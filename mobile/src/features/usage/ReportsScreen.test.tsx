@@ -97,9 +97,38 @@ it.each(['costs', 'stats'] as const)('folhas fechadas não montam e desmontam ao
   expect(sheets()).toHaveLength(0);
   await click(screen === 'costs' ? '2026-10-01' : 'heavy');
   expect(sheets()).toHaveLength(1);
-  expect(node.querySelector('aside')?.textContent).toContain(screen === 'costs' ? '360' : '2026-10-02');
+  expect(node.querySelector('aside')?.textContent).toContain(screen === 'costs' ? '360' : '02/10');
+  if (screen === 'stats') expect(node.querySelector('aside button[aria-label^="2026-10-02:"]')).toBeTruthy();
   await click(m.native_close());
   expect(sheets()).toHaveLength(0);
+});
+
+it('opções mostram só o item e preservam contexto acessível e chave do filtro', async () => {
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  await click(m.custos_servidores_relatorio());
+  const server = node.querySelector<HTMLButtonElement>(`aside button[aria-label="${m.custos_servidores_relatorio()}: Machine B"]`)!;
+  expect(server.textContent).toBe('Machine B');
+  await act(async () => server.click());
+  expect(useUsagePreferences.getState().off).toEqual(['b']);
+  await click(m.native_close());
+  await click(m.custos_dim_projeto());
+  const project = node.querySelector<HTMLButtonElement>(`aside button[aria-label="${m.custos_dim_projeto()}: /project-one"]`)!;
+  expect(project.textContent).toBe('/project-one');
+  await act(async () => project.click());
+  expect(net.usage).toHaveBeenLastCalledWith(a, '30d', { projeto: ['/project-one'], modelo: [] }, false);
+});
+
+it('barras de custos preservam rótulo e valores grandes em linhas próprias', async () => {
+  useServers.setState({ servers: [a] });
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: [{ ...combo, input: 786_211_945, cost: 2_730.88, cost_input: 2_730.88 }] }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  const bar = node.querySelector(`[aria-label^="${m.custos_input_sem_cache()}: 786.211.945"]`)!;
+  const label = [...bar.querySelectorAll('span')].find((span) => span.textContent === m.custos_input_sem_cache())!;
+  const detail = [...bar.querySelectorAll('span')].find((span) => span.textContent?.startsWith('786.211.945 · US$ 2.730,88'))!;
+  expect(detail.parentElement!.style.flexDirection).not.toBe('row');
+  expect(label.parentElement).toBe(detail.parentElement);
+  expect(label.parentElement!.style.flex).not.toBe('1');
+  expect(bar.getAttribute('aria-label')).toContain(`${m.custos_input_sem_cache()}: 786.211.945 · US$ 2.730,88`);
 });
 
 it('custos sequenciais seguem a ordem desktop com oito cartões e metodologia recolhida', async () => {
@@ -179,6 +208,36 @@ it('custos públicos têm cartões honestos, seções sequenciais, comparação,
   expect(net.back).toHaveBeenCalledTimes(1);
 });
 
+it.each([
+  ['pt', '311,8 mi', 'US$ 2,7 mil', 'R$ 13,7 mil'],
+  ['en', '311.8M', 'US$ 2.7K', 'R$13.7K'],
+] as const)('gráfico compacta eixo e datas sem perder moeda ou valores exatos em %s', async (locale, tokenAxis, usdAxis, brlAxis) => {
+  configureLocale({ getLocale: () => locale }); overwriteGetLocale(() => locale);
+  useServers.setState({ servers: [a] });
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), usd_brl: 5, combos: ['2026-10-01', '2026-10-02', '2026-10-03'].map((dia) => ({ ...combo, dia, input: 311_768_499, output: 0, cache_write: 0, cache_read: 0, cost: 2_730.88 })) }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  const chart = (metric: string) => node.querySelector(`[aria-label="${m.custos_grafico_diario({ metrica: metric })}"]`)!;
+  const axis = (metric: string) => chart(metric).firstElementChild!.firstElementChild as HTMLElement;
+  const text = (element: Element) => element.textContent!.replace(/ /g, ' ');
+  expect(text(axis(m.ctx_tokens()).firstElementChild!)).toBe(tokenAxis);
+  expect(axis(m.ctx_tokens()).style.flexShrink).toBe('0');
+  const scroll = axis(m.ctx_tokens()).nextElementSibling as HTMLElement;
+  expect(Number.parseFloat(scroll.style.minWidth)).toBe(0); expect(scroll.style.flexShrink).toBe('1');
+  expect(chart(m.ctx_tokens()).textContent).toContain('01/10'); expect(chart(m.ctx_tokens()).textContent).toContain('03/10');
+  const last = chart(m.ctx_tokens()).querySelector<HTMLButtonElement>('button[aria-label^="2026-10-03:"]')!;
+  expect(last.getAttribute('aria-label')).toContain(locale === 'pt' ? '311.768.499' : '311,768,499');
+  await act(async () => last.click());
+  expect(node.querySelector('aside')?.textContent).toContain('2026-10-03');
+  expect(node.querySelector('aside')?.textContent).toContain(locale === 'pt' ? '311.768.499' : '311,768,499');
+  await click(m.native_close());
+  await click(m.custos_estimativa_api());
+  expect(text(axis(m.custos_estimativa_api()).firstElementChild!)).toBe(usdAxis);
+  expect(chart(m.custos_estimativa_api()).querySelector('button')!.getAttribute('aria-label')).toContain(locale === 'pt' ? 'US$ 2.730,88' : 'US$ 2,730.88');
+  await click('BRL');
+  expect(text(axis(m.custos_estimativa_api()).firstElementChild!)).toBe(brlAxis);
+  expect(chart(m.custos_estimativa_api()).querySelector('button')!.getAttribute('aria-label')).toMatch(locale === 'pt' ? /R\$\s13\.654,40/ : /R\$13,654\.40/);
+});
+
 it.each(['pt', 'en'] as const)('diário usa colunas empilhadas tocáveis, legenda e custo por fonte em %s', async (locale) => {
   configureLocale({ getLocale: () => locale }); overwriteGetLocale(() => locale);
   useServers.setState({ servers: [a] });
@@ -250,8 +309,58 @@ it('comparação desenha linhas e pontos diários ou semanais com métrica indep
   await click(m.custos_periodo_90d());
   expect(chart(m.custos_estimativa_api(), m.custos_semana()).querySelectorAll('circle')).toHaveLength(4);
   const weeklySection = chart(m.custos_estimativa_api(), m.custos_semana()).parentElement!;
-  expect(weeklySection.textContent).toContain('2026-09-28'); expect(weeklySection.textContent).toContain('2026-10-05');
+  expect(weeklySection.textContent).toContain('28/09'); expect(weeklySection.textContent).toContain('05/10');
+  expect(weeklySection.querySelector('button[aria-label^="2026-09-28:"]')).toBeTruthy(); expect(weeklySection.querySelector('button[aria-label^="2026-10-05:"]')).toBeTruthy();
   expect(weeklySection.textContent).toContain(m.custos_ponto_semana());
+});
+
+it.each([true, false])('provedores usam nomes das contas e prefixo único sem perder chave no filtro cruzado=%s', async (crossed) => {
+  useServers.setState({ servers: [a] });
+  const providers = [
+    ['anthropic:11111111-1111-4111-8111-111111111111', 'Conta Azul', 'Claude Code · Conta Azul'],
+    ['anthropic:22222222-2222-4222-8222-222222222222', 'Claude Code · Conta Verde', 'Claude Code · Conta Verde'],
+    ['codex:33333333-3333-4333-8333-333333333333', 'Codex · Conta Ouro', 'Codex · Conta Ouro'],
+    ['codex:44444444-4444-4444-8444-444444444444', 'Conta Prata', 'Codex · Conta Prata'],
+    ['anthropic', 'Anthropic direto', 'Anthropic direto'],
+  ];
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: crossed ? providers.map(([provider]) => ({ ...combo, provider, cost: 2 })) : [], by_provider: providers.map(([key, label]) => ({ ...combo, key, label, cost: 2 })) }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  const ranking = [...node.querySelectorAll('span')].find((span) => span.textContent === m.custos_por_provedor())!.parentElement!;
+  for (const [, , label] of providers) {
+    expect(ranking.querySelector(`button[aria-label^="${label}:"]`), label).toBeTruthy();
+    expect(ranking.querySelector(`div[role="image"][aria-label^="${label}:"]`), label).toBeTruthy();
+  }
+  expect(ranking.textContent).not.toContain('Claude Code · Claude Code ·');
+  expect(ranking.textContent).not.toContain('Codex · Codex ·');
+  expect(ranking.textContent).not.toContain('Claude Code · Anthropic direto');
+  await click(m.custos_dim_provedor());
+  const option = node.querySelector<HTMLButtonElement>(`aside button[aria-label="${m.custos_dim_provedor()}: Claude Code · Conta Azul"]`)!;
+  expect(option.textContent).toBe('Claude Code · Conta Azul');
+  await act(async () => option.click()); await click(m.native_close());
+  const total = [...node.querySelectorAll('span')].find((span) => span.textContent === m.custos_tokens_processados())!.parentElement!;
+  expect([...total.querySelectorAll('span')].some((span) => span.textContent === '180')).toBe(true);
+  await click(m.custos_limpar_filtros());
+  await click(m.custos_entidades_comparadas());
+  await click(`${m.custos_entidades_comparadas()}: Claude Code · Conta Azul`);
+  await click(`${m.custos_entidades_comparadas()}: Codex · Conta Ouro`); await click(m.native_close());
+  const comparison = [...node.querySelectorAll('span')].find((span) => span.textContent === m.lista_comparar())!.parentElement!;
+  expect(comparison.textContent).toContain('Claude Code · Conta Azul'); expect(comparison.textContent).toContain('Codex · Conta Ouro');
+  if (crossed) expect(comparison.querySelector('button[aria-label^="2026-10-01:"]')?.getAttribute('aria-label')).toContain('Claude Code · Conta Azul: 180');
+});
+
+it('comparação mostra média diária de tokens inteira sem arredondar total ou custo', async () => {
+  useServers.setState({ servers: [a] });
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: ['provider-one', 'provider-two'].map((provider) => ({ ...combo, provider, input: 320, output: 0, cache_write: 0, cache_read: 0, cost: 2.73 })) }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  await click(m.custos_entidades_comparadas()); await click(`${m.custos_entidades_comparadas()}: provider-one`); await click(`${m.custos_entidades_comparadas()}: provider-two`); await click(m.native_close());
+  const section = [...node.querySelectorAll('span')].find((span) => span.textContent === m.lista_comparar())!.parentElement!;
+  const entity = [...section.querySelectorAll('span')].find((span) => span.textContent === 'provider-one')!.parentElement!;
+  expect(entity.textContent).toContain(`11 ${m.custos_por_dia()}`);
+  expect([...entity.querySelectorAll('span')].some((span) => span.textContent === '320')).toBe(true);
+  expect(entity.textContent).toContain('US$ 2,73');
+  const costMetric = [...section.querySelectorAll('button')].find((button) => button.getAttribute('aria-label') === m.custos_estimativa_api())!;
+  await act(async () => costMetric.click());
+  expect(entity.textContent).toContain(`US$ 0,09 ${m.custos_por_dia()}`);
 });
 
 it('comparação sem detalhamento conserva cartões sem inventar série', async () => {
@@ -281,6 +390,41 @@ it('custos composição conserva custos e percentuais, economia e áreas ordenad
   expect(areaLabels.map((label) => label?.split(':')[0])).toEqual(['front', 'back', 'conversa']);
   expect(areaLabels[0]).toContain('20%');
   expect(node.querySelector('button[aria-label="' + m.custos_por_maquina() + '"]')).toBeNull();
+});
+
+it('projetos carregam doze e mais cinquenta por toque com recolher antes das linhas expandidas', async () => {
+  useServers.setState({ servers: [a] });
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: Array.from({ length: 1_338 }, (_, index) => ({ ...combo, project: `/project-${String(index).padStart(4, '0')}`, cost: 2 })) }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  const projects = [...node.querySelectorAll('span')].find((span) => span.textContent === m.custos_por_projeto())!.parentElement!;
+  const rows = () => [...projects.querySelectorAll('button[aria-label^="/project-"]')];
+  expect(rows()).toHaveLength(12);
+  await click(m.custos_ver_projetos({ n: 1_338 }));
+  expect(rows()).toHaveLength(62);
+  await click(m.uso_mostrar_mais({ n: 50 }));
+  expect(rows()).toHaveLength(112);
+  const collapse = projects.querySelector<HTMLButtonElement>(`button[aria-label="${m.custos_mostrar_menos()}"]`)!;
+  expect(collapse.compareDocumentPosition(rows()[12]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  await click(m.custos_tirar_da_lista({ nome: '/project-0050' }));
+  expect(rows().some((row) => row.getAttribute('aria-label')?.startsWith('/project-0050:'))).toBe(false);
+  await click(m.custos_mostrar_todos());
+  expect(rows()).toHaveLength(112);
+  await act(async () => collapse.click());
+  expect(rows()).toHaveLength(12);
+  expect(projects.textContent).not.toContain('/project-0111');
+});
+
+it('modelos com cache lido preservam asteriscos e mostram uma nota depois da lista', async () => {
+  useServers.setState({ servers: [a] });
+  net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve({ ...costs(period), combos: ['model-one', 'model-two'].map((model) => ({ ...combo, model, cache_write: 0, cache_read: 50, cost: 2 })) }));
+  await act(async () => root.render(React.createElement(CostsScreen)));
+  const models = [...node.querySelectorAll('span')].find((span) => span.textContent === m.custos_por_modelo())!.parentElement!;
+  const notes = [...models.querySelectorAll('span')].filter((span) => span.textContent === m.custos_sem_cache_escrito_ajuda());
+  expect(notes).toHaveLength(1);
+  expect([...models.querySelectorAll('span')].filter((span) => span.textContent === `${m.custos_col_entrada()}: 150 / 100*`)).toHaveLength(2);
+  const second = models.querySelector('button[aria-label^="model-two:"]')!;
+  expect(second.compareDocumentPosition(notes[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(notes[0].parentElement).toBe(models);
 });
 
 it('custos listas expandem projetos e sessões e modelos conservam todos os campos', async () => {
@@ -558,7 +702,8 @@ it('estatísticas conservam filtros, detalhe usa foco sem refazer tabela e abas 
   await click('heavy');
   expect(net.usage).toHaveBeenLastCalledWith(b, '30d', { conta: ['account'], foco: 'plugin:heavy' }, false);
   expect(net.usage.mock.calls.filter((call) => !call[2].foco)).toHaveLength(before);
-  expect(node.querySelector('aside')?.textContent).toContain('2026-10-02');
+  expect(node.querySelector('aside')?.textContent).toContain('02/10');
+  expect(node.querySelector('aside button[aria-label^="2026-10-02:"]')).toBeTruthy();
   await click(m.native_close());
   await click(m.uso_avancado()); await click(m.uso_aba_agentes());
   expect(node.querySelector(`div[aria-label="${m.uso_aba_agentes()}"]`)?.textContent).toContain('480');
@@ -690,7 +835,8 @@ it('dia sem movimento entre dois dias abre detalhe com zero explícito', async (
 it('avançado mostra chamadas diárias e contexto sem enviar data como foco de item', async () => {
   await act(async () => root.render(React.createElement(StatsScreen)));
   await click(m.uso_avancado());
-  expect(node.textContent).toContain('2026-10-01');
+  expect(node.textContent).toContain('01/10');
+  expect(node.querySelector('button[aria-label^="2026-10-01:"]')).toBeTruthy();
   expect(node.textContent).toContain(m.uso_ctx_cat_instrucoes());
   expect(node.querySelector('button[aria-label="2026-10-01"]')).toBeNull();
   expect(net.usage.mock.calls.every((call) => !call[2].foco)).toBe(true);
@@ -843,10 +989,34 @@ it('plugin abre série pelo filtro de plugin sem transformar nome do grupo em fo
   await click(m.uso_avancado()); await click(m.uso_aba_plugins());
   await click('usage-plugin');
   expect(net.usage).toHaveBeenLastCalledWith(b, '30d', { plugin: ['usage-plugin'] }, false);
-  expect(node.querySelector('aside')?.textContent).toContain('2026-10-01');
+  expect(node.querySelector('aside')?.textContent).toContain('01/10');
+  expect(node.querySelector('aside button[aria-label^="2026-10-01:"]')).toBeTruthy();
 });
 
-it('detalhe de plugin conserva chamadas contexto e custo sem inventar tokens reais', async () => {
+it.each(['skill', 'plugin', 'tool', 'context', 'image', 'agent'] as const)('detalhe mostra custo somente para agente inclusive zero: %s', async (kind) => {
+  useServers.setState({ servers: [a] });
+  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters), by_agente: [{ ...skill, key: 'reviewer', cost: 0 }], by_imagem: [{ ...skill, key: 'enviada' }] }));
+  await act(async () => root.render(React.createElement(StatsScreen)));
+  if (kind === 'plugin' || kind === 'context' || kind === 'image') {
+    await click(m.uso_avancado());
+    await click(kind === 'plugin' ? m.uso_aba_plugins() : kind === 'context' ? m.uso_aba_contexto() : m.uso_aba_imagens());
+  }
+  const label = { skill: 'heavy', plugin: 'plugin', tool: 'Read', context: 'instructions', image: m.uso_img_enviada(), agent: 'reviewer' }[kind];
+  if (kind === 'plugin') {
+    const list = node.querySelector(`div[aria-label="${m.uso_aba_plugins()}"]`)!;
+    await act(async () => list.querySelector<HTMLButtonElement>('button[aria-label^="plugin:"]')!.click());
+  } else await click(label);
+  const detail = node.querySelector('aside')!;
+  expect(detail.textContent).toContain(`${m.uso_foco()}: ${label}`);
+  expect(detail.textContent).toContain(`${m.uso_col_chamadas()}: 4`);
+  if (kind === 'agent') expect(detail.textContent).toContain(`${m.uso_col_custo_real()}: US$ 0,00`);
+  else {
+    expect(detail.textContent).not.toContain(m.uso_col_custo_real());
+    expect(detail.textContent).not.toContain('US$');
+  }
+});
+
+it('detalhe de plugin conserva chamadas e contexto sem mostrar custo ou inventar tokens reais', async () => {
   net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters), by_plugin: [{ ...skill, key: 'detail-plugin' }], by_day: [{ ...skill, key: '2026-10-01', input: 0, output: 0 }] }));
   await act(async () => root.render(React.createElement(StatsScreen)));
   await click(m.uso_avancado()); await click(m.uso_aba_plugins()); await click('detail-plugin');
@@ -854,22 +1024,24 @@ it('detalhe de plugin conserva chamadas contexto e custo sem inventar tokens rea
   expect(detail?.textContent).not.toContain(m.uso_detalhe_tokens());
   expect(detail?.textContent).toContain(`${m.uso_col_chamadas()}: 8`);
   expect(detail?.textContent).toContain(`${m.uso_col_ctx()}: ≈ 40`);
-  expect(detail?.textContent?.replace(/\s/g, '')).toContain('US$0,20');
+  expect(detail?.textContent).not.toContain(m.uso_col_custo_real());
+  expect(detail?.textContent).not.toContain('US$');
 });
 
-it('áreas diárias separam data e área inteira sem trocar tokens ou custo', async () => {
+it('áreas mostram composição e ranking do período sem montar lista diária ou mais 171', async () => {
   useServers.setState({ servers: [a] });
-  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters), by_area: [], by_area_dia: [
-    { ...zeroUso('2026-09-17|back: serviços de autorização'), input: 153_583_509, cost: 91.96 },
-    { ...zeroUso('2026-09-18|front – área compartilhada'), output: 43, cache_read: 7, cost: 2.5 },
-  ] }));
+  net.usage.mockImplementation((_server: Server, period: string, filters: UsoFiltros) => Promise.resolve({ ...usage(period, filters), by_area: [
+    { ...zeroUso('back'), input: 153_583_509, cost: 91.96 },
+    { ...zeroUso('front'), output: 43, cache_read: 7, cost: 2.5 },
+  ], by_area_dia: Array.from({ length: 191 }, (_, index) => ({ ...zeroUso(`2026-09-17|daily-area-${index}`), input: 10, cost: 1 })) }));
   await act(async () => root.render(React.createElement(CostsScreen)));
   const areas = [...node.querySelectorAll('span')].find((span) => span.textContent === m.uso_graf_areas())!.parentElement!;
-  const dates = [...areas.querySelectorAll('span')].filter((span) => ['2026-09-17', '2026-09-18'].includes(span.textContent ?? ''));
-  expect(dates.map((span) => span.textContent)).toEqual(['2026-09-17', '2026-09-18']);
-  expect(dates[0].parentElement?.textContent?.replace(/\s/g, '')).toBe('2026-09-17back:serviçosdeautorização:153.583.509·US$91,96');
-  expect(dates[1].parentElement?.textContent?.replace(/\s/g, '')).toBe('2026-09-18front–áreacompartilhada:50·US$2,50');
-  expect(node.textContent).not.toContain('|');
+  expect(areas.textContent).not.toContain('2026-09-17');
+  expect(areas.textContent).not.toContain('daily-area-');
+  expect(areas.querySelector(`button[aria-label="${m.uso_mostrar_mais({ n: 171 })}"]`)).toBeNull();
+  expect(areas.querySelector(`[role="image"][aria-label^="${m.uso_graf_areas()}: front: 50"]`)).toBeTruthy();
+  expect(areas.querySelector('[aria-label^="back: 153.583.509 · US$ 91,96"]')).toBeTruthy();
+  expect(areas.querySelector('[aria-label^="front: 50 · US$ 2,50"]')).toBeTruthy();
 });
 
 it('áreas sem tarifa mantêm traço e barras interativas anunciam valores além do nome', async () => {
@@ -880,8 +1052,8 @@ it('áreas sem tarifa mantêm traço e barras interativas anunciam valores além
   const areas = [...node.querySelectorAll('span')].find((span) => span.textContent === m.uso_graf_areas())!.parentElement!;
   const area = areas.querySelector('[aria-label^="front:"]');
   expect(area?.getAttribute('aria-label')).toContain('—');
-  const daily = [...areas.querySelectorAll('span')].find((span) => span.textContent === '2026-10-01');
-  expect(daily?.parentElement?.textContent).toContain('front: 24 · —');
+  expect(area?.getAttribute('aria-label')).toContain('24 · —');
+  expect(areas.textContent).not.toContain('2026-10-01');
 });
 
 it('áreas respeitam a máquina do filtro sem consultar ou somar a outra máquina', async () => {

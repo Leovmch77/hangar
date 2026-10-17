@@ -46,8 +46,8 @@ function UsageDetail({ servers, period, filters, selection, presenceAvailable, a
     <Card>
       <Copy>{`${m.uso_col_chamadas()}: ${number(item.chamadas)} · ${m.uso_col_sessoes()}: ${number(item.sessions)}`}</Copy>
       {(tab === 'by_skill' || tab === 'by_agente') && <Copy>{`${tab === 'by_skill' ? m.uso_col_origem_skill() : m.uso_col_origem_agente()}: ${number(item.pedidas)} / ${number(item.chamadas - item.pedidas)}`}</Copy>}
-      <Copy>{`${m.uso_col_custo_real()}: ${dollars(item.cost)}`}</Copy>
       {tab === 'by_agente' && <>
+        <Copy>{`${m.uso_col_custo_real()}: ${dollars(item.cost)}`}</Copy>
         {(['input', 'output', 'cache_write', 'cache_read'] as const).map((type, index) => <Copy key={type}>{`${[m.custos_input_sem_cache(), m.custos_output_total(), m.custos_tipo_cache_escrito(), m.custos_tipo_cache_lido()][index]}: ${number(item[type])} · ${dollars(item[`cost_${type}`])}`}</Copy>)}
         <Copy>{`${m.uso_col_tok_sem_cache_chamada()}: ${number(item.chamadas > 0 ? (item.input + item.output) / item.chamadas : 0, 1)}`}</Copy>
       </>}

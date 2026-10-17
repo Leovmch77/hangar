@@ -16,6 +16,7 @@ import * as m from '../../paraglide/messages';
 
 export const useUsagePreferences = create(() => ({ period: '30d', off: [] as string[] }));
 export const number = (value: number, digits = 0) => value.toLocaleString(intlLocale(), { maximumFractionDigits: digits });
+export const compactNumber = (value: number) => value.toLocaleString(intlLocale(), { notation: 'compact', maximumFractionDigits: 1 });
 export const dollars = (value: number) => `US$ ${value.toLocaleString(intlLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 export const percent = (part: number, total: number) => `${number(total > 0 ? part / total * 100 : 0, 1)}%`;
 
@@ -33,10 +34,10 @@ export function Copy({ children, title = false, muted = false }: { children: Rea
   return <Text style={{ color: muted ? c.muted : c.text, fontSize: title ? theme.base.text.lg : theme.base.text.sm, fontWeight: title ? '600' : '400' }}>{children}</Text>;
 }
 
-export function Action({ label, onPress, selected = false, disabled = false, icon }: { label: string; onPress: () => void; selected?: boolean; disabled?: boolean; icon?: IconName }) {
+export function Action({ label, accessibilityLabel, onPress, selected = false, disabled = false, icon }: { label: string; accessibilityLabel?: string; onPress: () => void; selected?: boolean; disabled?: boolean; icon?: IconName }) {
   const { theme } = useUnistyles();
   const c = useSettingsColors();
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected, disabled }} disabled={disabled} onPress={onPress}
+  return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? label} accessibilityState={{ selected, disabled }} disabled={disabled} onPress={onPress}
     style={{ minHeight: 44, paddingHorizontal: 12, paddingVertical: 10, borderRadius: theme.base.radius.md, backgroundColor: selected ? c.accentDim : 'transparent', flexDirection: 'row', alignItems: 'center', gap: 8, opacity: disabled ? 0.45 : 1 }}>
     {icon && <Icon name={icon} size={18} color={c.accentText} />}
     <Text style={{ color: selected ? c.accentText : c.text, fontSize: theme.base.text.sm, flexShrink: 1 }}>{label}</Text>
@@ -83,7 +84,7 @@ export function Choice({ label, options, values, onChange, max }: { label: strin
         <Copy title>{label}</Copy>
         <Search value={query} onChange={setQuery} />
         <Action label={m.uso_limpar()} onPress={() => onChange([])} />
-        <Paged key={query} items={matches} render={(item) => <Action label={`${label}: ${item.label ?? item.key}`} selected={values.includes(item.key)}
+        <Paged key={query} items={matches} render={(item) => <Action label={item.label ?? item.key} accessibilityLabel={`${label}: ${item.label ?? item.key}`} selected={values.includes(item.key)}
           disabled={!values.includes(item.key) && max !== undefined && max > 1 && values.length >= max}
           icon={values.includes(item.key) ? 'CheckSquare' : 'Square'} onPress={() => onChange(values.includes(item.key) ? values.filter((v) => v !== item.key) : max === 1 ? [item.key] : [...values, item.key])} />} />
         <Action label={m.native_close()} icon="X" onPress={() => setOpen(false)} />
@@ -141,7 +142,7 @@ export function Composition({ label, items }: { label: string; items: { label: s
 export interface ChartSeries { key: string; label: string; color: string }
 export interface ChartDay { key: string; values: (number | null)[]; detail?: string }
 
-export function Columns({ label, days, series, format = number, onPress, lines = false }: { label: string; days: ChartDay[]; series: ChartSeries[]; format?: (value: number) => string; onPress?: (key: string) => void; lines?: boolean }) {
+export function Columns({ label, days, series, format = number, axisFormat = compactNumber, onPress, lines = false }: { label: string; days: ChartDay[]; series: ChartSeries[]; format?: (value: number) => string; axisFormat?: (value: number) => string; onPress?: (key: string) => void; lines?: boolean }) {
   const c = useSettingsColors();
   const { theme } = useUnistyles();
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
@@ -156,8 +157,8 @@ export function Columns({ label, days, series, format = number, onPress, lines =
   const width = days.length * step;
   const height = 180;
   return <View accessibilityLabel={label} style={{ gap: 8 }}><View style={{ flexDirection: 'row', gap: 8 }}>
-    <View style={{ width: 64, height, justifyContent: 'space-between' }}><Copy muted>{format(maximum)}</Copy><Copy muted>{format(maximum / 2)}</Copy><Copy muted>{format(0)}</Copy></View>
-    <ScrollView horizontal><View style={{ width }}>
+    <View style={{ width: 64, flexShrink: 0, height, justifyContent: 'space-between' }}>{[maximum, maximum / 2, 0].map((value, index) => <Text key={index} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.65} style={{ color: c.muted, fontSize: theme.base.text.sm }}>{axisFormat(value)}</Text>)}</View>
+    <ScrollView horizontal style={{ flex: 1, flexShrink: 1, minWidth: 0 }}><View style={{ width }}>
       <Svg width={width} height={height} accessible={false}>
         {[0, 0.25, 0.5, 0.75, 1].map((ratio) => <Line key={ratio} x1={0} x2={width} y1={height * ratio} y2={height * ratio} stroke={c.borderStrong} />)}
         {lines ? series.map((item, seriesIndex) => {
@@ -181,14 +182,14 @@ export function Columns({ label, days, series, format = number, onPress, lines =
         })}
       </Svg>
       <View style={{ position: 'absolute', top: 0, left: 0, flexDirection: 'row' }}>{days.map((day) => <Pressable key={day.key} accessibilityRole="button" accessibilityLabel={describe(day)} onPress={() => onPress ? onPress(day.key) : setSelectedDay(day.key)} style={{ width: step, height, minHeight: 44 }} />)}</View>
-      <View style={{ flexDirection: 'row' }}>{days.map((day) => <Text key={day.key} style={{ width: step, paddingTop: 8, textAlign: 'center', color: c.muted, fontSize: theme.base.text.xxxs }}>{day.key}</Text>)}</View>
+      <View style={{ flexDirection: 'row' }}>{days.map((day) => <Text key={day.key} numberOfLines={1} accessibilityLabel={day.key} style={{ width: step, paddingTop: 8, textAlign: 'center', color: c.muted, fontSize: theme.base.text.xxxs }}>{`${day.key.slice(8, 10)}/${day.key.slice(5, 7)}`}</Text>)}</View>
     </View></ScrollView>
   </View>{!onPress && selected && <Copy>{describe(selected)}</Copy>}</View>;
 }
 
 export function Bar({ label, value, max, detail, onPress, color }: { label: string; value: number; max: number; detail: string; onPress?: () => void; color?: string }) {
   const c = useSettingsColors();
-  const body = <View style={{ gap: 6, paddingVertical: 8 }}><View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 12 }}><View style={{ flex: 1 }}><Copy>{label}</Copy></View><Copy>{detail}</Copy></View>
+  const body = <View style={{ gap: 6, paddingVertical: 8 }}><Copy>{label}</Copy><Copy>{detail}</Copy>
     <View style={{ height: 5, backgroundColor: c.hover, borderRadius: 3 }}><View style={{ height: 5, width: `${Math.max(0, Math.min(100, max > 0 ? value / max * 100 : 0))}%`, backgroundColor: color ?? c.accent, borderRadius: 3 }} /></View>
   </View>;
   return onPress ? <Pressable accessibilityRole="button" accessibilityLabel={`${label}: ${detail}`} onPress={onPress} style={{ minHeight: 44 }}>{body}</Pressable> : <View accessible accessibilityLabel={`${label}: ${detail}`}>{body}</View>;
