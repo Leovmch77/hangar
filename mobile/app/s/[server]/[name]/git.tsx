@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { ActivityIndicator, Platform, Text, View } from 'react-native';
+import { ActivityIndicator, Text, View } from 'react-native';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useHeaderHeight } from 'expo-router/react-navigation';
@@ -29,15 +29,17 @@ export default function GitRoute() {
   const header = useGlassHeader();
   const headerHeight = useHeaderHeight();
   const back = () => router.replace(`/s/${encodeURIComponent(serverId)}/${encodeURIComponent(name)}` as never);
-  return <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} automaticOffset style={[styles.root, { paddingTop: headerHeight, paddingBottom: insets.bottom }]}>
+  return <KeyboardAvoidingView behavior="padding" automaticOffset style={[styles.root, { paddingTop: headerHeight }]}>
     <Stack.Screen options={{
       ...header,
       title: m.sessao_git(),
       headerLeft: router.canGoBack() ? undefined : () => <HeaderBack onPress={back} />,
     }} />
-    {!ready ? <View style={styles.center}><ActivityIndicator color={theme.tokens.text.muted} /><Text style={styles.text}>{m.native_git_loading()}</Text></View>
-      : refused || !server || !name ? <Text selectable accessibilityRole="alert" style={styles.error}>{m.chat_servidor_removido()}</Text>
-      : <GitPanel key={`${serverId}:${name}:${baseUrl}:${token}`} server={server} name={name} />}
+    <View style={{ flex: 1, paddingBottom: insets.bottom }}>
+      {!ready ? <View style={styles.center}><ActivityIndicator color={theme.tokens.text.muted} /><Text style={styles.text}>{m.native_git_loading()}</Text></View>
+        : refused || !server || !name ? <Text selectable accessibilityRole="alert" style={styles.error}>{m.chat_servidor_removido()}</Text>
+        : <GitPanel key={`${serverId}:${name}:${baseUrl}:${token}`} server={server} name={name} />}
+    </View>
   </KeyboardAvoidingView>;
 }
 

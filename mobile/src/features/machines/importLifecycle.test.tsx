@@ -8,7 +8,7 @@ import { useServers } from '../../stores/servers';
 const mocks = vi.hoisted(() => ({
   read: vi.fn(), replace: vi.fn(), discover: vi.fn(), segments: ['importar'],
   appState: null as null | ((state: string) => void), remove: vi.fn(),
-  warning: vi.fn(), error: vi.fn(),
+  warning: vi.fn(), error: vi.fn(), screens: {} as Record<string, Record<string, unknown>>,
 }));
 vi.mock('expo-secure-store', () => ({ getItemAsync: mocks.read, setItemAsync: vi.fn(async () => {}) }));
 vi.mock('./importMachines', () => ({ discoverSavedMachines: mocks.discover }));
@@ -23,7 +23,7 @@ vi.mock('../../features/voice/LiveVoiceRoot', () => ({ LiveVoiceRoot: () => null
 vi.mock('sonner-native', () => ({ Toaster: () => null, toast: Object.assign(mocks.warning, { error: mocks.error }) }));
 vi.mock('expo-router', () => ({
   useRouter: () => ({ replace: mocks.replace }), useSegments: () => mocks.segments,
-  Stack: Object.assign(({ children }: { children: ReactNode }) => <>{children}</>, { Screen: () => null }),
+  Stack: Object.assign(({ children }: { children: ReactNode }) => <>{children}</>, { Screen: ({ name, options }: any) => { mocks.screens[name] = options; return null; } }),
 }));
 vi.mock('react-native-gesture-handler', () => ({ GestureHandlerRootView: ({ children }: { children: ReactNode }) => <>{children}</> }));
 vi.mock('react-native-keyboard-controller', () => ({ KeyboardProvider: ({ children }: { children: ReactNode }) => <>{children}</> }));
@@ -33,6 +33,7 @@ vi.mock('react-native', async (original) => ({ ...await original<typeof import('
   } },
 }));
 import Layout from '../../../app/_layout';
+import { Platform } from 'react-native';
 
 let root: Root;
 let el: HTMLDivElement;
@@ -43,6 +44,17 @@ beforeEach(() => {
   el = document.createElement('div'); document.body.appendChild(el); root = createRoot(el);
 });
 afterEach(async () => { await act(async () => root.unmount()); el.remove(); });
+
+test.each(['android', 'ios'] as const)('registra Git com cabeçalho inicial e apresentação adequada no %s', async (platform) => {
+  const previous = Platform.OS;
+  try {
+    Platform.OS = platform;
+    await act(async () => root.render(<Layout />));
+    expect(mocks.screens['s/[server]/[name]/git']).toEqual(platform === 'android'
+      ? { presentation: 'card', headerShown: true }
+      : { presentation: 'formSheet', headerShown: true, sheetAllowedDetents: [0.92], sheetGrabberVisible: true });
+  } finally { Platform.OS = previous; }
+});
 
 test('espera hidratação, descobre uma vez e não repete ao entrar máquina nova', async () => {
   let resolve!: (raw: string) => void;

@@ -2,7 +2,7 @@
 import React, { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { configureApi, type ChangedFile, type GitCommit, type SessionInfo } from '@hangar/core';
+import { configureApi, configureLocale, localeAtual, type ChangedFile, type GitCommit, type SessionInfo } from '@hangar/core';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const boundary = vi.hoisted(() => ({
@@ -23,13 +23,13 @@ vi.mock('expo-haptics', async (original) => ({ ...await original<typeof import('
 vi.mock('react-native-safe-area-context', async (original) => ({ ...await original<typeof import('react-native-safe-area-context')>(), useSafeAreaInsets: () => ({ top: 20, bottom: 24, left: 0, right: 0 }) }));
 vi.mock('react-native-keyboard-controller', async () => {
   const { View } = await import('react-native');
-  return { KeyboardAvoidingView: ({ automaticOffset, behavior, ...props }: any) => createElement(View, { ...props, 'data-keyboard': behavior, 'data-automatic-offset': !!automaticOffset }) };
+  return { KeyboardAvoidingView: ({ automaticOffset, behavior, style, ...props }: any) => createElement(View, { ...props, style: [style, { paddingBottom: 0 }], 'data-keyboard': behavior, 'data-automatic-offset': !!automaticOffset }) };
 });
 vi.mock('react-native', async (original) => {
   const actual = await original<typeof import('react-native')>();
   return { ...actual, Alert: { alert: boundary.alert },
-    ScrollView: ({ nestedScrollEnabled, ...props }: any) => createElement(actual.ScrollView, { ...props, 'data-scroll': true }),
-    Text: ({ selectable, ellipsizeMode, ...props }: any) => createElement(actual.Text, { ...props, 'data-selectable': !!selectable }),
+    ScrollView: ({ nestedScrollEnabled, contentContainerStyle, ...props }: any) => createElement(actual.ScrollView, { ...props, 'data-scroll': true, 'data-content-padding-horizontal': contentContainerStyle?.paddingHorizontal }),
+    Text: ({ selectable, ellipsizeMode, numberOfLines, ...props }: any) => createElement(actual.Text, { ...props, 'data-selectable': !!selectable, 'data-lines': numberOfLines, 'data-ellipsis': ellipsizeMode }),
     Pressable: ({ accessibilityState, accessibilityHint, ...props }: any) => createElement(actual.Pressable, { ...props, 'aria-checked': accessibilityState?.checked, 'aria-selected': accessibilityState?.selected }),
     TextInput: ({ onChangeText, accessibilityLabel, value, editable, ...props }: any) => createElement('textarea', {
       'aria-label': accessibilityLabel, value: value ?? '', disabled: editable === false,
@@ -41,6 +41,7 @@ import { Platform } from 'react-native';
 import GitRoute from '../../../app/s/[server]/[name]/git';
 import { useServers } from '../../stores/servers';
 import * as m from '../../paraglide/messages';
+import { getLocale, overwriteGetLocale } from '../../paraglide/runtime';
 const server = { id: 'route-b', label: 'fixture-route-b', baseUrl: 'https://route-b.test', token: 'token-b' };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 const changed = (path: string, staged = false): ChangedFile => ({ path, staged, code: staged ? 'M ' : ' M', added: 2, removed: 1 });
@@ -99,10 +100,22 @@ describe('iOS Git', () => {
     expect(button(m.comum_voltar())).toBeUndefined();
     const content = button(m.native_git_reload())?.closest<HTMLElement>('[data-keyboard]');
     expect(content?.style.paddingTop).toBe('64px');
-    expect(content?.style.paddingBottom).toBe('24px');
+    expect(content?.style.paddingBottom).toBe('0px');
     expect(content?.getAttribute('data-keyboard')).toBe('padding');
     expect(content?.getAttribute('data-automatic-offset')).toBe('true');
     expect(button(m.native_git_commit())).toBeTruthy();
+  });
+
+  it('preserva inset do composer em View interna quando teclado sobrescreve padding animado', async () => {
+    await render();
+    const input = el.querySelector('textarea')!;
+    const keyboard = input.closest<HTMLElement>('[data-keyboard]')!;
+    expect(keyboard.style.paddingBottom).toBe('0px');
+    const content = [...keyboard.children].find((node) => node.contains(input)) as HTMLElement;
+    expect(content.style.paddingBottom).toBe('24px');
+    expect(content.style.flex).toBe('1 1 0%');
+    expect(content.parentElement).toBe(keyboard);
+    expect(content.contains(button(m.native_git_reload())!)).toBe(true);
   });
 
   it('vibra ao trocar aba e marcar arquivo, não ao tocar a aba já selecionada', async () => {
@@ -190,6 +203,19 @@ describe('iOS Git', () => {
 });
 
 describe('Git pela rota explícita', () => {
+  it.each(['android', 'ios'] as const)('compensa teclado com padding e offset automático no %s', async (platform) => {
+    const previous = Platform.OS;
+    try {
+      Platform.OS = platform;
+      await render();
+      const content = button(m.native_git_reload())?.closest<HTMLElement>('[data-automatic-offset]');
+      expect(content?.getAttribute('data-keyboard')).toBe('padding');
+      expect(content?.getAttribute('data-automatic-offset')).toBe('true');
+      expect(content?.style.paddingTop).toBe('64px');
+      expect(content?.style.paddingBottom).toBe('0px');
+    } finally { Platform.OS = previous; }
+  });
+
   it('aguarda o cofre e carrega apenas o destino da rota, sem montar histórico oculto', async () => {
     useServers.setState({ ready: false });
     await render(); expect(boundary.fetch).not.toHaveBeenCalled(); expect(el.textContent).toContain(m.native_git_loading());
@@ -203,6 +229,107 @@ describe('Git pela rota explícita', () => {
       expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer token-b');
     }
     expect(boundary.fetch.mock.calls.some(([url]) => String(url).includes('/git/log?n=1'))).toBe(true);
+  });
+
+  it.each(['repo', 'file', 'history', 'commit', 'write'] as const)('resume erro técnico de %s e mantém diagnóstico selecionável menor', async (kind) => {
+    const item = committed(1);
+    const detail = kind === 'repo' ? 'fatal: not a git repository (or any of the parent directories): .git' : `fatal: fixture-${kind}-failed`;
+    boundary.fetch.mockImplementation((url, init) => {
+      const path = new URL(String(url)).pathname;
+      if (kind === 'repo' && path.endsWith('/branches')) return json({ detail }, 500);
+      if (kind === 'file' && path.endsWith('/git/diff') || kind === 'commit' && path.endsWith('/diff-full')) return json({ detail }, 500);
+      if (path.endsWith('/git/log') && new URL(String(url)).searchParams.get('n') !== '1') return kind === 'history' ? json({ detail }, 500) : json({ commits: [item], ahead: null, behind: null });
+      if (kind === 'write' && path.endsWith('/git/commit')) return json({ ok: false, output: detail });
+      return respond(url, init);
+    });
+    await render();
+    if (kind === 'file') await click('a.ts');
+    if (kind === 'history' || kind === 'commit') await click(m.native_git_history());
+    if (kind === 'commit') await click(m.git_titulo_commit({ short: item.short, subject: item.subject }));
+    if (kind === 'write') { await fill(m.native_git_message(), 'fixture-failed-commit'); await click(m.native_git_commit()); }
+    const summary = kind === 'repo' ? m.native_git_not_repo() : m.mobile_git_operation_failed();
+    const alerts = el.querySelectorAll<HTMLElement>('[role="alert"]');
+    expect([...alerts].map((node) => node.textContent)).toEqual([summary]);
+    const diagnostic = [...el.querySelectorAll<HTMLElement>('[data-selectable="true"]')].find((node) => node.textContent?.includes(detail) && node.childElementCount === 0)!;
+    expect(diagnostic?.textContent).toContain(detail);
+    expect(parseFloat(diagnostic.style.fontSize)).toBeLessThan(parseFloat(alerts[0].style.fontSize));
+    expect(diagnostic.closest('[data-scroll="true"]')).toBeTruthy();
+  });
+
+  it.each(['changes', 'history', 'branches'] as const)('explica repo indisponível no conteúdo de %s sem vazio falso nem histórico oculto', async (tab) => {
+    const labels = { changes: m.native_git_changes(), history: m.native_git_history(), branches: m.git_aba_branches() };
+    boundary.fetch.mockImplementation((url, init) => String(url).endsWith('/branches') ? json({ detail: 'fatal: not a git repository' }, 400) : respond(url, init));
+    await render(); await click(labels[tab]);
+    const activeTab = [...el.querySelectorAll<HTMLElement>('[role="tab"]')].find((node) => node.getAttribute('aria-selected') === 'true')!;
+    expect(activeTab.getAttribute('aria-label')).toBe(labels[tab]);
+    const alerts = el.querySelectorAll('[role="alert"]');
+    expect([...alerts].map((node) => node.textContent)).toEqual([m.native_git_not_repo()]);
+    expect(activeTab.compareDocumentPosition(alerts[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(el.textContent).not.toContain(m.native_git_no_commits());
+    expect(el.textContent).not.toContain(m.native_git_no_branch());
+    expect(el.textContent).not.toContain(m.native_git_clean());
+    expect(boundary.fetch.mock.calls.some(([url]) => String(url).includes('/git/log'))).toBe(false);
+    const pending = deferred<Response>();
+    boundary.fetch.mockImplementation((url, init) => String(url).endsWith('/git/files') ? pending.promise : respond(url, init));
+    await click(m.native_git_reload());
+    expect(el.querySelector('[role="alert"]')).toBeNull();
+    expect(el.textContent).toContain(m.native_git_loading());
+    expect(el.textContent).not.toContain(m.native_git_no_commits());
+    expect(el.textContent).not.toContain(m.native_git_no_branch());
+    await act(async () => pending.resolve(json({ files, sequencer: null })));
+    expect(el.querySelector('[role="alert"]')).toBeNull();
+    expect(el.querySelector('[role="tab"][aria-selected="true"]')?.getAttribute('aria-label')).toBe(labels[tab]);
+    if (tab === 'changes') expect(button('a.ts')).toBeTruthy();
+    if (tab === 'branches') expect(button('next')).toBeTruthy();
+    if (tab === 'history') expect(el.textContent).toContain(m.native_git_no_commits());
+  });
+
+  it('não duplica a falha do repo com uma falha de histórico na releitura', async () => {
+    await render(); await click(m.native_git_history());
+    boundary.fetch.mockImplementation((url, init) => String(url).endsWith('/git/files') || String(url).includes('/git/log')
+      ? json({ detail: 'fatal: fixture-repo-offline' }, 503) : respond(url, init));
+    await click(m.native_git_reload());
+    expect([...el.querySelectorAll('[role="alert"]')].map((node) => node.textContent)).toEqual([m.mobile_git_operation_failed()]);
+    expect(el.textContent).not.toContain(m.native_git_no_commits());
+  });
+
+  it('suspende diff com repo indisponível e recupera arquivo, rascunho e seleção ao reler', async () => {
+    let offline = false;
+    boundary.fetch.mockImplementation((url, init) => {
+      const path = new URL(String(url)).pathname;
+      if (offline && (path.endsWith('/branches') || path.endsWith('/git/diff'))) return json({ detail: 'fatal: not a git repository' }, 503);
+      if (path.endsWith('/git/diff')) return json({ path: 'a.ts', diff: '+fixture-recovered-diff', truncated: false });
+      return respond(url, init);
+    });
+    await render(); await fill(m.native_git_message(), 'fixture-offline-draft');
+    await click(m.native_git_include({ path: 'b.ts' })); await click('a.ts');
+    expect(el.textContent).toContain('+fixture-recovered-diff');
+    offline = true; await click(m.native_git_reload());
+    expect([...el.querySelectorAll('[role="alert"]')].map((node) => node.textContent)).toEqual([m.native_git_not_repo()]);
+    for (const empty of [m.native_git_clean(), m.native_git_diff_empty(), m.native_git_no_commits(), m.native_git_no_branch()]) expect(el.textContent).not.toContain(empty);
+    expect(el.textContent).not.toContain('+fixture-recovered-diff');
+    const diffRequests = () => boundary.fetch.mock.calls.filter(([url]) => String(url).endsWith('/git/diff'));
+    const failedReads = diffRequests().length;
+    await click(m.native_git_history()); await click(m.native_git_changes());
+    expect(diffRequests()).toHaveLength(failedReads);
+    offline = false; await click(m.native_git_reload());
+    expect(el.querySelector('[role="alert"]')).toBeNull();
+    expect(el.textContent).toContain('+fixture-recovered-diff');
+    expect(JSON.parse(diffRequests().at(-1)![1].body)).toEqual({ path: 'a.ts' });
+    expect(el.querySelector('textarea')).toBeNull();
+    await click(m.git_voltar_arquivos());
+    expect(el.querySelector('textarea')?.value).toBe('fixture-offline-draft');
+    expect(button(m.native_git_include({ path: 'a.ts' }))?.getAttribute('aria-checked')).toBe('true');
+    expect(button(m.native_git_include({ path: 'b.ts' }))?.getAttribute('aria-checked')).toBe('false');
+    expect(writes()).toHaveLength(0);
+  });
+
+  it.each(['history', 'branches'] as const)('mostra vazio real de %s somente depois da leitura bem-sucedida', async (tab) => {
+    files = []; branches = { current: 'main', branches: [], dirty: false };
+    await render(); await click(tab === 'history' ? m.native_git_history() : m.git_aba_branches());
+    expect(el.textContent).toContain(tab === 'history' ? m.native_git_no_commits() : m.native_git_no_branch());
+    expect(el.querySelector('[role="alert"]')).toBeNull();
+    expect(el.textContent).not.toContain(m.native_git_loading());
   });
 
   it('mostra erro de leitura selecionável e recupera ao reler sem fingir árvore limpa', async () => {
@@ -280,11 +407,41 @@ describe('Git pela rota explícita', () => {
     const confirmed = accept();
     await act(async () => { confirmed(); confirmed(); });
     expect(writes()).toHaveLength(2);
-    expect(el.textContent).toContain(m.native_git_push_failed({ reason: 'fixture-push-refused' }));
+    expect([...el.querySelectorAll('[role="alert"]')].map((node) => node.textContent)).toEqual([
+      m.mobile_git_operation_failed(), `${m.native_git_committed()} ${m.native_git_sync_failed({ op: m.native_git_push() })}`,
+    ]);
+    expect(el.textContent).toContain('fixture-push-refused');
     expect(el.textContent).toContain('fixture-refresh-refused');
     expect(el.textContent).not.toContain(m.native_git_pushed());
-    expect(el.querySelector('textarea')?.value).toBe('');
     expect(reads().filter(([url]) => String(url).endsWith('/git/files'))).toHaveLength(2);
+    boundary.fetch.mockImplementation(respond); await click(m.native_git_reload());
+    expect(el.querySelector('textarea')?.value).toBe('');
+    expect(writes()).toHaveLength(2);
+  });
+
+  it.each(['refusal', 'timeout'] as const)('separa resumo do commit feito da causa de push %s', async (kind) => {
+    if (kind === 'timeout') vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const pending = deferred<Response>();
+    const detail = kind === 'refusal' ? 'fatal: Authentication failed' : m.mobile_git_write_timeout();
+    boundary.fetch.mockImplementation((url, init) => String(url).endsWith('/git/push')
+      ? kind === 'refusal' ? json({ ok: false, output: detail }) : pending.promise : respond(url, init));
+    await render(); await fill(m.native_git_message(), 'fixture-partial-commit');
+    await click(m.native_git_commit_push()); await act(async () => accept()());
+    if (kind === 'timeout') await act(async () => vi.advanceTimersByTimeAsync(60000));
+    const alerts = el.querySelectorAll<HTMLElement>('[role="alert"]');
+    expect([...alerts].map((node) => node.textContent)).toEqual([`${m.native_git_committed()} ${m.native_git_sync_failed({ op: m.native_git_push() })}`]);
+    const diagnostic = [...el.querySelectorAll<HTMLElement>('[data-selectable="true"]')].find((node) => node.textContent === detail)!;
+    expect(diagnostic).toBeTruthy();
+    expect(parseFloat(diagnostic.style.fontSize)).toBeLessThan(parseFloat(alerts[0].style.fontSize));
+    expect(diagnostic.closest('[data-scroll="true"]')).toBeTruthy();
+    expect(el.querySelector('textarea')?.value).toBe('');
+    expect(writes().map(([url]) => new URL(String(url)).pathname)).toEqual([
+      '/api/sessions/fixture-session/git/commit', '/api/sessions/fixture-session/git/push',
+    ]);
+    expect(JSON.parse(writes()[0][1].body)).toEqual({ message: 'fixture-partial-commit', paths: ['a.ts', 'b.ts'], amend: false, new_branch: null });
+    if (kind === 'timeout') await act(async () => pending.resolve(json({ ok: true })));
+    expect(writes()).toHaveLength(2);
+    expect(el.textContent).not.toContain(m.native_git_pushed());
   });
 
   it('publica somente após confirmar, e mantém resultado se refresh falhar', async () => {
@@ -372,6 +529,28 @@ describe('Git pela rota explícita', () => {
     expect(el.textContent).toContain(m.git_working_tree_suja());
   });
 
+  it('substitui lista e composer pelo diff e conserva rascunho e seleção ao voltar', async () => {
+    boundary.fetch.mockImplementation((url, init) => String(url).endsWith('/git/diff') ? json({ diff: '+fixture-isolated-diff', truncated: false }) : respond(url, init));
+    await render(); await fill(m.native_git_message(), 'fixture-kept-draft');
+    await click(m.native_git_include({ path: 'b.ts' }));
+    await click('a.ts');
+    expect(el.textContent).toContain('+fixture-isolated-diff');
+    expect(button('b.ts')).toBeUndefined();
+    expect(el.querySelector('[role="checkbox"]')).toBeNull();
+    expect(el.querySelector('textarea')).toBeNull();
+    await click(m.native_git_reload());
+    expect(button('b.ts')).toBeUndefined();
+    expect(el.textContent).toContain('+fixture-isolated-diff');
+    await click(m.git_voltar_arquivos());
+    expect(el.querySelector('textarea')?.value).toBe('fixture-kept-draft');
+    expect(button(m.native_git_include({ path: 'b.ts' }))?.getAttribute('aria-checked')).toBe('false');
+    await click('a.ts'); files = [changed('b.ts')];
+    await click(m.native_git_reload());
+    expect(button(m.git_voltar_arquivos())).toBeUndefined();
+    expect(button('b.ts')).toBeTruthy();
+    expect(el.querySelector('textarea')?.value).toBe('fixture-kept-draft');
+  });
+
   it('mostra diff por arquivo com carregamento e corte, ignorando resposta antiga', async () => {
     const old = deferred<Response>();
     boundary.fetch.mockImplementation((url, init) => {
@@ -380,6 +559,7 @@ describe('Git pela rota explícita', () => {
     });
     await render(); await click('a.ts');
     expect(el.textContent).toContain(m.native_git_diff_loading());
+    await click(m.git_voltar_arquivos());
     await click('b.ts');
     expect(el.textContent).toContain('+fixture-new-diff');
     expect(el.textContent).toContain(m.git_diff_cortado());
@@ -413,6 +593,22 @@ describe('Git pela rota explícita', () => {
     expect(JSON.parse(writes()[0][1].body)).toEqual({ path: 'a.ts' });
     expect(el.textContent).toContain('fixture-discard-refused');
     expect(reads().filter(([url]) => String(url).endsWith('/git/files'))).toHaveLength(2);
+  });
+
+  it('mostra duas horas em português a partir do timestamp e ignora rel do servidor', async () => {
+    const previousCore = localeAtual(); const previousMobile = getLocale();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1700007200000);
+    configureLocale({ getLocale: () => 'pt' }); overwriteGetLocale(() => 'pt');
+    try {
+      const item = { ...committed(1), ts: 1700000000, rel: '2 hours ago' };
+      boundary.fetch.mockImplementation((url, init) => String(url).includes('/git/log') && new URL(String(url)).searchParams.get('n') !== '1'
+        ? json({ commits: [item], ahead: null, behind: null }) : respond(url, init));
+      await render(); await click(m.native_git_history());
+      expect(el.textContent).toContain(`${item.short} · fixture-author · ${m.tempo_h_atras({ n: 2 })}`);
+      expect(el.textContent).not.toContain('2 hours ago');
+    } finally {
+      clock.mockRestore(); configureLocale({ getLocale: () => previousCore }); overwriteGetLocale(() => previousMobile);
+    }
   });
 
   it('monta histórico só na aba visível, pagina e não busca quando oculto', async () => {
@@ -452,6 +648,23 @@ describe('Git pela rota explícita', () => {
     failed = false; await click(m.native_git_reload());
     expect(el.textContent).toContain(m.native_git_no_commits());
     expect(el.textContent).not.toContain('fixture-history-offline');
+  });
+
+  it('dá respiro horizontal ao assunto e corpo sem envolver a área do diff', async () => {
+    const item = { ...committed(1), body: 'fixture-commit-body' };
+    boundary.fetch.mockImplementation((url, init) => {
+      if (String(url).endsWith('/diff-full')) return json({ diff: '+fixture-full-width-diff', truncated: false });
+      if (String(url).includes('/git/log') && new URL(String(url)).searchParams.get('n') !== '1') return json({ commits: [item], ahead: null, behind: null });
+      return respond(url, init);
+    });
+    await render(); await click(m.native_git_history()); await click(m.git_titulo_commit({ short: item.short, subject: item.subject }));
+    const subject = [...el.querySelectorAll('span')].find((node) => node.textContent === item.subject)!;
+    const body = [...el.querySelectorAll('span')].find((node) => node.textContent === item.body)!;
+    const content = subject.closest('[data-scroll]')!;
+    expect(Number(content.getAttribute('data-content-padding-horizontal'))).toBeGreaterThan(0);
+    expect(content.contains(body)).toBe(true);
+    expect(content.textContent).not.toContain('+fixture-full-width-diff');
+    expect(el.textContent).toContain('+fixture-full-width-diff');
   });
 
   it('abre diff do commit com corte no destino explícito e ignora diff fechado atrasado', async () => {
@@ -513,7 +726,8 @@ describe('Git pela rota explícita', () => {
     });
     await click(m.native_git_commit_push()); await act(async () => accept()());
     expect(writes().map(([url]) => new URL(String(url)).pathname)).toEqual(['/api/sessions/fixture-session/git/commit']);
-    expect(el.textContent).toContain(m.native_git_push_failed({ reason: m.mobile_git_context_changed() }));
+    expect(el.querySelector('[role="alert"]')?.textContent).toBe(`${m.native_git_committed()} ${m.native_git_sync_failed({ op: m.native_git_push() })}`);
+    expect(el.textContent).toContain(m.mobile_git_context_changed());
     expect(el.querySelector('textarea')?.value).toBe('');
   });
 
@@ -664,6 +878,32 @@ describe('Git pela rota explícita', () => {
     expect(parseFloat(errorBox!.style.maxHeight)).toBeLessThanOrEqual(160);
     expect(button(m.native_git_reload())?.disabled).toBe(false);
     expect(button(m.native_git_commit())?.disabled).toBe(false);
+  });
+
+  it.each([
+    ['mobile/src/features/terminal/TerminalPanel.tsx', 'TerminalPanel.tsx', 'mobile/src/features/terminal/'],
+    ['mobile/scripts/', 'scripts', 'mobile/'],
+  ])('prioriza o nome de %s sem perder o caminho acessível ou enviado ao diff', async (path, filename, directory) => {
+    files = [changed(path)];
+    boundary.fetch.mockImplementation((url, init) => String(url).endsWith('/git/diff') ? json({ path, diff: '', truncated: false }) : respond(url, init));
+    await render();
+    const entry = button(path)!;
+    const title = [...entry.querySelectorAll<HTMLElement>('span')].find((node) => node.textContent === filename);
+    expect(title?.textContent).toBe(filename);
+    expect(title?.getAttribute('data-lines')).toBe('1');
+    expect(title?.getAttribute('data-ellipsis')).toBe('tail');
+    expect(title?.style.fontWeight).toBe('600');
+    expect(parseFloat(title!.parentElement!.style.minWidth)).toBe(0);
+    expect(title?.parentElement?.style.flex).toBe('1 1 0%');
+    const folder = [...entry.querySelectorAll<HTMLElement>('span')].find((node) => node.textContent === directory);
+    expect(folder?.getAttribute('data-lines')).toBe('1');
+    expect(folder?.getAttribute('data-ellipsis')).toBe('middle');
+    expect(parseFloat(folder!.style.fontSize)).toBeLessThan(parseFloat(title!.style.fontSize));
+    const stats = [...entry.parentElement!.children].find((node) => node !== entry && node.textContent?.includes('+2')) as HTMLElement;
+    expect(stats.style.maxWidth).toBe('40%');
+    await click(path);
+    const diff = boundary.fetch.mock.calls.find(([url]) => String(url).endsWith('/git/diff'))!;
+    expect(JSON.parse(diff[1].body)).toEqual({ path });
   });
 
   it('acomoda paths e branches longos em espaços flexíveis e mantém alvo de seleção 44', async () => {
