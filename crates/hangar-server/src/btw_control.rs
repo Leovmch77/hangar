@@ -160,8 +160,10 @@ async fn buffer_cmd(seq: &PermissionSequence<'_>, sub: &str, args: &[&str]) -> (
     (ok, out)
 }
 
-async fn buffers(seq: &PermissionSequence<'_>) -> Vec<String> {
-    buffer_cmd(seq, "list-buffers", &["-F", "#{buffer_name}"]).await.1.split('\n').filter(|b| !b.is_empty()).map(str::to_owned).collect()
+/// `None`: a lista falhou, o que não é "nenhum buffer".
+async fn buffers(seq: &PermissionSequence<'_>) -> Option<Vec<String>> {
+    let (ok, out) = buffer_cmd(seq, "list-buffers", &["-F", "#{buffer_name}"]).await;
+    ok.then(|| out.split('\n').filter(|b| !b.is_empty()).map(str::to_owned).collect())
 }
 
 async fn read_buffer(seq: &PermissionSequence<'_>, name: &str) -> String {
@@ -180,7 +182,7 @@ async fn delete_buffers(seq: &PermissionSequence<'_>, fresh: &[String], before: 
     // apagou, e apagar por contagem levaria a cópia manual de outra pessoa (buffers do servidor inteiro).
     if BUFFER_TARGET.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&seq.binding().mux_argv.join("\u{0}")).copied() != Some(true) { return; }
     for _ in 0..4 {
-        if buffers(seq).await.len() <= before { break; }
+        if buffers(seq).await.is_none_or(|b| b.len() <= before) { break; }
         buffer_cmd(seq, "delete-buffer", &[]).await;
     }
 }
@@ -270,19 +272,23 @@ pub async fn ask(driver: &TerminalDriver, question: &str, limits: &BtwLimits) ->
     }
     let copied = {
         let _copy = COPY_LOCK.lock().await;
+        // Sem a lista de antes não há como separar a cópia nova da do usuário: a resposta sai do pane.
         let before = buffers(&seq).await;
-        let _ = seq.key("c").await;
+        match before {
+            Some(_) => { let _ = seq.key("c").await; }
+            None => tracing::warn!(session=%seq.binding().name, "btw: a lista de buffers falhou antes da cópia"),
+        }
         let until = Instant::now() + limits.copy;
         let mut fresh = Vec::new();
-        while Instant::now() < until {
+        while let Some(before) = &before && Instant::now() < until {
             tokio::time::sleep(limits.poll).await;
-            fresh = buffers(&seq).await.into_iter().filter(|b| !before.contains(b)).collect();
+            fresh = buffers(&seq).await.unwrap_or_default().into_iter().filter(|b| !before.contains(b)).collect();
             if !fresh.is_empty() || footer(&screen(&seq).await?).contains(COPIED) { break; }
         }
         let mut copied = String::new();
         if let Some(first) = fresh.first() {
             copied = read_buffer(&seq, first).await;
-            delete_buffers(&seq, &fresh, before.len()).await;
+            delete_buffers(&seq, &fresh, before.as_ref().map_or(0, Vec::len)).await;
         }
         copied
     };

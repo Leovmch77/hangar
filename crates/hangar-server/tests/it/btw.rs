@@ -25,7 +25,7 @@ struct Fake {
     composer: Mutex<String>, resist: String, lose_slash: Mutex<usize>,
     after_typing: Mutex<Option<VecDeque<Option<String>>>>, typed_once: Mutex<bool>,
     fail_enter: bool, fail_literal: bool, fail_escape: bool, close_to: Option<String>,
-    target_gone: bool, at_typing: Mutex<Option<String>>, name: String,
+    target_gone: bool, at_typing: Mutex<Option<String>>, name: String, fail_lists: Mutex<usize>,
 }
 impl Fake {
     fn new(screens: &[String]) -> Self {
@@ -33,7 +33,7 @@ impl Fake {
             buffers: Mutex::default(), mux: Mux::Tmux, answer: "1. Apple\n2. Banana\n".into(), buffer_after_c: true,
             composer: Mutex::default(), resist: String::new(), lose_slash: Mutex::new(0), after_typing: Mutex::new(None),
             typed_once: Mutex::new(false), fail_enter: false, fail_literal: false, fail_escape: false,
-            close_to: Some(screen(&["❯ "])), target_gone: false, at_typing: Mutex::new(None), name: "s".into() }
+            close_to: Some(screen(&["❯ "])), target_gone: false, at_typing: Mutex::new(None), name: "s".into(), fail_lists: Mutex::new(0) }
     }
     fn keys(&self) -> Vec<String> { self.keys.lock().unwrap().clone() }
     fn composer_screen(&self) -> String {
@@ -55,6 +55,10 @@ impl Fake {
         let mut none = Vec::new();
         // psmux sem alvo: a sessão padrão é outra, que não tem os buffers desta.
         let buffers = if self.mux == Mux::Tmux || targeted { &mut *all } else { &mut none };
+        if sub == "list-buffers" {
+            let mut fails = self.fail_lists.lock().unwrap();
+            if *fails > 0 { *fails -= 1; return (false, String::new(), "server busy\n".into()); }
+        }
         match sub {
             "list-buffers" if self.mux == Mux::Psmux => (true, (0..buffers.len()).map(|i| format!("buffer{i:04}\n")).collect(), String::new()),
             "list-buffers" => (true, buffers.iter().map(|(n, _)| format!("{n}\n")).collect(), String::new()),
@@ -173,6 +177,18 @@ const CAPTURE_FAILS: &str = "\u{0}captura falha";
 async fn a_capture_failure_is_its_own_code_not_a_closed_overlay() {
     let fake = Arc::new(Fake::new(&[screen(&["❯ "]), screen(&["    /btw q", "      · Answering…", WALKING]), CAPTURE_FAILS.to_owned()]));
     assert_eq!(code(ask(&fake, "capture", "q").await), (503, "erro_btw_captura_falhou".into()));
+}
+
+/// A lista de buffers de antes do `c` que falha não vira "nenhum": a cópia do usuário passaria por resposta e seria apagada.
+#[tokio::test]
+async fn a_failed_buffer_list_before_the_copy_keeps_the_users_buffer() {
+    let mut fake = Fake::new(&answered());
+    fake.buffers = Mutex::new(vec![("buffer0".into(), "cópia do usuário".into())]);
+    fake.fail_lists = Mutex::new(1);
+    let fake = Arc::new(fake);
+    let r = ask(&fake, "list-fails", "q").await.unwrap();
+    assert_eq!((r["answer"].as_str(), r["fonte"].as_str()), (Some("4"), Some("pane")));
+    assert!(fake.buffers.lock().unwrap().iter().any(|(_, c)| c == "cópia do usuário"));
 }
 
 fn answered() -> Vec<String> { vec![screen(&["❯ "]), screen(&["    /btw q", "      4", READY]), screen(&["    /btw q", "      4", COPIED])] }
