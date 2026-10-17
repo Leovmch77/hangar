@@ -16,7 +16,7 @@ class Socket {
   closed = false;
   ignoreConnectingClose = false;
   closeCalls = 0;
-  constructor(public url: string) { Socket.instances.push(this); }
+  constructor(public url: string, public protocols?: string[], public options?: { headers: { Origin: string } }) { Socket.instances.push(this); }
   send(data: string | Uint8Array) {
     if (this.failSend) throw new Error('native-send-failed');
     this.sent.push(data);
@@ -58,6 +58,27 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); esquecerRota(server.id); });
 
 describe('native terminal socket', () => {
+  it.each([
+    { baseUrl: 'http://term.test:8765/prefix', lan: undefined, url: 'ws://term.test:8765/prefix/api/sessions/chat/term?token=explicit%20%2B%2F%26&cols=80&rows=24', origin: 'http://term.test:8765' },
+    { baseUrl: 'https://term.test:8443/prefix', lan: undefined, url: 'wss://term.test:8443/prefix/api/sessions/chat/term?token=explicit%20%2B%2F%26&cols=80&rows=24', origin: 'https://term.test:8443' },
+    { baseUrl: 'https://remote.test/prefix', lan: { id: 'term-lan', url: 'http://192.168.1.10:8765/local' }, url: 'ws://192.168.1.10:8765/local/api/sessions/chat/term?token=explicit%20%2B%2F%26&cols=80&rows=24', origin: 'http://192.168.1.10:8765' },
+  ])('Origin HTTP da conexão efetiva do terminal: $origin', async ({ baseUrl, lan, url, origin }) => {
+    const target = { ...server, baseUrl, lan };
+    if (lan) {
+      vi.stubGlobal('fetch', vi.fn(async (address: string) => {
+        if (!address.includes('/prova?')) return new Promise(() => {});
+        const challenge = new URL(address).searchParams.get('desafio')!;
+        return { ok: true, json: async () => ({ identificador: 'term-lan', prova: createHmac('sha256', server.token).update(`${challenge}|term-lan`).digest('hex') }) };
+      }));
+      await decidirRota(target);
+    }
+    const terminal = openTerminalSocket(target, 'chat', size, { output: vi.fn(), status: vi.fn() });
+    const socket = Socket.instances.at(-1)!;
+    expect(socket.url).toBe(url);
+    expect(socket.options).toEqual({ headers: { Origin: origin } });
+    terminal.close();
+  });
+
   it('usa prefixo e token do servidor explícito e respeita a rota local comprovada por baseOf', async () => {
     const { socket, terminal } = connect();
     expect(socket.url).toBe('wss://remote.test/prefix/api/sessions/name%20%2F%C3%A7/term?token=explicit%20%2B%2F%26&cols=80&rows=24');

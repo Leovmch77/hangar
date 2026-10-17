@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { configureApi, registrarDiag, type LiveVoiceHandlers, type Server } from '@hangar/core';
+import { createHmac } from 'node:crypto';
+import { configureApi, decidirRota, esquecerRota, registrarDiag, type LiveVoiceHandlers, type Server } from '@hangar/core';
 import { LiveVoiceCall } from './liveVoice';
 
 vi.mock('@hangar/core', async importOriginal => ({
@@ -78,7 +79,7 @@ class Socket {
   messages: Record<string, unknown>[] = [];
   send = vi.fn((data: string) => { this.messages.push(JSON.parse(data)); });
   close = vi.fn(() => { this.readyState = 3; });
-  constructor(readonly url: string) { Socket.all.push(this); }
+  constructor(readonly url: string, readonly protocols?: string[], readonly options?: { headers: { Origin: string } }) { Socket.all.push(this); }
   open() { this.readyState = Socket.OPEN; this.onopen?.(); }
   receive(message: object) { this.onmessage?.({ data: JSON.stringify(message) }); }
 }
@@ -135,6 +136,30 @@ afterEach(async () => {
   }
   clearInterval(rtc.clock); rtc.clock = undefined;
   vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks();
+});
+
+describe('Origin HTTP da conexão efetiva de voz', () => {
+  afterEach(() => esquecerRota(server.id));
+  it.each([
+    { baseUrl: 'http://voice.test:8765/prefix', lan: undefined, url: 'ws://voice.test:8765/prefix/api/voice?token=token-a', origin: 'http://voice.test:8765' },
+    { baseUrl: 'https://voice.test:8443/prefix', lan: undefined, url: 'wss://voice.test:8443/prefix/api/voice?token=token-a', origin: 'https://voice.test:8443' },
+    { baseUrl: 'https://remote.test/prefix', lan: { id: 'voice-lan', url: 'http://192.168.1.10:8765/local' }, url: 'ws://192.168.1.10:8765/local/api/voice?token=token-a', origin: 'http://192.168.1.10:8765' },
+  ])('envia Origin explícita $origin ao abrir $url', async ({ baseUrl, lan, url, origin }) => {
+    const target = { ...server, baseUrl, lan };
+    if (lan) {
+      vi.stubGlobal('fetch', vi.fn(async (address: string) => {
+        if (!address.includes('/prova?')) return new Promise(() => {});
+        const challenge = new URL(address).searchParams.get('desafio')!;
+        return { ok: true, json: async () => ({ identificador: 'voice-lan', prova: createHmac('sha256', 'token-a').update(`${challenge}|voice-lan`).digest('hex') }) };
+      }));
+      await decidirRota(target);
+    }
+    const { call } = makeCall();
+    await call.start(target, null);
+    const socket = Socket.all.at(-1)!;
+    expect(socket.url).toBe(url);
+    expect(socket.options).toEqual({ headers: { Origin: origin } });
+  });
 });
 
 describe('logs WebRTC pela abertura pública da chamada', () => {

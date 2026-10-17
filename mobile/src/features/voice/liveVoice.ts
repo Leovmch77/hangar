@@ -182,7 +182,8 @@ export class LiveVoiceCall {
       await pc.setLocalDescription(offer);
       if (!this.current(call)) return;
       let ws: WebSocket;
-      try { ws = call.ws = new WebSocket(url); }
+      const NativeWebSocket = WebSocket as typeof WebSocket & { new (url: string, protocols: string[], options: { headers: { Origin: string } }): WebSocket };
+      try { ws = call.ws = new NativeWebSocket(url, [], { headers: { Origin: new URL(url.replace(/^ws/, 'http')).origin } }); }
       catch { this.fail(call, 'failed', 'websocket_start_failed', true); return; }
       call.createdAt = call.lastPong = call.lastPing = Date.now();
       ws.onopen = () => {

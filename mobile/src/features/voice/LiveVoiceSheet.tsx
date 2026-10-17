@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, View, useWindowDimensions } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
-import type { Credencial, LiveVoiceState, LiveVoiceSettings, LiveVoiceSettingsReply, ModelOption, VoiceMemory } from '@hangar/core';
+import type { Credencial, LiveVoiceState, LiveVoiceSettings, LiveVoiceSettingsReply, ModelOption, Server, VoiceMemory } from '@hangar/core';
 import { liveVoiceSpeaker, liveVoiceStatus, liveVoiceThoughtTail } from '@hangar/core';
 import { Sheet } from '../../ui/Sheet';
 import { Icon } from '../../ui/Icon';
@@ -36,6 +36,9 @@ export interface LiveVoiceView {
 export interface LiveVoiceSheetProps {
   open: boolean;
   view: LiveVoiceView;
+  servers: Pick<Server, 'id' | 'label'>[];
+  serverId: string | null;
+  onSelectServer: (serverId: string) => void;
   onDismiss: () => void;
   onStart: () => void;
   onStop: () => void;
@@ -133,7 +136,7 @@ function Level({ title, value }: { title: string; value: number }) {
   );
 }
 
-export function LiveVoiceSheet({ open, view, onDismiss, onStart, onStop, onToggleMute, onMode, onRetry,
+export function LiveVoiceSheet({ open, view, servers, serverId, onSelectServer, onDismiss, onStart, onStop, onToggleMute, onMode, onRetry,
   onSaveSettings, onSettingsOpen, onForgetMemory }: LiveVoiceSheetProps) {
   const { theme } = useUnistyles();
   const { height } = useWindowDimensions();
@@ -155,7 +158,7 @@ export function LiveVoiceSheet({ open, view, onDismiss, onStart, onStop, onToggl
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [open, view.phase, view.liveSince]);
-  useEffect(() => { if (!open) setSettingsOpen(false); }, [open]);
+  useEffect(() => { setSettingsOpen(false); }, [open, serverId]);
 
   const save = (next: LiveVoiceSettings) => { if (!disabled) onSaveSettings(next); };
   const savePair = (mode: Mode, field: 'model' | 'effort' | 'tier', value: string | null) => {
@@ -180,7 +183,13 @@ export function LiveVoiceSheet({ open, view, onDismiss, onStart, onStop, onToggl
         <View style={styles.header}>
           <View style={styles.heading}>
             <Text style={styles.title} accessibilityRole="header">{m.live_voice_open()}</Text>
-            <Text style={styles.detail} selectable>{m.live_voice_server()}: {view.serverLabel}</Text>
+            {servers.length > 0 ? <View style={styles.field}>
+              <Text style={styles.detail}>{m.live_voice_server()}</Text>
+              <QuietPill label={view.serverLabel} aria={m.live_voice_server()} menuTitle={m.live_voice_server()} disabled={inCall}
+                actions={servers.map(server => ({ id: server.id, title: server.id === serverId ? view.serverLabel : server.label,
+                  state: server.id === serverId ? 'on' : 'off' }))}
+                onAction={id => { if (!inCall) onSelectServer(id); }} />
+            </View> : <Text style={styles.detail} selectable>{m.live_voice_server()}: {view.serverLabel}</Text>}
           </View>
           <Pressable onPress={onDismiss} accessibilityRole="button" accessibilityLabel={m.native_live_voice_close()}
             style={styles.close}><Icon name="X" size={22} /></Pressable>

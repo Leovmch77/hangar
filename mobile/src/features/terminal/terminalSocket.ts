@@ -31,7 +31,9 @@ export function openTerminalSocket(server: Server, name: string, size: { cols: n
     const base = baseOf(server).replace(/\/+$/, '').replace(/^http/, 'ws');
     const initial = grid(size.cols, size.rows);
     latestSize = initial;
-    socket = new WebSocket(`${base}/api/sessions/${encodeURIComponent(name)}/term?token=${encodeURIComponent(server.token)}&cols=${initial.cols}&rows=${initial.rows}`);
+    const url = `${base}/api/sessions/${encodeURIComponent(name)}/term?token=${encodeURIComponent(server.token)}&cols=${initial.cols}&rows=${initial.rows}`;
+    const NativeWebSocket = WebSocket as typeof WebSocket & { new (url: string, protocols: string[], options: { headers: { Origin: string } }): WebSocket };
+    socket = new NativeWebSocket(url, [], { headers: { Origin: new URL(url.replace(/^ws/, 'http')).origin } });
     socket.binaryType = 'arraybuffer';
     openingTimer = setTimeout(() => fail(m.mobile_terminal_connect_timeout()), 20_000);
     socket.onopen = () => {

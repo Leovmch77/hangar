@@ -60,7 +60,9 @@ const initialView = (): LiveVoiceView => ({
 let container: HTMLDivElement;
 let root: Root;
 let view: LiveVoiceView;
-let callbacks: Omit<LiveVoiceSheetProps, 'open' | 'view'>;
+let callbacks: Omit<LiveVoiceSheetProps, 'open' | 'view' | 'servers' | 'serverId'>;
+const servers = [{ id: 'server-a', label: 'server-fixture' }, { id: 'server-b', label: 'other-server' }];
+let serverId: string;
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-10-15T12:00:00Z'));
@@ -68,11 +70,12 @@ beforeEach(() => {
   container = document.createElement('div');
   root = createRoot(container);
   view = initialView();
-  callbacks = { onDismiss: vi.fn(), onStart: vi.fn(), onStop: vi.fn(), onToggleMute: vi.fn(), onMode: vi.fn(), onRetry: vi.fn(),
+  serverId = 'server-a';
+  callbacks = { onSelectServer: vi.fn(), onDismiss: vi.fn(), onStart: vi.fn(), onStop: vi.fn(), onToggleMute: vi.fn(), onMode: vi.fn(), onRetry: vi.fn(),
     onSaveSettings: vi.fn(), onSettingsOpen: vi.fn(), onForgetMemory: vi.fn() };
 });
 afterEach(async () => { await act(async () => root.unmount()); vi.useRealTimers(); });
-const render = (open = true) => act(async () => root.render(createElement(LiveVoiceSheet, { open, view, ...callbacks })));
+const render = (open = true) => act(async () => root.render(createElement(LiveVoiceSheet, { open, view, servers, serverId, ...callbacks })));
 const button = (label: string) => [...container.querySelectorAll('button')].find(el => el.getAttribute('aria-label') === label)!;
 const click = (label: string) => act(async () => button(label).click());
 const choose = async (title: string, option: string) => {
@@ -85,15 +88,61 @@ const choose = async (title: string, option: string) => {
 };
 
 describe('LiveVoiceSheet', () => {
+  it.each(['idle', 'closed'] as const)('seletor de servidor permite escolher próxima chamada em %s mesmo após erro', async phase => {
+    view.phase = phase;
+    if (phase === 'closed') view.error = { code: 'connection_lost' };
+    await render();
+    expect(button(`${m.live_voice_server()}: server-fixture`)).toBeDefined();
+    await choose(m.live_voice_server(), 'other-server');
+    expect(callbacks.onSelectServer).toHaveBeenCalledExactlyOnceWith('server-b');
+    expect(callbacks.onStart).not.toHaveBeenCalled();
+  });
+
+  it('servidor removido após erro permite selecionar B sem oferecer A', async () => {
+    view.phase = 'closed';
+    view.error = { code: 'server_removed', detail: m.chat_servidor_removido() };
+    await act(async () => root.render(createElement(LiveVoiceSheet, { open: true, view, servers: [servers[1]], serverId, ...callbacks })));
+    const trigger = button(`${m.live_voice_server()}: server-fixture`);
+    expect(trigger).toBeDefined();
+    await act(async () => trigger.click());
+    const options = [...container.querySelectorAll<HTMLButtonElement>('button[role="radio"]')];
+    expect(options.map(option => option.getAttribute('aria-label'))).toEqual(['other-server']);
+    await act(async () => options[0].click());
+    expect(callbacks.onSelectServer).toHaveBeenCalledExactlyOnceWith('server-b');
+    expect(callbacks.onStart).not.toHaveBeenCalled();
+  });
+
+  it.each(['connecting', 'live'] as const)('seletor de servidor fica desabilitado em %s', async phase => {
+    view.phase = phase;
+    await render();
+    const trigger = button(`${m.live_voice_server()}: server-fixture`);
+    expect(trigger).toBeDefined();
+    expect(trigger.disabled).toBe(true);
+    await act(async () => trigger.click());
+    expect(container.querySelectorAll('button[role="radio"]')).toHaveLength(0);
+    expect(callbacks.onSelectServer).not.toHaveBeenCalled();
+  });
+
+  it('seletor de servidor fecha ajustes da máquina anterior quando a escolha muda', async () => {
+    await render();
+    await click(m.native_live_voice_settings_memory());
+    expect(button(m.native_live_voice_settings_memory()).getAttribute('aria-expanded')).toBe('true');
+    serverId = 'server-b';
+    view = { ...initialView(), serverLabel: 'other-server' };
+    await render();
+    expect(button(m.native_live_voice_settings_memory()).getAttribute('aria-expanded')).toBe('false');
+    expect(button(`${m.live_voice_server()}: other-server`)).toBeDefined();
+  });
+
   it('conserva o rótulo salvo no app antes e durante a chamada mesmo com outro nome no estado do servidor', async () => {
     view.serverLabel = 'app-server-label';
     await render();
-    expect(container.textContent).toContain(`${m.live_voice_server()}: app-server-label`);
+    expect(button(`${m.live_voice_server()}: app-server-label`)).toBeDefined();
     view.state = { ...liveState(), server: 'runtime-hostname' };
     for (const phase of ['connecting', 'live'] as const) {
       view.phase = phase;
       await render();
-      expect(container.textContent).toContain(`${m.live_voice_server()}: app-server-label`);
+      expect(button(`${m.live_voice_server()}: app-server-label`)).toBeDefined();
       expect(container.textContent).not.toContain('runtime-hostname');
     }
   });

@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { AppState, type AppStateStatus } from 'react-native';
 import type { LiveVoiceDestination } from './liveVoiceStore';
-import type { LiveVoiceView } from './LiveVoiceSheet';
+import type { LiveVoiceSheetProps, LiveVoiceView } from './LiveVoiceSheet';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -12,7 +12,7 @@ const harness = vi.hoisted(() => ({
   params: { server: 'saved-a', name: 'session / a' } as { server?: string; name?: string },
   segments: ['s', '[server]', '[name]'] as string[],
   replace: vi.fn(), push: vi.fn(), start: vi.fn(), stop: vi.fn(), setRoute: vi.fn(), foreground: vi.fn(),
-  loadSettings: vi.fn(), openFor: vi.fn(), reconcile: vi.fn(), dismissed: vi.fn(), ensureActive: vi.fn(),
+  loadSettings: vi.fn(), openFor: vi.fn(), selectServer: vi.fn(), reconcile: vi.fn(), dismissed: vi.fn(), ensureActive: vi.fn(),
   navigate: null as ((destination: LiveVoiceDestination) => void) | null,
 }));
 vi.mock('expo-router', () => {
@@ -28,7 +28,7 @@ vi.mock('./liveVoiceStore', async () => {
   return { useLiveVoice: create(() => ({
     open: false, view: {} as LiveVoiceView, chatControls: null, settingsByServer: {},
     start: harness.start, stop: harness.stop, setRoute: harness.setRoute, setForeground: harness.foreground,
-    loadSettings: harness.loadSettings, openFor: harness.openFor, reconcileServers: harness.reconcile,
+    loadSettings: harness.loadSettings, openFor: harness.openFor, selectServer: harness.selectServer, reconcileServers: harness.reconcile,
     dismiss: harness.dismissed, toggleMute: vi.fn(), setMode: vi.fn(), retry: vi.fn(), saveSettings: vi.fn(), openSettings: vi.fn(), forgetMemory: vi.fn(),
     registerNavigation(navigate: (destination: LiveVoiceDestination) => void) {
       harness.navigate = navigate;
@@ -36,8 +36,10 @@ vi.mock('./liveVoiceStore', async () => {
     },
   })) };
 });
-vi.mock('./LiveVoiceSheet', () => ({ LiveVoiceSheet: ({ open, onStop }: { open: boolean; onStop(): void }) => open
-  ? <button aria-label="stop-call" onClick={onStop} /> : null }));
+vi.mock('./LiveVoiceSheet', () => ({ LiveVoiceSheet: ({ open, onStop, servers, serverId, onSelectServer }: LiveVoiceSheetProps) => open
+  ? <><button aria-label="stop-call" onClick={onStop} />
+    {(servers ?? []).map(server => <button key={server.id} aria-label={`voice-${server.id}`}
+      aria-pressed={server.id === serverId} onClick={() => onSelectServer(server.id)}>{server.label}</button>)}</> : null }));
 vi.mock('./LiveVoiceButton', () => ({ LiveVoiceButton: ({ visible, onPress, error }: { visible: boolean; onPress(): void; error: boolean }) => visible
   ? <button aria-label="open-call" data-error={error} onClick={onPress} /> : null }));
 
@@ -78,6 +80,21 @@ afterEach(async () => {
   await act(async () => { for (const root of roots) root.unmount(); });
   roots.clear();
   vi.restoreAllMocks();
+});
+
+test('seleção da voz recebe só próprios habilitados e usa setter sem alterar servidor global', async () => {
+  act(() => {
+    useServers.setState({ servers: [a, b, { ...a, id: 'guest', invite: true }, { ...a, id: 'ended', inviteEnded: true },
+      { ...a, id: 'removed', removed: true }, { ...a, id: 'disabled', disabled: true }, { ...a, id: 'no-token', token: '' }], activeId: a.id });
+    useLiveVoice.setState({ open: true, server: b, view: { ...idle(), serverLabel: b.label } });
+  });
+  const { container } = await mount(<LiveVoiceRoot />);
+  expect([...container.querySelectorAll('button[aria-label^="voice-"]')].map(el => el.textContent)).toEqual(['a', 'b']);
+  expect(button(container, `voice-${b.id}`).getAttribute('aria-pressed')).toBe('true');
+  await act(async () => button(container, `voice-${a.id}`).click());
+  expect(harness.selectServer).toHaveBeenCalledExactlyOnceWith(a.id);
+  expect(harness.ensureActive).not.toHaveBeenCalled();
+  expect(useServers.getState().activeId).toBe(a.id);
 });
 
 test('navegação usa pathname tipado com params, e só a rota refletida publica a tela', async () => {

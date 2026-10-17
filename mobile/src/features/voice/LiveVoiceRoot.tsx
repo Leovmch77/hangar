@@ -16,6 +16,7 @@ export function LiveVoiceRoot() {
   const servers = useServers(state => state.servers);
   const open = useLiveVoice(state => state.open);
   const view = useLiveVoice(state => state.view);
+  const server = useLiveVoice(state => state.server);
   const serverId = first(params.server);
   const name = first(params.name);
   const sessionRoute = segments[0] === 's' && !!serverId && !!name;
@@ -63,7 +64,9 @@ export function LiveVoiceRoot() {
       <LiveVoiceButton phase={view.phase} muted={view.muted} error={!!view.error} visible
         onPress={() => useLiveVoice.setState({ open: true })} />
     </View> : null}
-    <LiveVoiceSheet open={open} view={view} onDismiss={store.dismiss}
+    <LiveVoiceSheet open={open} view={view} serverId={server?.id ?? null}
+      servers={servers.filter(s => !s.invite && !s.inviteEnded && !s.removed && !s.disabled && !!s.token)}
+      onSelectServer={store.selectServer} onDismiss={store.dismiss}
       onStart={() => { void store.start(); }} onStop={() => { void store.stop(); }} onToggleMute={store.toggleMute}
       onMode={store.setMode} onRetry={() => { void store.retry(); }}
       onSaveSettings={next => { void store.saveSettings(next); }} onSettingsOpen={store.openSettings}
