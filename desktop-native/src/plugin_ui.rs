@@ -660,7 +660,9 @@ fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
                 let site = pane["id"].as_str().unwrap().to_owned();
                 let open = c.view.open.clone();
                 return div().id(SharedString::from(format!("plg-open-{site}"))).flex_shrink_0().cursor_pointer()
+                    .focusable().tab_stop(true).role(Role::Button)
                     .hover(|el| el.text_color(theme::accent_text()).underline())
+                    .focus_visible(|el| el.text_color(theme::accent_text()).underline())
                     .on_click(move |_, window, cx| open(&site, window, cx))
                     .child(label).into_any_element();
             }
