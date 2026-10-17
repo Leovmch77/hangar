@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { configureApi, configureDiag, definirArmazem, _resetRotasForTests, estaDesligado, registrarFalha, registrarSucesso, retryAfterMs, retentarAgora } from '@hangar/core';
 import { prefs } from './prefs';
@@ -318,6 +319,190 @@ test.each([false, true])('rota antiga é descartada mesmo com retorno antes de r
     'http://10.0.0.1:8765/api/sessions',
   ]);
   rel();
+});
+
+test.each([
+  { pending: 'identificador', lan: undefined, abortAt: 4000, resumeEarly: false },
+  { pending: 'prova', lan: { url: 'http://192.168.1.2:8765', id: 'home' }, abortAt: 800, resumeEarly: false },
+  { pending: 'identificador', lan: undefined, abortAt: 4000, resumeEarly: true },
+])('rota pendurada não bloqueia lista nem reconexão após 6s: $pending, retorno=$resumeEarly', async ({ pending, lan, abortAt, resumeEarly }) => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+  const controllers: AbortController[] = [];
+  const timers: ReturnType<typeof setTimeout>[] = [];
+  const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+    const controller = new AbortController();
+    controllers.push(controller);
+    timers.push(setTimeout(() => controller.abort(new DOMException('timeout', 'TimeoutError')), ms));
+    return controller.signal;
+  });
+  const registrar = vi.fn();
+  configureDiag({ registrar, novoReq: () => 'route-test' });
+  const target = { id: 'srv1', label: 'srv1', baseUrl: 'http://10.0.0.1:8765', token: 'tok', lan };
+  useServers.setState({ servers: [target], activeId: target.id });
+  const hung = deferred<Response>();
+  let hungSignal: AbortSignal | undefined;
+  const unexpected: string[] = [];
+  fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+    const path = new URL(url).pathname;
+    if (path === `/api/peers/${pending}`) {
+      hungSignal = init?.signal ?? undefined;
+      // O sinal aborta de verdade, mas este transporte continua sem concluir.
+      return hung.promise;
+    }
+    if (url === `${target.baseUrl}/api/peers/identificador`) {
+      return Promise.resolve(response({ identificador: 'home', lan_url: lan?.url }));
+    }
+    if (url === `${target.baseUrl}/api/sessions`) {
+      return Promise.resolve(response([{ name: 'principal', state: 'working', jsonl: '/j/principal.jsonl' }]));
+    }
+    unexpected.push(url);
+    return Promise.reject(new Error(`unexpected_request: ${url}`));
+  });
+  const listRequests = () => fetchMock.mock.calls.filter(([url]) => url === `${target.baseUrl}/api/sessions`);
+  const release = useSessions.getState().retain();
+  try {
+    await settle();
+    expect(hungSignal?.aborted).toBe(false);
+    if (resumeEarly) {
+      await vi.advanceTimersByTimeAsync(1000);
+      useSessions.getState().setForeground(false);
+      useSessions.getState().setForeground(true);
+    }
+    await vi.advanceTimersByTimeAsync(abortAt - (resumeEarly ? 1000 : 0));
+    expect(hungSignal?.aborted).toBe(true);
+    expect(listRequests()).toHaveLength(0);
+    expect(created).toHaveLength(0);
+    expect(useSessions.getState().loading).toBe(true);
+    await vi.advanceTimersByTimeAsync(5999 - abortAt);
+    expect(listRequests()).toHaveLength(0);
+    expect(created).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    if (resumeEarly) await vi.advanceTimersByTimeAsync(1);
+    expect(useSessions.getState().rows.map((row) => row.name)).toEqual(['principal']);
+    expect(useSessions.getState().loading).toBe(false);
+    expect(listRequests()).toHaveLength(1);
+    expect(listRequests()[0][1].headers.Authorization).toBe('Bearer tok');
+    expect(created).toHaveLength(1);
+    expect(new URL(created[0].url).origin).toBe(target.baseUrl);
+    expect(new URL(created[0].url).pathname).toBe('/api/sessions/events');
+    expect(new URL(created[0].url).searchParams.get('token')).toBe('tok');
+    expect(registrar).toHaveBeenCalledWith(expect.objectContaining({
+      evento: 'rota.falhou', codigo: 'route_timeout', nivel: 'aviso',
+    }), target.baseUrl);
+
+    created[0].onerror?.({});
+    expect(created[0].close).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(created).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    // O prazo da promessa original já acabou; só falta o turno do timer de 0 ms.
+    await vi.advanceTimersByTimeAsync(1);
+    expect(listRequests()).toHaveLength(2);
+    expect(created).toHaveLength(2);
+    expect(new URL(created[1].url).origin).toBe(target.baseUrl);
+    expect(useSessions.getState().loading).toBe(false);
+    expect(useSessions.getState().byServer[0].error).toBeNull();
+    created[1].trigger('sessions', '[{"name":"reconnected","state":"idle"}]');
+    expect(useSessions.getState().rows.map((row) => row.name)).toEqual(['reconnected']);
+    expect(fetchMock.mock.calls.filter(([url]) => new URL(url).pathname === `/api/peers/${pending}`)).toHaveLength(1);
+    const proofs = fetchMock.mock.calls.filter(([url]) => new URL(url).pathname === '/api/peers/prova');
+    expect(proofs).toHaveLength(lan ? 1 : 0);
+    for (const [, init] of proofs) {
+      expect(new Headers(init?.headers).has('Authorization')).toBe(false);
+      expect(init?.credentials).toBe('omit');
+    }
+    expect(unexpected).toEqual([]);
+  } finally {
+    release();
+    hung.resolve(response({}, 503));
+    await settle();
+    for (const timer of timers) clearTimeout(timer);
+    for (const controller of controllers) controller.abort();
+    timeout.mockRestore();
+    _resetRotasForTests();
+  }
+});
+
+test('prova LAN tardia do token antigo não autoriza rota do token novo', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-10-17T12:00:00Z'));
+  const controllers: AbortController[] = [];
+  const timers: ReturnType<typeof setTimeout>[] = [];
+  const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+    const controller = new AbortController();
+    controllers.push(controller);
+    timers.push(setTimeout(() => controller.abort(new DOMException('timeout', 'TimeoutError')), ms));
+    return controller.signal;
+  });
+  const target = {
+    id: 'srv1', label: 'srv1', baseUrl: 'http://10.0.0.1:8765', token: 'old-token',
+    lan: { url: 'http://192.168.1.2:8765', id: 'home' },
+  };
+  useServers.setState({ servers: [target], activeId: target.id });
+  const proof = deferred<Response>();
+  const currentList = deferred<Response>();
+  let challenge = '';
+  let proofSignal: AbortSignal | undefined;
+  const unexpected: string[] = [];
+  fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+    const parsed = new URL(url);
+    if (url === `${target.baseUrl}/api/peers/identificador`) return Promise.resolve(response({}));
+    if (parsed.origin === target.lan.url && parsed.pathname === '/api/peers/prova') {
+      challenge = parsed.searchParams.get('desafio') ?? '';
+      proofSignal = init?.signal ?? undefined;
+      return proof.promise;
+    }
+    if ([target.baseUrl, target.lan.url].includes(parsed.origin) && parsed.pathname === '/api/sessions') {
+      return currentList.promise;
+    }
+    unexpected.push(url);
+    return Promise.reject(new Error(`unexpected_request: ${url}`));
+  });
+  const listRequests = () => fetchMock.mock.calls.filter(([url]) => new URL(url).pathname === '/api/sessions');
+  const release = useSessions.getState().retain();
+  try {
+    await settle();
+    expect(challenge).toMatch(/^[a-f0-9]{32}$/);
+    expect(proofSignal?.aborted).toBe(false);
+    useServers.setState({ servers: [{ ...target, token: 'new-token' }] });
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(proofSignal?.aborted).toBe(true);
+    expect(created).toHaveLength(0);
+    // A tentativa nova compartilha a prova antiga, sem iniciar outra sondagem.
+    expect(fetchMock.mock.calls.map(([url]) => new URL(url).pathname).filter((path) => path.startsWith('/api/peers/'))).toEqual([
+      '/api/peers/identificador', '/api/peers/prova',
+    ]);
+    await vi.advanceTimersByTimeAsync(1000);
+    proof.resolve(response({
+      identificador: 'home',
+      prova: createHmac('sha256', 'old-token').update(`${challenge}|home`).digest('hex'),
+    }));
+    await settle();
+    // A prova pode chegar entre o GET principal e a abertura do stream.
+    currentList.resolve(response([{ name: 'new-token', state: 'working', jsonl: '/j/new-token.jsonl' }]));
+    await settle();
+    expect(listRequests().map(([url]) => url)).toEqual([`${target.baseUrl}/api/sessions`]);
+    expect(new Headers(listRequests()[0][1].headers).get('Authorization')).toBe('Bearer new-token');
+    expect(created).toHaveLength(1);
+    expect(new URL(created[0].url).origin).toBe(target.baseUrl);
+    expect(new URL(created[0].url).pathname).toBe('/api/sessions/events');
+    expect(new URL(created[0].url).searchParams.get('token')).toBe('new-token');
+    expect(fetchMock.mock.calls.filter(([url, init]) => new URL(url).origin === target.lan.url
+      && new Headers(init?.headers).get('Authorization') === 'Bearer new-token')).toEqual([]);
+    expect(useSessions.getState().rows.map((row) => row.name)).toEqual(['new-token']);
+    expect(useSessions.getState().loading).toBe(false);
+    expect(unexpected).toEqual([]);
+  } finally {
+    release();
+    proof.resolve(response({}, 503));
+    currentList.resolve(response([]));
+    await settle();
+    for (const timer of timers) clearTimeout(timer);
+    for (const controller of controllers) controller.abort();
+    timeout.mockRestore();
+    _resetRotasForTests();
+  }
 });
 
 test('troca de token durante GET descarta resposta antiga e usa destino capturado', async () => {

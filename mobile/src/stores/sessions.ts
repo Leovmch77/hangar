@@ -38,6 +38,7 @@ const slots = new Map<string, Slot>();
 const streams = new Map<string, ReturnType<typeof openSessionsStream>>();
 type ConnectionAttempt = { server: Server; generation: number; abort: AbortController; routing: boolean };
 const connecting = new Map<string, ConnectionAttempt>();
+const routeDeadlines = new WeakMap<Promise<void>, number>();
 const failures = new Map<string, number>();
 const retryAt = new Map<string, number>();
 // Falha da lista não é necessariamente queda de rede; só lista SSE válida encerra este recuo.
@@ -302,7 +303,28 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
     return false;
   };
   try {
-    if (!rotaDecidida(s.id)) await decidirRota(s);
+    if (!rotaDecidida(s.id)) {
+      const route = decidirRota(s);
+      const deadline = routeDeadlines.get(route) ?? Date.now() + 6000;
+      routeDeadlines.set(route, deadline);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        // O fetch pode ignorar o abort; o prazo corta a espera, não a decisão compartilhada.
+        const timedOut = await Promise.race([
+          route.then(() => {
+            if (!hasServer(s)) esquecerRota(s.id);
+            return false;
+          }),
+          new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(true), Math.max(0, deadline - Date.now())); }),
+        ]);
+        if (timedOut && isCurrent(attempt)) {
+          esquecerRota(s.id);
+          registrarDiag({ evento: 'rota.falhou', nivel: 'aviso', codigo: 'route_timeout' }, s.baseUrl);
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    }
     attempt.routing = false;
     if (!isCurrent(attempt)) return;
     let httpResponse = false;
