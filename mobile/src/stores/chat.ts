@@ -67,6 +67,8 @@ export type ChatQueueEdit = QueueEdit & { refs: readonly ContextRef[] };
 export interface ChatState {
   draftUpdate: number;
   events: ChatEvent[];
+  // Invalida a leitura incremental quando algo além de append muda o histórico.
+  eventsRevision: number;
   stateEvent: StateEvent | null;
   // Prévia do bloco em voo (texto cru/markdown). Full-replace; some quando o assistant_msg
   // real chega ou quando a sessão sai de working.
@@ -155,6 +157,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   const useChatStore = create<ChatState>(() => ({
     draftUpdate: 0,
     events: [],
+    eventsRevision: 0,
     stateEvent: null,
     preview: '',
     previewMd: false,
@@ -201,6 +204,9 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   // Índice id->posição: o SSE re-emite o transcript inteiro a cada reconexão; Map = dedup O(1)
   // em vez de findIndex O(n) por evento (O(n²) por reconexão congelava a PWA em conversa longa).
   const idIndex = new Map<string, number>();
+  // Só mensagens com texto participam do dedup; append comum não relê o histórico.
+  const queuedTexts = new Map<number, string>();
+  const realTexts = new Map<number, string>();
   // Fonte da prévia no último frame (md/full): a monotonicidade só vale DENTRO da mesma fonte.
   let previewMd = false;
   let previewFull = false;
@@ -266,15 +272,35 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     useChatStore.setState({ ferramenta: null });
   }
 
+  function indexText(ev: ChatEvent, i: number) {
+    queuedTexts.delete(i);
+    realTexts.delete(i);
+    if (ev.kind === 'user_msg' && ev.text) {
+      (ev.id.startsWith('queued-') ? queuedTexts : realTexts).set(i, ev.text);
+    }
+  }
+
   function rebuildIndex(events: ChatEvent[]) {
     idIndex.clear();
-    for (let i = 0; i < events.length; i++) idIndex.set(events[i].id, i);
+    queuedTexts.clear();
+    realTexts.clear();
+    for (let i = 0; i < events.length; i++) {
+      idIndex.set(events[i].id, i);
+      indexText(events[i], i);
+    }
+  }
+
+  function publishEvents(events: ChatEvent[], change: 'append' | 'replace' | 'rebuild' = 'rebuild', patch: Partial<ChatState> = {}) {
+    const current = useChatStore.getState();
+    const changed = events !== current.events || change === 'replace';
+    if (changed && change === 'rebuild') rebuildIndex(events);
+    useChatStore.setState({ ...patch, events,
+      eventsRevision: current.eventsRevision + (changed && change !== 'append' ? 1 : 0) });
   }
 
   function aplicarEvents(events: ChatEvent[]) {
-    rebuildIndex(events);
     const pending = events.reduce(reconcilePending, useChatStore.getState().pending);
-    useChatStore.setState({ events, pending });
+    publishEvents(events, 'rebuild', { pending });
   }
 
   // Destino desta conversa, nunca o servidor ativo: sem ele nenhuma leitura cai em outra máquina.
@@ -384,10 +410,10 @@ function criarChatStore(serverId: string, name: string): ChatApi {
 
   function ingest(ev: ChatEvent): void {
     let { events } = useChatStore.getState();
+    let removedQueued = false;
     if (ev.queued_confirmed && ev.id.startsWith('queued-')) {
       events = events.filter((x) => x.id !== ev.id);
-      rebuildIndex(events);
-      useChatStore.setState({ events });
+      publishEvents(events);
       return;
     }
     // Dedup cruzado fila<->transcript: a fila durável emite user_msg sintético (id
@@ -396,23 +422,14 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     // documenta que o dedup é do front (sse.py: "O front faz o dedup cruzado").
     // Porte do handler de message do Chat.svelte.
     if (ev.kind === 'user_msg' && ev.text) {
-      const filas: { i: number; text: string }[] = [];
-      for (let i = 0; i < events.length; i++) {
-        const x = events[i];
-        if (x.kind === 'user_msg' && x.id.startsWith('queued-') && x.text) {
-          filas.push({ i, text: x.text });
-        }
-      }
+      const filas = [...queuedTexts].sort(([a], [b]) => a - b)
+        .map(([i, text]) => ({ i, text }));
       if (ev.id.startsWith('queued-')) {
         // Sintético só entra se NENHUMA bolha real já cobre este texto sendo ela dona.
         const candidatos = [...filas.map((f) => f.text), ev.text];
-        const coberto = events.some(
-          (x) =>
-            x.kind === 'user_msg' &&
-            !x.id.startsWith('queued-') &&
-            !!x.text &&
-            especificidade(x.text, ev.text!) >= 0 &&
-            donoDaLinha(x.text!, candidatos) === candidatos.length - 1,
+        const coberto = [...realTexts.values()].some(
+          (text) => especificidade(text, ev.text!) >= 0 &&
+            donoDaLinha(text, candidatos) === candidatos.length - 1,
         );
         if (coberto) return; // real já cobre e é o dono -> ignora o sintético
       } else {
@@ -422,6 +439,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
           const qi = filas[dono].i;
           events = [...events.slice(0, qi), ...events.slice(qi + 1)];
           rebuildIndex(events);
+          removedQueued = true;
         }
       }
     }
@@ -429,19 +447,28 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     // pode ter crescido), novo entra no fim.
     const i = idIndex.get(ev.id);
     if (i !== undefined) {
+      const previous = events[i];
+      const keys = Object.keys(ev) as (keyof ChatEvent)[];
+      if (!removedQueued && keys.length === Object.keys(previous).length &&
+          keys.every((key) => Object.hasOwn(previous, key) && (
+            Object.is(previous[key], ev[key]) ||
+            (typeof previous[key] === 'object' && typeof ev[key] === 'object' &&
+              JSON.stringify(previous[key]) === JSON.stringify(ev[key]))
+          ))) return;
       const next = events.slice();
       next[i] = ev;
-      rebuildIndex(next);
-      useChatStore.setState({ events: next });
+      indexText(ev, i);
+      publishEvents(next, 'replace');
       return;
     }
     const next = [...events, ev];
     idIndex.set(ev.id, next.length - 1);
+    indexText(ev, next.length - 1);
     // Reconcilia pending com o evento que acabou de chegar (se for user_msg real)
     const curPending = useChatStore.getState().pending;
     const nextPending = curPending.length ? reconcilePending(curPending, ev) : curPending;
     const pendingPatch = nextPending.length !== curPending.length ? { pending: nextPending } : {};
-    useChatStore.setState({ events: next, ...pendingPatch });
+    publishEvents(next, removedQueued ? 'replace' : 'append', pendingPatch);
     if (ev.kind === 'thinking' && useChatStore.getState().pensamento) limparPensamento();
     if (ev.kind === 'tool_use' && useChatStore.getState().ferramenta) limparFerramenta();
     // Swap prévia->bolha: o bloco real chegou, a prévia sai no MESMO flush.
@@ -621,7 +648,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         const data = JSON.parse(e.data as string);
         // Apagadas noutro aparelho: a bolha delas sai daqui também.
         const events = dropQueuedBubbles(useChatStore.getState().events, queueRemovedBubbleIds(data));
-        useChatStore.setState({ queuePanel: parseQueuePanel(data), events });
+        publishEvents(events, 'rebuild', { queuePanel: parseQueuePanel(data) });
       } catch {
         quadroFalhou('queue');
       }
@@ -671,7 +698,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       pensamentoTimer = undefined;
       clearTimeout(ferramentaTimer);
       ferramentaTimer = undefined;
-      useChatStore.setState({
+      publishEvents(useChatStore.getState().events, 'replace', {
         pensamento: '',
         ferramenta: null,
         turnSeen: null,
@@ -766,9 +793,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   function dropQueuedBubbles(events: ChatEvent[], ids: Iterable<string>): ChatEvent[] {
     const drop = new Set(ids);
     if (!drop.size) return events;
-    const next = events.filter((e) => !drop.has(e.id));
-    rebuildIndex(next);
-    return next;
+    return events.filter((e) => !drop.has(e.id));
   }
 
   const queueEntries = () => {
@@ -812,12 +837,12 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       const ok = await queueAction((t) => cancelQueuedMessage(name, id, t));
       if (!ok) return;
       // A bolha da entrada apagada sai junto: sem isto ela voltava à conversa ao deixar o painel.
-      useChatStore.setState({ events: dropQueuedBubbles(useChatStore.getState().events, [`queued-${id}`]) });
+      publishEvents(dropQueuedBubbles(useChatStore.getState().events, [`queued-${id}`]));
     },
     async discardQueued(id: string) {
       let error: string | null = null;
       const ok = await queueAction((t) => descartarDaFila(name, id, t), (message) => { error = message; });
-      if (ok) useChatStore.setState({ events: dropQueuedBubbles(useChatStore.getState().events, [`queued-${id}`]) });
+      if (ok) publishEvents(dropQueuedBubbles(useChatStore.getState().events, [`queued-${id}`]));
       return error;
     },
     // `steered: false` = entrou na frente da fila; a própria conversa mostra a entrega, sem aviso a mais.
@@ -902,8 +927,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       let events = useChatStore.getState().events;
       if (sent.size) events = events.map((e) => (sent.has(e.id) ? { ...e, queued_delivered: true } : e));
       if (result.promoted) events = events.filter((e) => !(e.kind === 'user_msg' && e.id.startsWith('queued-')));
-      rebuildIndex(events);
-      useChatStore.setState({ events });
+      publishEvents(events);
     },
     async send(text: string, draftRevision?: number, mode?: 'steer') {
       const trimmed = mode === 'steer' ? text : text.trim();

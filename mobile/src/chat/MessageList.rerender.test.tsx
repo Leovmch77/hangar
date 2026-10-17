@@ -25,7 +25,7 @@ vi.mock('./tools/ToolDetailSheet', () => ({ ToolDetailSheet: () => null }));
 vi.mock('./tools/HtmlPageCard', () => ({ HtmlPageCard: () => null }));
 
 // Os itens reais são `memo`; os dublês também, para o teste medir o que a lista entrega a eles.
-const renders = vi.hoisted(() => ({ log: [] as string[] }));
+const renders = vi.hoisted(() => ({ log: [] as string[], virtual: false, data: [] as unknown[] }));
 vi.mock('./UserBubble', async () => {
   const { memo: m } = await import('react');
   return { UserBubble: m(({ eventId }: { eventId?: string }) => { renders.log.push(`user:${eventId}`); return null; }) };
@@ -54,7 +54,10 @@ vi.mock('@legendapp/list/react-native', async () => {
   return {
     LegendList: ({ data, renderItem, keyExtractor }: {
       data: unknown[]; renderItem: (row: { item: unknown }) => ReactNode; keyExtractor: (i: unknown) => string;
-    }) => h('div', null, ...data.map((item) => h(Cell, { key: keyExtractor(item), item, renderItem }))),
+    }) => {
+      renders.data = data;
+      return h('div', null, ...(renders.virtual ? [] : data.map((item) => h(Cell, { key: keyExtractor(item), item, renderItem }))));
+    },
   };
 });
 
@@ -75,7 +78,7 @@ const assistant = (id: string): ChatEvent => ({ id, kind: 'assistant_msg', text:
 const tool = (id: string, name = 'Bash'): ChatEvent => ({ id, kind: 'tool_use', tool_name: name, tool_use_id: id, tool_input: {} });
 const result = (id: string, text: string): ChatEvent => ({ id: `r-${id}`, kind: 'tool_result', tool_use_id: id, result: text });
 
-beforeEach(() => { renders.log.length = 0; aparencia.tarefas = false; });
+beforeEach(() => { renders.log.length = 0; renders.virtual = false; aparencia.tarefas = false; });
 afterEach(() => { act(() => { for (const root of roots.splice(0)) root.unmount(); }); });
 
 const historico = [user('u1'), tool('t1'), result('t1', 'ok1'), tool('t2'), result('t2', 'ok2'), assistant('a1')];
@@ -91,6 +94,33 @@ it('mensagem nova não refaz os itens antigos da conversa', () => {
   renders.log.length = 0;
   render([...historico, user('u2'), tool('t3')]);
   expect(renders.log).toEqual(['fold:t3:-']);
+});
+
+it('5000 eventos e 200 appends leem somente o delta sem alterar snapshots', () => {
+  renders.virtual = true;
+  let reads = 0;
+  const counted = (ev: ChatEvent) => new Proxy(ev, { get(target, key, receiver) {
+    if (typeof key === 'string') reads++;
+    return Reflect.get(target, key, receiver);
+  } });
+  let events = Array.from({ length: 5000 }, (_, i) => counted(tool(`t${i}`)));
+  const root = createRoot(document.createElement('div'));
+  roots.push(root);
+  const render = () => act(() => root.render(createElement(MessageList, {
+    events, eventsRevision: 0, preview: '', olderFailed: '', onLoadOlder: () => {},
+    agentesRodando: [], queuePanel: { entries: [], actions: true },
+  } as Parameters<typeof MessageList>[0])));
+  render();
+  const before = renders.data as { type: string; parts: ChatEvent[] }[];
+  reads = 0;
+  for (let i = 0; i < 200; i++) {
+    events = [...events, counted(tool(`new${i}`))];
+    render();
+  }
+  const deltaReads = reads;
+  expect((renders.data[0] as { parts: ChatEvent[] }).parts).toHaveLength(5200);
+  expect(before[0].parts).toHaveLength(5000);
+  expect(deltaReads).toBeLessThan(200 * 100);
 });
 
 it('resultado que chega refaz só o trecho dele', () => {

@@ -1,11 +1,11 @@
 import { memo, useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { toolPhase, type ChatEvent } from '@hangar/core';
+import type { ChatEvent } from '@hangar/core';
 import { Icon } from '../../ui/Icon';
 import { ToolCard } from './ToolCard';
 import { ThinkingBlock } from '../ThinkingBlock';
-import { failedLabel, foldCalls, foldTitle } from './fold';
+import { appendFoldSummary, failedLabel, summaryTitle, type FoldSummary } from './fold';
 import type { Ferramentas } from '../../stores/aparencia';
 import * as m from '../../paraglide/messages';
 
@@ -21,25 +21,26 @@ const CHIPS_ABERTO_ATE = 5;
 // Trecho de uma linha só não ganha cabeçalho: dobrar uma linha numa linha não resume nada.
 export const ToolGroup = memo(function ToolGroup({
   parts,
+  summary,
   resultOf,
   onAbrir,
   look = 'tree',
 }: {
   parts: ChatEvent[];
+  summary?: FoldSummary;
   resultOf: (t: ChatEvent) => ChatEvent | null;
   onAbrir: (use: ChatEvent) => void;
   look?: Ferramentas;
 }) {
   const { theme } = useUnistyles();
-  const linhas = parts.filter((p) => p.kind === 'thinking' || (p.kind === 'tool_use' && p.tool_name !== 'ToolSearch'));
-  const calls = foldCalls(parts);
+  const folded = summary ?? appendFoldSummary(undefined, parts, resultOf);
+  const linhas = folded.lines;
+  const calls = folded.calls;
   const chips = look === 'chips';
   const [virado, setVirado] = useState(false);
-  const aberto = (chips && calls.length <= CHIPS_ABERTO_ATE) !== virado;
+  const aberto = (chips && calls <= CHIPS_ABERTO_ATE) !== virado;
   const [tudo, setTudo] = useState(false);
-  const fases = calls.map((c) => toolPhase(resultOf(c)));
-  const vivas = calls.filter((_c, i) => fases[i] === 'pending');
-  const falhas = failedLabel(fases.filter((f) => f === 'error').length);
+  const falhas = failedLabel(folded.failures);
 
   const linha = (p: ChatEvent) =>
     p.kind === 'thinking'
@@ -57,9 +58,9 @@ export const ToolGroup = memo(function ToolGroup({
   if (linhas.length === 0) return null;
   if (linhas.length === 1) return chips && linhas[0].kind === 'tool_use' ? tabela(linhas) : linha(linhas[0]);
 
-  const titulo = foldTitle(parts);
-  const chamadas = chips && calls.length ? ` · ${calls.length === 1 ? m.native_chip_calls_1() : m.native_chip_calls({ n: calls.length })}` : '';
-  const visiveis = tudo ? linhas : linhas.slice(0, TETO);
+  const titulo = summaryTitle(folded);
+  const chamadas = chips && calls ? ` · ${calls === 1 ? m.native_chip_calls_1() : m.native_chip_calls({ n: calls })}` : '';
+  const visiveis = aberto ? (tudo ? linhas : linhas.slice(0, TETO)) : [];
   return (
     <View style={styles.wrap}>
       <Pressable
@@ -76,8 +77,8 @@ export const ToolGroup = memo(function ToolGroup({
           {falhas ? <Text style={{ color: theme.tokens.status.warning }}>{` · ${falhas}`}</Text> : null}
         </Text>
       </Pressable>
-      {!aberto && vivas.length ? (
-        <View style={styles.vivas}>{vivas.map(linha)}</View>
+      {!aberto && folded.live.size ? (
+        <View style={styles.vivas}>{[...folded.live].map(linha)}</View>
       ) : null}
       {aberto ? (
         <View style={chips ? undefined : [styles.fio, { borderLeftColor: theme.tokens.border.default }]}>
