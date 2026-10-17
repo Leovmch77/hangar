@@ -207,6 +207,14 @@ pub fn forget(home: &Path, name: &str) {
     }
 }
 
+/// As que ficaram ausentes nesta fotografia sem terem sido fechadas pelo dono: nome e conversa.
+fn vanished(prev: &Snapshot, next: &Snapshot, closed: &[String]) -> Vec<(String, Option<String>)> {
+    next.sessions.iter()
+        .filter(|(key, entry)| entry.missing_since.is_some() && prev.sessions.get(*key).is_some_and(|was| was.missing_since.is_none())
+            && !closed.contains(&entry.name))
+        .map(|(_, entry)| (entry.name.clone(), entry.conversation.clone())).collect()
+}
+
 /// Tira da fotografia os nomes fechados desde a última; chamar com `CLOSED` travada.
 fn drop_closed(snap: &mut Snapshot, closed: &mut Vec<String>) {
     snap.sessions.retain(|_, entry| !closed.contains(&entry.name));
@@ -392,6 +400,10 @@ pub async fn run(st: Arc<crate::routes::AppState>, home: PathBuf, program: std::
                 if let Some(alive) = alive(&st, &home, &program, &mut known).await {
                     let mut next = observe(&snap, &alive, now(), snap.mux_started);
                     let mut closed = CLOSED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let gone: Vec<serde_json::Value> = vanished(&snap, &next, &closed).into_iter().map(|(name, conversation)| json!({
+                        "evento": "sessao.sumiu", "nivel": "aviso", "sessao": name, "codigo": "session_gone_without_close",
+                        "conversa": conversation, "detalhe": "a sessão saiu do multiplexador sem o fechamento pelo Hangar"})).collect();
+                    if !gone.is_empty() { crate::diag::record_blocking(crate::diag::diary_dir().as_deref(), &gone, "sessão sumida"); }
                     drop_closed(&mut next, &mut closed);
                     if next != snap {
                         if let Err(error) = write(&home, &next) {
@@ -563,6 +575,16 @@ mod tests {
         assert!(!settle(&[("busy".to_owned(), Err("erro_mux_indisponivel".to_owned()))], &mut attempts, &mut done));
         assert!(settle(&[("busy".to_owned(), Err("account_busy".to_owned()))], &mut attempts, &mut done), "esgotou: o servidor novo é adotado");
         assert!(done.contains("busy"));
+    }
+
+    /// A sessão que some do multiplexador sem o `DELETE` do dono vai ao diário uma vez, quando some.
+    #[test]
+    fn a_session_that_vanishes_without_a_close_is_named_once() {
+        let prev = Snapshot { mux_started: Some(1), sessions: [("k1".into(), entry("a", Some("c1"))), ("k2".into(), entry("b", Some("c2"))),
+            ("k3".into(), Entry { missing_since: Some(5.0), ..entry("c", None) })].into() };
+        let next = observe(&prev, &BTreeMap::new(), 10.0, Some(1));
+        assert_eq!(vanished(&prev, &next, &["b".to_owned()]), vec![("a".to_owned(), Some("c1".to_owned()))],
+            "b foi fechada pelo dono; c já estava ausente");
     }
 
     #[test]

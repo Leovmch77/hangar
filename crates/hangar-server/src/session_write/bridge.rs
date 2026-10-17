@@ -129,6 +129,9 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     if let (true, Some(name), Some(dirs)) = (owner, name.as_deref(), st.list.env().dirs.as_ref()) {
         crate::session_open::restore::forget(&dirs.home, name);
     }
+    if let (true, Some(name)) = (owner, name.as_deref()) {
+        crate::diag::record(crate::diag::diary_dir(), vec![close_line(name, req.headers(), peer)], "sessão fechada");
+    }
     let (Some(runtime), true, Some(name)) = (st.state.runtime.get().cloned(), owner, name)
         else { return crate::routes::pass(&st, req, &fwd).await };
     match runtime.kill_codex_terminal(&name).await {
@@ -206,5 +209,25 @@ async fn dispatch(st: Arc<AppState>, peer: SocketAddr, method: &str, rest: &str,
         ("POST", "modo-execucao") => relaunch::mode(s, c, req).await,
         ("POST", "recarregar") => relaunch::reload(s, c, req).await,
         _ => not_ours(),
+    }
+}
+
+/// Quem pediu o fechamento: o cliente e a origem que a requisição traz (o dono não manda identidade própria).
+fn close_line(name: &str, headers: &axum::http::HeaderMap, peer: SocketAddr) -> serde_json::Value {
+    let header = |key: &str| headers.get(key).and_then(|v| v.to_str().ok()).map(|v| v.chars().take(80).collect::<String>());
+    json!({"evento": "sessao.fechada", "nivel": "ok", "sessao": name, "codigo": "session_closed_by_owner",
+        "cliente": header("user-agent"), "req": header("x-hangar-req"), "origem": header("x-forwarded-for").unwrap_or_else(|| peer.ip().to_string())})
+}
+
+#[cfg(test)]
+mod close_tests {
+    /// O fechamento pelo dono vai ao diário com o cliente e a origem.
+    #[test]
+    fn the_owner_close_names_the_client_and_the_origin() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("user-agent", "curl/8.10".parse().unwrap());
+        let line = super::close_line("s1", &headers, "127.0.0.1:5000".parse().unwrap());
+        assert_eq!((line["evento"].as_str(), line["sessao"].as_str(), line["codigo"].as_str()), (Some("sessao.fechada"), Some("s1"), Some("session_closed_by_owner")));
+        assert_eq!((line["cliente"].as_str(), line["origem"].as_str()), (Some("curl/8.10"), Some("127.0.0.1")));
     }
 }
