@@ -35,7 +35,7 @@ vi.mock('react-native', async (original) => {
   const View = native.View as ComponentType<Record<string, unknown>>;
   return { ...native, Platform: { get OS() { return platform.OS; }, select: (values: { ios?: unknown; android?: unknown; default?: unknown }) => values[platform.OS] ?? values.default },
     View: ({ style, accessibilityLiveRegion, accessible, ...props }: ViewProps) => {
-      const flat = Object.assign({}, ...(Array.isArray(style) ? style.flat(Infinity) : [style]).filter(Boolean));
+      const flat = Object.assign({}, ...(Array.isArray(style) ? (style as unknown[]).flat(Infinity) : [style]).filter(Boolean));
       return createElement(View, { ...props, style, 'data-padding-horizontal': flat.paddingHorizontal, 'data-accessible': accessible, 'aria-live': accessibilityLiveRegion === 'none' ? 'off' : accessibilityLiveRegion });
     },
     TextInput: ({ onChangeText, editable, multiline: _, placeholderTextColor: __, ...props }: TextInputProps) =>
