@@ -149,21 +149,24 @@ async fn the_drain_of_a_restored_claude_terminal_adopts_it_instead_of_failing() 
 #[tokio::test]
 async fn the_usage_limit_target_adopts_the_restored_claude_or_says_why_not() {
     let fx = fixture();
+    let registry = fx.registry().await;
+    let status = registry.terminal_status("s1");
+    let mut shell = std::process::Command::new("sleep").arg("120").spawn().unwrap();
+    std::fs::write(&fx.panes,format!("s1\t1\t{}\t{}\t%7\t\t\t1700000000\t0\t0\n",shell.id(),fx.root.display())).unwrap();
+    assert_eq!(registry.limit_target("s1").await.map(|_|()).map_err(|e|e.code),Err("limit_switch_no_target".into()));
+    assert_eq!(status.borrow().limit.as_ref().map(|(code,_)|code.as_str()),Some("limit_switch_no_target"),"problema na linha");
+    finish(&mut shell);
     let mut agent = claude();
     named(&agent).await;
     fx.pane("s1",agent.id(),1700000000);
     fx.native(agent.id(),SID);
     let key = "aa".repeat(16);
     std::fs::write(fx.panes.with_extension("env"),format!("CP_SESSION_KEY={key}\n")).unwrap();
-    let registry = fx.registry().await;
     let target = registry.limit_target("s1").await.map_err(|e|e.code).expect("alvo do restaurado").expect("com terminal");
     assert_eq!(target.key,key);
+    assert_eq!(status.borrow().limit,None,"o alvo voltou: o problema sai");
     registry.close(&key,1).await.unwrap();
     finish(&mut agent);
-    let mut shell = std::process::Command::new("sleep").arg("120").spawn().unwrap();
-    std::fs::write(&fx.panes,format!("s2\t1\t{}\t{}\t%7\t\t\t1700000000\t0\t0\n",shell.id(),fx.root.display())).unwrap();
-    assert_eq!(registry.limit_target("s2").await.map(|_|()).map_err(|e|e.code),Err("limit_switch_no_target".into()));
-    finish(&mut shell);
 }
 
 #[tokio::test]

@@ -1008,6 +1008,7 @@
   "problema_codex_limite_uso": "This account's Codex quota ran out — wait for it to reset or use another account",
   "problema_limit_switch_no_room": "This account hit its usage limit and no other Claude account has room; the session waits until the quota resets",
   "problema_limit_switch_failed": "This account hit its usage limit and the automatic account switch failed; switch the session's account",
+  "problema_limit_switch_no_target": "The end of the turn could not check the usage limit: Hangar is not attached to this session's terminal",
   "problema_codex_sem_login": "Codex rejected this account's login — sign in to the account again (`codex login`) and resend the message",
   "problema_codex_turno_cortado": "The Codex process died mid-turn and the turn was cut off; open approval requests were lost — resend the message to continue",
   "problema_codex_esforco_nao_aplicado": "Codex did not accept the chosen effort level; the session keeps the model default",

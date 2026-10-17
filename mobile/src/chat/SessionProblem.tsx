@@ -20,6 +20,7 @@ const problemLabels: Record<string, () => string> = {
   codex_limite_uso: m.problema_codex_limite_uso,
   limit_switch_no_room: m.problema_limit_switch_no_room,
   limit_switch_failed: m.problema_limit_switch_failed,
+  limit_switch_no_target: m.problema_limit_switch_no_target,
   codex_sem_login: m.problema_codex_sem_login,
   codex_turno_cortado: m.problema_codex_turno_cortado,
   codex_esforco_nao_aplicado: m.problema_codex_esforco_nao_aplicado,

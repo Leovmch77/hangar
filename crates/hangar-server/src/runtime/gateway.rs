@@ -1035,12 +1035,25 @@ impl RuntimeRegistry {
     }
     /// O alvo do Claude com terminal para conferir o limite de uso no fim do turno; `None`: a sessão é sem
     /// terminal, e quem vê o limite é o ator dela.
+    /// Sem alvo, o `limit_switch_no_target` aparece na linha (o canal do nome existe sem ator) até o alvo voltar.
     pub async fn limit_target(&self,name:&str)->Result<Option<super::terminal::TerminalTarget>,RuntimeError> {
-        self.adopt_claude_terminal(name).await?;
-        match self.terminal_target(name).await? {
-            Some(target)=>Ok(Some(target)),
-            None if self.has_entry(None,name).await=>Ok(None),
-            None=>Err(failure("limit_switch_no_target")),
+        const NO_TARGET:&str="limit_switch_no_target";
+        let found=match self.adopt_claude_terminal(name).await {
+            Ok(())=>self.terminal_target(name).await,
+            Err(error)=>Err(error),
+        };
+        let sender=self.terminal_status_sender(name);
+        match found {
+            Ok(Some(target))=>{
+                if sender.borrow().limit.as_ref().is_some_and(|(code,_)|code==NO_TARGET) {super::terminal_status::publish_limit(&sender,None);}
+                Ok(Some(target))
+            }
+            Ok(None) if self.has_entry(None,name).await=>Ok(None),
+            other=>{
+                let cause=other.err().map_or_else(||NO_TARGET.to_owned(),|error|error.code);
+                super::terminal_status::publish_limit(&sender,Some((NO_TARGET.to_owned(),cause)));
+                Err(failure(NO_TARGET))
+            }
         }
     }
     pub async fn drain(&self,name:&str)->Result<Value,RuntimeError> {
