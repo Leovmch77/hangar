@@ -52,7 +52,9 @@ pub(super) fn parse(v: &Value) -> Option<MigrationView> {
         if p.is_null() || p.get("count").and_then(Value::as_u64) == Some(0) { return None; }
         let cpu = p.get("cpu_percent").and_then(Value::as_f64)
             .map_or_else(|| t("migration_cpu_wait"), |c| format!("{c:.1}%").replace('.', &tr("decimal")));
-        Some((size_text(p.get("rss_bytes").and_then(Value::as_u64).unwrap_or(0)), cpu))
+        let bytes = |k: &str| p.get(k).and_then(Value::as_u64).unwrap_or(0);
+        // RSS + swap: com zram o kernel troca um pelo outro.
+        Some((size_text(bytes("rss_bytes") + bytes("swap_bytes")), cpu))
     };
     let procs = v.pointer("/python/processes").map(|p| vec![
         (t("migration_proc_python"), usage(&p["python"])),

@@ -72,7 +72,7 @@
     const p = py?.processes;
     // Sem os dados do Python não dá para dizer quem roda: a tela mostra o erro, não "não está rodando".
     if (!p) return [];
-    const rows: { label: string; proc: MigrationProcess | { rss_bytes: number; cpu_percent: number | null } | null }[] = [
+    const rows: { label: string; proc: MigrationProcess | { rss_bytes: number; swap_bytes: number; cpu_percent: number | null } | null }[] = [
       { label: m.migration_proc_python(), proc: p?.python ?? null },
       { label: m.migration_proc_rust(), proc: p?.rust ?? null },
     ];
@@ -140,7 +140,7 @@
             <tr>
               <th scope="row">{row.label}</th>
               {#if row.proc}
-                <td>{fmtBytes(row.proc.rss_bytes)}</td><td>{cpu(row.proc)}</td>
+                <td>{fmtBytes(row.proc.rss_bytes + (row.proc.swap_bytes ?? 0))}</td><td>{cpu(row.proc)}</td>
               {:else}
                 <td colspan="2" class="nota">{m.migration_proc_none()}</td>
               {/if}

@@ -1067,6 +1067,8 @@ export interface Atualizacao {
 export interface MigrationProcess {
   pid: number;
   rss_bytes: number;
+  /** Fora do Linux, 0. A tela mostra RSS + swap: com zram o kernel troca um pelo outro. */
+  swap_bytes: number;
   cpu_seconds: number;
   /** Média entre esta leitura e a anterior; `null` na primeira. */
   cpu_percent: number | null;
@@ -1085,7 +1087,7 @@ export interface MigrationPython {
   processes: {
     python: MigrationProcess | null;
     rust: MigrationProcess | null;
-    cano: { count: number; rss_bytes: number; cpu_percent: number | null };
+    cano: { count: number; rss_bytes: number; swap_bytes: number; cpu_percent: number | null };
   };
 }
 

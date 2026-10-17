@@ -33,3 +33,18 @@ def test_reason_recorded_by_the_supervisor_wins(monkeypatch):
     assert migration_status.reason() == "quedas"
     monkeypatch.setattr(migration_status, "_reason", None)
     assert migration_status.reason() == "reload"
+
+
+STATUS = "Name:\thangar-server\nVmRSS:\t   85000 kB\nRssAnon:\t   70000 kB\nVmSwap:\t   62000 kB\nThreads:\t12\n"
+
+
+def test_status_gives_rss_and_swap_in_bytes():
+    assert migration_status._status_memory(STATUS) == (85000 * 1024, 62000 * 1024)
+    assert migration_status._status_memory("Name:\tx\nVmRSS:\t10 kB\n") == (10 * 1024, 0), "kernel sem VmSwap"
+
+
+def test_canos_sum_rss_and_swap(monkeypatch):
+    monkeypatch.setattr(migration_status, "_cano_pids", lambda: [11, 12])
+    monkeypatch.setattr(migration_status, "_read_proc", lambda pid: {11: (100, 40, 1.0), 12: (200, 0, 2.0)}[pid])
+    total = migration_status._canos_usage()
+    assert (total["count"], total["rss_bytes"], total["swap_bytes"]) == (2, 300, 40)
