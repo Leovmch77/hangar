@@ -60,6 +60,7 @@ const routerPush = vi.hoisted(() => vi.fn());
 const chatRow = vi.hoisted(() => ({ extra: {} as Record<string, unknown> }));
 const navigation = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), dismissTo: vi.fn(), canGoBack: true }));
 const route = vi.hoisted(() => ({ params: { server: 's1', name: 'sess' }, segments: ['s'] }));
+const realSettings = vi.hoisted(() => ({ enabled: false, models: vi.fn(), permissions: vi.fn(), commands: vi.fn() }));
 const realFirstInput = vi.hoisted(() => ({ enabled: false, send: vi.fn(), steer: vi.fn(), history: vi.fn(), transcribe: vi.fn(), relimpar: vi.fn(),
   upload: vi.fn(async () => ({ path: '/up/sess/ditado-1.m4a' })) }));
 const voiceInput = vi.hoisted(() => ({ recording: false, simulateRecorder: false, delayStop: false, stop: vi.fn(),
@@ -85,6 +86,7 @@ vi.mock('@hangar/core', async (original) => ({
   recarregarSessao: vi.fn(async () => ({ ok: true })),
   implementCodexPlan: vi.fn(async () => {}),
   setPermissionMode: vi.fn(async () => ({ mode: 'acceptEdits', current: 'acceptEdits', previous_non_plan: 'acceptEdits' })),
+  getModelOptions: realSettings.models, getPermissionModes: realSettings.permissions, getCommands: realSettings.commands,
   sendInputForServer: realFirstInput.send,
   steerSession: realFirstInput.steer,
   getHistory: realFirstInput.history,
@@ -124,9 +126,12 @@ vi.mock('../ui/Sheet', () => ({ Sheet: ({ children, onDidPresent, onDismiss }: {
   return createElement('div', null, children);
 } }));
 const panelEvents = vi.hoisted(() => ({ dismissed: undefined as (() => void) | undefined }));
-vi.mock('../ui/AnchoredPanel', () => ({ AnchoredPanel: ({ open, onDismissed, children }: { open: boolean; onDismissed?: () => void; children: ReactNode }) => {
+vi.mock('../ui/AnchoredPanel', () => ({ AnchoredPanel: ({ open, onDismissed, onClose, label, children }: {
+  open: boolean; onDismissed?: () => void; onClose?: () => void; label?: string; children: ReactNode;
+}) => {
   panelEvents.dismissed = onDismissed;
-  return open ? createElement('div', null, children) : null;
+  return open ? createElement('div', { role: 'dialog', 'aria-label': label }, children,
+    onClose ? createElement('button', { 'aria-label': 'dismiss-settings', onClick: onClose }) : null) : null;
 } }));
 // A folha de anexo também é um Sheet; fora daqui para o `sheetEvents` seguir preso à folha de opções.
 vi.mock('../ui/AttachSheet', () => ({ AttachSheet: ({ open, sendToGroup }: {
@@ -140,7 +145,7 @@ vi.mock('../paraglide/messages', async (importOriginal) => ({
   ...Object.fromEntries(
   ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo compartilhar_menu ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes mods_celular_mostrar mods_celular_mostrar_um mods_celular_mostrar_paineis mods_celular_ocultar mods_celular_sub plugin_band_label navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de switcher_buscar_conversas term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
-    .concat(' sessao_git chat_acao_git_detalhe')
+    .concat(' sessao_git chat_acao_git_detalhe cota_conta_ativa accounts_switch_title native_ctl_model_title native_new_chat_reasoning native_mode_bypassPermissions chat_mode_label')
     .concat(' live_voice_open composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint composer_steer_current_text ditado_estilo_titulo uso_aria codex_orientar_ajuda composer_fila_titulo composer_submission_recover_first queue_steer_uncertain')
     .concat(' composer_interromper_claude composer_interromper_msg composer_interromper comum_cancelar')
     .concat(' orq_tab_title orq_row_badge orq_talk_to_arbiter')
@@ -191,7 +196,7 @@ beforeEach(() => {
 });
 afterEach(() => { _limparEsfriamentoParaTestes(); _resetRotasForTests(); });
 
-const sessionsState = vi.hoisted(() => ({ rows: [] as (Pick<SessionInfo, 'name' | 'jsonl' | 'pair_peers' | 'provider' | 'orq_arbiter'> & { serverId: string })[], byServerRecord: {},
+const sessionsState = vi.hoisted(() => ({ rows: [] as (Pick<SessionInfo, 'name' | 'jsonl' | 'pair_peers' | 'provider' | 'orq_arbiter' | 'conta' | 'engine'> & { serverId: string })[], byServerRecord: {},
   holders: 0, retain: () => { sessionsState.holders++; return () => { sessionsState.holders--; }; } }));
 
 // Composer isolado: sem picker, pills, ditado nem store real — só o que decide o botão Parar.
@@ -205,14 +210,23 @@ vi.mock('./draftAttachments', () => ({
 }));
 vi.mock('../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 const pasteInput = vi.hoisted(() => ({ onPaste: null as null | ((files: import('@mattermost/react-native-paste-input').PastedFile[], error: string | null) => void) }));
-vi.mock('../ui/MultilineInput', () => ({ MultilineInput: ({ value, onChangeText, accessibilityLabel, ref, onPaste }: {
+vi.mock('../ui/MultilineInput', () => ({ MultilineInput: ({ value, onChangeText, accessibilityLabel, ref, onPaste, onSelectionChange }: {
   value: string; onChangeText: (text: string) => void; accessibilityLabel?: string; ref?: import('react').Ref<HTMLTextAreaElement>;
   onPaste?: NonNullable<typeof pasteInput.onPaste>;
-}) => (pasteInput.onPaste = onPaste ?? null, createElement('textarea', { ref, 'aria-label': accessibilityLabel, value, readOnly: true, onInput: (e: { currentTarget: { value: string } }) => onChangeText(e.currentTarget.value) })),
+  onSelectionChange?: (event: { nativeEvent: { selection: { start: number; end: number } } }) => void;
+}) => (pasteInput.onPaste = onPaste ?? null, createElement('textarea', { ref, 'aria-label': accessibilityLabel, value, readOnly: true,
+  onInput: (e: { currentTarget: HTMLTextAreaElement }) => {
+    onChangeText(e.currentTarget.value);
+    onSelectionChange?.({ nativeEvent: { selection: { start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd } } });
+  } })),
 }));
 vi.mock('../features/pills/PillMenu', () => ({ PillMenu: () => null }));
 vi.mock('../features/ditado/EstiloPill', () => ({ DictationStyleMenu: () => null, useDictationStyleLabel: () => 'estilo' }));
-vi.mock('./SessionSettings', () => ({ SessionSettingsButton: () => createElement('button', { 'aria-label': 'composer_session_settings' }) }));
+vi.mock('./SessionSettings', async () => {
+  const actual = await vi.importActual<typeof import('./SessionSettings')>('./SessionSettings');
+  return { ...actual, SessionSettingsButton: (props: Parameters<typeof actual.SessionSettingsButton>[0]) => realSettings.enabled
+    ? createElement(actual.SessionSettingsButton, props) : createElement('button', { 'aria-label': 'composer_session_settings' }) };
+});
 vi.mock('../features/ditado/useDitado', () => ({ useDitado: (callbacks: {
   onFim: NonNullable<typeof voiceInput.onFim>; onErroParada?: (e: Error) => void;
 }) => {
@@ -251,11 +265,16 @@ vi.mock('../features/ditado/useDitado', () => ({ useDitado: (callbacks: {
   };
 } }));
 vi.mock('../features/ditado/ditadoEstiloStore', () => ({ dictationStyleStore: () => ({ getState: () => ({ pronto: false }) }) }));
-vi.mock('./CommandSheet', () => ({
-  CommandSheet: () => null,
-  useSessionCommands: () => ({ commands: [], error: '', retry: () => {} }),
-}));
-vi.mock('./SlashSuggest', () => ({ SlashSuggest: () => null }));
+vi.mock('./CommandSheet', async () => {
+  const actual = await vi.importActual<typeof import('./CommandSheet')>('./CommandSheet');
+  return { ...actual, CommandSheet: () => null,
+    useSessionCommands: (...args: Parameters<typeof actual.useSessionCommands>) => realSettings.enabled
+      ? actual.useSessionCommands(...args) : { commands: [], error: '', retry: () => {} } };
+});
+vi.mock('./SlashSuggest', async () => {
+  const actual = await vi.importActual<typeof import('./SlashSuggest')>('./SlashSuggest');
+  return { SlashSuggest: (props: Parameters<typeof actual.SlashSuggest>[0]) => realSettings.enabled ? createElement(actual.SlashSuggest, props) : null };
+});
 vi.mock('./SideQuestionSheet', () => ({ SideQuestionSheet: () => null }));
 vi.mock('../stores/sessions', () => ({
   useSessions: Object.assign((sel: (s: unknown) => unknown) => sel(sessionsState), { getState: () => sessionsState }),
@@ -406,6 +425,117 @@ describe('ações e atualização da conversa na rota', () => {
         onerror: null, onopen: null, readyState: 1 }) });
   });
   afterEach(() => { _resetChatsForTests(); chatRow.extra = {}; vi.useRealTimers(); });
+
+  describe('ajustes pelo rodapé na tela real', () => {
+    beforeEach(() => {
+      realSettings.enabled = true;
+      realSettings.models.mockReset().mockResolvedValue({ kind: 'claude', models: [{ id: 'opus', name: 'Opus 5.5' }] });
+      realSettings.permissions.mockReset().mockResolvedValue({ current: 'bypassPermissions', modes: ['bypassPermissions', 'plan'], sondavel: false });
+      realSettings.commands.mockReset().mockResolvedValue(['model', 'effort'].map(name => ({ name, display: `/${name}`, source: 'builtin' })));
+      sessionsState.rows = [
+        { serverId: 's2', name: 'sess', provider: 'claude', conta: 'claude:/home/test/.claude-active-server' },
+        { serverId: 's1', name: 'another', provider: 'claude', conta: 'claude:/home/test/.claude-other-session' },
+        { serverId: 's1', name: 'sess', provider: 'claude', conta: 'claude:/home/test/.claude-route-account' },
+      ];
+      chatStore('s1', 'sess').use.setState({ statusLine: '🤖 Opus5.5 (high)',
+        stateEvent: { session: 'sess', state: 'idle', claude_permission_mode: 'bypassPermissions' } });
+      routerPush.mockClear(); layouts.clear();
+    });
+    afterEach(() => { realSettings.enabled = false; layouts.clear(); });
+    const panel = (container: HTMLElement) => container.querySelector('[role="dialog"][aria-label="composer_session_settings"]');
+    const measureFooter = async () => {
+      await act(async () => {
+        for (const [id, onLayout] of layouts) {
+          if (id === 'composer-status-items' || id.startsWith('composer-status-measure-')) {
+            onLayout({ nativeEvent: { layout: { x: 0, y: 0, width: id === 'composer-status-items' ? 343 : 100, height: 44 } } } as import('react-native').LayoutChangeEvent);
+          }
+        }
+      });
+    };
+    const openFooter = async (container: HTMLElement, label: string) => {
+      await measureFooter();
+      const action = button(container, label);
+      expect(action?.tagName).toBe('BUTTON');
+      await act(async () => action!.click());
+      expect(panel(container)).not.toBeNull();
+    };
+    const closePanel = async (container: HTMLElement) => {
+      await act(async () => button(container, 'dismiss-settings')!.click());
+      expect(panel(container)).toBeNull();
+    };
+
+    it('modo e conta abrem e reabrem a mesma folha, que mostra a conta e navega para trocar na rota certa', async () => {
+      const { container, root } = await render(createElement(ChatScreen));
+      try {
+        expect(panel(container)).toBeNull();
+        for (const label of ['native_mode_bypassPermissions', 'native_mode_bypassPermissions', 'route-account', 'route-account']) {
+          await openFooter(container, label);
+          expect(container.querySelectorAll('[role="dialog"][aria-label="composer_session_settings"]')).toHaveLength(1);
+          expect(panel(container)!.textContent).toContain('cota_conta_ativa');
+          expect(panel(container)!.textContent).toContain('route-account');
+          expect(panel(container)!.textContent).not.toContain('active-server');
+          expect(panel(container)!.textContent).not.toContain('other-session');
+          expect(panel(container)!.textContent).toContain('native_ctl_model_title');
+          expect(button(panel(container)! as HTMLElement, 'accounts_switch_title')).toBeDefined();
+          await closePanel(container);
+        }
+        expect(setPermissionMode).not.toHaveBeenCalled();
+        expect(realFirstInput.send).not.toHaveBeenCalled();
+        expect(realSettings.models).toHaveBeenCalledWith('sess', useServers.getState().servers[0]);
+        await openFooter(container, 'route-account');
+        await act(async () => button(container, 'accounts_switch_title')!.click());
+        expect(panel(container)).toBeNull();
+        expect(routerPush).toHaveBeenLastCalledWith('/s/s1/sess/account');
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('pedido consumido não reabre depois de remontar o Composer nem ao trocar servidor ou sessão', async () => {
+      const { container, root } = await render(createElement(ChatScreen));
+      try {
+        await openFooter(container, 'route-account');
+        await closePanel(container);
+        // O rodapé de orquestração desmonta o Composer mantendo a mesma tela e rota.
+        sessionsState.rows[2] = { ...sessionsState.rows[2], provider: 'orq' };
+        await act(async () => root.render(createElement(ChatScreen)));
+        expect(container.querySelector('textarea')).toBeNull();
+        sessionsState.rows[2] = { ...sessionsState.rows[2], provider: 'claude' };
+        await act(async () => root.render(createElement(ChatScreen)));
+        expect(container.querySelector('textarea')).not.toBeNull();
+        expect(panel(container)).toBeNull();
+        await openFooter(container, 'native_mode_bypassPermissions');
+        route.params = { server: 's2', name: 'sess' };
+        await act(async () => root.render(createElement(ChatScreen)));
+        expect(panel(container)).toBeNull();
+        await openFooter(container, 'active-server');
+        route.params = { server: 's1', name: 'another' };
+        chatRow.extra = { name: 'another' };
+        await act(async () => root.render(createElement(ChatScreen)));
+        expect(panel(container)).toBeNull();
+        await openFooter(container, 'other-session');
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('/model e /effort continuam reabrindo a folha depois do pedido externo, sem enviar comandos', async () => {
+      const { container, root } = await render(createElement(ChatScreen));
+      try {
+        await openFooter(container, 'route-account');
+        await closePanel(container);
+        for (const command of ['/model', '/model', '/effort', '/effort']) {
+          const field = container.querySelector('textarea')!;
+          await act(async () => { field.value = command; field.setSelectionRange(command.length, command.length); field.dispatchEvent(new Event('input', { bubbles: true })); });
+          const suggestion = button(container, command);
+          expect(suggestion).toBeDefined();
+          await act(async () => suggestion!.click());
+          expect(panel(container)).not.toBeNull();
+          expect(panel(container)!.textContent).toContain('native_ctl_model_title');
+          expect(panel(container)!.textContent).toContain('native_new_chat_reasoning');
+          expect(field.value).toBe('');
+          await closePanel(container);
+        }
+        expect(realFirstInput.send).not.toHaveBeenCalled();
+      } finally { act(() => root.unmount()); }
+    });
+  });
 
   it('Nova conversa da gaveta do chat pede compose na inicial, sem mudar o fechamento das demais navegações', async () => {
     navigation.dismissTo.mockClear();

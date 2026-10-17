@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { overwriteGetLocale } from '../paraglide/runtime';
-import { composerStatus, linhaStats, settingsLabel, spacedModel, usageWindows } from './usage';
+import { composerStatus, fitComposerItems, linhaStats, settingsLabel, spacedModel, usageWindows } from './usage';
 
 // O baseLocale do projeto é `en`; os rótulos esperados aqui são os de pt-BR.
 beforeAll(() => overwriteGetLocale(() => 'pt'));
@@ -38,6 +38,49 @@ describe('spacedModel', () => {
   });
 });
 
+describe('fitComposerItems', () => {
+  const measured = [
+    { key: 'folder', width: 400, shrink: true }, { key: 'branch', width: 350, shrink: true },
+    { key: 'diff', width: 62 }, { key: 'time', width: 48 },
+    { key: 'mode', width: 240, shrink: true }, { key: 'account', width: 280, shrink: true },
+    { key: 'ctx', width: 44 }, { key: '5h', width: 44 }, { key: '7d', width: 44 },
+    { key: '30d', width: 52 }, { key: 'cost', width: 44 },
+  ];
+  const occupied = (widths: Record<string, number>) => Object.values(widths).reduce((sum, w) => sum + w, 0)
+    + Math.max(0, Object.keys(widths).length - 1) * 4;
+
+  it.each([375 - 32, 430 - 32])('preserva modo, conta, contexto, três cotas e custo em %s pt medidos', (available) => {
+    const widths = fitComposerItems(measured, available);
+    expect(widths).toEqual(available === 343
+      ? { mode: 47, account: 44, ctx: 44, '5h': 44, '7d': 44, '30d': 52, cost: 44 }
+      : { branch: 44, mode: 54, account: 44, ctx: 44, '5h': 44, '7d': 44, '30d': 52, cost: 44 });
+    expect(occupied(widths!)).toBeLessThanOrEqual(available);
+    expect(Object.values(widths!).every(w => w >= 44)).toBe(true);
+  });
+
+  it('fonte maior retira custo e contexto antes das cotas, depois 30d, 7d, 5h, conta e modo', () => {
+    const large = measured.map(item => ({ ...item, width: item.width * 2 }));
+    const widths = fitComposerItems(large, 398);
+    expect(widths).toEqual({ mode: 58, account: 44, '5h': 88, '7d': 88, '30d': 104 });
+    expect(occupied(widths!)).toBeLessThanOrEqual(398);
+    for (const [available, keys] of [[343, ['mode', 'account', '5h', '7d']], [200, ['mode', 'account', '5h']],
+      [120, ['mode', 'account']], [60, ['mode']], [43, []]] as const) {
+      const fitted = fitComposerItems(large, available);
+      expect(Object.keys(fitted)).toEqual(keys);
+      expect(occupied(fitted)).toBeLessThanOrEqual(available);
+    }
+  });
+
+  it('distribui sobra por modo, conta, branch e pasta sem ultrapassar medidas preferidas', () => {
+    const items = ['folder', 'branch', 'account', 'mode'].map(key => ({ key, width: 60, shrink: true }));
+    expect(fitComposerItems(items, 220)).toEqual({ folder: 44, branch: 44, account: 60, mode: 60 });
+    expect(fitComposerItems(items, 1000)).toEqual({ folder: 60, branch: 60, account: 60, mode: 60 });
+    expect(fitComposerItems([], 100)).toEqual({});
+    expect(fitComposerItems(items, 0)).toEqual({});
+    expect(items.every(item => item.width === 60)).toBe(true);
+  });
+});
+
 describe('composerStatus', () => {
   it('junta statusline e lista: pasta e branch caem para a sessão, diff zerado some', () => {
     expect(composerStatus(null, null)).toEqual({});
@@ -47,7 +90,15 @@ describe('composerStatus', () => {
     );
     expect(s).toMatchObject({ folder: 'hangar', branch: 'fix/mobile', added: 256, time: '1h00', ctxPct: 31, cost: '$1.50' });
     expect(s.removed).toBeUndefined();
-    expect(s.quota?.key).toBe('5h');
+    expect(s.quotas?.map(({ key, pct }) => [key, pct])).toEqual([['5h', 23], ['7d', 74]]);
+  });
+
+  it('conserva cotas simultâneas de 5h, 7d e 30d e valores zero sem criar cotas vazias', () => {
+    const status = composerStatus({ raw: '', fiveHourPct: 0, weeklyPct: 0, monthlyPct: 0, ctxPct: 0, costUsd: 0 }, null);
+    expect(status.quotas?.map(({ key, pct }) => [key, pct])).toEqual([['5h', 0], ['7d', 0], ['30d', 0]]);
+    expect(status).toMatchObject({ ctxPct: 0, cost: '$0.00' });
+    expect(composerStatus(null, null)).toEqual({});
+    expect(composerStatus({ raw: '' }, null)).not.toHaveProperty('quotas');
   });
 
   it('a statusline vence a lista para pasta e branch', () => {

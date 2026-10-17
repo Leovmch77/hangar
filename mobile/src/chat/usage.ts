@@ -56,9 +56,30 @@ export type ComposerStatus = {
   removed?: number;
   time?: string;
   ctxPct?: number;
-  quota?: UsageWindow;
+  quotas?: UsageWindow[];
   cost?: string;
 };
+
+export function fitComposerItems(
+  items: { key: string; width: number; shrink?: boolean }[], availableWidth: number, gap = 4,
+): Record<string, number> {
+  const widths = Object.fromEntries(items.map(item => [item.key, item.shrink ? 44 : Math.max(44, item.width)]));
+  const occupied = () => Object.values(widths).reduce((sum, width) => sum + width, 0)
+    + Math.max(0, Object.keys(widths).length - 1) * gap;
+  for (const key of ['time', 'diff', 'folder', 'branch', 'cost', 'ctx', '30d', '7d', '5h', 'account', 'mode', ...Object.keys(widths)]) {
+    if (occupied() <= availableWidth) break;
+    delete widths[key];
+  }
+  let spare = Math.max(0, availableWidth - occupied());
+  for (const key of ['mode', 'account', 'branch', 'folder']) {
+    const item = items.find(item => item.key === key);
+    if (!item?.shrink || widths[key] == null) continue;
+    const extra = Math.min(spare, Math.max(0, item.width - widths[key]));
+    widths[key] += extra;
+    spare -= extra;
+  }
+  return widths;
+}
 
 type GitSession = Pick<SessionInfo, 'cwd' | 'branch' | 'git_added' | 'git_removed'>;
 
@@ -77,8 +98,8 @@ export function composerStatus(f: StatusFields | null, session: GitSession | nul
   if (f?.sessionTime) out.time = f.sessionTime;
   const ctx = f?.ctxPct;
   if (known(ctx)) out.ctxPct = ctx;
-  const quota = usageWindows(f)[0];
-  if (quota) out.quota = quota;
+  const quotas = usageWindows(f);
+  if (quotas.length) out.quotas = quotas;
   const cost = f?.costUsd;
   if (known(cost)) out.cost = `$${cost.toFixed(2)}`;
   return out;
