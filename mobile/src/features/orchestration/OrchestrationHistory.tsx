@@ -17,11 +17,11 @@ const HistoryRun = memo(function HistoryRun({ run, onSelect }: { run: OrqExecuca
   const seconds = run.inicio && run.fim ? (Date.parse(run.fim) - Date.parse(run.inicio)) / 1000 : null;
   const status = !run.fim ? m.orq_em_curso() : run.resultado === 'abortada' ? m.orq_abortada() : !run.resultado || ['ok', 'concluido', 'concluida'].includes(run.resultado) ? m.orq_concluida() : run.resultado;
   const summary = `${orqWhen(run.inicio)} · ${m.orq_history_tasks({ n: run.metadata?.total_tasks ?? run.tasks.length })} · ${formatElapsed(seconds)} · ${status}`;
-  return <Pressable style={styles.run} accessibilityRole="button" accessibilityLabel={[title, run.metadata?.repo, summary, run.metadata?.error].filter(Boolean).join(', ')} onPress={() => onSelect(run.id)}>
+  return <Pressable style={styles.run} accessibilityRole="button" accessibilityLabel={[title, run.metadata?.repo, summary, run.metadata?.error && m.orq_mobile_metadata_read_error(), run.metadata?.error].filter(Boolean).join(', ')} onPress={() => onSelect(run.id)}>
     <Text style={styles.title}>{title}</Text>
     {run.metadata?.repo ? <Text style={styles.note}>{run.metadata.repo}</Text> : null}
     <Text style={styles.note}>{summary}</Text>
-    {run.metadata?.error ? <Text style={styles.error}>{run.metadata.error}</Text> : null}
+    {run.metadata?.error ? <><Text style={styles.error}>{m.orq_mobile_metadata_read_error()}</Text><Text style={styles.note}>{run.metadata.error}</Text></> : null}
   </Pressable>;
 });
 

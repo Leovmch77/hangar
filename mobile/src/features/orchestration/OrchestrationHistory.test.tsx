@@ -60,12 +60,50 @@ it('histórico lista captura máquina, preserva toda execução e trata loading 
   await click(m.comum_voltar()); expect(navigation.back).toHaveBeenCalledOnce();
 });
 
+it('history fetch error separates the warning from smaller detail and keeps partial content', async () => {
+  fetcher.mockResolvedValueOnce(reply({ execucoes: [run('run-1', 'retained-history-title')], fichas: [] }));
+  await render();
+  fetcher.mockRejectedValueOnce(new Error('history fetch failed: ECONNREFUSED 127.0.0.1:8765'));
+  await click(m.orq_history_refresh());
+  const title = container.querySelector<HTMLElement>('[role="alert"]');
+  expect(title?.textContent).toBe('Could not load the orchestration.');
+  const detail = [...container.querySelectorAll('span')].find(text => text.textContent === 'Error: history fetch failed: ECONNREFUSED 127.0.0.1:8765');
+  expect(detail, 'complete fetch error must remain visible separately').toBeDefined();
+  expect(Number.parseFloat(detail!.style.fontSize)).toBeLessThan(Number.parseFloat(title!.style.fontSize));
+  expect(detail!.style.color).not.toBe(title!.style.color);
+  expect(container.textContent).toContain('retained-history-title');
+  fetcher.mockResolvedValueOnce(reply({ execucoes: [run('run-2', 'reloaded-history-title')], fichas: [] }));
+  await click(m.orq_panel_retry());
+  expect(container.textContent).toContain('reloaded-history-title');
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+  expect(container.textContent).not.toContain('ECONNREFUSED');
+});
+
 it('histórico lista recusa convite e servidor removido sem consultar APIs do dono', async () => {
   navigation.params = { server: 'b' };
   useServers.setState({ activeId: 'a', servers: [{ ...server, invite: true }] });
   await render(); expect(container.textContent).toContain(m.lista_acesso_recusado()); expect(fetcher).not.toHaveBeenCalled();
   await act(async () => useServers.setState({ servers: [] }));
   expect(container.textContent).toContain(m.chat_servidor_removido()); expect(fetcher).not.toHaveBeenCalled();
+});
+
+it('history metadata error separates the warning title from the complete smaller detail', async () => {
+  const error = "Não consegui ler orq.json: FileNotFoundError: [Errno 2] No such file or directory: '/repo/history/run-1/orq.json'";
+  const data = run('run-1', 'partial-history-title'); data.metadata!.error = error;
+  fetcher.mockResolvedValue(reply({ execucoes: [data], fichas: [] }));
+  await render();
+  const button = [...container.querySelectorAll('button')].find(item => item.textContent?.startsWith('partial-history-title'))!;
+  const texts = [...button.querySelectorAll('span')];
+  const title = texts.find(text => text.textContent === 'Could not read the data for this run.');
+  const detail = texts.find(text => text.textContent === error);
+  expect(title, 'translated warning title must be separate from the technical error').toBeDefined();
+  expect(detail, 'complete technical detail must remain visible').toBeDefined();
+  expect(Number.parseFloat(detail!.style.fontSize)).toBeLessThan(Number.parseFloat(title!.style.fontSize));
+  expect(detail!.style.color).not.toBe(title!.style.color);
+  expect(button.getAttribute('aria-label')).toContain(title!.textContent);
+  expect(button.getAttribute('aria-label')).toContain(error);
+  expect(button.textContent).toContain('/repo/history');
+  expect(button.textContent).toContain(m.orq_history_tasks({ n: 4 }));
 });
 
 it('rótulo acessível do histórico inclui metadados visíveis e erro', async () => {

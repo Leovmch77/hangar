@@ -64,6 +64,41 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root.unmount()); _resetSessionsForTests(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
+it.each([false, true])('panel metadata error separates the warning title from the complete smaller detail with history=%s', async (history) => {
+  const panel = panelFixture();
+  const error = "Não consegui ler orq.json: FileNotFoundError: [Errno 2] No such file or directory: '/repo/fixture/run-1/orq.json'";
+  panel.metadata!.error = error;
+  await renderContent(panel, history);
+  const texts = [...container.querySelectorAll('span')];
+  const title = texts.find(text => text.textContent === 'Could not read the data for this run.');
+  const detail = texts.find(text => text.textContent === error);
+  expect(title, 'translated warning title must be separate from the technical error').toBeDefined();
+  expect(detail, 'complete technical detail must remain visible').toBeDefined();
+  expect(title!.parentElement).toBe(detail!.parentElement);
+  expect(Number.parseFloat(detail!.style.fontSize)).toBeLessThan(Number.parseFloat(title!.style.fontSize));
+  expect(detail!.style.color).not.toBe(title!.style.color);
+  expect(container.textContent).toContain('fixture-title');
+  expect(container.textContent).toContain('T2 · future-task');
+});
+
+it('erro de arquivo mostra frase traduzida e causa técnica em detalhe menor', async () => {
+  const panel = panelFixture();
+  const error = "FileNotFoundError: [Errno 2] No such file or directory: '/run/orq.json'";
+  panel.errors = [{ file: 'orq.json', error }];
+  fetcher.mockImplementation((url: string) => Promise.resolve(reply(url.endsWith('/orq/panel') ? panel : [])));
+  await renderPanel();
+  const texts = [...container.querySelectorAll('span')];
+  const heading = texts.find(text => text.textContent === 'Could not read orq.json.');
+  expect(heading, 'file warning title must be separate from the technical error').toBeDefined();
+  const detail = texts.find(text => text.textContent === error);
+  expect(detail).toBeDefined();
+  expect(heading!.parentElement).toBe(detail!.parentElement);
+  expect(parseFloat(detail!.style.fontSize)).toBeLessThan(parseFloat(heading!.style.fontSize));
+  expect(detail!.style.color).not.toBe(heading!.style.color);
+  expect(container.textContent).toContain('fixture-title');
+  expect(container.textContent).toContain('T2 · future-task');
+});
+
 it('conteúdo sete seções preserva dados, recolhe corpo e filtra somente integradas', async () => {
   await renderContent();
   expect(container.textContent).toContain('fixture-title');

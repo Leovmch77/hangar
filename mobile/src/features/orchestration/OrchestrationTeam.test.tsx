@@ -14,15 +14,20 @@ const navigation = vi.hoisted(() => ({ focused: true, prevented: false, prevent:
 vi.mock('expo-router', () => ({ useIsFocused: () => navigation.focused }));
 vi.mock('expo-router/react-navigation', () => ({ useHeaderHeight: () => 64, useNavigation: () => navigation, usePreventRemove: (prevented: boolean, callback: typeof navigation.prevent) => { navigation.prevented = prevented; navigation.prevent = callback; } }));
 vi.mock('expo-secure-store', () => ({ setItemAsync: vi.fn().mockResolvedValue(undefined), getItemAsync: vi.fn().mockResolvedValue(null) }));
-vi.mock('../../ui/Sheet', () => ({ Sheet: ({ children, open }: { children: ReactNode; open?: boolean }) => open === false ? null : createElement('section', null, children) }));
+vi.mock('../../ui/Sheet', () => ({ Sheet: ({ children, open, dismissible, onDismiss }: { children: ReactNode; open?: boolean; dismissible?: boolean; onDismiss?: () => void }) => open === false ? null : createElement('section', { 'data-dismissible': dismissible }, createElement('button', { 'data-sheet-dismiss': true, disabled: dismissible === false, onClick: onDismiss }), children) }));
 vi.mock('../../ui/Toast', () => ({ toast: { erro: vi.fn(), ok: vi.fn() } }));
 vi.mock('react-native-keyboard-controller', () => ({ KeyboardAvoidingView: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 vi.mock('react-native', async importOriginal => {
   const actual = await importOriginal<Record<string, unknown>>();
   const Pressable = actual.Pressable as ComponentType<Record<string, unknown>>;
+  const View = actual.View as ComponentType<Record<string, unknown>>;
   const ScrollView = actual.ScrollView as ComponentType<Record<string, unknown>>;
   const FlatList = actual.FlatList as ComponentType<Record<string, unknown>>;
   return { ...actual,
+    View: ({ style, ...props }: Record<string, unknown>) => {
+      const { paddingHorizontal, ...rest } = Object.assign({}, ...[style].flat().filter(Boolean));
+      return createElement(View, { ...props, style: { ...rest, ...(paddingHorizontal == null ? {} : { paddingLeft: paddingHorizontal, paddingRight: paddingHorizontal }) } });
+    },
     Pressable: ({ accessibilityState, accessibilityValue, ...props }: { accessibilityState?: { disabled?: boolean; selected?: boolean }; accessibilityValue?: { text?: string }; [key: string]: unknown }) => createElement(Pressable, { ...props, 'aria-disabled': accessibilityState?.disabled, 'aria-selected': accessibilityState?.selected, 'aria-valuetext': accessibilityValue?.text }),
     ScrollView: ({ contentContainerStyle: _style, keyboardShouldPersistTaps: _keyboard, ...props }: Record<string, unknown>) => createElement(ScrollView, props),
     FlatList: ({ ListHeaderComponent, contentInsetAdjustmentBehavior, contentContainerStyle, ...props }: Record<string, unknown>) => {
@@ -77,6 +82,32 @@ beforeEach(() => {
   vi.stubGlobal('fetch', fetcher);
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); _limparEsfriamentoParaTestes(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+it('gesto fecha detalhe editado sem descartar nem pedir confirmação de saída', async () => {
+  await render(); await click('executor'); await input(m.orqcfg_sessao(), 'kept-by-gesture');
+  await act(async () => container.querySelector<HTMLButtonElement>('section [data-sheet-dismiss]')!.click());
+  expect(container.querySelector('section')).toBeNull();
+  expect(alerts).toHaveLength(0); expect(navigation.prevented).toBe(true);
+  await click('executor');
+  expect(container.querySelector<HTMLInputElement>(`input[aria-label="${m.orqcfg_sessao()}"]`)?.value).toBe('kept-by-gesture');
+  await click(m.native_close()); expect(alerts).toHaveLength(0); expect(navigation.prevented).toBe(true);
+});
+
+it('gesto e botão de fechar ficam bloqueados durante gravação em voo', async () => {
+  await render(); await click('executor'); await input(m.orqcfg_sessao(), 'pending-detail');
+  const pending = deferred<Response>();
+  fetcher.mockImplementation(async (url: string, options?: RequestInit) => options?.method === 'POST' ? pending.promise : reply(readData(url)));
+  await click(m.orqcfg_salvar());
+  const dismiss = container.querySelector<HTMLButtonElement>('section [data-sheet-dismiss]')!;
+  expect(dismiss.disabled).toBe(true); expect(button(m.native_close())?.disabled).toBe(true);
+  await act(async () => { dismiss.click(); button(m.native_close())!.click(); });
+  expect(container.querySelector('section')).not.toBeNull(); expect(writes()).toHaveLength(1); expect(alerts).toHaveLength(0);
+  currentGroup = group([role('executor', { sessao: 'pending-detail' })], { mtime: 11 });
+  await act(async () => pending.resolve(reply({ mtime: 11, papeis: currentGroup.papeis, arbitro: null, aviso: 'proxima_sessao', erro: null })));
+  expect(container.querySelector<HTMLButtonElement>('section [data-sheet-dismiss]')?.disabled).toBe(false);
+  await act(async () => container.querySelector<HTMLButtonElement>('section [data-sheet-dismiss]')!.click());
+  expect(container.querySelector('section')).toBeNull();
+});
 
 it('rascunhos preserva seleção, null e false e salva todas as linhas em lote relendo o time completo', async () => {
   currentGroup = group([role(), role('revisor', { vez: '03', sessao: 'work-review*', modelo: 'legacy-model', janela: '55' })]);
@@ -159,6 +190,63 @@ it('modelo padrão pode ser escolhido e permanece vazio ao trocar conta liberada
     return reply(readData(url));
   });
   await click(m.orqcfg_salvar()); expect(JSON.parse(String(writes()[0][1].body)).papeis[0]).toMatchObject({ conta: 'second', modelo: '' });
+});
+
+it('novo papel intacto não marca saída, habilita salvar nem deixa linha ao fechar', async () => {
+  await render(); await click(m.orqcfg_novo_papel());
+  expect(navigation.prevented).toBe(false);
+  expect(button(m.orqcfg_salvar())?.disabled).toBe(true);
+  await click(m.native_close());
+  expect([...container.querySelectorAll('[data-list-inset] button')].filter(item => item.textContent?.includes('account-b'))).toHaveLength(1);
+  expect(alerts).toHaveLength(0); expect(navigation.prevented).toBe(false);
+  fetcher.mockImplementation(async (url: string, options?: RequestInit) => options?.method === 'POST' ? reply({ ok: true, entregue: true, fase: 'planner', plano: '' }) : reply(readData(url)));
+  await click(m.orqcfg_comecar());
+  expect(alerts).toHaveLength(0);
+  expect(writes().map(([url]) => String(url))).toEqual(['http://b:8765/api/sessions/origin/orq/comecar']);
+});
+
+it('novo papel com nome vazio preserva modelo editado e volta a limpo ao restaurar o inicial', async () => {
+  await render(); await click(m.orqcfg_novo_papel());
+  await click(m.native_ctl_model_title()); await click('Sonnet'); await click(m.native_close());
+  expect(navigation.prevented).toBe(true);
+  const fresh = [...container.querySelectorAll<HTMLButtonElement>('[data-list-inset] button')].find(item => item.textContent?.includes('sonnet'));
+  expect(fresh).toBeTruthy(); await act(async () => fresh!.click());
+  expect(button(m.native_ctl_model_title())?.getAttribute('aria-valuetext')).toBe('Sonnet');
+  await click(m.native_ctl_model_title()); await click('Opus');
+  expect(navigation.prevented).toBe(false);
+  await act(async () => container.querySelector<HTMLButtonElement>('section [data-sheet-dismiss]')!.click());
+  expect([...container.querySelectorAll('[data-list-inset] button')].filter(item => item.textContent?.includes('account-b'))).toHaveLength(1); expect(alerts).toHaveLength(0);
+});
+
+it('novo papel intacto não invalida o lote nem descarta edição de outro papel', async () => {
+  await render(); await click('executor'); await input(m.orqcfg_sessao(), 'keep-executor'); await click(m.native_close());
+  await click(m.orqcfg_novo_papel());
+  fetcher.mockImplementation(async (url: string, options?: RequestInit) => {
+    if (options?.method === 'POST') {
+      const body = JSON.parse(String(options.body)); currentGroup = group(body.papeis, { mtime: 11 });
+      return reply({ mtime: 11, papeis: body.papeis, arbitro: null, aviso: 'proxima_sessao', erro: null });
+    }
+    return reply(readData(url));
+  });
+  await click(m.orqcfg_salvar());
+  expect(writes()).toHaveLength(1);
+  expect(JSON.parse(String(writes()[0][1].body))).toMatchObject({ mtime: 10, papeis: [{ papel: 'executor', sessao: 'keep-executor' }] });
+  expect(JSON.parse(String(writes()[0][1].body)).papeis).toHaveLength(1);
+  expect(groupReads()).toHaveLength(2); expect(navigation.prevented).toBe(false);
+  await click(m.native_close()); expect([...container.querySelectorAll('[data-list-inset] button')].filter(item => item.textContent?.includes('account-b'))).toHaveLength(1);
+});
+
+it('novo papel editado permanece no time ao fechar e exige decisão para sair', async () => {
+  await render(); await click(m.orqcfg_novo_papel()); await input(m.orqcfg_papel(), 'auditor');
+  await act(async () => container.querySelector<HTMLButtonElement>('section [data-sheet-dismiss]')!.click());
+  expect(alerts).toHaveLength(0); expect(navigation.prevented).toBe(true);
+  await click('auditor'); expect(container.querySelector<HTMLInputElement>(`input[aria-label="${m.orqcfg_papel()}"]`)?.value).toBe('auditor');
+  await click(m.native_close());
+  const action = { type: 'GO_BACK', source: 'new-role' };
+  await act(async () => navigation.prevent?.({ data: { action } })); await chooseAlert(m.comum_cancelar());
+  expect(navigation.dispatch).not.toHaveBeenCalled(); expect(button('auditor')).toBeTruthy();
+  await act(async () => navigation.prevent?.({ data: { action } })); await chooseAlert(m.orqcfg_descartar());
+  expect(navigation.dispatch).toHaveBeenCalledWith(action); expect(button('auditor')).toBeUndefined(); expect(navigation.prevented).toBe(false);
 });
 
 it('rascunhos adiciona papel distinto sem conta de rodízio e deriva sessão do prefixo real', async () => {
@@ -501,6 +589,31 @@ it.each(['read', 'write'] as const)('prazo %s limpa timer ao desmontar e ignora 
   root = createRoot(container);
   await act(async () => pending.resolve(reply(operation === 'read' ? currentGroup : { mtime: 11, papeis: [], arbitro: null, aviso: 'proxima_sessao', erro: null })));
   expect(container.textContent).toBe(''); expect(fetcher).toHaveBeenCalledTimes(calls);
+});
+
+it('layout recua avisos, prontidão, erros auxiliares e vazio na lista do time', async () => {
+  currentGroup = group([]);
+  fetcher.mockImplementation(async (url: string, options?: RequestInit) => {
+    if (options?.method === 'POST') return reply({ ok: true, entregue: false, fase: 'planner', plano: '' });
+    if (url.endsWith('/api/cotas')) return reply({ detail: 'quota-failed' }, 503);
+    return reply(readData(url));
+  });
+  await render(); await click(m.orqcfg_comecar());
+  const list = container.querySelector('[data-list-inset]')!;
+  const inset = (element: HTMLElement | null): number => {
+    let padding = 0;
+    for (let current = element; current && current !== list; current = current.parentElement) {
+      const style = current.style as CSSStyleDeclaration & { paddingHorizontal?: string };
+      padding += Number.parseFloat(style.paddingHorizontal || style.paddingLeft || style.padding || '0');
+    }
+    return padding;
+  };
+  expect(inset(button(m.orqcfg_recarregar())!.parentElement)).toBe(16);
+  for (const text of [m.orqcfg_comecou_fila(), m.orqcfg_fase_planner(), m.orqcfg_sem_papeis(), 'quota-failed']) {
+    const element = [...list.querySelectorAll<HTMLElement>('span')].find(item => item.textContent?.includes(text));
+    expect(element, text).toBeTruthy();
+    expect(inset(element!), text).toBe(16);
+  }
 });
 
 it('layout mantém controles dentro da lista com inset automático e recuo Android do cabeçalho', async () => {

@@ -148,7 +148,7 @@ function RoleDetail({ role, existing, policy, busy, writeBlocked, engines, quota
     const conta = contasLiberadas(policy.politica, policy.inventario, next)[0]?.conta ?? '';
     onChange({ ...reset, ...accountPatch(reset, conta, policy, false) });
   };
-  return <Sheet open sizes={['large']} dismissible={false} scrollable>
+  return <Sheet open sizes={['large']} dismissible={!busy} onDismiss={onClose} scrollable>
     <KeyboardAvoidingView behavior="padding" automaticOffset style={styles.root}>
       <ScrollView contentContainerStyle={styles.form} keyboardShouldPersistTaps="handled">
         <Text style={styles.title}>{existing ? role.papel : m.orqcfg_novo_papel()}</Text>
@@ -200,6 +200,7 @@ function TeamEditor({ server, name, active, available, targetKey, routeError, st
   const [loading, setLoading] = useState(true);
   const [attempt, setAttempt] = useState(0);
   const [drafts, setDrafts] = useState<Drafts>({});
+  const newDefaults = useRef<Drafts>({});
   const [selected, setSelected] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -263,7 +264,7 @@ function TeamEditor({ server, name, active, available, targetKey, routeError, st
           { text: m.orqcfg_descartar(), style: 'destructive', onPress: () => resolve(true) },
         ], { cancelable: false }));
         if (!discardPrevious || !valid()) return false;
-        draftsRef.current = {}; setDrafts({}); setSelected(null); setNotice(null);
+        draftsRef.current = {}; setDrafts({}); newDefaults.current = {}; setSelected(null); setNotice(null);
       }
       const missing = Object.keys(draftsRef.current).filter(key => !key.startsWith('new:') && !next.papeis.some(role => roleKey(role) === key));
       if (missing.length) {
@@ -282,7 +283,7 @@ function TeamEditor({ server, name, active, available, targetKey, routeError, st
       const kept = { ...draftsRef.current };
       for (const [key, sent] of Object.entries(submitted.current)) {
         const confirmed = next.papeis.find(role => roleKey(role) === roleKey(sent.body));
-        if (confirmed && kept[key] === sent.draft && JSON.stringify(editable(confirmed)) === JSON.stringify(sent.body)) delete kept[key];
+        if (confirmed && kept[key] === sent.draft && JSON.stringify(editable(confirmed)) === JSON.stringify(sent.body)) { delete kept[key]; delete newDefaults.current[key]; }
       }
       draftsRef.current = kept; setDrafts(kept); submitted.current = {}; needsRead.current = false;
       setNotice(previous => previous === m.orqcfg_write_pending() ? null : previous);
@@ -340,12 +341,13 @@ function TeamEditor({ server, name, active, available, targetKey, routeError, st
   const patch = (key: string, change: Partial<Papel>) => {
     if (busy.current || readingRef.current !== null || blockedRef.current || !activeRef.current || !targetRef.current()) return;
     const original = groupRef.current?.papeis.find(role => roleKey(role) === key);
+    const initial = original ? editable(original) : newDefaults.current[key];
     setDrafts(previous => {
-      const base = previous[key] ?? (original && editable(original));
+      const base = previous[key] ?? initial;
       if (!base) return previous;
       const next = { ...base, ...change, ...(original ? { papel: original.papel, vez: original.vez ?? '' } : { vez: '' }) };
       const result = { ...previous };
-      if (original && JSON.stringify(editable(original)) === JSON.stringify(next)) delete result[key]; else result[key] = next;
+      if (JSON.stringify(initial) === JSON.stringify(next)) delete result[key]; else result[key] = next;
       return result;
     });
   };
@@ -362,7 +364,7 @@ function TeamEditor({ server, name, active, available, targetKey, routeError, st
     });
     const conta = contasLiberadas(policy.politica, policy.inventario, 'claude')[0]?.conta ?? '';
     const key = `new:${++newId.current}`;
-    setDrafts(previous => ({ ...previous, [key]: { ...blank, ...accountPatch(blank, conta, policy, false) } })); setSelected(key);
+    newDefaults.current[key] = { ...blank, ...accountPatch(blank, conta, policy, false) }; setSelected(key);
   };
   const save = async (): Promise<boolean> => {
     const original = groupRef.current;
@@ -397,6 +399,7 @@ function TeamEditor({ server, name, active, available, targetKey, routeError, st
       const response = result.value;
       if (!current(token)) { block(); needsRead.current = true; return false; }
       groupRef.current = { ...original, mtime: response.mtime }; setGroup(groupRef.current);
+      for (const [key, role] of pending) if (draftsRef.current[key] === role) delete newDefaults.current[key];
       setDrafts(previous => { const next = { ...previous }; for (const [key, role] of pending) if (next[key] === role) delete next[key]; return next; });
       setNotice(m.orqcfg_aviso_proxima_sessao());
       const reloaded = await read(token);
@@ -414,9 +417,15 @@ function TeamEditor({ server, name, active, available, targetKey, routeError, st
   };
   const discard = (key?: string) => {
     const next = { ...draftsRef.current };
-    if (key) delete next[key]; else for (const item of Object.keys(next)) delete next[item];
+    if (key) { delete next[key]; delete newDefaults.current[key]; }
+    else { for (const item of Object.keys(next)) delete next[item]; newDefaults.current = {}; }
     draftsRef.current = next; setDrafts(next); setSelected(null);
   };
+  const closeDetail = useCallback(() => {
+    if (busy.current) return;
+    if (selected && !draftsRef.current[selected]) delete newDefaults.current[selected];
+    setSelected(null);
+  }, [selected]);
   const decide = (proceed: () => void, leaving = false) => {
     if (busy.current || deciding.current || !activeRef.current || (!leaving && !targetRef.current())) return;
     const token = generation.current;
@@ -454,7 +463,7 @@ function TeamEditor({ server, name, active, available, targetKey, routeError, st
     if (busy.current || blockedRef.current || deciding.current || !activeRef.current || !targetRef.current()) return;
     const snapshot = groupRef.current;
     const original = snapshot?.papeis.find(role => roleKey(role) === key);
-    const role = draftsRef.current[key] ?? original;
+    const role = draftsRef.current[key] ?? original ?? newDefaults.current[key];
     if (!snapshot || !role) return;
     const token = generation.current;
     deciding.current = true;
@@ -495,7 +504,7 @@ function TeamEditor({ server, name, active, available, targetKey, routeError, st
   }, [policy, group, live, quotas]);
   const renderRow = useCallback(({ item }: ListRenderItemInfo<TeamRow>) => <RoleRow role={item.role} rowKey={item.key} edited={item.edited} quota={quotaFor(item.role)} onSelect={onSelect} />, [onSelect, quotaFor]);
   const original = selected ? group?.papeis.find(role => roleKey(role) === selected) : undefined;
-  const detail = selected ? drafts[selected] ?? (original && editable(original)) : null;
+  const detail = selected ? drafts[selected] ?? (original ? editable(original) : newDefaults.current[selected]) : null;
   const disabled = !active || loading || saving || starting;
   const writeBlocked = blocked || !available;
   const displayError = routeError ?? error;
@@ -504,15 +513,17 @@ function TeamEditor({ server, name, active, available, targetKey, routeError, st
       <Action label={m.orqcfg_recarregar()} onPress={refresh} disabled={disabled || !available} />
       {group && policy ? <><Action label={m.orqcfg_novo_papel()} onPress={add} disabled={disabled || writeBlocked} /><Action label={saving ? m.orqcfg_salvando() : m.orqcfg_salvar()} onPress={() => void save()} disabled={disabled || writeBlocked || !Object.keys(drafts).length} /><Action label={starting ? m.orqcfg_comecando() : m.orqcfg_comecar()} onPress={begin} disabled={disabled || writeBlocked} /></> : null}
     </View>
-    {notice ? <Text style={styles.note}>{notice}</Text> : null}
-    {quotaError || engineError ? <Text accessibilityRole="alert" style={styles.error}>{[quotaError, engineError].filter(Boolean).join('\n')}</Text> : null}
+    <View style={styles.listMessages}>
+      {notice ? <Text style={styles.note}>{notice}</Text> : null}
+      {quotaError || engineError ? <Text accessibilityRole="alert" style={styles.error}>{[quotaError, engineError].filter(Boolean).join('\n')}</Text> : null}
+    </View>
     {displayError ? <View style={styles.status}><Text accessibilityRole="alert" style={styles.error}>{displayError}</Text><Action label={m.orq_panel_retry()} onPress={refresh} disabled={disabled || !available} /></View> : null}
     {loading ? <View style={styles.status}><ActivityIndicator /><Text style={styles.note}>{m.orqcfg_carregando()}</Text></View> : null}
-    {group && policy ? <Text style={styles.note}>{readiness(group)}</Text> : null}
+    {group && policy ? <View style={styles.listMessages}><Text style={styles.note}>{readiness(group)}</Text></View> : null}
   </>;
   return <View style={styles.root}>
-    <FlatList data={rows} renderItem={renderRow} keyExtractor={rowKey} contentInsetAdjustmentBehavior="automatic" contentContainerStyle={[styles.content, Platform.OS !== 'ios' && { paddingTop: header }]} ListHeaderComponent={listHeader} ListEmptyComponent={group && policy ? <Text style={styles.note}>{m.orqcfg_sem_papeis()}</Text> : null} />
-    {detail && selected && policy && active ? <RoleDetail key={selected} role={detail} existing={!!original} policy={policy} busy={disabled} writeBlocked={writeBlocked} engines={engines} quota={quotaFor(detail)} live={casarViva(detail.sessao, live) as AggSession | null} error={displayError} notice={notice} auxiliaryError={[quotaError, engineError].filter(Boolean).join('\n')} onChange={change => patch(selected, change)} onSave={() => void save()} onClose={() => setSelected(null)} onDiscard={() => discard(selected)} onRemove={() => remove(selected)} /> : null}
+    <FlatList data={rows} renderItem={renderRow} keyExtractor={rowKey} contentInsetAdjustmentBehavior="automatic" contentContainerStyle={[styles.content, Platform.OS !== 'ios' && { paddingTop: header }]} ListHeaderComponent={listHeader} ListEmptyComponent={group && policy ? <View style={styles.listMessages}><Text style={styles.note}>{m.orqcfg_sem_papeis()}</Text></View> : null} />
+    {detail && selected && policy && active ? <RoleDetail key={selected} role={detail} existing={!!original} policy={policy} busy={disabled} writeBlocked={writeBlocked} engines={engines} quota={quotaFor(detail)} live={casarViva(detail.sessao, live) as AggSession | null} error={displayError} notice={notice} auxiliaryError={[quotaError, engineError].filter(Boolean).join('\n')} onChange={change => patch(selected, change)} onSave={() => void save()} onClose={closeDetail} onDiscard={() => discard(selected)} onRemove={() => remove(selected)} /> : null}
   </View>;
 }
 const styles = StyleSheet.create(theme => ({
@@ -520,6 +531,7 @@ const styles = StyleSheet.create(theme => ({
   controls: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: theme.base.space[4], gap: theme.base.space[2] },
   status: { padding: theme.base.space[4], gap: theme.base.space[2] },
   content: { paddingBottom: theme.base.space[6] },
+  listMessages: { paddingHorizontal: theme.base.space[4] },
   row: { minHeight: 44, padding: theme.base.space[4], gap: theme.base.space[2] },
   action: { minHeight: 44, justifyContent: 'center', paddingHorizontal: theme.base.space[3] },
   actionText: { fontSize: theme.base.text.sm, color: theme.tokens.accent.base },

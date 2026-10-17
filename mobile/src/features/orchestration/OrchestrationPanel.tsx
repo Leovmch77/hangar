@@ -54,7 +54,7 @@ export function OrchestrationHeader({ title, serverLabel, onClose, historyAction
 }
 export function OrchestrationStatus({ error, retry }: { error: string | null; retry?: () => void }) {
   const { theme } = useUnistyles();
-  return <View style={styles.status}>{error ? <><Text style={styles.warning} accessibilityRole="alert">{m.orq_panel_fetch_error({ error })}</Text>{retry ? <Pressable onPress={retry} accessibilityRole="button" accessibilityLabel={m.orq_panel_retry()}><Text style={[styles.text, styles.action]}>{m.orq_panel_retry()}</Text></Pressable> : null}</> : <><ActivityIndicator color={theme.tokens.text.muted} /><Text style={styles.note}>{m.orq_panel_loading()}</Text></>}</View>;
+  return <View style={styles.status}>{error ? <><Text style={styles.warning} accessibilityRole="alert">{m.orq_mobile_load_error()}</Text><Text style={styles.note}>{error}</Text>{retry ? <Pressable onPress={retry} accessibilityRole="button" accessibilityLabel={m.orq_panel_retry()}><Text style={[styles.text, styles.action]}>{m.orq_panel_retry()}</Text></Pressable> : null}</> : <><ActivityIndicator color={theme.tokens.text.muted} /><Text style={styles.note}>{m.orq_panel_loading()}</Text></>}</View>;
 }
 export function OrchestrationPanel() {
   const params = useLocalSearchParams<{ server: string; name: string }>();
@@ -154,9 +154,9 @@ export function OrchestrationContent({ panel, history = false, live = NO_LIVE, o
     if (panel.metadata) {
       out.push({ key: 'metadata', text: panel.metadata.title, detail: panel.metadata.repo, heading: true });
       text('plan', m.orq_history_plan({ path: panel.metadata.plan.trim() ? panel.metadata.plan : '—' }));
-      if (panel.metadata.error) text('metadata-error', panel.metadata.error, undefined, true);
+      if (panel.metadata.error) text('metadata-error', m.orq_mobile_metadata_read_error(), panel.metadata.error, true);
     }
-    panel.errors.forEach((error, index) => text(`error-${index}`, m.orq_panel_file_error(error), undefined, true));
+    panel.errors.forEach((error, index) => text(`error-${index}`, m.orq_mobile_file_read_error({ file: error.file }), error.error, true));
     if (panel.empty) { text('empty', m.orq_panel_empty()); return out; }
     const allCollapsed = collapsed.size === SECTIONS.length;
     action('collapse', allCollapsed ? m.orq_expand_all() : m.orq_collapse_all(), () => setCollapsed(allCollapsed ? new Set() : new Set(SECTIONS)));
