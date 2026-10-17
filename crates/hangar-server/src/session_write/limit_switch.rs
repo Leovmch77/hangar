@@ -100,10 +100,14 @@ const CONTINUE_CHECKS:usize = 30;
 /// Vai à sessão pela fila, depois de reaberta: sem ele a conversa ficaria parada no aviso de limite.
 pub const CONTINUE:&str = "O limite de uso da conta anterior acabou e esta sessão foi reaberta em outra conta. Continue de onde parou.";
 
+/// A entrada do recado na fila: gravada antes da reabertura, mais velha que a vida nova que a entrega. Sem
+/// `pre_transcript` a vida nova só entrega o que nasceu depois dela, e o recado ficaria parado.
+pub fn continue_append(id:&str,text:&str) -> Action { Action::Append { text:text.into(),delivered:false,ts:None,pre_transcript:true,entry_id:Some(id.to_owned()) } }
+
 /// Grava `text` na fila durável da sessão, na frente das que esperam. Devolve o id da entrada.
 pub async fn enqueue_first(runtime:&RuntimeRegistry,name:&str,text:&str) -> Result<String,crate::runtime::protocol::RuntimeError> {
     let id = crate::mods::state::random_hex(16);
-    runtime.queue_action(name,format!("limit-continue:{id}"),Action::Append { text:text.into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(id.clone()) }).await?;
+    runtime.queue_action(name,format!("limit-continue:{id}"),continue_append(&id,text)).await?;
     runtime.queue_action(name,format!("limit-continue-first:{id}"),Action::Promote { entry_id:id.clone() }).await?;
     Ok(id)
 }
@@ -561,6 +565,15 @@ mod tests {
         Switcher::default().handle(&fake,hit("/a",2000.0)).await;
         assert_eq!(fake.log(),vec![format!("enqueue {CONTINUE}"),"reopen /c".into(),"release".into()]);
         assert_eq!(fake.diary(),vec!["switched","limit_switch_continue_delivered"]);
+    }
+
+    /// O recado entra na fila antes da reabertura: a vida nova, criada depois, ainda o entrega.
+    #[test]
+    fn the_continue_note_queued_before_the_reopen_is_delivered_by_the_new_life() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = crate::runtime::queue::Store::open(&dir.path().join("state.json"),dir.path(),crate::runtime::queue::State::new("k",1,"s",vec![])).unwrap();
+        store.exec(1,"append",crate::runtime::protocol::ClockSample { monotonic_s:0.0,epoch_s:100.0 },continue_append("c1",CONTINUE)).unwrap();
+        assert_eq!(crate::runtime::queue::waiting_ids(store.state(),110.0),vec!["c1".to_owned()],"a vida nova nasceu 10 s depois");
     }
 
     /// "Recebeu o recado" só com a entrega confirmada; sem ela, o diário diz que está na fila e a fila é drenada de novo.
