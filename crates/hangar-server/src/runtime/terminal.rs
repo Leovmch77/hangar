@@ -907,6 +907,31 @@ impl Executor {
         Ok(result)
     }
 
+    /// O seletor do `/model` (`model_picker::drive`), com o payload já validado pela rota. Fica no diário
+    /// como a troca de modo: o mesmo ID repetido responde o que ficou, sem digitar de novo.
+    async fn model_effort(&mut self,id:&str,payload:Value)->Result<RuntimeReply,RuntimeError> {
+        let original=json!({"operation_id":id,"kind":"set_model_effort","payload":payload});
+        let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
+        if state.generation!=self.target.generation {return Err(error("runtime_generation"));}
+        if let Some(old)=state.operations.get(id) {
+            if old.payload!=original {return Err(error("operation_payload"));}
+            return serde_json::from_value(old.result.clone()).or_else(|_|Ok(reply(id,Disposition::Unknown,json!({"detail":"resultado incerto; confira o terminal da sessão","error_code":"recovered_operation"}))));
+        }
+        // O código que o app já conhece da recusa do empréstimo do Python.
+        if self.loaned() || self.held() || self.cleared(&state) {
+            return Err(RuntimeError::new("erro_opcao_nao_convergiu","o terminal da sessão está ocupado com outra operação; tente de novo"));
+        }
+        let driver=TerminalDriver::new(self.target.binding.clone(),self.services(id,id,""),self.options.io.clone(),self.options.limits.clone());
+        self.action(Action::Prepare {id:id.into(),payload:original,entry_id:None}).await?;
+        self.action(Action::BeginDispatch {id:id.into(),wire_id:format!("model:{}:{id}",self.target.generation),staged:false}).await?;
+        let result=match crate::model_picker::drive(&driver,payload["model"].as_str(),payload["effort"].as_str(),payload["scope"]=="default").await {
+            Ok(value)=>reply(id,Disposition::Accepted,value),
+            Err(refusal)=>reply(id,if refusal.uncertain {Disposition::Unknown} else {Disposition::Rejected},json!({"detail":refusal.detail,"error_code":refusal.code})),
+        };
+        self.action(Action::Finish {id:id.into(),status:status(result.disposition),result:serde_json::to_value(&result).unwrap()}).await?;
+        Ok(result)
+    }
+
     /// `steer`: o "Orientar" de uma entrada, que passa pelo turno em curso em vez de esperar o Claude parar.
     async fn execute(&mut self,id:&str,kind:&str,payload:Value,entry:Option<String>,steer:bool)->Result<RuntimeReply,RuntimeError> {
         if !valid_operation_id(id) {return Err(error("operation_id"));}
@@ -930,6 +955,7 @@ impl Executor {
             return Ok(reply(id,Disposition::Accepted,json!({"idle":true,"conversation":self.target.binding.conversation})));
         }
         if matches!(kind,"permission_modes"|"set_permission_mode") {return self.permission(id,kind,payload).await;}
+        if kind=="set_model_effort" {return self.model_effort(id,payload).await;}
         validate(kind,&payload)?;
         let requested=json!({"operation_id":id,"kind":kind,"payload":payload});
         let mut original=requested.clone();

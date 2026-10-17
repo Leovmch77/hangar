@@ -440,7 +440,7 @@ async def _codex_rust_port(name: str, request: Request):
         # Idem para a ponte do Claude: mesmo critério de provedor das rotas (`info.provider`).
         # O painel da fila (`queue/...`) é do Rust também: o Python só repassa.
         rota = route.split("?")[0]
-        if reply is None and (rota in {"answer", "select", "select/submit", "permission-mode", "permission-modes"} or rota.startswith("queue/")) \
+        if reply is None and (rota in {"answer", "select", "select/submit", "permission-mode", "permission-modes", "model-effort"} or rota.startswith("queue/")) \
                 and getattr(await _cached_info(name), "provider", "claude") == "claude":
             reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body)
         if reply:
@@ -1930,13 +1930,6 @@ class TermInputBody(_StrictBody):
     text: str | None = None
     key: str | None = None
 
-
-class ModelEffortBody(_StrictBody):
-    # ambos opcionais: so esforco (sem modelo) ainda dirige o picker do /model, deixando o
-    # modelo na linha atual. scope: 'session' (aperta `s`) ou 'default' (aperta Enter).
-    model: str | None = None
-    effort: str | None = None
-    scope: Literal["session", "default"] = "session"
 
 
 @app.get("/api/whoami", dependencies=[Depends(require_auth)])
@@ -8340,31 +8333,10 @@ def answer(name: str, body: AnswerBody):
     return {"ok": True, "fallback": fallback}
 
 
-@app.post("/api/sessions/{name}/model-effort", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
-async def model_effort(name: str, body: ModelEffortBody):
-    info = await _cached_info(name)
-    if info and info.engine_account:
-        # A conta ChatGPT fixa troca modelo e esforço reabrindo a sessão: é do Rust.
-        raise registry_mod.SessionOpenNeedsRust()
-    if _headless(name):
-        if _loop_servidor is None or not _loop_servidor.is_running():
-            raise HTTPException(503, detail=erro("erro_modelo_indisponivel", "servidor sem loop pra aplicar"))
-        try:
-            model_args.validar("claude", body.model, body.effort, None)
-        except ValueError as e:
-            raise HTTPException(422, str(e))
-        try:
-            await asyncio.wait_for(get_adapter(CLAUDE_HEADLESS).set_model(name, body.model, body.effort), 40)
-        except Exception as e:
-            raise HTTPException(409, detail=erro("erro_modelo_indisponivel", f"não consegui trocar: {e}"))
-        return {"ok": True, "scope": "session", "result": None}
-    await asyncio.to_thread(_recusa_se_painel_aberto, name)
-    try:
-        return await asyncio.to_thread(terminal.set_model_effort, name, body.model, body.effort, body.scope)
-    except PickerError as e:
-        raise HTTPException(e.status, e.detail)
-    except ValueError as e:
-        raise HTTPException(422, str(e))
+@app.post("/api/sessions/{name}/model-effort", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
+async def model_effort(name: str):
+    # Trocar modelo e esforço é do Rust (seletor do `/model` no ator do terminal, controle no sem terminal).
+    raise HTTPException(503, detail=erro("model_effort_needs_rust_server", "trocar modelo e esforço precisa do servidor Rust"))
 
 
 # ── Modo de permissão em sessão viva (Task 5) ─────────────────────────────────────────

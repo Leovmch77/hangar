@@ -213,7 +213,7 @@ async fn cano(sink: Arc<std::sync::Mutex<Vec<Value>>>) -> String {
 
 /// `calls` conta quantas vezes o ator pediu o serviço de plugin ao Python (a permissão segurada vai
 /// por ele); um contador por política, para os testes em paralelo não se contarem.
-async fn policy(calls: Arc<std::sync::atomic::AtomicUsize>) -> std::net::SocketAddr {
+pub(crate) async fn policy(calls: Arc<std::sync::atomic::AtomicUsize>) -> std::net::SocketAddr {
     use tokio::io::AsyncReadExt;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

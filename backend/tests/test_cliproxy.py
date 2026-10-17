@@ -83,12 +83,12 @@ def test_unassociated_proxy_accounts_have_visible_empty_error(cli, tmp_path, mon
     assert engine["cliproxy_error"]
 
 
-@pytest.mark.parametrize("route,body", [
-    ("model-effort", {"model": "gpt-5.5", "scope": "default"}),
-    ("model-effort", {"effort": "high", "scope": "session"}),
-    ("engine/model", {"model": "gpt-5.5[1m]"}),
+@pytest.mark.parametrize("route,body,code", [
+    ("model-effort", {"model": "gpt-5.5", "scope": "default"}, "model_effort_needs_rust_server"),
+    ("model-effort", {"effort": "high", "scope": "session"}, "model_effort_needs_rust_server"),
+    ("engine/model", {"model": "gpt-5.5[1m]"}, "session_open_needs_rust_server"),
 ])
-def test_fixed_session_model_changes_reopen_in_rust(cli, tmp_path, monkeypatch, route, body):
+def test_fixed_session_model_changes_reopen_in_rust(cli, tmp_path, monkeypatch, route, body, code):
     # A conta ChatGPT fixa troca modelo e esforço reabrindo: nada é aplicado no pane nem no global.
     from app import api
     from app.models import SessionInfo
@@ -100,7 +100,20 @@ def test_fixed_session_model_changes_reopen_in_rust(cli, tmp_path, monkeypatch, 
     monkeypatch.setattr(api.terminal, "set_engine_model", apply)
     response = cli.post(f"/api/sessions/fixed/{route}", headers=AUTH, json=body)
     assert response.status_code == 503, response.text
-    assert response.json()["detail"]["code"] == "session_open_needs_rust_server"
+    assert response.json()["detail"]["code"] == code
+    apply.assert_not_called()
+
+
+def test_model_effort_of_any_claude_needs_the_rust_server(cli, monkeypatch):
+    # Trocar modelo e esforço é do Rust, com e sem terminal: sem ele, o código próprio e nenhuma tecla.
+    from app import api
+    from app.models import SessionInfo
+    monkeypatch.setattr(api, "_cached_info", AsyncMock(return_value=SessionInfo(name="cc")))
+    apply = MagicMock()
+    monkeypatch.setattr(api.terminal, "set_model_effort", apply)
+    response = cli.post("/api/sessions/cc/model-effort", headers=AUTH, json={"model": "sonnet"})
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"]["code"] == "model_effort_needs_rust_server"
     apply.assert_not_called()
 
 

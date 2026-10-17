@@ -1,8 +1,8 @@
 //! O Claude num motor do CLIProxyAPI local com conta ChatGPT fixa: trocar a conta (`POST /conta` com
 //! `engine_account`), o modelo (`/engine/model`), o esforço (`/model-effort`) e o Fast (`/service-tier`)
-//! reabre a mesma conversa pelo spec com a mudança, como o `_trocar_conta` do Python. Sessão sem conta
-//! fixa (o `/model` digitado no terminal, o `set_model` do sem terminal) e as outras sessões seguem ao
-//! Python ou ao Codex como chegaram.
+//! reabre a mesma conversa pelo spec com a mudança, como o `_trocar_conta` do Python. Sem conta fixa, o
+//! `/model-effort` é do `model_effort`; o `/engine/model` e as outras sessões seguem ao Python ou ao
+//! Codex como chegaram.
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -119,9 +119,24 @@ pub async fn model(State(st):State<Arc<AppState>>,ConnectInfo(peer):ConnectInfo<
     reply(Some(&headers),status,body)
 }
 
-/// `POST /model-effort` da conta fixa: só a sessão (`scope: session`); o modelo vai pelo `/engine/model`.
+/// `POST /model-effort`. Conta fixa: só a sessão (`scope: session`), reabrindo; o modelo vai pelo
+/// `/engine/model`. As outras sessões Claude, pelo seletor do `/model` ou pelo ator sem terminal
+/// (`model_effort`).
 pub async fn effort(State(st):State<Arc<AppState>>,ConnectInfo(peer):ConnectInfo<SocketAddr>,req:Request) -> Response {
-    let (runtime,name,spec,body,headers)=match claude_engine(&st,peer,req).await {Ok(found)=>found,Err(response)=>return response};
+    let (fwd,owner)=gate(&st,peer,&req);
+    let runtime=st.state.runtime.get().cloned();
+    let (Some(runtime),true,Some(name))=(runtime,owner,session_name(req.uri().path())) else {return crate::routes::pass(&st,req,&fwd).await};
+    let (parts,body)=req.into_parts();
+    let Ok(bytes)=to_bytes(body,BODY_LIMIT).await else {return too_large(&parts.headers)};
+    let spec=match runtime.claude_spec(&name).await {
+        Some(Ok(spec)) if matches!(&spec.account,Account::Engine { account:Some(_),.. })=>spec,
+        _=>return super::model_effort::serve(&st,runtime,name,&parts.headers,&bytes).await,
+    };
+    let Ok(body)=serde_json::from_slice::<Value>(&bytes) else {return super::invalid_body(&parts.headers)};
+    if st.term.is_active(&name) {
+        return reply(Some(&parts.headers),StatusCode::CONFLICT,detail_body("erro_terminal_aberto","Terminal aberto nesta sessao. Feche o painel pra responder por aqui.",json!({})));
+    }
+    let headers=parts.headers;
     let (Ok(model),Ok(effort))=(text(&body,"model"),text(&body,"effort")) else {return super::invalid_body(&headers)};
     if body.get("scope").is_some_and(|scope|scope!="session") {
         return reply(Some(&headers),StatusCode::CONFLICT,detail_body("erro_cliproxy_modelo_rota","a conta ChatGPT fixa não altera o padrão global de modelo ou esforço",json!({})));

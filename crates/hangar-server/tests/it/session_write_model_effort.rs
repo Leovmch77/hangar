@@ -1,0 +1,158 @@
+//! `POST /api/sessions/{name}/model-effort` do Claude sem conta ChatGPT fixa: o Rust atende com e sem
+//! terminal, com as respostas da rota Python, e nada chega ao Python.
+use std::sync::Arc;
+use std::time::Duration;
+
+use hangar_server::routes::AppState;
+use hangar_server::runtime::gateway::RuntimeRegistry;
+use hangar_server::term::{TermConfig, Terms};
+use serde_json::{Value, json};
+
+use crate::fake::{self, Fake, SECRET};
+use crate::session_write_control::{open_headless, policy, send};
+#[cfg(unix)]
+use crate::session_write_control::{keys_sent, open_terminal};
+
+async fn registry(terms: &Arc<Terms>) -> Arc<RuntimeRegistry> {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    Arc::new(RuntimeRegistry::new(policy(calls).await, "secret-test".into(), "instance-test".into())
+        .with_processes(Arc::new(crate::runtime_open::RecipeProcesses("sid-1"))).with_terms(terms.clone()))
+}
+
+/// O servidor do dono; `panel`: a sessão com o painel de terminal aberto.
+async fn serve(registry: Arc<RuntimeRegistry>, terms: Arc<Terms>, panel: Option<&str>, gate_wait: Duration) -> (Arc<Fake>, std::net::SocketAddr) {
+    let (python, upstream) = fake::spawn_fake().await;
+    let mut state = AppState::new(fake::config(upstream, "127.0.0.1"));
+    state.term = terms;
+    state.write_gate_wait = gate_wait;
+    if let Some(name) = panel { state.term.mark_open_for_test(name, &state.diag).await; }
+    assert!(state.state.runtime.set(registry).is_ok());
+    (python, fake::spawn_state(state).await)
+}
+
+async fn post(server: std::net::SocketAddr, name: &str, body: &str) -> (u16, Value) { send(server, "POST", &format!("{name}/model-effort"), body).await }
+
+/// B1: corpo estrito (campo a mais, `scope` fora da lista, tipo errado) é 422 do Rust.
+#[tokio::test]
+async fn model_effort_b1_strict_body_is_a_rust_422() {
+    let (dir, terms) = (tempfile::tempdir().unwrap(), Arc::new(Terms::new(TermConfig::default())));
+    let registry = registry(&terms).await;
+    open_headless(&registry, dir.path(), "s").await;
+    let (python, server) = serve(registry, terms, None, Duration::from_secs(5)).await;
+    for body in [r#"{"model":"sonnet","x":1}"#, r#"{"model":"sonnet","scope":"global"}"#, r#"{"model":5}"#, "[]", "x"] {
+        let (status, reply) = post(server, "s", body).await;
+        assert_eq!((status, reply["detail"]["code"].as_str()), (422, Some("erro_corpo_invalido")), "{body}: {reply}");
+    }
+    assert_eq!(python.hits_to("/api/sessions/s/model-effort"), 0);
+}
+
+/// B5: sem terminal, a validação do `model_args` em texto cru e a troca pelo ator, `scope` ignorado.
+#[tokio::test]
+async fn model_effort_b5_headless_validates_and_sets_through_the_actor() {
+    let (dir, terms) = (tempfile::tempdir().unwrap(), Arc::new(Terms::new(TermConfig::default())));
+    let registry = registry(&terms).await;
+    let sink = open_headless(&registry, dir.path(), "s").await;
+    let (python, server) = serve(registry, terms, None, Duration::from_secs(5)).await;
+    assert_eq!(post(server, "s", r#"{"model":"bad id!"}"#).await,
+        (422, json!({"detail": "model: use letras, números e . _ : / - ~ [ ] (até 128 caracteres, sem começar com -)"})));
+    assert_eq!(post(server, "s", r#"{"effort":"ultracode"}"#).await, (422, json!({"detail": "effort: use um de low, medium, high, xhigh, max"})));
+    // Nada pedido passa do `validar` e o ator recusa: o 409 do `except` da rota Python.
+    let (status, reply) = post(server, "s", "{}").await;
+    assert_eq!((status, reply["detail"]["code"].as_str()), (409, Some("erro_modelo_indisponivel")), "{reply}");
+    assert!(reply["detail"]["msg"].as_str().unwrap().starts_with("não consegui trocar: "), "{reply}");
+    assert_eq!(post(server, "s", r#"{"model":"sonnet","scope":"default"}"#).await, (200, json!({"ok": true, "scope": "session", "result": null})));
+    let frames: Vec<Value> = sink.lock().unwrap().iter().filter_map(|e| serde_json::from_str(e["frame"].as_str()?).ok()).collect();
+    assert!(frames.iter().any(|f| f["request"]["subtype"] == "set_model" && f["request"]["model"] == "sonnet"), "{frames:?}");
+    assert_eq!(python.hits_to("/api/sessions/s/model-effort"), 0);
+}
+
+/// B6: painel de terminal aberto recusa antes de qualquer tecla.
+#[cfg(unix)]
+#[tokio::test]
+async fn model_effort_b6_open_terminal_panel_refuses() {
+    let (dir, terms) = (tempfile::tempdir().unwrap(), Arc::new(Terms::new(TermConfig::default())));
+    let registry = registry(&terms).await;
+    let log = open_terminal(&registry, dir.path(), "t").await;
+    let (python, server) = serve(registry, terms, Some("t"), Duration::from_secs(5)).await;
+    let (status, reply) = post(server, "t", r#"{"model":"sonnet"}"#).await;
+    assert_eq!((status, reply["detail"]["code"].as_str(), reply["detail"]["msg"].as_str()),
+        (409, Some("erro_terminal_aberto"), Some("Terminal aberto nesta sessao. Feche o painel pra responder por aqui.")), "{reply}");
+    assert_eq!(keys_sent(&log), 0);
+    assert_eq!(python.hits_to("/api/sessions/t/model-effort"), 0);
+}
+
+/// B8 e B9: sessão que não existe: a validação vem antes, depois "sessao nao esta viva".
+#[tokio::test]
+async fn model_effort_b8_b9_unknown_session_after_validation() {
+    let terms = Arc::new(Terms::new(TermConfig::default()));
+    let (python, server) = serve(registry(&terms).await, terms, None, Duration::from_secs(5)).await;
+    assert_eq!(post(server, "nada", r#"{"scope":"session"}"#).await, (422, json!({"detail": "must provide model or effort"})));
+    assert_eq!(post(server, "nada", r#"{"model":"sonnet"}"#).await, (409, json!({"detail": "sessao nao esta viva"})));
+    assert_eq!(python.hits_to("/api/sessions/nada/model-effort"), 0);
+}
+
+/// B9: com terminal, modelo torto é 422 antes do terminal.
+#[cfg(unix)]
+#[tokio::test]
+async fn model_effort_b9_malformed_model_never_types() {
+    let (dir, terms) = (tempfile::tempdir().unwrap(), Arc::new(Terms::new(TermConfig::default())));
+    let registry = registry(&terms).await;
+    let log = open_terminal(&registry, dir.path(), "t").await;
+    let (_python, server) = serve(registry, terms, None, Duration::from_secs(5)).await;
+    assert_eq!(post(server, "t", r#"{"model":"opus; rm"}"#).await, (422, json!({"detail": "unknown model 'opus; rm'"})));
+    assert_eq!(post(server, "t", r#"{"effort":"turbo"}"#).await, (422, json!({"detail": "unknown effort 'turbo'"})));
+    assert_eq!(keys_sent(&log), 0);
+}
+
+/// B13 e B21 pela rota: o ator do terminal dirige o seletor e a recusa sai em texto cru, como no Python.
+#[cfg(unix)]
+#[tokio::test]
+async fn model_effort_b13_b21_terminal_route_drives_the_actor() {
+    let (dir, terms) = (tempfile::tempdir().unwrap(), Arc::new(Terms::new(TermConfig::default())));
+    let registry = registry(&terms).await;
+    let log = open_terminal(&registry, dir.path(), "t").await;
+    let (python, server) = serve(registry, terms, None, Duration::from_secs(5)).await;
+    assert_eq!(post(server, "t", r#"{"model":"sonnet"}"#).await, (409, json!({"detail": "model picker did not open"})));
+    // `/model`, Enter, o 2º Enter e o Esc.
+    assert_eq!(keys_sent(&log), 4);
+    assert_eq!(python.hits_to("/api/sessions/t/model-effort"), 0);
+}
+
+/// B3: troca de conversa em curso (porta fechada) recusa com o código de sessão ocupada.
+#[tokio::test]
+async fn model_effort_b3_transfer_in_progress_is_busy() {
+    let (dir, terms) = (tempfile::tempdir().unwrap(), Arc::new(Terms::new(TermConfig::default())));
+    let registry = registry(&terms).await;
+    open_headless(&registry, dir.path(), "s").await;
+    registry.ingress().close("s", Duration::ZERO).await.unwrap();
+    let (python, server) = serve(registry, terms, None, Duration::from_millis(100)).await;
+    let (status, reply) = post(server, "s", r#"{"model":"sonnet"}"#).await;
+    assert_eq!((status, reply["detail"]["code"].as_str()), (409, Some("session_transfer_busy")), "{reply}");
+    assert_eq!(python.hits_to("/api/sessions/s/model-effort"), 0);
+}
+
+/// B2: convidado e Connect chegam pela ponte privada do Claude e recebem a resposta do Rust.
+#[tokio::test]
+async fn model_effort_b2_private_bridge_serves_the_route() {
+    let (dir, terms) = (tempfile::tempdir().unwrap(), Arc::new(Terms::new(TermConfig::default())));
+    let registry = registry(&terms).await;
+    open_headless(&registry, dir.path(), "s").await;
+    let (python, upstream) = fake::spawn_fake().await;
+    let mut state = AppState::new(fake::config(upstream, "127.0.0.1"));
+    state.term = terms;
+    assert!(state.state.runtime.set(registry).is_ok());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let private = listener.local_addr().unwrap();
+    let router = hangar_server::routes::terminal_router(Arc::new(state));
+    tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap() });
+    let call = |name: &'static str, body: &'static str| async move {
+        let response = fake::client().post(format!("http://{private}/__hangar_server/claude/{name}/model-effort"))
+            .header("content-type", "application/json").header("x-hangar-internal", SECRET).body(body).send().await.unwrap();
+        let status = response.status().as_u16();
+        (status, serde_json::from_str::<Value>(&response.text().await.unwrap()).unwrap_or(Value::Null))
+    };
+    assert_eq!(call("s", r#"{"model":"sonnet"}"#).await, (200, json!({"ok": true, "scope": "session", "result": null})));
+    assert_eq!(call("s", r#"{"model":"bad id!"}"#).await.0, 422);
+    assert_eq!(call("nada", r#"{"model":"sonnet"}"#).await.0, 421, "sessão que o Rust não tem segue ao Python");
+    assert_eq!(python.hits_to("/api/sessions/s/model-effort"), 0);
+}

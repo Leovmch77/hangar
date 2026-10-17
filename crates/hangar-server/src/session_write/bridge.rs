@@ -37,8 +37,8 @@ fn as_owner(req: &mut Request, name: &str, rest: &str) -> bool {
     true
 }
 
-/// `/__hangar_server/claude/<nome>/<rota>`: `POST` em `answer`, `select`, `select/submit`, `input` e
-/// `permission-mode`, `GET` em `permission-modes`, e as rotas do painel da fila (`DELETE`/`PATCH
+/// `/__hangar_server/claude/<nome>/<rota>`: `POST` em `answer`, `select`, `select/submit`, `input`,
+/// `permission-mode` e `model-effort`, `GET` em `permission-modes`, e as rotas do painel da fila (`DELETE`/`PATCH
 /// queue/<id>`, `POST queue/reorder` e `queue/<id>/steer`), de sessão Claude com entrada no Rust, pela
 /// mesma rota do dono. Outra rota, método ou sessão: 421.
 pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, mut req: Request) -> Response {
@@ -51,15 +51,15 @@ pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     }
     let queue = control::queue_route(req.method(), &rest);
     let allowed = queue.is_some() || match *req.method() {
-        Method::POST => matches!(rest.as_str(), "answer" | "select" | "select/submit" | "permission-mode" | "input"),
+        Method::POST => matches!(rest.as_str(), "answer" | "select" | "select/submit" | "permission-mode" | "input" | "model-effort"),
         Method::GET => rest == "permission-modes",
         _ => false,
     };
     if !allowed { return not_ours(); }
     let Some(runtime) = st.state.runtime.get().cloned() else { return not_ours() };
     // Texto que nasce no Python (grupo, par, MCP) para o Claude com terminal: o Rust o adota aqui, e a
-    // fila da sessão é uma só.
-    if rest == "input" && !runtime.has_entry(None, &name).await {
+    // fila da sessão é uma só. O seletor do `/model` do convidado também só existe no ator.
+    if matches!(rest.as_str(), "input" | "model-effort") && !runtime.has_entry(None, &name).await {
         match runtime.adopt_now(&name).await {
             None => return not_ours(),
             Some(Err(error)) => return super::detail(StatusCode::SERVICE_UNAVAILABLE, &error.code, &error.message, json!({})),
@@ -76,6 +76,7 @@ pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         "permission-mode" => permissions::set_mode(s, c, req).await,
         "permission-modes" => permissions::modes(s, c, req).await,
         "input" => super::input::input(s, c, req).await,
+        "model-effort" => super::engine::effort(s, c, req).await,
         _ => control::select_submit(s, c, req).await,
     }
 }

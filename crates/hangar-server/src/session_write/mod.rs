@@ -15,6 +15,7 @@ pub mod control;
 pub mod engine;
 pub mod input;
 pub mod limit_switch;
+mod model_effort;
 pub mod permissions;
 pub mod relaunch;
 pub mod resume;
