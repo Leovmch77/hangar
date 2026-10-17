@@ -8608,5 +8608,14 @@
   "composer_colar": "Colar",
   "composer_colar_vazio": "A área de transferência está vazia.",
   "composer_colar_falhou": "Não foi possível ler a área de transferência.",
-  "machine_import_warning_short": "Busca automática de máquinas: sem resposta de {hosts}. As salvas continuam iguais."
+  "machine_import_warning_short": "Busca automática de máquinas: sem resposta de {hosts}. As salvas continuam iguais.",
+  "mobile_git_publish_title": "Publicar os commits no remoto?",
+  "mobile_git_publish_body": "{action} vai enviar os commits da branch desta sessão. Confira os arquivos e a mensagem antes de publicar.",
+  "mobile_git_checkout_title": "Trocar para a branch {branch}?",
+  "mobile_git_branch_body": "Isso muda o código da pasta em que esta sessão está trabalhando.",
+  "mobile_git_operation_failed": "A operação Git falhou.",
+  "mobile_git_status": "Status",
+  "mobile_git_context_changed": "A sessão, a pasta Git ou a branch mudou ou não está disponível. A operação foi interrompida. Confira o repositório atualizado antes de tentar de novo.",
+  "mobile_git_read_timeout": "A leitura Git não respondeu em 20 s. Releia para tentar de novo.",
+  "mobile_git_write_timeout": "A operação Git não respondeu em 60 s. O resultado é incerto: ela pode ter sido concluída no servidor. O repositório será relido; confira antes de repetir."
 }

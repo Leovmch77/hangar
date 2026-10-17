@@ -71,7 +71,7 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
   const acoesMenu = useMemo(
     () => fora ? [{ id: 'leave', title: m.pair_leave_outside({ dono: fora.owner }), attributes: { destructive: true } }] : [
       ...(orq ? [] : [{ id: 'rename', title: m.sessao_renomear(), image: Platform.select({ ios: 'pencil', android: 'ic_menu_edit' }) }]),
-      ...(s.cwd ? [{ id: 'git', title: 'Git', image: Platform.select({ ios: 'arrow.triangle.branch' }) }] : []),
+      ...(s.cwd && !s.serverInvite ? [{ id: 'git', title: m.sessao_git(), image: Platform.select({ ios: 'arrow.triangle.branch' }) }] : []),
       ...(parAtivo ? [
         { id: 'pair-invite', title: m.native_par_convidar(), image: Platform.select({ ios: 'link' }) },
         { id: 'pair-accept', title: m.native_par_menu(), image: Platform.select({ ios: 'link.badge.plus' }) },
