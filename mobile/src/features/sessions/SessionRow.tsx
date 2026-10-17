@@ -221,7 +221,10 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
         {/* A pasta some quando repete o nome; a worktree tem seu próprio chip abaixo. */}
         {meta.length || engineLabel || mostrarServidor ? (
           <View style={styles.metaRow}>
-            {mostrarServidor ? <Text style={[styles.meta, styles.metaRest, { color: s.serverColor }]} numberOfLines={1}>{s.serverLabel}{meta.length || engineLabel ? ' · ' : ''}</Text> : null}
+            {mostrarServidor ? <>
+              <Text style={[styles.meta, styles.metaRest, { color: s.serverColor }]} numberOfLines={1}>{s.serverLabel}</Text>
+              {meta.length || engineLabel ? <Text style={[styles.meta, styles.metaSeparator, { color: s.serverColor }]}>{' · '}</Text> : null}
+            </> : null}
             {engineLabel ? (
               <View style={styles.engine}>
                 <Icon name="Settings" size={12} color={theme.tokens.accent.base} />
@@ -285,9 +288,10 @@ const styles = StyleSheet.create((theme) => ({
   tempo: { marginLeft: 'auto', paddingLeft: 4, flexShrink: 0, fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
   sub: { fontSize: theme.base.text.sm, lineHeight: 20 },
   metaRow: { flexDirection: 'row', alignItems: 'center', minWidth: 0 },
-  engine: { flexDirection: 'row', alignItems: 'center', gap: 4, minWidth: 0, flexShrink: 1 },
-  engineText: { fontWeight: '600', flexShrink: 1 },
+  engine: { flexDirection: 'row', alignItems: 'center', gap: 4, minWidth: 0, flexShrink: 0 },
+  engineText: { fontWeight: '600', flexShrink: 0 },
   metaRest: { flexShrink: 1 },
+  metaSeparator: { flexShrink: 0 },
   meta: { fontSize: theme.base.text.xs, lineHeight: 18 },
   metaTxt: { fontSize: theme.base.text.xs },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 },
