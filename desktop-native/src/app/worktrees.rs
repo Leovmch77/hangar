@@ -1,10 +1,11 @@
 //! Worktrees: página própria no molde de Custos. Contadores, onde está o disco e as worktrees de cada repositório numa
 //! tabela; ao lado, o painel da que foi aberta (pela lista ou pelo chip da linha da conversa) com o que se perde ao apagá-la.
 use super::*;
-use super::costs::{card_plain, dec, empty_state, error_state, loading_state, note_box, page_frame, stack_bar, swatch};
+use super::costs::{card_plain, dec, empty_state, loading_state, note_box, page_frame, stack_bar, swatch};
 use super::device::Remote;
 use super::sidebar::Target;
 use gpui_kit::component::progress::Progress;
+use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -18,6 +19,8 @@ pub(super) struct BiggestDir { pub name: String, pub bytes: u64 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub(super) struct WorktreeStatus {
+    #[serde(skip)]
+    pub server: String,
     pub path: String,
     pub repo: String,
     pub exists: bool,
@@ -65,10 +68,19 @@ pub(super) struct WorktreeStatus {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-pub(super) struct WorktreeRepo { pub repo: String, pub worktrees: Vec<WorktreeStatus> }
+pub(super) struct WorktreeRepo { #[serde(skip)] pub server: String, pub repo: String, pub worktrees: Vec<WorktreeStatus> }
+
+impl WorktreeStatus {
+    fn id(&self) -> String { worktree_id(&self.server, &self.path) }
+}
+
+fn worktree_id(server: &str, path: &str) -> String { format!("{}:{server}{path}", server.len()) }
 
 #[derive(Clone, Debug, Deserialize)]
 struct WorktreeSnapshot { repos: Vec<WorktreeRepo>, #[serde(default)] warning: Option<String> }
+
+#[derive(Default)]
+struct MachineWorktrees { label: String, snapshot: Option<WorktreeSnapshot>, loading: bool, error: Option<String> }
 
 fn merge_notice(worktree: &WorktreeStatus) -> Option<String> {
     worktree.merge_problem.as_deref().filter(|problem| !problem.trim().is_empty()).map(|problem|
@@ -268,7 +280,7 @@ pub(super) enum WtDialog { Delete(String), Batch, Create }
 
 /// A confirmação do lote congela o que a pessoa viu: o lote apaga essas e só essas.
 /// `ready` sai sempre; de `with_changes` (alteração não commitada) só as marcadas em `picked`.
-pub(super) struct Batch { repo: String, ready: Vec<WorktreeStatus>, with_changes: Vec<WorktreeStatus>, picked: HashSet<String>, blocked: Vec<WorktreeStatus> }
+pub(super) struct Batch { server: String, repo: String, ready: Vec<WorktreeStatus>, with_changes: Vec<WorktreeStatus>, picked: HashSet<String>, blocked: Vec<WorktreeStatus> }
 
 impl Batch {
     fn chosen(&self) -> Vec<&WorktreeStatus> {
@@ -302,6 +314,8 @@ impl BatchRun {
 
 /// O diálogo "Nova worktree" de um repositório.
 pub(super) struct NewWorktree {
+    id: u64,
+    server: String,
     repo: String,
     existing_mode: bool,
     task: Entity<InputState>,
@@ -339,10 +353,13 @@ impl NewWorktree {
 
 #[derive(Default)]
 pub(super) struct Worktrees {
+    machines: HashMap<String, MachineWorktrees>,
+    server_filter: Option<String>,
     pub(super) view: Option<()>,
     pub(super) repos: Remote<Vec<WorktreeRepo>>,
     pub(super) cache: HashMap<String, WorktreeStatus>,
     pub(super) open: Option<String>,
+    panel_server: Option<String>,
     pub(super) detail: Remote<WorktreeStatus>,
     pub(super) delete_branch: bool,
     pub(super) deleting: bool,
@@ -360,17 +377,77 @@ pub(super) struct Worktrees {
     batch_run: Option<BatchRun>,
     batch_seq: u64,
     create: Option<NewWorktree>,
+    next_create_id: u64,
     /// Releitura marcada enquanto o backend mede o espaço de alguma.
     size_poll: bool,
     size_tries: u32,
     /// Repositórios cujo fetch falhou na última atualização.
     fetch_failed: Vec<String>,
-    discovery_incomplete: bool,
 }
 
 impl Worktrees {
-    pub(super) fn status(&self, path: &str) -> Option<&WorktreeStatus> { self.cache.get(path) }
+    pub(super) fn status(&self, server: &str, path: &str) -> Option<&WorktreeStatus> { self.cache.get(&worktree_id(server, path)) }
     fn busy(&self) -> bool { self.deleting || self.create.as_ref().is_some_and(|c| c.busy) }
+
+    fn forget(&mut self, w: &WorktreeStatus) {
+        self.cache.remove(&w.id());
+        if let Some(snapshot) = self.machines.get_mut(&w.server).and_then(|m| m.snapshot.as_mut()) {
+            for repo in &mut snapshot.repos { repo.worktrees.retain(|current| current.id() != w.id()); }
+        }
+        if let Some(Ok(repos)) = &mut self.repos.value {
+            for repo in repos { repo.worktrees.retain(|current| current.id() != w.id()); }
+        }
+    }
+
+    fn begin_machines(&mut self, machines: &[(String, String)]) -> u64 {
+        self.machines.retain(|key, _| machines.iter().any(|(wanted, _)| wanted == key));
+        self.cache.retain(|_, w| self.machines.contains_key(&w.server));
+        if self.server_filter.as_ref().is_some_and(|key| !self.machines.contains_key(key)) { self.server_filter = None; }
+        if self.panel_server.as_ref().is_some_and(|key| !self.machines.contains_key(key)) {
+            self.open = None;
+            self.panel_server = None;
+            self.detail.reset();
+        }
+        for (key, label) in machines {
+            let state = self.machines.entry(key.clone()).or_default();
+            state.label = label.clone();
+            state.loading = true;
+            state.error = None;
+        }
+        self.repos.start()
+    }
+
+    fn take_machine(&mut self, seq: u64, server: &str, result: Result<WorktreeSnapshot, String>) -> bool {
+        if seq != self.repos.seq { return false; }
+        let Some(machine) = self.machines.get_mut(server) else { return false };
+        machine.loading = false;
+        match result {
+            Err(error) => { machine.error = Some(error); }
+            Ok(mut snapshot) => {
+                for repo in &mut snapshot.repos {
+                    repo.server = server.into();
+                    for w in &mut repo.worktrees { w.server = server.into(); }
+                }
+                if snapshot.warning.as_deref() == Some("worktree_discovery_incomplete") {
+                    for repo in machine.snapshot.iter().flat_map(|s| &s.repos) {
+                        if snapshot.repos.iter().any(|r| r.repo == repo.repo) { continue; }
+                        let kept: Vec<_> = repo.worktrees.iter().filter(|w| self.cache.contains_key(&w.id())).cloned().collect();
+                        if !kept.is_empty() { snapshot.repos.push(WorktreeRepo { server: server.into(), repo: repo.repo.clone(), worktrees: kept }); }
+                    }
+                }
+                machine.error = None;
+                machine.snapshot = Some(snapshot);
+            }
+        }
+        let known: HashSet<String> = machine.snapshot.iter().flat_map(|s| &s.repos).flat_map(|r| &r.worktrees).map(WorktreeStatus::id).collect();
+        self.cache.retain(|id, w| w.server != server || known.contains(id));
+        let mut machines: Vec<_> = self.machines.iter().collect();
+        machines.sort_by(|(ka, a), (kb, b)| (&a.label, ka).cmp(&(&b.label, kb)));
+        let repos = machines.iter().filter(|(_, m)| m.error.is_none()).flat_map(|(_, m)| m.snapshot.iter().flat_map(|s| s.repos.clone())).collect();
+        self.take_list(seq, Ok(repos));
+        self.repos.loading = self.machines.values().any(|m| m.loading);
+        true
+    }
 
     /// Resposta velha não entra no cache: traria de volta uma worktree já apagada ou cobriria dado mais novo.
     fn take_list(&mut self, seq: u64, result: Result<Vec<WorktreeRepo>, String>) -> bool {
@@ -378,37 +455,24 @@ impl Worktrees {
         if let Some(Ok(repos)) = &self.repos.value {
             for w in repos.iter().flat_map(|r| &r.worktrees) {
                 // O painel e a confirmação de apagar leem o `detail`: lido só ao abrir, ficaria para trás da lista.
-                if !self.detail.loading && self.detail.ok().is_some_and(|d| d.path == w.path) { self.detail.value = Some(Ok(w.clone())); }
-                self.cache.insert(w.path.clone(), w.clone());
+                if !self.detail.loading && self.detail.ok().is_some_and(|d| d.id() == w.id()) { self.detail.value = Some(Ok(w.clone())); }
+                self.cache.insert(w.id(), w.clone());
             }
         }
         true
     }
 
-    fn take_snapshot(&mut self, seq: u64, result: Result<WorktreeSnapshot, String>) -> bool {
-        if seq != self.repos.seq { return false; }
-        match result {
-            Err(error) => self.take_list(seq, Err(error)),
-            Ok(mut snapshot) => {
-                self.discovery_incomplete = snapshot.warning.as_deref() == Some("worktree_discovery_incomplete");
-                // A descoberta parcial pode omitir repositórios; não desfaz uma remoção confirmada pelo cliente.
-                if self.discovery_incomplete {
-                    if let Some(previous) = self.repos.ok() {
-                        for repo in previous {
-                            if snapshot.repos.iter().any(|current| current.repo == repo.repo) { continue; }
-                            let kept: Vec<_> = repo.worktrees.iter().filter(|w| self.cache.contains_key(&w.path)).cloned().collect();
-                            if !kept.is_empty() { snapshot.repos.push(WorktreeRepo { repo: repo.repo.clone(), worktrees: kept }); }
-                        }
-                    }
-                }
-                self.take_list(seq, Ok(snapshot.repos))
-            }
-        }
-    }
-
     fn take_detail(&mut self, seq: u64, result: Result<WorktreeStatus, String>) -> bool {
         if !self.detail.finish(seq, result) { return false; }
-        if let Some(s) = self.detail.ok() { self.cache.insert(s.path.clone(), s.clone()); }
+        if let Some(s) = self.detail.ok() {
+            self.cache.insert(s.id(), s.clone());
+            if let Some(snapshot) = self.machines.get_mut(&s.server).and_then(|m| m.snapshot.as_mut()) {
+                for w in snapshot.repos.iter_mut().flat_map(|r| &mut r.worktrees).filter(|w| w.id() == s.id()) { *w = s.clone(); }
+            }
+            if let Some(Ok(repos)) = &mut self.repos.value {
+                for w in repos.iter_mut().flat_map(|r| &mut r.worktrees).filter(|w| w.id() == s.id()) { *w = s.clone(); }
+            }
+        }
         true
     }
 }
@@ -424,6 +488,38 @@ impl Render for DialogBody {
 }
 
 impl Hangar {
+    fn worktree_sources(&self) -> Vec<(String, String, Api)> {
+        let mut sources: Vec<_> = self.servers.iter().filter(|s| !s.disabled && !s.invite && !s.ephemeral)
+            .filter_map(|s| {
+                let key = super::servers::norm(&s.address);
+                self.machine_api(&key).or_else(|| Api::new(&s.address, &s.token).ok()).map(|api| (key, s.label.clone(), api))
+            }).collect();
+        if !self.active_invite() && sources.iter().all(|(key, _, _)| !self.is_active_key(key))
+            && let Some(api) = self.api.clone()
+            && self.servers.iter().all(|s| super::servers::norm(&s.address) != self.active_key()) {
+            sources.push((self.active_key(), super::servers::default_label(&api.identity()), api));
+        }
+        sources
+    }
+
+    fn worktree_api(&self, server: &str) -> Option<Api> {
+        self.worktree_sources().into_iter().find(|(key, _, _)| key == server).map(|(_, _, api)| api)
+    }
+
+    fn worktree_get(&mut self, server: &str, path: Vec<String>, query: Vec<(String, String)>, seconds: u64, cx: &mut Context<Self>,
+        done: impl FnOnce(&mut Self, Result<Value, Failure>, &mut Context<Self>) + 'static) {
+        let Some(api) = self.worktree_api(server) else { done(self, Err(Failure::local("connection_failed")), cx); return };
+        let task = self.runtime.spawn(async move {
+            let path: Vec<_> = path.iter().map(String::as_str).collect();
+            let query: Vec<_> = query.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            api.server_read(&path, &query, seconds).await
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await.unwrap_or_else(|_| Err(Failure::local("connection_failed")));
+            let _ = this.update(cx, |this, cx| done(this, result, cx));
+        }).detach();
+    }
+
     /// Abre a página (atalho ou botão); chamada de novo com ela aberta, fecha.
     pub(super) fn toggle_worktrees(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.worktrees.view.is_some() { self.close_worktrees(window, cx) } else { self.open_worktrees(window, cx) }
@@ -457,30 +553,52 @@ impl Hangar {
 
     /// Outra conexão: as worktrees eram do servidor anterior. Com a página aberta, relê do novo.
     pub(super) fn worktrees_reconnected(&mut self, cx: &mut Context<Self>) {
-        if self.worktrees.view.is_none() { self.worktrees = Default::default(); return; }
         self.worktrees.cache.clear();
         self.worktrees.repos.reset();
-        self.worktrees.discovery_incomplete = false;
+        self.worktrees.machines.clear();
+        self.worktrees.detail.reset();
+        self.worktrees.fetch.reset();
         self.worktrees.fetch_failed.clear();
         self.worktrees.open = None;
-        self.load_worktrees(false, cx);
+        if self.worktrees.view.is_some() { self.load_worktrees(false, cx); }
     }
 
     /// `then_fetch`: depois da primeira leitura, busca os remotos e relê, para "mesclada" valer contra a base atual.
     fn load_worktrees(&mut self, then_fetch: bool, cx: &mut Context<Self>) {
-        let seq = self.worktrees.repos.start();
-        self.server_get(vec!["worktrees".into()], vec![], 30, cx, move |this, result, cx| {
-            if seq != this.worktrees.repos.seq { return; }
-            let parsed = result.and_then(|v| serde_json::from_value::<WorktreeSnapshot>(v)
-                .map_err(|_| Failure::local("invalid_response")));
-            if let Ok(snapshot) = &parsed {
-                if then_fetch { this.fetch_worktrees(snapshot.repos.iter().map(|r| r.repo.clone()).collect(), cx); }
-                if snapshot.repos.iter().flat_map(|r| &r.worktrees).any(|w| w.size_pending) { this.poll_sizes(cx); }
-                else { this.worktrees.size_tries = 0; }
+        let sources = self.worktree_sources();
+        let machines = sources.iter().map(|(key, label, _)| (key.clone(), label.clone())).collect::<Vec<_>>();
+        let seq = self.worktrees.begin_machines(&machines);
+        if sources.is_empty() { self.worktrees.take_list(seq, Ok(Vec::new())); }
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for (key, _, api) in sources {
+            let tx = tx.clone();
+            self.runtime.spawn(async move {
+                let result = api.server_read(&["worktrees"], &[], 30).await
+                    .and_then(|v| serde_json::from_value::<WorktreeSnapshot>(v).map_err(|_| Failure::local("invalid_response")))
+                    .map_err(|e| Self::failure(&e));
+                let _ = tx.send((key, result));
+            });
+        }
+        drop(tx);
+        cx.spawn(async move |this, cx| {
+            while let Some((key, result)) = rx.recv().await {
+                let current = this.update(cx, |this, cx| {
+                    if !this.worktrees.take_machine(seq, &key, result) { return false; }
+                    cx.notify();
+                    true
+                });
+                if !matches!(current, Ok(true)) { return; }
             }
-            this.worktrees.take_snapshot(seq, parsed.map_err(|e| Self::failure(&e)));
-            cx.notify();
-        });
+            let _ = this.update(cx, |this, cx| {
+                if seq != this.worktrees.repos.seq { return; }
+                let missing: Vec<_> = this.worktrees.machines.iter().filter(|(_, m)| m.loading).map(|(key, _)| key.clone()).collect();
+                for key in missing { this.worktrees.take_machine(seq, &key, Err(tr("connection_failed"))); }
+                let repos = this.worktrees.repos.ok().cloned().unwrap_or_default();
+                if then_fetch { this.fetch_worktrees(repos.clone(), cx); }
+                if repos.iter().flat_map(|r| &r.worktrees).any(|w| w.size_pending) { this.poll_sizes(cx); }
+                else { this.worktrees.size_tries = 0; }
+            });
+        }).detach();
         cx.notify();
     }
 
@@ -498,29 +616,33 @@ impl Hangar {
         }).detach();
     }
 
-    fn fetch_worktrees(&mut self, repos: Vec<String>, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone() else { return };
+    fn fetch_worktrees(&mut self, repos: Vec<WorktreeRepo>, cx: &mut Context<Self>) {
+        if repos.is_empty() { return; }
         let seq = self.worktrees.fetch.start();
         self.worktrees.fetch_progress = (0, repos.len());
         self.worktrees.fetch_failed.clear();
         // Todos ao mesmo tempo: cada fetch é um repositório diferente, e o progresso conta o que já voltou.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // A que não responder (tarefa que caiu sem mandar nada) entra como falha, nunca some da conta.
-        let mut pending: HashSet<String> = repos.iter().cloned().collect();
+        let mut pending: HashSet<String> = repos.iter().map(|r| worktree_id(&r.server, &r.repo)).collect();
         for repo in repos {
-            let (api, tx) = (api.clone(), tx.clone());
+            let api = self.worktree_api(&repo.server);
+            let tx = tx.clone();
             self.runtime.spawn(async move {
-                let ok = api.server_send(reqwest::Method::POST, &["worktrees", "fetch"], Some(json!({"repo": &repo})), 150).await.is_ok();
-                let _ = tx.send((repo, ok));
+                let ok = match api {
+                    Some(api) => api.server_send(reqwest::Method::POST, &["worktrees", "fetch"], Some(json!({"repo": &repo.repo})), 150).await.is_ok(),
+                    None => false,
+                };
+                let _ = tx.send((worktree_id(&repo.server, &repo.repo), repo, ok));
             });
         }
         drop(tx);
         cx.spawn(async move |this, cx| {
             // Fetch que falha deixa a base como estava: a lista relida vale, com o aviso de que pode estar desatualizada.
             let mut failed = Vec::new();
-            while let Some((repo, ok)) = rx.recv().await {
-                pending.remove(&repo);
-                if !ok { failed.push(repo); }
+            while let Some((id, repo, ok)) = rx.recv().await {
+                pending.remove(&id);
+                if !ok { failed.push(format!("{} · {}", repo.server, repo.repo)); }
                 let current = this.update(cx, |this, cx| {
                     let current = this.worktrees.fetch.seq == seq;
                     if current { this.worktrees.fetch_progress.0 += 1; cx.notify(); }
@@ -537,15 +659,21 @@ impl Hangar {
     }
 
     pub(super) fn open_worktree(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_worktree_on(self.open_server(), path, window, cx);
+    }
+
+    pub(super) fn open_worktree_on(&mut self, server: String, path: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.worktrees.view.is_none() { self.open_worktrees(window, cx); }
         // A página pode recusar abrir (diálogo de conexão): sem ela, nada de painel.
         if self.worktrees.view.is_none() { return; }
-        self.worktrees.open = Some(path.clone());
+        self.worktrees.open = Some(worktree_id(&server, &path));
+        self.worktrees.panel_server = Some(server.clone());
         self.worktrees.delete_branch = false;
         self.worktrees.delete_error = None;
         let seq = self.worktrees.detail.start();
-        self.server_get(vec!["worktrees".into(), "detail".into()], vec![("path".into(), path)], 30, cx, move |this, result, cx| {
-            let parsed = result.and_then(|v| serde_json::from_value::<WorktreeStatus>(v).map_err(|_| Failure::local("invalid_response")));
+        self.worktree_get(&server.clone(), vec!["worktrees".into(), "detail".into()], vec![("path".into(), path)], 30, cx, move |this, result, cx| {
+            let parsed = result.and_then(|v| serde_json::from_value::<WorktreeStatus>(v).map_err(|_| Failure::local("invalid_response")))
+                .map(|mut w| { w.server = server; w });
             this.worktrees.take_detail(seq, parsed.map_err(|e| Self::failure(&e)));
             cx.notify();
         });
@@ -554,21 +682,22 @@ impl Hangar {
 
     fn close_worktree_panel(&mut self, cx: &mut Context<Self>) {
         self.worktrees.open = None;
+        self.worktrees.panel_server = None;
         self.worktrees.delete_error = None;
         self.worktrees.detail.reset();
         cx.notify();
     }
 
     /// O chip da sessão: a página fecha e a conversa dela abre.
-    fn go_to_session(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        let target = Target::new(&self.active_key(), &name);
+    fn go_to_session(&mut self, server: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let target = Target::new(&server, &name);
         self.close_worktrees(window, cx);
         self.open_target(&target, window, cx);
     }
 
     /// "Nova sessão aqui": a tela sem sessão na pasta principal, com esta worktree já escolhida na pílula de branch.
     fn new_session_here(&mut self, w: &WorktreeStatus, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone() else { return };
+        let Some(api) = self.worktree_api(&w.server) else { return };
         self.close_worktrees(window, cx);
         self.go_home(window, cx);
         // A tela sem sessão pode estar em outra máquina: a worktree é desta, então ela recomeça aqui.
@@ -626,12 +755,12 @@ impl Hangar {
     }
 
     fn delete_worktree(&mut self, s: WorktreeStatus, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone() else { return };
+        let Some(api) = self.worktree_api(&s.server) else { self.worktrees.delete_error = Some(self.machine_error(&s.server)); cx.notify(); return };
         if self.worktrees.deleting { return; }
         self.worktrees.deleting = true;
         self.worktrees.delete_error = None;
         let body = json!({"repo": &s.repo, "path": &s.path, "confirm": !lost_files(&s).is_empty(),
-                          "delete_branch": self.worktrees.delete_branch});
+                          "delete_branch": s.exists && self.worktrees.delete_branch, "keep_branch": !s.exists});
         let task = self.runtime.spawn(async move { api.server_send(reqwest::Method::POST, &["worktrees", "delete"], Some(body), 150).await });
         cx.spawn_in(window, async move |this, cx| {
             let joined = task.await;
@@ -639,9 +768,9 @@ impl Hangar {
                 this.worktrees.deleting = false;
                 match joined {
                     Ok(Ok(_)) => {
-                        this.worktrees.cache.remove(&s.path);
-                        this.finish_wt_dialog(&WtDialog::Delete(s.path.clone()), window, cx);
-                        if this.worktrees.open.as_deref() == Some(s.path.as_str()) { this.close_worktree_panel(cx); }
+                        this.worktrees.forget(&s);
+                        this.finish_wt_dialog(&WtDialog::Delete(s.id()), window, cx);
+                        if this.worktrees.open.as_deref() == Some(s.id().as_str()) { this.close_worktree_panel(cx); }
                         this.load_worktrees(false, cx);
                     }
                     Ok(Err(e)) => this.worktrees.delete_error = Some(Self::failure(&e)),
@@ -657,15 +786,15 @@ impl Hangar {
         let (deletable, blocked) = merged_batch(&repo.worktrees);
         if deletable.is_empty() { return; }
         let (ready_ones, with_changes) = deletable.into_iter().partition(ready);
-        self.worktrees.batch = Some(Batch { repo: repo.repo.clone(), ready: ready_ones, with_changes, picked: HashSet::new(), blocked });
+        self.worktrees.batch = Some(Batch { server: repo.server.clone(), repo: repo.repo.clone(), ready: ready_ones, with_changes, picked: HashSet::new(), blocked });
         self.worktrees.batch_run = None;
         self.open_wt_dialog(WtDialog::Batch, 520., Hangar::render_batch_dialog, window, cx);
     }
 
     /// Manda só as que a confirmação mostrou, uma por pedido e em ordem: o progresso é real e um lote longo não estoura o prazo.
     fn delete_batch(&mut self, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone() else { return };
         let Some(batch) = self.worktrees.batch.as_ref() else { return };
+        let Some(api) = self.worktree_api(&batch.server) else { return };
         if self.worktrees.deleting { return; }
         let queue: Vec<WorktreeStatus> = batch.chosen().into_iter().cloned().collect();
         if queue.is_empty() { return; }
@@ -693,11 +822,11 @@ impl Hangar {
                     Err(_) => Err(tr("delivery_uncertain")),
                 };
                 let _ = this.update(cx, |this, cx| {
-                    let path = w.path.clone();
+                    let removed = w.clone();
                     let Some(run) = this.worktrees.batch_run.as_mut().filter(|r| r.id == id) else { return };
                     if run.record(w, outcome) {
-                        this.worktrees.cache.remove(&path);
-                        if this.worktrees.open.as_deref() == Some(path.as_str()) { this.close_worktree_panel(cx); }
+                        this.worktrees.forget(&removed);
+                        if this.worktrees.open.as_deref() == Some(removed.id().as_str()) { this.close_worktree_panel(cx); }
                     }
                     cx.notify();
                 });
@@ -715,7 +844,7 @@ impl Hangar {
 
     // ── Nova worktree ───────────────────────────────────────────────────────
 
-    fn open_create(&mut self, repo: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_create(&mut self, server: String, repo: String, window: &mut Window, cx: &mut Context<Self>) {
         let task = cx.new(|cx| InputState::new(window, cx));
         let branch = cx.new(|cx| InputState::new(window, cx).placeholder(tr_shared("worktree_nome_branch", &[])));
         let folder = cx.new(|cx| InputState::new(window, cx));
@@ -725,7 +854,8 @@ impl Hangar {
         let subscriptions = vec![cx.subscribe(&task, notify), cx.subscribe(&branch, notify), cx.subscribe(&folder, notify)];
         let focus = task.clone();
         cx.defer_in(window, move |_, window, cx| focus.update(cx, |input, cx| input.focus(window, cx)));
-        self.worktrees.create = Some(NewWorktree { repo, existing_mode: false, task, branch, folder, edit_branch: false, edit_folder: false,
+        self.worktrees.next_create_id += 1;
+        self.worktrees.create = Some(NewWorktree { id: self.worktrees.next_create_id, server, repo, existing_mode: false, task, branch, folder, edit_branch: false, edit_folder: false,
             base: String::new(), fetch: true, session: true, pick: String::new(), branches: Remote::default(), busy: false, error: None,
             _subscriptions: subscriptions });
         self.load_create_branches(cx);
@@ -737,13 +867,16 @@ impl Hangar {
         let Some(c) = self.worktrees.create.as_mut() else { return };
         let seq = c.branches.start();
         let repo = c.repo.clone();
-        let done = |this: &mut Hangar, seq: u64, result: Result<BranchList, String>| {
+        let server = c.server.clone();
+        let id = c.id;
+        let done = move |this: &mut Hangar, seq: u64, result: Result<BranchList, String>| {
             let Some(c) = this.worktrees.create.as_mut() else { return };
+            if c.id != id { return; }
             if c.branches.finish(seq, result) && c.base.is_empty() {
                 c.base = c.branches.ok().and_then(|b| b.current.clone().or_else(|| b.branches.first().cloned())).unwrap_or_default();
             }
         };
-        self.server_get(vec!["fs".into(), "roots".into()], vec![], 15, cx, move |this, result, cx| {
+        self.worktree_get(&server.clone(), vec!["fs".into(), "roots".into()], vec![], 15, cx, move |this, result, cx| {
             let roots = match result {
                 Ok(v) => v.as_array().cloned().unwrap_or_default(),
                 Err(e) => { done(this, seq, Err(Self::failure(&e))); cx.notify(); return; }
@@ -751,7 +884,7 @@ impl Hangar {
             let root = roots.iter().filter_map(|r| r.get("path").and_then(Value::as_str)).filter(|p| inside(&repo, p))
                 .max_by_key(|p| p.len()).map(str::to_owned);
             let Some(root) = root else { done(this, seq, Err(tr("create_roots_failed"))); cx.notify(); return };
-            this.server_get(vec!["fs".into(), "branches".into()], vec![("root".into(), root), ("path".into(), repo)], 30, cx, move |this, result, cx| {
+            this.worktree_get(&server, vec!["fs".into(), "branches".into()], vec![("root".into(), root), ("path".into(), repo)], 30, cx, move |this, result, cx| {
                 done(this, seq, result.map_err(|e| Self::failure(&e))
                     .and_then(|v| serde_json::from_value::<BranchList>(v).map_err(|_| tr("invalid_response"))));
                 cx.notify();
@@ -760,11 +893,13 @@ impl Hangar {
     }
 
     fn submit_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(api) = self.api.clone() else { return };
         let Some(c) = self.worktrees.create.as_ref() else { return };
+        let Some(api) = self.worktree_api(&c.server) else { return };
         if c.busy { return; }
         let Some(plan) = c.plan(cx) else { return };
         let (repo, session) = (c.repo.clone(), c.session);
+        let server = c.server.clone();
+        let id = c.id;
         let base = (plan.new_branch && !plan.base.is_empty()).then(|| plan.base.clone());
         if let Some(c) = self.worktrees.create.as_mut() { (c.busy, c.error) = (true, None); }
         let task = self.runtime.spawn(async move {
@@ -782,6 +917,7 @@ impl Hangar {
         cx.spawn_in(window, async move |this, cx| {
             let joined = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
+                if this.worktrees.create.as_ref().is_none_or(|c| c.id != id) { return; }
                 let result = match joined {
                     Ok(Ok(v)) if session => serde_json::from_value::<SessionInfo>(v).map(Ok).map_err(|_| tr("invalid_response")),
                     Ok(Ok(v)) => v.get("path").and_then(Value::as_str).map(|p| Err(p.to_owned())).ok_or_else(|| tr("invalid_response")),
@@ -794,8 +930,7 @@ impl Hangar {
                         this.worktrees.create = None;
                         this.finish_wt_dialog(&WtDialog::Create, window, cx);
                         this.close_worktrees(window, cx);
-                        let key = this.active_key();
-                        if this.select_on(&key, session.clone(), window, cx) { this.focus_composer_for(&session, window, cx); }
+                        if this.select_on(&server, session.clone(), window, cx) { this.focus_composer_for(&session, window, cx); }
                         for warning in &session.avisos {
                             window.push_notification(Notification::warning(warning.clone()).autohide(false), cx);
                         }
@@ -804,7 +939,7 @@ impl Hangar {
                         this.worktrees.create = None;
                         this.finish_wt_dialog(&WtDialog::Create, window, cx);
                         this.load_worktrees(false, cx);
-                        this.open_worktree(path, window, cx);
+                        this.open_worktree_on(server.clone(), path, window, cx);
                     }
                     Err(error) => if let Some(c) = this.worktrees.create.as_mut() { c.error = Some(error); },
                 }
@@ -824,6 +959,7 @@ impl Hangar {
             .aria_label(tr_shared("worktrees_buscar", &[])).prefix(chrome::small_icon(IconName::Search, 13., theme::faint())).into_any_element());
         let header = self.costs_header(tr_shared("worktrees_titulo", &[]), |this, window, cx| this.close_worktrees(window, cx),
             search.into_iter().chain([
+                self.render_worktree_machine_filter(cx),
                 div().when(refreshing, |el| el.text_size(px(12.5)).text_color(theme::muted()).child(tr_shared("worktrees_remoto_progresso", &[("feitos", &fetched.to_string()), ("total", &fetch_total.to_string())])))
                     .into_any_element(),
                 Button::new("worktrees-refresh").outline().small().label(tr_shared("custos_atualizar", &[])).loading(loading || refreshing)
@@ -842,37 +978,78 @@ impl Hangar {
         self.worktrees.search.as_ref().map(|i| i.read(cx).value().trim().to_lowercase()).unwrap_or_default()
     }
 
+    fn render_worktree_machine_filter(&self, cx: &mut Context<Self>) -> AnyElement {
+        let all = tr_shared("worktrees_all_computers", &[]);
+        let selected = self.worktrees.server_filter.clone();
+        let label = selected.as_ref().and_then(|key| self.worktrees.machines.get(key)).map(|m| m.label.clone()).unwrap_or_else(|| all.clone());
+        let mut machines: Vec<_> = self.worktrees.machines.iter().map(|(key, m)| (key.clone(), m.label.clone())).collect();
+        machines.sort_by(|a, b| (&a.1, &a.0).cmp(&(&b.1, &b.0)));
+        let weak = cx.entity().downgrade();
+        Button::new("worktrees-machine-filter").outline().small().label(label).icon(IconName::ChevronDown)
+            .accessibility_label(tr_shared("worktrees_computer", &[])).disabled(self.worktrees.busy())
+            .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+                let pick = |key: Option<String>| {
+                    let weak = weak.clone();
+                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        let _ = weak.update(cx, |this, cx| {
+                            this.worktrees.server_filter = key.clone();
+                            this.close_worktree_panel(cx);
+                        });
+                    }
+                };
+                let mut menu = sidebar::menu_style(menu).min_w(px(240.)).max_h(px(420.)).scrollable(true)
+                    .item(PopupMenuItem::new(all.clone()).checked(selected.is_none()).on_click(pick(None))).separator();
+                for (key, label) in machines.clone() {
+                    menu = menu.item(PopupMenuItem::new(label).checked(selected.as_ref() == Some(&key)).on_click(pick(Some(key))));
+                }
+                menu
+            }).into_any_element()
+    }
+
     fn render_worktrees_body(&self, cx: &mut Context<Self>) -> Div {
         let page = div().flex().flex_col().gap(px(16.))
-            .when(self.worktrees.discovery_incomplete, |el| el.child(note_box(tr("worktree_discovery_incomplete"), theme::warning())
-                .id("worktree-discovery-warning").role(Role::Status)))
             .children(self.worktrees.fetch_failed.iter().map(|repo| note_box(tr_shared("worktrees_busca_remoto_falhou", &[("repo", &base_name(repo))]), theme::warning())));
-        let repos = match &self.worktrees.repos.value {
-            None => return page.child(div().py(px(40.)).flex().items_center().justify_center().gap(px(10.)).text_color(theme::muted())
-                .child(chrome::Spinner::new("worktrees-loading", IconName::LoaderCircle, px(16.), theme::muted())).child(tr_shared("worktrees_lendo", &[]))),
-            Some(Err(error)) => return page.child(error_state(tr_shared("worktrees_erro", &[("motivo", error.as_str())]),
-                cx.listener(|this, _, _, cx| this.load_worktrees(false, cx)))),
-            Some(Ok(repos)) => repos,
-        };
-        if repos.iter().all(|r| r.worktrees.is_empty()) { return page.child(empty_state(tr_shared("worktrees_vazio", &[]))); }
+        let repos = self.worktrees.repos.ok().map(Vec::as_slice).unwrap_or_default();
         let now = super::side::now_seconds();
-        let all: Vec<&WorktreeStatus> = repos.iter().flat_map(|r| &r.worktrees).collect();
+        let selected = self.worktrees.server_filter.as_deref();
+        let all: Vec<&WorktreeStatus> = repos.iter().filter(|r| selected.is_none_or(|key| key == r.server)).flat_map(|r| &r.worktrees).collect();
         let query = self.wt_search_text(cx);
         let filter = self.worktrees.filter;
         let shown = |w: &WorktreeStatus| filter.matches(w, now) && (query.is_empty()
             || [title(w), base_name(&w.path), w.branch.clone().unwrap_or_default(),
                 w.last_commit.as_ref().map(|c| format!("{} {}", c.sha, c.subject)).unwrap_or_default()]
                 .iter().any(|t| t.to_lowercase().contains(&query)));
-        let cards: Vec<Div> = repos.iter().filter_map(|r| {
-            let visible: Vec<&WorktreeStatus> = r.worktrees.iter().filter(|w| shown(w)).collect();
-            (!visible.is_empty()).then(|| self.render_worktree_repo(r, visible, filter != Filter::All || !query.is_empty(), now, cx))
+        let mut machines: Vec<_> = self.worktrees.machines.iter().filter(|(key, _)| selected.is_none_or(|s| s == key.as_str())).collect();
+        machines.sort_by(|(ka, a), (kb, b)| (&a.label, ka).cmp(&(&b.label, kb)));
+        let sections: Vec<Div> = machines.into_iter().map(|(server, machine)| {
+            let cards: Vec<_> = repos.iter().filter(|r| &r.server == server).filter_map(|r| {
+                let visible: Vec<_> = r.worktrees.iter().filter(|w| shown(w)).collect();
+                (!visible.is_empty()).then(|| self.render_worktree_repo(r, visible, filter != Filter::All || !query.is_empty(), now, cx))
+            }).collect();
+            let empty = cards.is_empty();
+            let group = div().flex().flex_col().gap(px(12.))
+                .child(div().flex().items_center().gap(px(8.)).pt(px(8.))
+                    .child(dot(theme::server_color(server)))
+                    .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(machine.label.clone()))
+                    .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme::faint()).child(server.clone())))
+                .when(machine.loading, |el| el.child(div().flex().items_center().gap(px(8.)).text_color(theme::muted())
+                    .child(chrome::Spinner::new(SharedString::from(format!("worktrees-loading-{server}")), IconName::LoaderCircle, px(14.), theme::muted()))
+                    .child(tr_shared("worktrees_lendo", &[]))))
+                .when_some(machine.error.clone(), |el, error| el.child(div().flex().items_center().gap(px(12.))
+                    .child(note_box(tr_shared("worktrees_erro", &[("motivo", &error)]), theme::warning()).flex_1())
+                    .child(Button::new(SharedString::from(format!("worktrees-retry-{server}"))).outline().small().label(tr("retry"))
+                        .on_click(cx.listener(|this, _, _, cx| this.load_worktrees(false, cx))))))
+                .when(machine.snapshot.as_ref().is_some_and(|s| s.warning.as_deref() == Some("worktree_discovery_incomplete")),
+                    |el| el.child(note_box(tr("worktree_discovery_incomplete"), theme::warning())))
+                .children(cards);
+            group.when(empty && machine.snapshot.is_some() && machine.error.is_none() && !machine.loading, |el| el.child(empty_state(tr_shared(
+                if all.is_empty() || (filter == Filter::All && query.is_empty()) { "worktrees_vazio" } else { "worktrees_filtro_vazio" }, &[]))))
         }).collect();
-        let none = cards.is_empty();
-        page.child(self.render_counters(&all, now, cx))
+        page.when(!all.is_empty(), |el| el.child(self.render_counters(&all, now, cx))
             .children(self.render_disk(&all, cx))
-            .child(self.render_wt_filters(&all, now, cx))
-            .children(cards)
-            .when(none, |el| el.child(empty_state(tr_shared("worktrees_filtro_vazio", &[]))))
+            .child(self.render_wt_filters(&all, now, cx)))
+            .when(sections.is_empty(), |el| el.child(empty_state(tr_shared("worktrees_vazio", &[]))))
+            .children(sections)
             .child(div().text_size(px(12.)).text_color(theme::faint()).child(tr_shared("worktrees_legenda_commits", &[])))
     }
 
@@ -929,10 +1106,13 @@ impl Hangar {
             .child(div().w(px(72.)).flex_shrink_0().flex().justify_end().child(text));
         let rows: Vec<AnyElement> = top.iter().map(|w| {
             let path = w.path.clone();
+            let server = w.server.clone();
             let st = state_of(w);
-            div().id(SharedString::from(format!("worktrees-disk-{}", w.path))).px(px(6.)).py(px(4.)).rounded(px(6.)).cursor_pointer()
-                .hover(|el| el.bg(theme::hover())).child(line(title(w), st.label(), w.size.unwrap_or(0), Self::size_text(w), st.color()))
-                .on_click(cx.listener(move |this, _, window, cx| this.open_worktree(path.clone(), window, cx))).into_any_element()
+            let name = self.worktrees.machines.get(&w.server).filter(|_| self.worktrees.server_filter.is_none())
+                .map(|machine| format!("{} · {}", machine.label, title(w))).unwrap_or_else(|| title(w));
+            div().id(SharedString::from(format!("worktrees-disk-{}", w.id()))).px(px(6.)).py(px(4.)).rounded(px(6.)).cursor_pointer()
+                .hover(|el| el.bg(theme::hover())).child(line(name, st.label(), w.size.unwrap_or(0), Self::size_text(w), st.color()))
+                .on_click(cx.listener(move |this, _, window, cx| this.open_worktree_on(server.clone(), path.clone(), window, cx))).into_any_element()
         }).chain((!rest.is_empty()).then(|| div().px(px(6.)).py(px(4.))
             .child(line(tr_shared("worktrees_disco_outras", &[("n", &rest.len().to_string())]), String::new(), sum_size(rest.iter().copied()),
                 sum_label(rest.iter().copied()), theme::border_strong())).into_any_element())).collect();
@@ -979,6 +1159,7 @@ impl Hangar {
         };
         let total = sum_label(&repo.worktrees);
         let (repo_new, repo_batch) = (repo.repo.clone(), repo.clone());
+        let server_new = repo.server.clone();
         let head = div().flex().items_center().gap(px(10.))
             .child(chrome::small_icon(IconName::Folder, 16., theme::muted()))
             .child(div().flex_1().min_w_0().flex().flex_col()
@@ -986,10 +1167,10 @@ impl Hangar {
                 .child(div().truncate().text_size(px(12.)).text_color(theme::muted()).child(path_line)))
             .child(div().flex_shrink_0().text_size(px(12.5)).text_color(theme::muted())
                 .child(tr_shared("worktree_repo_resumo", &[("n", &repo.worktrees.len().to_string()), ("tamanho", &total)])))
-            .child(Button::new(SharedString::from(format!("worktrees-new-{}", repo.repo))).outline().small().icon(IconName::Plus)
+            .child(Button::new(SharedString::from(format!("worktrees-new-{}", worktree_id(&repo.server, &repo.repo)))).outline().small().icon(IconName::Plus)
                 .label(tr_shared("worktree_nova", &[]))
-                .on_click(cx.listener(move |this, _, window, cx| this.open_create(repo_new.clone(), window, cx))))
-            .when(!deletable.is_empty(), |el| el.child(Button::new(SharedString::from(format!("worktrees-clean-{}", repo.repo))).outline().small()
+                .on_click(cx.listener(move |this, _, window, cx| this.open_create(server_new.clone(), repo_new.clone(), window, cx))))
+            .when(!deletable.is_empty(), |el| el.child(Button::new(SharedString::from(format!("worktrees-clean-{}", worktree_id(&repo.server, &repo.repo)))).outline().small()
                 .label(tr_shared(clean_key, &[("n", &clean_n.to_string()), ("tamanho", &clean_size)]))
                 .loading(deleting).disabled(deleting)
                 .on_click(cx.listener(move |this, _, window, cx| this.open_batch(&repo_batch, window, cx)))));
@@ -1004,10 +1185,10 @@ impl Hangar {
             .child(div().w(px(COL_SIZE)).flex_shrink_0().flex().justify_end().child(tr_shared("worktree_col_espaco", &[])));
         let rows: Vec<Stateful<Div>> = mains.iter().map(|w| self.render_worktree_row(w, now, cx)).collect();
         let agent_group = (!agents.is_empty()).then(|| {
-            let open = narrowed || self.worktrees.agents_open.contains(&repo.repo);
+            let key = worktree_id(&repo.server, &repo.repo);
+            let open = narrowed || self.worktrees.agents_open.contains(&key);
             let newest = agents.iter().filter_map(|w| activity_at(w)).max();
-            let key = repo.repo.clone();
-            let toggle = div().id(SharedString::from(format!("worktrees-agents-{}", repo.repo))).mt(px(4.)).px(px(10.)).py(px(6.)).rounded(px(8.))
+            let toggle = div().id(SharedString::from(format!("worktrees-agents-{key}"))).mt(px(4.)).px(px(10.)).py(px(6.)).rounded(px(8.))
                 .cursor_pointer().hover(|el| el.bg(theme::hover())).flex().items_center().gap(px(8.)).text_size(px(13.))
                 .child(chrome::small_icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 13., theme::muted()))
                 .child(div().font_weight(FontWeight::MEDIUM).child(tr_shared("worktree_subagentes", &[])))
@@ -1025,8 +1206,12 @@ impl Hangar {
             .child(div().flex().flex_col().gap(px(2.)).child(cols).children(rows).children(agent_group))
     }
 
-    fn session_live(&self, name: &str) -> (String, Hsla) {
-        match self.sessions.iter().find(|s| s.name == name).map(SessionInfo::display_state) {
+    fn worktree_sessions(&self, server: &str) -> &[SessionInfo] {
+        if self.is_active_key(server) { &self.sessions } else { self.remote.get(server).map(|r| r.sessions.as_slice()).unwrap_or_default() }
+    }
+
+    fn session_live(&self, server: &str, name: &str) -> (String, Hsla) {
+        match self.worktree_sessions(server).iter().find(|s| s.name == name).map(SessionInfo::display_state) {
             Some("working") => (tr_shared("worktree_sessao_trabalhando", &[]), theme::success()),
             Some("awaiting_input") => (tr_shared("worktree_sessao_esperando", &[]), theme::warning()),
             _ => (tr_shared("worktree_sessao_parada", &[]), theme::faint()),
@@ -1034,7 +1219,7 @@ impl Hangar {
     }
 
     /// A sessão aberta agora, se for desta máquina.
-    fn current_session(&self) -> Option<&str> { self.selected.as_ref().filter(|_| self.open_api.is_none()).map(|s| s.name.as_str()) }
+    fn current_session(&self, server: &str) -> Option<&str> { self.selected.as_ref().filter(|_| self.open_server() == server).map(|s| s.name.as_str()) }
 
     fn size_text(w: &WorktreeStatus) -> String {
         match (w.exists, w.size) {
@@ -1049,18 +1234,20 @@ impl Hangar {
 
     fn render_worktree_row(&self, w: &WorktreeStatus, now: f64, cx: &mut Context<Self>) -> Stateful<Div> {
         let path = w.path.clone();
-        let open = self.worktrees.open.as_deref() == Some(w.path.as_str());
+        let server = w.server.clone();
+        let open = self.worktrees.open.as_deref() == Some(w.id().as_str());
         let st = state_of(w);
-        let you = self.current_session().is_some_and(|me| w.sessions.iter().any(|s| s == me));
+        let you = self.current_session(&w.server).is_some_and(|me| w.sessions.iter().any(|s| s == me));
         let sessions: Vec<Button> = w.sessions.iter().map(|name| {
-            let (label, color) = self.session_live(name);
+            let (label, color) = self.session_live(&w.server, name);
             let target = name.clone();
-            Button::new(SharedString::from(format!("worktree-session-{}-{name}", w.path))).ghost().xsmall()
+            let server = w.server.clone();
+            Button::new(SharedString::from(format!("worktree-session-{}-{name}", w.id()))).ghost().xsmall()
                 .accessibility_label(tr_shared("worktree_ir_sessao_nome", &[("nome", name)]))
                 .child(div().flex().items_center().gap(px(5.)).text_size(px(12.))
                     .child(dot(color)).child(name.clone()).child(div().text_color(theme::muted()).child(label))
                     .child(chrome::small_icon(IconName::ArrowRight, 11., theme::faint())))
-                .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.go_to_session(target.clone(), window, cx); }))
+                .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.go_to_session(server.clone(), target.clone(), window, cx); }))
         }).collect();
         let name_cell = div().flex_basis(px(0.)).flex_grow(1.).min_w_0().flex().flex_col().gap(px(4.))
             .child(div().flex().items_center().gap(px(6.))
@@ -1070,7 +1257,13 @@ impl Hangar {
                 .children(stale_days(w, now).map(|d| chip(tr_shared("worktree_parada_dias", &[("n", &d.to_string())]), theme::warning_text()))))
             .when(!sessions.is_empty(), |el| el.child(div().flex().flex_wrap().gap(px(2.)).children(sessions)))
             .when(w.degraded, |el| el.child(div().text_size(px(11.5)).text_color(theme::warning_text()).whitespace_normal()
-                .child(tr_shared("worktree_leitura_incompleta", &[]))));
+                .child(tr_shared("worktree_leitura_incompleta", &[]))))
+            .when(!w.exists, |el| {
+                let id = w.id();
+                el.child(div().flex().child(Button::new(SharedString::from(format!("worktree-clear-{id}"))).outline().xsmall()
+                    .label(tr_shared("worktree_clear_registration", &[])).disabled(!w.sessions.is_empty() || self.worktrees.deleting)
+                    .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.open_delete(id.clone(), window, cx); }))))
+            });
         let branch_cell = div().flex_basis(px(0.)).flex_grow(1.).min_w_0().flex().flex_col().gap(px(2.)).text_size(px(12.5))
             .child(div().flex().min_w_0()
                 .child(div().min_w_0().truncate().font_family(theme::MONO)
@@ -1091,11 +1284,11 @@ impl Hangar {
                 .child(tr_shared("worktree_criada", &[("quando", &short_date(at))]))));
         let size = div().w(px(COL_SIZE)).flex_shrink_0().flex().justify_end().text_size(px(12.5))
             .text_color(if w.size.unwrap_or(0) >= 1 << 30 { theme::text() } else { theme::muted() }).child(Self::size_text(w));
-        div().id(SharedString::from(format!("worktree-row-{}", w.path))).px(px(10.)).py(px(8.)).rounded(px(8.)).flex().items_start().gap(px(12.))
+        div().id(SharedString::from(format!("worktree-row-{}", w.id()))).px(px(10.)).py(px(8.)).rounded(px(8.)).flex().items_start().gap(px(12.))
             .cursor_pointer().border_l_2().border_color(if open { theme::accent() } else { transparent_black() })
             .map(|el| if open { el.bg(theme::selected_row()) } else { el.hover(|el| el.bg(theme::hover())) })
             .child(name_cell).child(branch_cell).child(commits).child(dirty).child(activity).child(size)
-            .on_click(cx.listener(move |this, _, window, cx| this.open_worktree(path.clone(), window, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| this.open_worktree_on(server.clone(), path.clone(), window, cx)))
     }
 
     /// O painel da worktree aberta: veredito, sessões dentro, branch contra a base, fatos, commits e o que não foi commitado.
@@ -1116,12 +1309,15 @@ impl Hangar {
         let state = state_of(&st);
         let now = super::side::now_seconds();
         let copy = st.path.clone();
+        let machine = self.worktrees.machines.get(&st.server).map(|m| m.label.clone()).unwrap_or_else(|| st.server.clone());
+        let detail_error = detail.and_then(|result| result.as_ref().err()).cloned();
         let head = div().flex().flex_col().gap(px(8.))
             .child(div().flex().items_start().gap(px(8.))
                 .child(div().flex_1().min_w_0().flex().flex_col().gap(px(4.))
                     .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(title(&st)))
                     .child(div().flex().child(chip(state.label(), state.color()))))
                 .child(close))
+            .child(muted(machine))
             .child(div().flex().items_center().gap(px(4.))
                 .child(div().flex_1().min_w_0().font_family(theme::MONO).text_size(px(11.5)).text_color(theme::muted()).child(st.path.clone()))
                 .child(Button::new("worktree-copy-path").ghost().xsmall().icon(IconName::Copy).tooltip(tr_shared("worktree_copiar_caminho", &[]))
@@ -1129,13 +1325,14 @@ impl Hangar {
                     .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone())))))
             .child(div().p(px(10.)).rounded(px(8.)).bg(theme::inset()).text_color(state.color()).child(state.verdict(&st)))
             .when(st.degraded, |el| el.child(note_box(tr_shared("worktree_leitura_incompleta", &[]), theme::warning())))
-            .when_some(merge_notice(&st), |el, notice| el.child(note_box(notice, theme::warning()).id("worktree-merge-warning").role(Role::Status)));
-        let me = self.current_session();
+            .when_some(merge_notice(&st), |el, notice| el.child(note_box(notice, theme::warning()).id("worktree-merge-warning").role(Role::Status)))
+            .when_some(detail_error, |el, error| el.child(note_box(error, theme::warning()).id("worktree-detail-error").role(Role::Alert)));
+        let me = self.current_session(&st.server);
         let sessions = (!st.sessions.is_empty()).then(|| div().flex().flex_col().gap(px(8.))
             .child(section(tr_shared("worktree_sessoes_aqui", &[])))
             .children(st.sessions.iter().map(|name| {
-                let info = self.sessions.iter().find(|s| &s.name == name);
-                let (label, color) = self.session_live(name);
+                let info = self.worktree_sessions(&st.server).iter().find(|s| &s.name == name);
+                let (label, color) = self.session_live(&st.server, name);
                 let here = me == Some(name.as_str());
                 let harness = info.map(|s| match s.engine.as_deref().filter(|e| !e.is_empty()) {
                     Some(engine) => format!("{} · {engine}", super::agent_name(&s.provider)),
@@ -1145,6 +1342,7 @@ impl Hangar {
                     .or_else(|| s.last_reply.as_deref().and_then(|r| r.lines().find(|l| !l.trim().is_empty())).map(str::to_owned)));
                 let when = info.and_then(|s| s.last_activity).map(|at| super::side::ago(now - at));
                 let target = name.clone();
+                let server = st.server.clone();
                 div().p(px(10.)).rounded(px(8.)).border_1().border_color(theme::border()).bg(theme::inset()).flex().flex_col().gap(px(4.))
                     .child(div().flex().items_center().gap(px(6.)).child(dot(color))
                         .child(div().min_w_0().truncate().font_weight(FontWeight::MEDIUM).child(name.clone()))
@@ -1155,7 +1353,7 @@ impl Hangar {
                         .child([doing, when].into_iter().flatten().collect::<Vec<_>>().join(" · "))))
                     .when(!here, |el| el.child(div().flex().child(Button::new(SharedString::from(format!("worktree-go-{name}"))).outline().xsmall()
                         .label(tr_shared("worktree_ir_sessao", &[])).icon(IconName::ArrowRight)
-                        .on_click(cx.listener(move |this, _, window, cx| this.go_to_session(target.clone(), window, cx))))))
+                        .on_click(cx.listener(move |this, _, window, cx| this.go_to_session(server.clone(), target.clone(), window, cx))))))
             })));
         let branch = st.branch.clone().unwrap_or_else(|| tr_shared("worktree_sem_branch_rotulo", &[]));
         let diagram = div().flex().flex_col().gap(px(8.))
@@ -1187,13 +1385,13 @@ impl Hangar {
             .children(st.dirty_files.iter().map(|f| div().flex().gap(px(8.)).font_family(theme::MONO).text_size(px(11.5))
                 .child(div().w(px(18.)).flex_shrink_0().text_color(theme::warning_text()).child(f.code.clone()))
                 .child(div().flex_1().min_w_0().truncate().child(f.path.clone())))));
-        let (here, target) = (st.clone(), st.path.clone());
+        let (here, target) = (st.clone(), st.id());
         let blocked = !st.sessions.is_empty();
         let actions = div().flex().flex_wrap().gap(px(8.))
             .child(Button::new("worktree-new-session").outline().small().label(tr_shared(if st.sessions.is_empty() { "worktree_abrir_sessao_aqui" } else { "worktree_nova_sessao_aqui" }, &[])).disabled(!st.exists)
                 .on_click(cx.listener(move |this, _, window, cx| this.new_session_here(&here, window, cx))))
             .child(div().flex_1())
-            .child(Button::new("worktree-delete").danger().small().label(tr_shared("worktree_apagar_reticencias", &[]))
+            .child(Button::new("worktree-delete").danger().small().label(tr_shared(if st.exists { "worktree_apagar_reticencias" } else { "worktree_clear_registration" }, &[]))
                 .disabled(blocked || self.worktrees.deleting)
                 .on_click(cx.listener(move |this, _, window, cx| this.open_delete(target.clone(), window, cx))));
         panel.child(head).children(sessions).child(diagram).child(facts).child(commits).children(files).child(actions)
@@ -1204,9 +1402,24 @@ impl Hangar {
     /// A confirmação de apagar, no texto do web: o que se perde, o que fica guardado e a branch.
     fn render_delete_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
         let Some(WtDialog::Delete(path)) = self.worktrees.dialog.clone() else { return div() };
-        let fresh = self.worktrees.detail.ok().filter(|s| s.path == path);
+        let fresh = self.worktrees.detail.ok().filter(|s| s.id() == path);
         let Some(st) = fresh.or_else(|| self.worktrees.cache.get(&path)).cloned() else { return div().child(loading_state()) };
         let deleting = self.worktrees.deleting;
+        if !st.exists {
+            let machine = self.worktrees.machines.get(&st.server).map(|m| m.label.clone()).unwrap_or_else(|| st.server.clone());
+            let target = st.clone();
+            return div().flex().flex_col().gap(px(14.)).text_size(px(13.)).whitespace_normal()
+                .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child(tr_shared("worktree_clear_registration_title", &[("nome", &title(&st))])))
+                .child(muted(format!("{machine} · {}", st.path)))
+                .child(tr_shared("worktree_clear_registration_description", &[]))
+                .when_some(self.worktrees.delete_error.clone(), |el, error| el.child(note_box(error, theme::danger()).id("worktree-delete-error").role(Role::Alert)))
+                .child(div().flex().justify_end().gap_2()
+                    .child(Button::new("worktree-delete-cancel").outline().label(tr_shared("worktree_nova_cancelar", &[])).disabled(deleting)
+                        .on_click(cx.listener(|this, _, window, cx| this.cancel_wt_dialog(window, cx))))
+                    .child(Button::new("worktree-delete-confirm").primary().label(tr_shared("worktree_clear_registration", &[]))
+                        .loading(deleting).disabled(deleting || !st.sessions.is_empty())
+                        .on_click(cx.listener(move |this, _, window, cx| this.delete_worktree(target.clone(), window, cx)))));
+        }
         let branch = st.branch.clone().unwrap_or_default();
         let base = st.base.clone().unwrap_or_default();
         let ok = |text: String| div().flex().gap(px(6.)).child(div().text_color(theme::success_text()).child("✓")).child(div().flex_1().child(text));
@@ -1323,7 +1536,7 @@ impl Hangar {
     fn render_create_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
         let Some(c) = self.worktrees.create.as_ref() else { return div() };
         // Branch aberta em alguma worktree deste repositório: leva até ela em vez de criar outra.
-        let taken: HashMap<String, (String, String)> = self.worktrees.repos.ok().into_iter().flatten().filter(|r| r.repo == c.repo)
+        let taken: HashMap<String, (String, String)> = self.worktrees.repos.ok().into_iter().flatten().filter(|r| r.server == c.server && r.repo == c.repo)
             .flat_map(|r| &r.worktrees).filter_map(|w| w.branch.clone().map(|b| (b, (w.path.clone(), title(w))))).collect();
         let plan = c.plan(cx);
         let busy = c.busy;
@@ -1401,6 +1614,7 @@ impl Hangar {
                             match taken.get(&name) {
                                 Some((path, wt)) => {
                                     let path = path.clone();
+                                    let server = c.server.clone();
                                     row.child(div().size(px(16.)).flex_shrink_0())
                                         .child(div().flex_1().min_w_0().truncate().font_family(theme::MONO).text_color(theme::muted()).child(name.clone()))
                                         .child(Button::new(SharedString::from(format!("worktree-create-taken-{name}"))).ghost().xsmall()
@@ -1408,7 +1622,7 @@ impl Hangar {
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 this.finish_wt_dialog(&WtDialog::Create, window, cx);
                                                 this.worktrees.create = None;
-                                                this.open_worktree(path.clone(), window, cx);
+                                                this.open_worktree_on(server.clone(), path.clone(), window, cx);
                                             })))
                                         .into_any_element()
                                 }
@@ -1482,41 +1696,115 @@ mod tests {
     }
 
     #[test]
+    fn same_path_on_two_servers_keeps_both_worktrees_and_their_details() {
+        let mut wt = Worktrees::default();
+        let mut a = st(base("/r/shared")); a.server = "http://machine-a".into();
+        let mut b = st(base("/r/shared")); b.server = "http://machine-b".into(); b.dirty = 4;
+        let seq = wt.repos.start();
+        wt.take_list(seq, Ok(vec![WorktreeRepo { server: a.server.clone(), repo: "/r".into(), worktrees: vec![a.clone(), b.clone()] }]));
+        assert_eq!(wt.cache.len(), 2);
+        assert_eq!(wt.cache[&a.id()].dirty, 0);
+        assert_eq!(wt.cache[&b.id()].dirty, 4);
+        let seq = wt.detail.start();
+        wt.take_detail(seq, Ok(a.clone()));
+        let seq = wt.repos.start();
+        wt.take_list(seq, Ok(vec![WorktreeRepo { server: b.server.clone(), repo: "/r".into(), worktrees: vec![b] }]));
+        assert_eq!(wt.detail.ok().unwrap().server, a.server);
+    }
+
+    #[test]
+    fn machine_results_arrive_independently_and_old_rounds_are_discarded() {
+        let mut wt = Worktrees::default();
+        let machines = vec![("a".into(), "Desktop".into()), ("b".into(), "Notebook".into())];
+        let snapshot = || serde_json::from_value::<WorktreeSnapshot>(json!({"repos":[{"repo":"/r","worktrees":[base("/r/shared")]}]})).unwrap();
+        let old = wt.begin_machines(&machines);
+        let current = wt.begin_machines(&machines);
+        assert!(wt.take_machine(current, "a", Ok(snapshot())));
+        assert_eq!(wt.repos.ok().unwrap().len(), 1);
+        assert!(wt.repos.loading, "uma máquina respondeu, outra ainda carrega");
+        assert!(wt.take_machine(current, "b", Err("offline".into())));
+        assert!(!wt.repos.loading);
+        assert_eq!(wt.repos.ok().unwrap().len(), 1);
+        assert_eq!(wt.machines["b"].error.as_deref(), Some("offline"));
+        assert!(!wt.take_machine(old, "b", Ok(snapshot())));
+        let current = wt.begin_machines(&machines);
+        wt.take_machine(current, "a", Ok(snapshot()));
+        wt.take_machine(current, "b", Ok(snapshot()));
+        assert_eq!(wt.repos.ok().unwrap().len(), 2);
+        assert_eq!(wt.cache.len(), 2);
+        assert_eq!(wt.status("b", "/r/shared").unwrap().server, "b");
+    }
+
+    #[test]
+    fn partial_discovery_after_a_network_error_keeps_the_last_known_repositories() {
+        let mut wt = Worktrees::default();
+        let machines = [("a".into(), "Desktop".into())];
+        let seq = wt.begin_machines(&machines);
+        wt.take_machine(seq, "a", Ok(serde_json::from_value(json!({"repos":[
+            {"repo":"/r","worktrees":[base("/r/a")]},
+            {"repo":"/s","worktrees":[base("/s/b")]}
+        ]})).unwrap()));
+        let seq = wt.begin_machines(&machines);
+        wt.take_machine(seq, "a", Err("offline".into()));
+        let seq = wt.begin_machines(&machines);
+        wt.take_machine(seq, "a", Ok(serde_json::from_value(json!({"repos":[
+            {"repo":"/r","worktrees":[base("/r/a")]}
+        ],"warning":"worktree_discovery_incomplete"})).unwrap()));
+        assert!(wt.status("a", "/s/b").is_some());
+        assert_eq!(wt.repos.ok().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn another_machine_response_does_not_replace_a_fresh_detail_with_an_old_snapshot() {
+        let mut wt = Worktrees::default();
+        let seq = wt.begin_machines(&[("a".into(), "Desktop".into()), ("b".into(), "Notebook".into())]);
+        let snapshot = || serde_json::from_value::<WorktreeSnapshot>(json!({"repos":[{"repo":"/r","worktrees":[base("/r/shared")]}]})).unwrap();
+        wt.take_machine(seq, "a", Ok(snapshot()));
+        let detail_seq = wt.detail.start();
+        let mut fresh = st(base("/r/shared")); fresh.server = "a".into(); fresh.dirty = 3;
+        wt.take_detail(detail_seq, Ok(fresh));
+        wt.take_machine(seq, "b", Ok(snapshot()));
+        assert_eq!(wt.detail.ok().unwrap().dirty, 3);
+        assert_eq!(wt.status("a", "/r/shared").unwrap().dirty, 3);
+        assert_eq!(wt.repos.ok().unwrap().iter().find(|r| r.server == "a").unwrap().worktrees[0].dirty, 3);
+    }
+
+    #[test]
     fn worktree_settings_partial_discovery_keeps_known_repositories_and_warning() {
         let mut wt = Worktrees::default();
-        let complete = wt.repos.start();
-        wt.take_list(complete, Ok(vec![WorktreeRepo { repo: "/r".into(), worktrees: vec![st(base("/r/a"))] }]));
+        let complete = wt.begin_machines(&[(String::new(), "Desktop".into())]);
+        wt.take_machine(complete, "", Ok(serde_json::from_value(json!({"repos":[{"repo":"/r","worktrees":[base("/r/a")]}]})).unwrap()));
         let partial = wt.repos.start();
         let snapshot = serde_json::from_value::<WorktreeSnapshot>(json!({"repos": [], "warning": "worktree_discovery_incomplete"})).unwrap();
-        assert!(wt.take_snapshot(partial, Ok(snapshot)));
-        assert!(wt.discovery_incomplete);
+        assert!(wt.take_machine(partial, "", Ok(snapshot)));
+        assert_eq!(wt.machines[""].snapshot.as_ref().unwrap().warning.as_deref(), Some("worktree_discovery_incomplete"));
         assert_eq!(wt.repos.ok().unwrap()[0].worktrees[0].path, "/r/a");
         let partial_update = wt.repos.start();
-        assert!(wt.take_snapshot(partial_update, Ok(serde_json::from_value(json!({"repos": [
+        assert!(wt.take_machine(partial_update, "", Ok(serde_json::from_value(json!({"repos": [
             {"repo": "/r", "worktrees": [base("/r/b")]}
         ], "warning": "worktree_discovery_incomplete"})).unwrap())));
         let mut paths: Vec<_> = wt.repos.ok().unwrap()[0].worktrees.iter().map(|w| w.path.as_str()).collect();
         paths.sort();
         assert_eq!(paths, ["/r/b"]);
         let full = wt.repos.start();
-        assert!(wt.take_snapshot(full, Ok(serde_json::from_value(json!({"repos": []})).unwrap())));
-        assert!(!wt.discovery_incomplete);
+        assert!(wt.take_machine(full, "", Ok(serde_json::from_value(json!({"repos": []})).unwrap())));
+        assert!(wt.machines[""].snapshot.as_ref().unwrap().warning.is_none());
         assert!(wt.repos.ok().unwrap().is_empty());
-        assert!(!wt.take_snapshot(partial, Ok(serde_json::from_value(json!({"repos": [], "warning": "worktree_discovery_incomplete"})).unwrap())));
-        assert!(!wt.discovery_incomplete);
+        assert!(!wt.take_machine(partial, "", Ok(serde_json::from_value(json!({"repos": [], "warning": "worktree_discovery_incomplete"})).unwrap())));
+        assert!(wt.machines[""].snapshot.as_ref().unwrap().warning.is_none());
     }
     #[test]
     fn worktree_settings_partial_discovery_does_not_restore_deleted_worktrees() {
         let mut wt = Worktrees::default();
-        let complete = wt.repos.start();
-        wt.take_list(complete, Ok(vec![
-            WorktreeRepo { repo: "/r".into(), worktrees: vec![st(base("/r/deleted")), st(base("/r/kept"))] },
-            WorktreeRepo { repo: "/last".into(), worktrees: vec![st(base("/last/deleted"))] },
-        ]));
-        wt.cache.remove("/r/deleted");
-        wt.cache.remove("/last/deleted");
+        let complete = wt.begin_machines(&[(String::new(), "Desktop".into())]);
+        wt.take_machine(complete, "", Ok(serde_json::from_value(json!({"repos":[
+            {"repo":"/r","worktrees":[base("/r/deleted"),base("/r/kept")]},
+            {"repo":"/last","worktrees":[base("/last/deleted")]}
+        ]})).unwrap()));
+        wt.forget(&st(base("/r/deleted")));
+        wt.forget(&st(base("/last/deleted")));
         let partial = wt.repos.start();
-        assert!(wt.take_snapshot(partial, Ok(serde_json::from_value(json!({
+        assert!(wt.take_machine(partial, "", Ok(serde_json::from_value(json!({
             "repos": [], "warning": "worktree_discovery_incomplete"
         })).unwrap())));
         let repos = wt.repos.ok().unwrap();
@@ -1524,8 +1812,8 @@ mod tests {
         assert_eq!(repos[0].repo, "/r");
         assert_eq!(repos[0].worktrees.len(), 1);
         assert_eq!(repos[0].worktrees[0].path, "/r/kept");
-        assert!(!wt.cache.contains_key("/r/deleted"));
-        assert!(!wt.cache.contains_key("/last/deleted"));
+        assert!(wt.status("", "/r/deleted").is_none());
+        assert!(wt.status("", "/last/deleted").is_none());
     }
     #[test]
     fn worktree_settings_pr_lookup_failure_is_visible_without_changing_git_state() {
@@ -1589,12 +1877,12 @@ mod tests {
         let mut wt = Worktrees::default();
         let old = wt.repos.start();
         let new = wt.repos.start();
-        let list = vec![WorktreeRepo { repo: "/r".into(), worktrees: vec![st(base("/r/a"))] }];
+        let list = vec![WorktreeRepo { server: String::new(), repo: "/r".into(), worktrees: vec![st(base("/r/a"))] }];
         // A lista velha chega depois de apagar "/r/a": não pode trazê-la de volta.
         assert!(!wt.take_list(old, Ok(list.clone())));
         assert!(wt.cache.is_empty());
         assert!(wt.take_list(new, Ok(list)));
-        assert!(wt.cache.contains_key("/r/a"));
+        assert!(wt.status("", "/r/a").is_some());
         wt.cache.clear();
         let old = wt.detail.start();
         wt.detail.start();
@@ -1609,7 +1897,7 @@ mod tests {
         let mut old = base("/r/a"); old["dirty"] = json!(2);
         wt.take_detail(seq, Ok(st(old)));
         let seq = wt.repos.start();
-        wt.take_list(seq, Ok(vec![WorktreeRepo { repo: "/r".into(), worktrees: vec![st(base("/r/a"))] }]));
+        wt.take_list(seq, Ok(vec![WorktreeRepo { server: String::new(), repo: "/r".into(), worktrees: vec![st(base("/r/a"))] }]));
         assert_eq!(wt.detail.ok().map(|d| d.dirty), Some(0));
     }
 

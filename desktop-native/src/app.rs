@@ -5484,7 +5484,8 @@ impl Hangar {
         let worktree_gone = !compact && session.worktree_gone;
         let second_line = branch.is_some() || worktree.is_some() || worktree_gone;
         let worktree_target = session.worktree_path.clone().or_else(|| session.cwd.clone()).unwrap_or_default();
-        let merged = self.worktrees.status(&worktree_target).is_some_and(|s| s.merged);
+        let worktree_server = target.server.clone();
+        let merged = self.worktrees.status(&target.server, &worktree_target).is_some_and(|s| s.merged);
         let time = div().flex_shrink_0().text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
             .children(session.last_activity.map(side::since));
         // Id da marca com a máquina: a de mesmo nome em outra máquina não divide a animação.
@@ -5550,7 +5551,7 @@ impl Hangar {
                         .flex().items_center().gap(px(3.)).text_color(theme::accent())
                         .child(chrome::small_icon(IconName::GitBranch, 11., theme::accent()))
                         .child(if merged { format!("{label} ✓") } else { label })
-                        .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.open_worktree(worktree_target.clone(), window, cx); })))
+                        .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.open_worktree_on(worktree_server.clone(), worktree_target.clone(), window, cx); })))
                 })
                 .when(worktree_gone, |el| el.child(div().text_color(theme::muted()).child(tr_shared("worktree_apagada", &[]))))))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {

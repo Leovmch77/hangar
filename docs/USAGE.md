@@ -246,6 +246,12 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   própria, e a sua pasta principal só muda quando você mesclar. A tela **Worktrees** lista cada
   uma (mesclada ou quantos commits à frente, o que não foi commitado) e apaga as mescladas e
   limpas; as conversas dela continuam e podem ser retomadas na pasta principal.
+- **Worktrees de todos os computadores no app nativo:** a tela reúne os servidores próprios
+  habilitados, separados por computador e repositório. Use **Todos os computadores** para filtrar
+  uma máquina. Detalhes, criação, exclusão e abertura de sessão acontecem no computador da
+  worktree. Se uma máquina não responder, as demais continuam visíveis e a falha permite tentar
+  de novo. Para uma **Pasta sumida**, **Limpar registro** remove apenas aquela entrada do Git,
+  conservando a branch, os commits e as conversas.
 - **Preferências de worktrees no app nativo:** em **Configurações → Worktrees**, escolha a pasta
   das novas worktrees de cada servidor. Deixe vazia para usar a pasta de worktrees do Hangar;
   as existentes continuam onde estão. A limpeza automática começa desligada. É possível ligá-la
