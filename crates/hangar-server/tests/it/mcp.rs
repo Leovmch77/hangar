@@ -241,6 +241,21 @@ async fn new_session_opens_with_the_caller_as_creator_and_the_whole_request() {
     assert_eq!(s.python.hits_to("/api/sessions"), 0, "a abertura não passa pelo Python");
 }
 
+/// `resume` retoma uma conversa que existe no disco pela rota do Arquivo (D-012): a pasta vem da conversa;
+/// o que a retomada não aceita é recusado, nunca largado calado.
+#[tokio::test(flavor = "multi_thread")]
+async fn new_session_with_resume_goes_through_the_archive_resume() {
+    let s = scene().await;
+    let mut mcp = Mcp::open(s.addr, &[("x-hangar-pane", "%7")]).await;
+    let missing = mcp.call("new_session", json!({"nome": "volta", "cwd": "", "resume": "11111111-1111-4111-8111-111111111111",
+        "headless": false})).await;
+    assert!(failed(&missing) && first_text(&missing).contains("transcript"), "{missing}");
+    let mixed = mcp.call("new_session", json!({"nome": "volta", "cwd": "", "resume": "11111111-1111-4111-8111-111111111111",
+        "permissao": "plan"})).await;
+    assert!(failed(&mixed) && first_text(&mixed).contains("permissao"), "{mixed}");
+    assert_eq!(s.python.hits_to("/api/sessions"), 0);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn close_session_refuses_itself_remote_and_unknown() {
     let s = scene().await;

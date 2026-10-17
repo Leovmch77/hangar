@@ -112,6 +112,26 @@ struct NewSession {
     service_tier: Option<String>, branch: Option<String>, #[serde(default)] new_branch: bool, base: Option<String>,
     codex_account: Option<String>, subagent_model: Option<String>, initial_prompt: Option<String>, engine_account: Option<String>,
     omp_profile: Option<String>, claude_customizations: Option<Value>, inherit: Option<bool>, #[serde(default)] remember_provider: bool,
+    resume: Option<String>,
+}
+
+impl NewSession {
+    /// O corpo da retomada; o que ela não aceita é recusado pelo nome.
+    fn clone_for_resume(&self) -> Result<Value, String> {
+        let unsupported = [("effort", self.effort.is_some()), ("permissao", self.permissao.is_some()), ("read_only", self.read_only),
+            ("jev", self.jev.is_some()), ("service_tier", self.service_tier.is_some()), ("branch", self.branch.as_deref().is_some_and(|b| !b.is_empty())),
+            ("new_branch", self.new_branch), ("subagent_model", self.subagent_model.is_some()), ("initial_prompt", self.initial_prompt.is_some()),
+            ("omp_profile", self.omp_profile.is_some()), ("claude_customizations", self.claude_customizations.is_some()),
+            ("inherit", self.inherit.is_some()), ("remember_provider", self.remember_provider)];
+        if let Some((key, _)) = unsupported.iter().find(|(_, set)| *set) { return Err(format!("{key} não combina com resume")); }
+        let mut body = json!({"name": self.nome});
+        for (key, value) in [("provider", &self.provider), ("engine", &self.engine), ("model", &self.model), ("config_dir", &self.conta),
+                             ("codex_account", &self.codex_account), ("engine_account", &self.engine_account)] {
+            if let Some(value) = value { body[key] = json!(value); }
+        }
+        if let Some(headless) = self.headless { body["headless"] = json!(headless); }
+        Ok(body)
+    }
 }
 
 #[derive(Deserialize)]
@@ -301,6 +321,7 @@ impl Tools {
         if a.headless == Some(true) && let Some(provider) = a.provider.as_deref().filter(|p| !matches!(*p, "claude" | "codex")) {
             return Err(format!("headless só vale com provider claude ou codex (veio: {provider})"));
         }
+        if let Some(sid) = a.resume.as_deref().filter(|s| !s.is_empty()) { return self.resume_session(sid, a.clone_for_resume()).await; }
         let mut body = json!({"name": a.nome, "cwd": a.cwd});
         let optional = [("provider", a.provider.map(Value::from)), ("engine", a.engine.map(Value::from)), ("model", a.model.map(Value::from)),
             ("effort", a.effort.map(Value::from)), ("permission_mode", a.permissao.map(Value::from)), ("headless", a.headless.map(Value::from)),
@@ -322,6 +343,13 @@ impl Tools {
             "config_dir": info["config_dir"], "account_source": info["account_source"]});
         if info["avisos"].as_array().is_some_and(|a| !a.is_empty()) { out["avisos"] = info["avisos"].clone(); }
         Ok(dict(out))
+    }
+
+    /// `resume`: a conversa volta pela rota do Arquivo (`-` = a pasta que a guarda), com nome e superfície.
+    async fn resume_session(&self, sid: &str, a: Result<Value, String>) -> Outcome {
+        let body = a?;
+        let info = self.ok(Method::POST, &format!("/api/archive/-/{}/resume", segment(sid)), Some(body)).await?;
+        Ok(dict(json!({"name": info["name"], "cwd": info["cwd"], "provider": info["provider"], "headless": info["headless"]})))
     }
 
     async fn close_session(&self, headers: &HeaderMap, alvo: &str) -> Outcome {
