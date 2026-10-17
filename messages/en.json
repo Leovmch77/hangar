@@ -8588,5 +8588,14 @@
   "composer_colar": "Paste",
   "composer_colar_vazio": "The clipboard is empty.",
   "composer_colar_falhou": "Could not read the clipboard.",
-  "machine_import_warning_short": "Automatic machine discovery: no answer from {hosts}. Saved machines are unchanged."
+  "machine_import_warning_short": "Automatic machine discovery: no answer from {hosts}. Saved machines are unchanged.",
+  "mobile_git_publish_title": "Publish commits to the remote?",
+  "mobile_git_publish_body": "{action} will send commits from this session's branch. Check the files and message before publishing.",
+  "mobile_git_checkout_title": "Switch to branch {branch}?",
+  "mobile_git_branch_body": "This changes the code in the folder where this session is working.",
+  "mobile_git_operation_failed": "The Git operation failed.",
+  "mobile_git_status": "Status",
+  "mobile_git_context_changed": "The session, Git folder or branch changed or is unavailable. The operation was stopped. Check the refreshed repository before trying again.",
+  "mobile_git_read_timeout": "The Git read did not respond within 20 s. Reload to try again.",
+  "mobile_git_write_timeout": "The Git operation did not respond within 60 s. Its outcome is uncertain: it may have completed on the server. The repository will be reloaded; check before repeating it."
 }

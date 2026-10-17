@@ -114,7 +114,7 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
   }, [router, onClose]);
   const abrirGit = useCallback((s: AggSession) => {
     onClose();
-    router.push(`/s/${s.serverId}/${s.name}/files` as never);
+    router.push(`/s/${s.serverId}/${s.name}/git` as never);
   }, [router, onClose]);
   // Convite fica de fora: o backend recusa worktrees ao convidado.
   const proprios = useMemo(() => new Set(servers.filter((x) => !x.invite).map((x) => x.id)), [servers]);

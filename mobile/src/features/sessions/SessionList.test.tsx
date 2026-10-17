@@ -13,6 +13,7 @@ const calls = vi.hoisted(() => ({
   ok: vi.fn(),
   push: vi.fn(),
   organizar: 'sessions',
+  realRow: false,
   listeners: new Map<string, (event: { data: string }) => void>(),
   stream: { addEventListener: vi.fn(), close: vi.fn(), onerror: null },
   sessions: [{ name: 'fixture', state: 'idle', jsonl: '/tmp/fixture.jsonl' }] as SessionInfo[],
@@ -42,16 +43,26 @@ vi.mock('../../stores/aparencia', () => ({
   ehGroupBy: () => false,
 }));
 vi.mock('expo-router', () => ({ useRouter: () => ({ push: calls.push }) }));
-vi.mock('@react-native-menu/menu', () => ({ MenuView: ({ children }: { children: React.ReactNode }) => children }));
+vi.mock('@react-native-menu/menu', () => ({
+  MenuView: ({ children, actions, onPressAction }: { children: React.ReactNode; actions: { id: string; title: string }[];
+    onPressAction: (event: { nativeEvent: { event: string } }) => void }) =>
+    React.createElement('div', null, children, ...(calls.realRow ? actions.map((action) =>
+      React.createElement('button', { key: action.id, 'data-action': action.id,
+        onClick: () => onPressAction({ nativeEvent: { event: action.id } }) }, action.title)) : [])),
+}));
 vi.mock('../../ui/HangarMark', () => ({ HangarMark: () => null }));
 vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('../../ui/Toast', () => ({ toast: { erro: calls.error, ok: calls.ok } }));
-vi.mock('./SessionRow', () => ({
-  SessionRow: ({ session, onExcluir, onPress, compact }: { session: AggSession; onExcluir: (session: AggSession) => void; onPress: (session: AggSession) => void; compact?: boolean }) =>
-    React.createElement('div', null,
+vi.mock('./SessionRow', async (original) => {
+  const actual = await original<typeof import('./SessionRow')>();
+  return { SessionRow: (props: React.ComponentProps<typeof actual.SessionRow>) => {
+    if (calls.realRow) return React.createElement(actual.SessionRow, props);
+    const { session, onExcluir, onPress, compact } = props;
+    return React.createElement('div', null,
       React.createElement('button', { 'data-row': `${session.serverId}::${session.name}`, 'data-compact': String(!!compact), onClick: () => onExcluir(session) }, session.name),
-      React.createElement('button', { 'data-open': `${session.serverId}::${session.name}`, onClick: () => onPress(session) })),
-}));
+      React.createElement('button', { 'data-open': `${session.serverId}::${session.name}`, onClick: () => onPress(session) }));
+  } };
+});
 vi.mock('../pair/PairInviteSheet', () => ({ PairInviteSheet: () => null }));
 vi.mock('../voice/LiveVoiceChatButton', () => ({ LiveVoiceChatButton: () => null }));
 vi.mock('../pair/PairAcceptSheet', () => ({ PairAcceptSheet: () => null }));
@@ -64,7 +75,8 @@ vi.mock('../../paraglide/messages', () => ({ ...Object.fromEntries((
   'native_brand lista_buscar lista_filtrar lista_filtro_limpar native_connected config_modal_titulo ' +
   'native_new_chat_title native_sidebar_all_sessions lista_sessoes_plural sessao_expandir sessao_recolher ' +
   'lista_carregando lista_vazia_filtro lista_nenhuma_ativa comum_cancelar sessao_excluir sessao_excluir_curto servidor_nao_existe ' +
-  'comum_carregando lista_nenhum_servidor lista_pareie_qr native_sidebar_awaiting home_sessions_awaiting home_sessions_working home_sessions_ready sessao_recolher'
+  'comum_carregando lista_nenhum_servidor lista_pareie_qr native_sidebar_awaiting home_sessions_awaiting home_sessions_working home_sessions_ready sessao_recolher ' +
+  'sessao_renomear sessao_git convite_parar orq_row_badge native_par_convidar native_par_menu'
 ).split(' ').map((key) => [key, () => key])),
   home_sessions_more_ready: ({ n }: { n: number }) => `home_sessions_more_ready:${n}`,
   lista_servidor_offline: ({ label }: { label: string }) => `${label}:offline`,
@@ -116,6 +128,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   calls.deleteSession.mockReset();
   calls.organizar = 'sessions';
+  calls.realRow = false;
   calls.sessions = [{ name: 'fixture', state: 'idle', jsonl: '/tmp/fixture.jsonl' }];
   calls.listeners.clear();
   calls.stream.addEventListener.mockImplementation((event: string, listener: (event: { data: string }) => void) => calls.listeners.set(event, listener));
@@ -132,6 +145,33 @@ afterEach(async () => {
 });
 
 describe('SessionList', () => {
+  it.each(['claude', 'orq'] as const)('git no menu real da linha %s abre a tela da conversa e fecha a lista', async (provider) => {
+    calls.realRow = true;
+    calls.sessions = [{ ...calls.sessions[0], cwd: '/repo', provider }];
+    const onClose = vi.fn();
+    await mount({ onClose });
+    const git = container.querySelector<HTMLButtonElement>('[data-action="git"]');
+    expect(git).not.toBeNull();
+    await act(async () => git!.click());
+    expect(calls.push).toHaveBeenCalledExactlyOnceWith('/s/srv1/fixture/git');
+    expect(onClose).toHaveBeenCalledExactlyOnceWith();
+  });
+
+  it('git não aparece no menu real de servidor de convite com cwd', async () => {
+    calls.realRow = true;
+    calls.sessions = [{ ...calls.sessions[0], cwd: '/repo', provider: 'claude' }];
+    useServers.setState({ servers: [server, { ...server, id: 'guest', baseUrl: 'https://guest.test', invite: true }] });
+    await mount();
+    const stop = container.querySelector<HTMLButtonElement>('[data-action="stop-following"]');
+    expect(stop).not.toBeNull();
+    expect(stop!.parentElement!.querySelector('[data-action="git"]')).toBeNull();
+    expect(stop!.parentElement!.querySelector('[data-action="rename"]')).not.toBeNull();
+    await act(async () => stop!.click());
+    expect(useServers.getState().servers.map((s) => s.id)).toEqual(['srv1']);
+    expect(calls.deleteSession).not.toHaveBeenCalled();
+    expect(calls.push).not.toHaveBeenCalled();
+  });
+
   it('home mostra recolhida a pronta que terminou por último', async () => {
     await mount({ variant: 'home' });
     const row = useSessions.getState().rows[0];
