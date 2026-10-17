@@ -18,7 +18,7 @@ const IOS = Platform.OS === 'ios';
 const one = (value: string | string[] | undefined) => (Array.isArray(value) ? value[0] : value) ?? '';
 const message = (error: unknown) => error instanceof Error ? error.message : m.erro_desconhecido();
 
-function Context({ server, project, sid, eventId, name }: { server: Server; project: string; sid: string; eventId: string; name: string }) {
+function Context({ server, project, sid, eventId, name, conversationTitle }: { server: Server; project: string; sid: string; eventId: string; name: string; conversationTitle: string }) {
   const router = useRouter();
   const [events, setEvents] = useState<ChatEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -75,7 +75,10 @@ function Context({ server, project, sid, eventId, name }: { server: Server; proj
   };
   return <View style={styles.body}>
     <View style={styles.actions}>
-      <Text style={styles.meta}>{server.label}</Text>
+      <View style={styles.identity}>
+        <Text style={styles.title}>{conversationTitle || name || sid.slice(0, 8)}</Text>
+        <Text style={styles.meta}>{server.label}</Text>
+      </View>
       <Pressable onPress={open} disabled={opening} style={styles.button} hitSlop={4} accessibilityRole="button">
         {opening ? <ActivityIndicator /> : null}
         <Text style={styles.action}>{name ? m.busca_abrir_sessao() : m.switcher_arquivo()}</Text>
@@ -113,7 +116,7 @@ export default function SearchPoint() {
   const headerOptions = useMemo(() => ({ ...glassHeader, title,
     headerLeft: canGoBack ? undefined : () => <HeaderBack onPress={() => router.replace('/search' as never)} />,
   }), [glassHeader, title, canGoBack, router]);
-  const params = useLocalSearchParams<{ server: string; project: string; sid: string; eventId: string; name?: string }>();
+  const params = useLocalSearchParams<{ server: string; project: string; sid: string; eventId: string; name?: string; conversationTitle?: string }>();
   const serverId = one(params.server), project = one(params.project), sid = one(params.sid), eventId = one(params.eventId), name = one(params.name);
   const server = useServers((s) => s.servers.find((item) => item.id === serverId && !item.invite && !item.removed && !item.disabled));
   if (!focused) return null;
@@ -121,7 +124,7 @@ export default function SearchPoint() {
     <Stack.Screen options={headerOptions} />
     <View style={[styles.body, { paddingTop: headerHeight }]}>
       {server && project && sid && eventId ? <Context key={JSON.stringify([server.id, server.baseUrl, server.token, project, sid, eventId, name])}
-        server={server} project={project} sid={sid} eventId={eventId} name={name} />
+        server={server} project={project} sid={sid} eventId={eventId} name={name} conversationTitle={one(params.conversationTitle)} />
         : <Text accessibilityRole="alert" style={styles.error}>{m.busca_contexto_indisponivel()}</Text>}
     </View>
   </Screen>;
@@ -130,6 +133,8 @@ export default function SearchPoint() {
 const styles = StyleSheet.create((theme) => ({
   body: { flex: 1 },
   actions: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: theme.base.space[4] },
+  identity: { flex: 1, gap: theme.base.space[1] },
+  title: { fontSize: theme.base.text.base, color: theme.tokens.text.primary },
   button: { minHeight: 44, minWidth: 44, paddingHorizontal: theme.base.space[2], flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
   action: { fontSize: theme.base.text.sm, color: theme.tokens.accent.base },
   meta: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted },

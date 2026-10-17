@@ -12,7 +12,7 @@ const h = vi.hoisted(() => ({ context: vi.fn(), push: vi.fn(), replace: vi.fn(),
   drag: null as null | (() => void),
   targetLayout: null as null | ((event: { nativeEvent: { layout: { y: number } } }) => void),
   contentLayout: null as null | ((width: number, height: number) => void),
-  params: { server: 'a', project: 'proj', sid: 'sid', eventId: 'match', name: '' } }));
+  params: { server: 'a', project: 'proj', sid: 'sid', eventId: 'match', name: '', conversationTitle: '' } }));
 const state = vi.hoisted(() => ({ activeId: 'b', servers: [
   { id: 'a', label: 'A', baseUrl: 'https://a.test', token: 'a' },
   { id: 'b', label: 'B', baseUrl: 'https://b.test', token: 'b' },
@@ -59,7 +59,7 @@ const entry = { project: 'proj', session_id: 'sid', provider: 'codex', codex_acc
 async function mount() { await act(async () => root.render(createElement(SearchPoint))); }
 beforeEach(() => { vi.resetAllMocks(); h.focused = true; h.canGoBack = true; h.options = null; h.edges = undefined; h.scrollInset = undefined;
   h.targetLayout = null; h.contentLayout = null; h.drag = null;
-  h.params = { server: 'a', project: 'proj', sid: 'sid', eventId: 'match', name: '' };
+  h.params = { server: 'a', project: 'proj', sid: 'sid', eventId: 'match', name: '', conversationTitle: '' };
   container = document.createElement('div'); root = createRoot(container);
   configureApi({ getBaseUrl: () => 'https://b.test', getToken: () => 'b', onUnauthorized: () => {}, origin: null,
     createEventSource: () => { throw new Error('unexpected SSE'); } });
@@ -122,6 +122,37 @@ it('ponto lê somente vizinhança de A e destaca evento sem buscar histórico in
   await act(async () => { h.targetLayout?.({ nativeEvent: { layout: { y: 480 } } }); h.contentLayout?.(390, 1800); });
   expect(h.scroll).toHaveBeenCalledWith({ y: 480, animated: false });
   expect(fetch).not.toHaveBeenCalled(); expect(h.push).not.toHaveBeenCalled();
+});
+
+it('título do arquivo fica acima da máquina sem transformar abertura em sessão viva', async () => {
+  h.params = { ...h.params, conversationTitle: 'Conversa arquivada' };
+  const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify([entry]), { status: 200 })); vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Conversa arquivada');
+  const open = button(m.switcher_arquivo()); expect(open).toBeDefined();
+  expect([...open!.parentElement!.firstElementChild!.children].map((element) => element.textContent)).toEqual(['Conversa arquivada', 'A']);
+  expect(button(m.busca_abrir_sessao())).toBeUndefined();
+  await act(async () => open!.click());
+  expect(String(fetch.mock.calls[0][0])).toBe('https://a.test/api/archive/proj');
+  expect(h.push).toHaveBeenCalledExactlyOnceWith('/archive/a/proj/sid');
+  expect(takeEntry('a', 'proj', 'sid')).toEqual(entry);
+  expect(state.activeId).toBe('b');
+});
+
+it.each([
+  ['sessao-viva', '123456789abcdef', 'sessao-viva'],
+  ['', '123456789abcdef', '12345678'],
+])('link sem título apresenta nome vivo ou início do ID: %s', async (name, sid, title) => {
+  h.params = { ...h.params, name, sid };
+  await mount();
+  expect(container.textContent).toContain(title);
+  const open = button(name ? m.busca_abrir_sessao() : m.switcher_arquivo());
+  expect(open).toBeDefined();
+  expect([...open!.parentElement!.firstElementChild!.children].map((element) => element.textContent)).toEqual([title, 'A']);
+  if (name) {
+    await act(async () => open!.click());
+    expect(h.push).toHaveBeenCalledExactlyOnceWith('/s/a/sessao-viva');
+  }
 });
 
 it('Abrir arquivo resolve conta e provider em A mesmo ativo B, sem enviar ou retomar', async () => {
