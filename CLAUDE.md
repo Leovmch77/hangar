@@ -261,8 +261,8 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Promovem camada que renderiza preto durante o scroll.
 - **A lista de mensagens é janelada** (`WINDOW=120`). Não renderize o transcript inteiro.
 - **O app renderiza `AskUserQuestion` nativamente**; use à vontade. Texto numerado é só fallback.
-- **Mods no nativo têm altura estável entre abas; Minimizar é local.** Perguntas ocupam o mesmo
-  espaço do mod e só devolvem o painel quando a interação termina. Minimização manual, aba e
+- **Mods no nativo começam minimizados e têm altura estável entre abas; Minimizar é local.**
+  Perguntas ocupam o mesmo espaço do mod e só devolvem o painel quando a interação termina. Minimização manual, aba e
   rolagem pertencem à sessão. Evidência em [frontend.md](docs/decisoes/frontend.md#mods-altura-estável-e-pergunta-no-mesmo-espaço-16102026).
 - **Mensagem esperando na fila do Hangar aparece no painel "Na fila", não como bolha.** A lista e a
   ordem vêm do evento `queue`; o modelo é `packages/core/src/queuePanel.ts` (o nativo repete em
@@ -317,6 +317,22 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   janela). Sem ícone de pé ou sem hospedeiro de bandeja, fechar encerra: o app nunca fica vivo e
   invisível. No Wayland esconder troca os objetos xdg na mesma superfície; só desmapear com
   buffer nulo não volta no Hyprland.
+- **App iOS (`mobile/`)** — interface e desempenho. Medição e exemplos em
+  [frontend.md](docs/decisoes/frontend.md#app-ios-mobile-interface-e-desempenho-16102026).
+  - A borda esquerda (0–20 pt) é o voltar do iOS: gaveta e arrasto próprio começam mais para dentro (`SessionsDrawer` `edgeStart`).
+  - Alvo de toque mínimo 44×44 pt; visual menor ganha `hitSlop`.
+  - Voltar e setas são `Icon` (`ChevronLeft`…), nunca caractere (‹ ▸).
+  - Formulário em folha usa o `KeyboardAvoidingView` do `react-native-keyboard-controller` com `automaticOffset`.
+  - Vibração só por `src/ui/haptics.ts` (iOS): seleção ao marcar, sucesso/erro no resultado; `toast.ok`/`toast.erro` já vibram.
+  - Tela simples usa o cabeçalho nativo da pilha (`useGlassHeader`); só o chat tem cabeçalho próprio.
+  - Conteúdo sob cabeçalho transparente: ScrollView com `contentInsetAdjustmentBehavior="automatic"` no iOS; o resto recua por `useHeaderHeight`.
+  - Tamanho de texto vem de `theme.base.text.*`, mínimo 11 pt; `fontScaleGuard.test.ts` barra número solto.
+  - Ícone Lucide novo ganha SF Symbol em `src/ui/sfSymbols.ts` quando houver um de mesmo sentido.
+  - Texto ao vivo (prévia) publica no máximo a cada ~50 ms; nunca um render por token.
+  - Composer e ChatHeader ficam em `memo` com callbacks estáveis; quem lê a prévia é só quem a desenha.
+  - Animação contínua para fora da tela e com a gaveta fechada, e roda a no máximo ~20 fps.
+  - Lista, folha e vidro escondidos não montam: nascem na primeira abertura.
+  - Linha que não mudou mantém o mesmo objeto (store e lista): evento novo não redesenha as outras.
 
 ### Harnesses — Claude, Codex, Pi, omp, Kimi → [`docs/decisoes/harnesses.md`](docs/decisoes/harnesses.md)
 

@@ -40,9 +40,9 @@ export function AccountUsage({ credential }: { credential: Credencial }) {
 const styles = StyleSheet.create(theme => ({
   block: { gap: 8 },
   window: { gap: 4 },
-  label: { fontSize: 13, color: theme.tokens.text.primary },
-  muted: { fontSize: 12, color: theme.tokens.text.muted },
-  warning: { fontSize: 12, color: theme.tokens.status.warning },
+  label: { fontSize: theme.base.text.xs, color: theme.tokens.text.primary },
+  muted: { fontSize: theme.base.text.xxs, color: theme.tokens.text.muted },
+  warning: { fontSize: theme.base.text.xxs, color: theme.tokens.status.warning },
   track: { height: 4, borderRadius: 2, overflow: 'hidden', backgroundColor: theme.tokens.bg.hover },
   fill: { height: 4, borderRadius: 2, backgroundColor: theme.tokens.accent.base },
 }));

@@ -37,6 +37,8 @@ import * as m from '../../../../src/paraglide/messages';
 // Tela de chat de uma sessão: histórico janelado + SSE ao vivo (store chat.ts).
 // A conversa para antes da curva de baixo da caixa: senão o texto vaza pelos cantos arredondados.
 const BORDA_DOCK = 20;
+// Faixa da borda esquerda que fica com o voltar nativo do iOS (HIG: nunca disputar esse arrasto).
+const IOS_BACK_EDGE = 20;
 
 // A prévia e o trabalho ao vivo mudam a cada token: assinados aqui, re-renderizam só a lista,
 // não a tela com o Composer e o cabeçalho.
@@ -468,7 +470,7 @@ export default function ChatScreen() {
   // A lista sai deste chat antes de empurrar outro destino; Nova conversa pede o campo na inicial.
   return (
     <Screen edges={[]}>
-      <SessionsDrawer onClose={() => router.dismissTo('/')} onOpenServers={() => setServersOpen(true)}
+      <SessionsDrawer edgeStart={Platform.OS === 'ios' ? IOS_BACK_EDGE : undefined} onClose={() => router.dismissTo('/')} onOpenServers={() => setServersOpen(true)}
         onNewConversation={() => router.dismissTo({ pathname: '/', params: { compose: '1' } })}>
         <MemoChatHeader
           name={name}

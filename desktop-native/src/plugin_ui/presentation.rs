@@ -9,9 +9,15 @@ pub enum Display {
     Question,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Presentation {
     minimized: bool,
+}
+
+impl Default for Presentation {
+    fn default() -> Self {
+        Self { minimized: true }
+    }
 }
 
 impl Presentation {
@@ -45,8 +51,23 @@ mod tests {
     use super::{Display, Presentation};
 
     #[test]
+    fn panels_start_minimized_and_expand_only_when_restored() {
+        let mut view = Presentation::default();
+        assert_eq!(view.display(false, false), Display::None);
+        assert_eq!(view.display(true, false), Display::Minimized);
+        assert!(!view.reserves_panel(true));
+        assert_eq!(view.display(true, true), Display::Question);
+        assert_eq!(view.display(true, false), Display::Minimized);
+
+        view.restore();
+        assert_eq!(view.display(true, false), Display::Panel);
+        assert!(view.reserves_panel(true));
+    }
+
+    #[test]
     fn question_replaces_the_panel_until_the_interaction_is_resolved() {
-        let view = Presentation::default();
+        let mut view = Presentation::default();
+        view.restore();
         assert_eq!(view.display(true, false), Display::Panel);
         assert_eq!(view.display(true, true), Display::Question);
         assert_eq!(
@@ -69,6 +90,7 @@ mod tests {
     #[test]
     fn manual_minimization_survives_questions_and_isolated_sessions() {
         let mut view = Presentation::default();
+        view.restore();
         view.minimize();
         assert_eq!(view.display(true, false), Display::Minimized);
         assert!(!view.reserves_panel(true));
@@ -76,7 +98,7 @@ mod tests {
         assert_eq!(view.display(true, false), Display::Minimized);
         assert_eq!(view.display(false, false), Display::None);
         assert_eq!(view.display(false, true), Display::Question);
-        assert_eq!(Presentation::default().display(true, false), Display::Panel);
+        assert_eq!(Presentation::default().display(true, false), Display::Minimized);
         view.restore();
         assert_eq!(view.display(true, false), Display::Panel);
         assert!(view.reserves_panel(true));

@@ -101,7 +101,7 @@ const styles = StyleSheet.create((theme) => ({
   name: { fontSize: theme.base.text.base, fontWeight: '600' },
   cwd: { fontSize: theme.base.text.xs },
   paired: { fontSize: theme.base.text.xs, flexShrink: 0 },
-  taskInput: { minHeight: 48, borderWidth: 1, borderRadius: theme.base.radius.md, paddingHorizontal: theme.base.space[3], fontSize: 16 },
+  taskInput: { minHeight: 48, borderWidth: 1, borderRadius: theme.base.radius.md, paddingHorizontal: theme.base.space[3], fontSize: theme.base.text.sm },
   primary: { minHeight: 50, borderRadius: theme.base.radius.md, alignItems: 'center', justifyContent: 'center', paddingHorizontal: theme.base.space[3] },
   primaryText: { fontSize: theme.base.text.base, fontWeight: '700', textAlign: 'center' },
   disabled: { opacity: 0.45 },

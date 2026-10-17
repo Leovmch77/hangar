@@ -538,22 +538,22 @@ function Button({ label, primary, disabled, onPress }: { label: string; primary?
 
 const MONO = Platform.select({ ios: 'Menlo', default: 'monospace' });
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   field: { gap: 8 },
-  fieldLabel: { fontSize: 15, fontWeight: '600', paddingHorizontal: 4 },
+  fieldLabel: { fontSize: theme.base.text.sm, fontWeight: '600', paddingHorizontal: 4 },
   self: { alignSelf: 'flex-start' },
   origin: { flexDirection: 'row', alignItems: 'center', gap: 6, height: 36, paddingHorizontal: 12, borderWidth: 1, borderRadius: 9999, alignSelf: 'flex-start', maxWidth: '100%' },
   dot: { width: 7, height: 7, borderRadius: 4 },
-  body: { fontSize: 15 },
-  strong: { fontSize: 15, fontWeight: '600' },
-  small: { fontSize: 13.5, lineHeight: 17 },
-  mono: { fontSize: 13.5, fontFamily: MONO },
-  note: { fontSize: 14, paddingHorizontal: 4 },
+  body: { fontSize: theme.base.text.sm },
+  strong: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  small: { fontSize: theme.base.text.xs, lineHeight: 17 },
+  mono: { fontSize: theme.base.text.xs, fontFamily: MONO },
+  note: { fontSize: theme.base.text.xs, paddingHorizontal: 4 },
   right: { marginLeft: 'auto' },
   line: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', columnGap: 10, rowGap: 4 },
   buttons: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   button: { height: 40, paddingHorizontal: 18, borderRadius: 9999, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
-  buttonText: { fontSize: 15, fontWeight: '600' },
+  buttonText: { fontSize: theme.base.text.sm, fontWeight: '600' },
   disabled: { opacity: 0.45 },
   row: { borderTopWidth: 1, paddingVertical: 12, paddingHorizontal: 16, gap: 4 },
   check: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, minHeight: 48, borderTopWidth: 1, paddingVertical: 12, paddingHorizontal: 16 },
@@ -562,7 +562,7 @@ const styles = StyleSheet.create({
   checkBody: { flex: 1, minWidth: 0, gap: 4 },
   card: { borderRadius: 14, borderWidth: 1, padding: 14, gap: 10 },
   group: { gap: 2 },
-  groupTitle: { fontSize: 13, fontWeight: '600', paddingTop: 4 },
+  groupTitle: { fontSize: theme.base.text.xs, fontWeight: '600', paddingTop: 4 },
   script: { marginTop: 4, paddingLeft: 10, borderLeftWidth: 1, gap: 2 },
   result: { gap: 2 },
-});
+}));

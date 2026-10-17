@@ -55,7 +55,7 @@ function RefItem({ refItem, md, onQuoteClick }: { refItem: ContextRef; md: Markd
           {refItem.url ? <Text style={[styles.url, { color: theme.tokens.text.muted }]} numberOfLines={1}>{refItem.url}</Text> : null}
           {refItem.html ? (
             <>
-              <Pressable onPress={() => setHtml((v) => !v)} style={styles.toggle} accessibilityRole="button" accessibilityState={{ expanded: html }}>
+              <Pressable onPress={() => setHtml((v) => !v)} hitSlop={6} style={styles.toggle} accessibilityRole="button" accessibilityState={{ expanded: html }}>
                 <Text style={[styles.toggleTxt, { color: theme.tokens.text.secondary }]}>{m.cite_element_html()}</Text>
               </Pressable>
               {html ? <Text style={[styles.code, { color: theme.tokens.text.secondary }]} selectable>{refItem.html}</Text> : null}
