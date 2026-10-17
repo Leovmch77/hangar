@@ -963,6 +963,17 @@ impl RuntimeRegistry {
         }).await.map_err(|_|refused("queue_job","a fila da sessão não respondeu"))?
     }
 
+    /// A entrada `entry` da fila da sessão `key` já foi entregue (leitura do arquivo, sem a trava).
+    pub async fn queue_entry_delivered(&self,key:&str,entry:&str) -> Result<bool,RuntimeError> {
+        let (state,_)=super::codex_terminal::queue_files(&self.codex_environment().claude_base.join(".hangar-queue"),key);
+        let entry=entry.to_owned();
+        tokio::task::spawn_blocking(move||{
+            let raw=super::queue::read_replaced(&state).map_err(|_|refused("queue_io","fila da sessão inacessível"))?;
+            let value:Value=serde_json::from_slice(&raw).map_err(|_|refused("queue_io","fila da sessão ilegível"))?;
+            Ok(value["rows"].as_array().into_iter().flatten().any(|row|row["id"]==entry.as_str() && row["delivered"]==true))
+        }).await.map_err(|_|refused("queue_job","a fila da sessão não respondeu"))?
+    }
+
     /// Tira a entrada `entry` da fila da sessão `key` direto no arquivo, para a sessão sem ator aberto.
     pub async fn cancel_queued(&self,key:&str,entry:&str) -> Result<(),RuntimeError> {
         let queue=self.codex_environment().claude_base.join(".hangar-queue");

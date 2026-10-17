@@ -94,6 +94,9 @@ pub fn decide(spec:&SessionSpec,current:&str,catalog:&Value,quotas:&[Value],spen
     }
 }
 
+/// Conferências da entrega do recado depois da troca (uma por segundo no servidor).
+const CONTINUE_CHECKS:usize = 30;
+
 /// Vai à sessão pela fila, depois de reaberta: sem ele a conversa ficaria parada no aviso de limite.
 pub const CONTINUE:&str = "O limite de uso da conta anterior acabou e esta sessão foi reaberta em outra conta. Continue de onde parou.";
 
@@ -137,6 +140,12 @@ pub trait Host: Send + Sync {
     fn show_problem<'a>(&'a self,name:&'a str,problem:LimitProblem) -> BoxFuture<'a,()>;
     fn diary(&self,name:&str,code:&str,reason:&'static str);
     fn now(&self) -> f64;
+    /// A entrada `entry` da fila `key` já foi entregue ao agente.
+    fn delivered<'a>(&'a self,key:&'a str,entry:&'a str) -> BoxFuture<'a,Result<bool,String>>;
+    /// A espera entre duas conferências da entrega.
+    fn wait_delivery(&self) -> BoxFuture<'_,()>;
+    /// Pede a drenagem da fila de novo.
+    fn drain<'a>(&'a self,name:&'a str) -> BoxFuture<'a,()>;
 }
 
 #[derive(Debug,PartialEq)]
@@ -149,7 +158,7 @@ struct Switcher {
     handled:Mutex<BTreeMap<String,UsageLimit>>,
 }
 
-enum Outcome { Switched { label:String, explicit:bool }, Stayed(&'static str), Failed(String), Busy(String) }
+enum Outcome { Switched { label:String, explicit:bool, key:String, entry:String }, Stayed(&'static str), Failed(String), Busy(String) }
 
 impl Switcher {
     fn first_time(&self,name:&str,limit:&UsageLimit) -> bool {
@@ -198,7 +207,7 @@ impl Switcher {
                         Some(Ok(_))=>{},
                     }
                 },
-                Reopen::Done=>return Outcome::Switched { label,explicit:spec.account_source == AccountSource::Explicit },
+                Reopen::Done=>return Outcome::Switched { label,explicit:spec.account_source == AccountSource::Explicit,key:spec.key.clone(),entry },
             }
         };
         if let Err(code) = host.cancel(&hit.name,&spec.key,&entry).await {
@@ -227,11 +236,23 @@ impl Switcher {
             handled.remove(&hit.name);
         }
         match &outcome {
-            Outcome::Switched { label,explicit } => {
+            Outcome::Switched { label,explicit,key,entry } => {
                 tracing::info!(session=%hit.name,window=%hit.limit.window,to=%label,explicit,"limite de uso: sessão reaberta em outra conta");
-                report("switched","limite de uso: a sessão reabriu na conta de mais folga e recebeu o recado para continuar");
+                report("switched","limite de uso: a sessão reabriu na conta de mais folga; o recado para continuar está na fila");
                 // O limite vence a conta escolhida pela pessoa, e isso fica registrado.
                 if *explicit { report("explicit_account","limite de uso: a conta escolhida pela pessoa foi trocada"); }
+                // "Recebeu o recado" só depois de entregue: antes disso é recado na fila.
+                let mut delivered = false;
+                for _ in 0..CONTINUE_CHECKS {
+                    if host.delivered(key,entry).await.unwrap_or(false) { delivered = true; break; }
+                    host.wait_delivery().await;
+                }
+                if delivered { report("limit_switch_continue_delivered","limite de uso: a vida nova recebeu o recado para continuar"); }
+                else {
+                    tracing::warn!(session=%hit.name,"limite de uso: o recado de continuar segue na fila depois da troca");
+                    report("limit_switch_continue_pending","limite de uso: o recado de continuar não foi entregue à vida nova; a fila é drenada de novo");
+                    host.drain(&hit.name).await;
+                }
             }
             Outcome::Stayed("limit_switch_no_room") => {
                 tracing::warn!(session=%hit.name,window=%hit.limit.window,"limite de uso: nenhuma conta com folga; a sessão fica parada");
@@ -330,6 +351,13 @@ impl Host for Native {
     }
     fn diary(&self,name:&str,code:&str,reason:&'static str) { self.st.diag.report("session.limit_switch",name,code,reason); }
     fn now(&self) -> f64 { crate::state::monitor::wall_now() }
+    fn delivered<'a>(&'a self,key:&'a str,entry:&'a str) -> BoxFuture<'a,Result<bool,String>> {
+        Box::pin(async move { self.runtime.queue_entry_delivered(key,entry).await.map_err(|error|error.code) })
+    }
+    fn wait_delivery(&self) -> BoxFuture<'_,()> { Box::pin(tokio::time::sleep(std::time::Duration::from_secs(1))) }
+    fn drain<'a>(&'a self,name:&'a str) -> BoxFuture<'a,()> {
+        Box::pin(async move { if let Err(error) = self.runtime.drain(name).await { tracing::warn!(session=%name,code=%error.code,"recado de continuar: a drenagem pedida falhou"); } })
+    }
 }
 
 #[cfg(test)]
@@ -465,13 +493,15 @@ mod tests {
         cancel_fails:std::sync::atomic::AtomicBool,
         /// A pessoa troca a conta pelo `/conta` durante a espera entre tentativas.
         on_pause:Mutex<Option<String>>,
+        /// A vida nova nunca recebe o recado.
+        undelivered:std::sync::atomic::AtomicBool,
     }
 
     impl Fake {
         fn new(dir:&str,quotas:Vec<Value>) -> Self {
             Fake { spec:Mutex::new(spec(claude(dir))),catalog:catalog(&["/a","/b","/c"]),quotas:Mutex::new(Ok(quotas)),
                 reopens:Mutex::new(Vec::new()),log:Mutex::new(Vec::new()),diary:Mutex::new(Vec::new()),problems:Mutex::new(Vec::new()),gone:Default::default(),
-                cancel_fails:Default::default(),on_pause:Mutex::new(None) }
+                cancel_fails:Default::default(),on_pause:Mutex::new(None),undelivered:Default::default() }
         }
         fn log(&self) -> Vec<String> { self.log.lock().unwrap().clone() }
         fn diary(&self) -> Vec<String> { self.diary.lock().unwrap().clone() }
@@ -514,6 +544,11 @@ mod tests {
         }
         fn diary(&self,_:&str,code:&str,_:&'static str) { self.diary.lock().unwrap().push(code.to_owned()); }
         fn now(&self) -> f64 { 1000.0 }
+        fn delivered<'a>(&'a self,_:&'a str,_:&'a str) -> BoxFuture<'a,Result<bool,String>> {
+            Box::pin(async move { Ok(!self.undelivered.load(std::sync::atomic::Ordering::Relaxed)) })
+        }
+        fn wait_delivery(&self) -> BoxFuture<'_,()> { Box::pin(async {}) }
+        fn drain<'a>(&'a self,_:&'a str) -> BoxFuture<'a,()> { Box::pin(async move { self.log.lock().unwrap().push("drain".into()); }) }
     }
 
     fn hit(account:&str,reset:f64) -> LimitHit {
@@ -525,7 +560,17 @@ mod tests {
         let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/b",60.0),quota("/c",20.0)]);
         Switcher::default().handle(&fake,hit("/a",2000.0)).await;
         assert_eq!(fake.log(),vec![format!("enqueue {CONTINUE}"),"reopen /c".into(),"release".into()]);
-        assert_eq!(fake.diary(),vec!["switched"]);
+        assert_eq!(fake.diary(),vec!["switched","limit_switch_continue_delivered"]);
+    }
+
+    /// "Recebeu o recado" só com a entrega confirmada; sem ela, o diário diz que está na fila e a fila é drenada de novo.
+    #[tokio::test]
+    async fn the_continue_note_counts_only_once_delivered() {
+        let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/b",60.0),quota("/c",20.0)]);
+        fake.undelivered.store(true,std::sync::atomic::Ordering::Relaxed);
+        Switcher::default().handle(&fake,hit("/a",2000.0)).await;
+        assert_eq!(fake.diary(),vec!["switched","limit_switch_continue_pending"]);
+        assert_eq!(fake.log().last().map(String::as_str),Some("drain"));
     }
 
     #[tokio::test]
@@ -555,7 +600,7 @@ mod tests {
         fake.reopens.lock().unwrap().push(Reopen::Busy("erro_sessao_trabalhando".into()));
         Switcher::default().handle(&fake,hit("/a",2000.0)).await;
         assert_eq!(fake.log(),vec![format!("enqueue {CONTINUE}"),"reopen /c".into(),"pause".into(),"reopen /c".into(),"release".into()]);
-        assert_eq!(fake.diary(),vec!["switched"]);
+        assert_eq!(fake.diary(),vec!["switched","limit_switch_continue_delivered"]);
     }
 
     #[tokio::test]
@@ -582,7 +627,7 @@ mod tests {
         assert_eq!(fake.diary(),vec!["erro_sessao_esperando_resposta"]);
         // O mesmo limite, quando a sessão voltar a parar, ainda troca.
         switcher.handle(&fake,hit("/a",2000.0)).await;
-        assert_eq!(fake.diary().last().map(String::as_str),Some("switched"));
+        assert_eq!(fake.diary().last().map(String::as_str),Some("limit_switch_continue_delivered"));
     }
 
     #[tokio::test]
@@ -663,13 +708,13 @@ mod tests {
         let switcher = Switcher::default();
         switcher.handle(&fake,hit("/a",2000.0)).await;
         switcher.handle(&fake,hit("/a",2000.0)).await;
-        assert_eq!(fake.diary().last().map(String::as_str),Some("switched"),"{:?}",fake.diary());
+        assert_eq!(fake.diary().last().map(String::as_str),Some("limit_switch_continue_delivered"),"{:?}",fake.diary());
         let fake = Fake::new("/a",vec![quota("/a",100.0)]);
         let switcher = Switcher::default();
         switcher.handle(&fake,hit("/a",2000.0)).await;
         *fake.quotas.lock().unwrap() = Ok(vec![quota("/a",100.0),quota("/b",10.0)]);
         switcher.handle(&fake,hit("/a",2000.0)).await;
-        assert_eq!(fake.diary(),vec!["limit_switch_no_room","switched"]);
+        assert_eq!(fake.diary(),vec!["limit_switch_no_room","switched","limit_switch_continue_delivered"]);
     }
 
     /// RR2: a pessoa que trocou de conta durante as tentativas vence; a tentativa seguinte não desfaz a escolha.
@@ -692,7 +737,7 @@ mod tests {
         switcher.handle(&fake,hit("/a",2000.0)).await;
         *fake.quotas.lock().unwrap() = Ok(vec![quota("/a",100.0),quota("/b",100.0),quota("/c",20.0)]);
         switcher.handle(&fake,hit("/b",2000.0)).await;
-        assert_eq!(fake.diary().last().map(String::as_str),Some("switched"),"{:?}",fake.diary());
+        assert_eq!(fake.diary().last().map(String::as_str),Some("limit_switch_continue_delivered"),"{:?}",fake.diary());
     }
 
     #[test]

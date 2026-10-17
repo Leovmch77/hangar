@@ -26,7 +26,8 @@ impl LimitWatch {
         let jsonl = row.jsonl.as_deref().filter(|j| !j.is_empty())?;
         if self.0.get(&row.name).is_some_and(|s| s.jsonl == jsonl && s.mtime == row.last_activity) { return None; }
         let found = crate::session_write::limit_switch::file_limit_at(Path::new(jsonl), now);
-        let sent = self.0.get(&row.name).filter(|s| s.jsonl == jsonl).and_then(|s| s.sent);
+        // Pela sessão, não pelo arquivo: a troca move a conversa para a pasta da conta nova, com o aviso dentro.
+        let sent = self.0.get(&row.name).and_then(|s| s.sent);
         let mut seen = Seen { jsonl: jsonl.to_owned(), mtime: row.last_activity, sent };
         // Sem a hora da linha ou do agente não há como dizer que o aviso é desta vida.
         let fresh = found.as_ref().and_then(|(_, at)| *at).zip(agent_started).filter(|(at, born)| *at + SLACK >= *born);
@@ -70,6 +71,10 @@ mod tests {
         let mut working = row(&jsonl, 3.0);
         working.state = "working".into();
         assert_eq!(LimitWatch::default().seen(&working, Some(LINE_AT - 600.0), NOW), None, "só a parada");
+        // A troca move a conversa para a pasta da conta nova: o aviso já entregue não vai de novo.
+        let moved = dir.path().join("outra-conta.jsonl");
+        std::fs::copy(&jsonl, &moved).unwrap();
+        assert_eq!(watch.seen(&row(&moved, 5.0), Some(LINE_AT - 600.0), NOW), None, "o mesmo aviso no arquivo movido");
         let mut headless = row(&jsonl, 3.0);
         headless.headless = true;
         assert_eq!(LimitWatch::default().seen(&headless, Some(LINE_AT - 600.0), NOW), None, "sem terminal o ator vê");
