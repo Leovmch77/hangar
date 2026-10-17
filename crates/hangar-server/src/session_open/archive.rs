@@ -31,6 +31,9 @@ pub struct ArchiveBody {
     pub codex_account: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
+    /// Com ou sem terminal acima do padrão do servidor (`None`: o padrão).
+    #[serde(default)]
+    pub headless: Option<bool>,
 }
 
 fn claude() -> String { "claude".into() }
@@ -220,7 +223,16 @@ fn redirect(home: &Path, cwd: String) -> String {
 pub struct Found { pub transcript: PathBuf, pub cwd: String, pub owner: Option<String>, pub codex_account: Option<String> }
 
 /// O pedido de abertura da retomada e o que a rota faz em volta dele.
-pub struct Plan { pub request: SessionOpenRequest, pub found: Found, pub provider: AgentProvider }
+pub struct Plan { pub request: SessionOpenRequest, pub found: Found, pub provider: AgentProvider, pub project: String }
+
+/// `-` no lugar do projeto: a pasta que guarda a conversa Claude, em qualquer conta (o id é único).
+fn claude_project(w: &Where, project: &str, sid: &str) -> Result<String, Miss> {
+    if project != "-" { return Ok(project.to_owned()); }
+    if !UUID.is_match(sid) { return Err(Miss::Invalid); }
+    let file = format!("{sid}.jsonl");
+    claude_accounts(w, None).into_iter().find_map(|(_, base)| std::fs::read_dir(base).ok()?.flatten()
+        .find(|e| e.path().join(&file).is_file())?.file_name().into_string().ok()).ok_or(Miss::Absent)
+}
 
 /// As validações e a busca do `resume_archived`, na ordem dele; o nome livre vem por último.
 pub fn plan(w: &Where, facts: &dyn OpenFacts, project: &str, sid: &str, body: ArchiveBody) -> Result<Plan, OpenError> {
@@ -234,6 +246,8 @@ pub fn plan(w: &Where, facts: &dyn OpenFacts, project: &str, sid: &str, body: Ar
     if provider == AgentProvider::Codex && !UUID.is_match(sid) {
         return Err(OpenError::new(400, "erro_rollout_sem_id", "nome de rollout sem id de conversa"));
     }
+    let project = if provider == AgentProvider::Claude { claude_project(w, project, sid)? } else { project.to_owned() };
+    let project = project.as_str();
     let found = match provider {
         AgentProvider::Claude => {
             // A conta pedida vence; sem ela, a dona (a conversa noutra conta morre com "No conversation found").
@@ -300,8 +314,8 @@ pub fn plan(w: &Where, facts: &dyn OpenFacts, project: &str, sid: &str, body: Ar
     let config_dir = body.config_dir.clone().or_else(|| found.owner.clone());
     let request = SessionOpenRequest { name: Some(name), cwd: found.cwd.clone(), config_dir, provider: Some(provider.name().into()),
         codex_account: found.codex_account.clone(), engine: body.engine, engine_account: body.engine_account, model: body.model,
-        ..Default::default() };
-    Ok(Plan { request, found, provider })
+        headless: body.headless, ..Default::default() };
+    Ok(Plan { request, found, provider, project: project.to_owned() })
 }
 
 /// `move_conversation`: a conversa vai inteira para a conta `to` (o `<id>.jsonl` e a pasta irmã), sem

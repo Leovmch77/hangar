@@ -2090,6 +2090,23 @@ fn an_archived_conversation_resumes_like_python() {
     }
 }
 
+/// Retomar pelo id (o `hangar-send --resume` e a tool `new_session`): `-` no lugar do projeto acha a pasta
+/// da conversa, e `headless` no corpo escolhe com ou sem terminal acima do padrão do servidor (D-012).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_conversation_resumes_by_id_alone_with_the_surface_asked() {
+    const SID: &str = "11111111-1111-4111-8111-111111111111";
+    let nothing: &dyn Fn(&std::path::Path) = &|_| {};
+    let (_, raw, _dir, _root) = run_resume_patched("archive_resume_claude", |s| {
+        s["steps"][0]["path"] = json!(format!("/api/archive/-/{SID}/resume"));
+        s["steps"][0]["json"] = json!({"name": "retomada", "headless": false});
+    }, nothing);
+    assert_eq!(raw["steps"][0]["status"], 200, "{}", raw["steps"][0]["body"]);
+    assert_eq!((&raw["steps"][0]["body"]["name"], &raw["steps"][0]["body"]["headless"]), (&json!("retomada"), &json!(false)));
+    let created = raw["subprocesses"].as_array().unwrap().iter().find(|p| p["argv"][0] == "new-session").expect("com terminal");
+    assert!(created["argv"].as_array().unwrap().last().unwrap().as_str().unwrap().contains(&format!("--resume {SID}")), "{created}");
+}
+
 /// Com o padrão do servidor sem terminal, a conversa do Arquivo volta sem terminal (matriz, item 21): o
 /// sidecar leva a conversa retomada, nenhum pane nasce e a sessão é acordada.
 #[cfg(target_os = "linux")]

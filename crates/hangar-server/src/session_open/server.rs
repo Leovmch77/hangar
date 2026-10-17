@@ -564,15 +564,14 @@ pub async fn serve_archive_resume(st: &Arc<AppState>, project: &str, sid: &str, 
         Ok(body) => body,
         Err(error) => return reply(&error),
     };
-    match resume_archived(st, project, sid, body, None).await {
+    match resume_archived(st, project, sid, body).await {
         Ok(body) => crate::session_write::json_response(StatusCode::OK, body),
         Err(error) => reply(&error),
     }
 }
 
-/// A retomada do Arquivo; `headless` fixa com ou sem terminal (`None`: o padrão da criação).
-pub async fn resume_archived(st: &Arc<AppState>, project: &str, sid: &str, body: super::archive::ArchiveBody, headless: Option<bool>)
-    -> Result<Value, OpenError> {
+/// A retomada do Arquivo; `-` no lugar do projeto procura a conversa pelo id.
+pub async fn resume_archived(st: &Arc<AppState>, project: &str, sid: &str, body: super::archive::ArchiveBody) -> Result<Value, OpenError> {
     let st = st.clone();
     let (project, sid) = (project.to_owned(), sid.to_owned());
     // Tarefa própria: cliente que desconecta não deixa a conversa movida de conta sem a sessão.
@@ -585,13 +584,13 @@ pub async fn resume_archived(st: &Arc<AppState>, project: &str, sid: &str, body:
             let facts = super::facts::LocalFacts::new(env.clone(), runtime);
             let config_dirs = super::OpenFacts::config_dirs(&facts)?;
             let w = super::archive::Where { home: &env.home, env: &env.base, server_projects: &server_projects, config_dirs: &config_dirs, live: &live };
-            let mut plan = super::archive::plan(&w, &facts, &p, &s, body)?;
-            if headless.is_some() { plan.request.headless = headless; }
+            let plan = super::archive::plan(&w, &facts, &p, &s, body)?;
             let resolved = super::resolve_open(&plan.request, &OpenCaller::Owner, &facts)?;
             Ok::<_, OpenError>((plan, resolved))
         }).await.unwrap_or_else(|_| Err(OpenError::new(500, "erro_criacao_sessao", "a resolução da retomada não terminou")));
         let (plan, resolved) = planned?;
         let _progress = super::open::Progress::track(&resolved.spec.name);
+        let project = plan.project.clone();
         super::archive::open(&host, plan, resolved, &project, &sid).await
     }).await.unwrap_or_else(|_| Err(OpenError::new(500, "erro_criacao_sessao", "a retomada não terminou")))
 }

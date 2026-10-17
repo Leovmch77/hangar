@@ -195,8 +195,9 @@ pub async fn after_restore(st: &std::sync::Arc<crate::routes::AppState>, home: &
     let resume = move |legacy: Legacy, project: String| -> BoxFuture<'static, Result<(), String>> {
         let st = st.clone();
         Box::pin(async move {
-            let body = super::archive::ArchiveBody { provider: "claude".into(), name: Some(legacy.name), config_dir: legacy.config_dir, ..Default::default() };
-            super::server::resume_archived(&st, &project, &legacy.conversation, body, Some(false)).await
+            let body = super::archive::ArchiveBody { provider: "claude".into(), name: Some(legacy.name), config_dir: legacy.config_dir,
+                headless: Some(false), ..Default::default() };
+            super::server::resume_archived(&st, &project, &legacy.conversation, body).await
                 .map(|_| ()).map_err(|e| e.code.unwrap_or("legacy_open_failed").to_owned())
         })
     };

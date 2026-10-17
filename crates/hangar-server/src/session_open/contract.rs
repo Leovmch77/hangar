@@ -343,7 +343,7 @@ pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -
                 Ok::<_, OpenError>((plan, resolved))
             }).await.unwrap();
             let (status, body) = match planned {
-                Ok((plan, resolved)) => match super::archive::open(&host, plan, resolved, &project, &sid).await {
+                Ok((plan, resolved)) => match { let project = plan.project.clone(); super::archive::open(&host, plan, resolved, &project, &sid).await } {
                     Ok(body) => (200, body),
                     Err(error) => (error.status, error.body()),
                 },
