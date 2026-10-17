@@ -292,7 +292,15 @@ it('avançado mostra chamadas diárias e contexto sem enviar data como foco de i
   expect(net.usage.mock.calls.every((call) => !call[2].foco)).toBe(true);
 });
 
-it('custos distinguem carregamento, sucesso incremental, parcial, falha total e período vazio', async () => {
+it.each([
+  ['pt', 'Sem resposta do servidor.'],
+  ['en', 'The server did not respond.'],
+] as const)('custos distinguem carregamento, sucesso incremental, parcial, falha total e período vazio em %s', async (locale, networkError) => {
+  configureLocale({ getLocale: () => locale });
+  overwriteGetLocale(() => locale);
+  const notebook = { ...b, label: 'notebook-lhais' };
+  useServers.setState({ servers: [a, notebook] });
+  const canceled = 'fetch failed: Fetch request has been canceled';
   let finishA!: (report: Partial<CostReport>) => void;
   let failB!: (error: Error) => void;
   net.costs.mockImplementation((server: Server) => server.id === 'a' ? new Promise((resolve) => { finishA = resolve; }) : new Promise((_resolve, reject) => { failB = reject; }));
@@ -302,31 +310,56 @@ it('custos distinguem carregamento, sucesso incremental, parcial, falha total e 
   await act(async () => finishA(costs('30d')));
   expect(node.textContent).toContain(m.custos_custo_periodo());
   expect(node.textContent).toContain(m.custos_carregando_maquinas({ n: 1 }));
-  await act(async () => failB(new Error('offline')));
+  await act(async () => failB(new Error(canceled)));
+  expect(node.textContent).toContain(`notebook-lhais: ${networkError}`);
+  expect(node.textContent).not.toMatch(/fetch failed|Fetch request has been canceled/);
   expect(node.textContent).toContain(m.custos_total_parcial());
-  expect(node.textContent).toContain('Machine B: offline');
-  net.costs.mockRejectedValue(new Error('offline'));
+  expect(node.textContent).toContain(m.custos_custo_periodo());
+  net.costs.mockRejectedValue(new Error(canceled));
   await click(m.custos_atualizar());
+  expect(net.costs).toHaveBeenLastCalledWith(notebook, '30d', true, false);
+  expect(node.textContent).toContain(`Machine A: ${networkError}`);
+  expect(node.textContent).toContain(`notebook-lhais: ${networkError}`);
+  expect(node.textContent).not.toMatch(/fetch failed|Fetch request has been canceled/);
   expect(node.textContent).toContain(m.home_usage_load_failed());
+  expect(node.textContent).not.toContain(m.custos_total_parcial());
   expect(node.textContent).not.toContain(m.custos_custo_periodo());
   net.costs.mockImplementation((_server: Server, period: string) => Promise.resolve(mergeReports([{ id: a.id, report: { applied: { period } } }], period).report));
   await click(m.custos_atualizar());
   expect(node.textContent).toContain(m.custos_sem_dados_periodo());
   expect(node.textContent).toContain(m.custos_custo_periodo());
+  expect(node.textContent).not.toContain(networkError);
+  expect(node.textContent).not.toContain(m.home_usage_load_failed());
+});
+
+it.each(['stats', 'areas'] as const)('rede de uso preserva sucesso parcial e identifica a máquina em %s', async (screen) => {
+  net.usage.mockImplementation((server: Server, period: string, filters: UsoFiltros) => server.id === 'b'
+    ? Promise.reject(new Error('fetch failed: Fetch request has been canceled'))
+    : Promise.resolve(usage(period, filters)));
+  await act(async () => root.render(React.createElement(screen === 'stats' ? StatsScreen : CostsScreen)));
+  if (screen === 'areas') await click(m.uso_graf_areas());
+  expect(node.textContent).toContain(`Machine B: ${m.native_network_error()}`);
+  expect(node.textContent).not.toMatch(/fetch failed|Fetch request has been canceled/);
+  expect(node.textContent).toContain(m.custos_total_parcial());
+  expect(node.textContent).toContain(screen === 'stats' ? 'heavy' : 'front');
 });
 
 it('detalhe de uso separa vazio, parcial e erro e opções sobrevivem ao recorte vazio', async () => {
   net.usage.mockImplementation((server: Server, period: string, filters: UsoFiltros) => filters.foco
-    ? server.id === 'b' ? Promise.reject(new Error('detail offline')) : Promise.resolve({ ...usage(period, filters), by_day: [] })
+    ? server.id === 'b' ? Promise.reject(new Error('fetch failed: Fetch request has been canceled')) : Promise.resolve({ ...usage(period, filters), by_day: [] })
     : Promise.resolve(usage(period, filters)));
   await act(async () => root.render(React.createElement(StatsScreen)));
   await click('heavy');
   expect(node.querySelector('aside')?.textContent).toContain(m.uso_detalhe_sem_serie());
   expect(node.querySelector('aside')?.textContent).toContain(m.custos_total_parcial());
-  expect(node.querySelector('aside')?.textContent).toContain('Machine B: detail offline');
-  net.usage.mockRejectedValue(new Error('detail offline'));
+  expect(node.querySelector('aside')?.textContent).toContain(`Machine B: ${m.native_network_error()}`);
+  expect(node.querySelector('aside')?.textContent).not.toMatch(/fetch failed|Fetch request has been canceled/);
+  net.usage.mockRejectedValue(new Error('fetch failed: Fetch request has been canceled'));
   const refresh = node.querySelector('aside button[aria-label="' + m.custos_atualizar() + '"]') as HTMLButtonElement;
   await act(async () => refresh.click());
+  expect(node.querySelector('aside')?.textContent).toContain(`Machine A: ${m.native_network_error()}`);
+  expect(node.querySelector('aside')?.textContent).toContain(`Machine B: ${m.native_network_error()}`);
+  expect(node.querySelector('aside')?.textContent).not.toMatch(/fetch failed|Fetch request has been canceled/);
   expect(node.querySelector('aside')?.textContent).toContain(m.home_usage_load_failed());
   expect(node.querySelector('aside')?.textContent).not.toContain(m.uso_detalhe_por_dia());
   await click(m.native_close());

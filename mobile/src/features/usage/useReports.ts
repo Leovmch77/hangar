@@ -62,7 +62,7 @@ export function useReports<K extends ReportKind>(kind: K, servers: Server[], per
           const timer = setTimeout(() => { timers.delete(timer); void read(server, tries + 1); }, 3000);
           timers.add(timer);
         } else update(server, { report: null, pending: false, warming: undefined,
-          error: error instanceof Aquecendo ? m.home_usage_warming_timeout() : motivoDoServidor(error) ?? (error instanceof Error ? error.message : m.home_usage_load_failed()) });
+          error: error instanceof Aquecendo ? m.home_usage_warming_timeout() : motivoDoServidor(error) ?? m.native_network_error() });
       }
     };
     for (const server of chosen) void read(server, 0);

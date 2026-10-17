@@ -87,12 +87,22 @@ it('falha total não vira zeros, parcial nomeia causa e período incompatível n
   net.costs.mockRejectedValue(new Error('offline'));
   await render();
   expect(latest.accepted).toBe(false);
-  expect(latest.parts.map((p) => [p.label, p.error])).toEqual([['a', 'offline'], ['b', 'offline']]);
+  expect(latest.parts.map((p) => [p.label, p.error])).toEqual([['a', m.native_network_error()], ['b', m.native_network_error()]]);
   net.costs.mockImplementation((s: Server) => s.id === 'a' ? Promise.resolve(cost('7d', 100)) : Promise.resolve(cost()));
   await act(async () => latest.refresh());
   expect(node.textContent).toContain('4');
-  expect(latest.parts[0].error).toBeTruthy();
+  expect(latest.parts[0].error).toBe(m.home_usage_period_unsupported());
   expect(mergeReports(latestCosts.parts, '30d').mismatched).toEqual(['a']);
+});
+
+it.each(['costs', 'usage'] as const)('erros codificados preservam motivo do servidor em %s', async (kind) => {
+  const error = Object.assign(new Error(m.costs_no_disk()), { code: 'costs_no_disk' });
+  net.costs.mockRejectedValue(error);
+  net.usage.mockRejectedValue(error);
+  await render({ kind, servers: [a] });
+  expect(latest.accepted).toBe(false);
+  expect(latest.parts[0].error).toBe(m.costs_no_disk());
+  expect(node.textContent).toBe(`no-report${m.costs_no_disk()}`);
 });
 
 it.each(['conta', 'projeto', 'modelo', 'plugin', 'foco'] as const)('uso recusa eco ausente ou divergente de %s sem somar relatório errado', async (key) => {
@@ -134,5 +144,5 @@ it('uso envia filtros repetíveis e foco separadamente, ignora filtros anteriore
   await act(async () => vi.advanceTimersByTimeAsync(3000 * 100));
   expect(net.usage).toHaveBeenCalledTimes(100);
   expect(latest.loading).toBe(false);
-  expect(latest.parts[0].error).toBeTruthy();
+  expect(latest.parts[0].error).toBe(m.home_usage_warming_timeout());
 });
