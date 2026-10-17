@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Platform, Pressable, ScrollView, Text, View } from 'react-native';
-import { Stack, useLocalSearchParams } from 'expo-router';
+import { ActivityIndicator, BackHandler, Platform, Pressable, ScrollView, Text, View } from 'react-native';
+import { Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useHeaderHeight } from 'expo-router/react-navigation';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -163,12 +163,13 @@ export default function ActivitySheet() {
     return !sub || subRows.find((row) => row.run.agentId === sub.agentId)?.status === 'running';
   });
   const shown = new Set(runningAgents.map((a) => matchSub(a.prompt)?.agentId));
-  const runningSubs = subRows.filter((row) => row.status !== 'finished' && row.status !== 'failed' && !shown.has(row.run.agentId));
+  const runningSubs = subRows.filter((row) => row.status === 'running' && !shown.has(row.run.agentId));
+  const uncertainSubs = subRows.filter((row) => row.status === 'silent' || row.status === 'unknown');
   const finishedSubs = subRows.filter((row) => row.status === 'finished' || row.status === 'failed');
   const midnight = new Date(agora * 1000).setHours(0, 0, 0, 0);
   const olderSubs = finishedSubs.filter((row) => row.at < midnight);
   const recentSubs = finishedSubs.filter((row) => !(row.at < midnight));
-  const runningCount = runningAgents.length + runningSubs.filter((row) => row.status === 'running').length;
+  const runningCount = runningAgents.length + runningSubs.length;
   const shellsVivos = activity.shells.filter((s2) => s2.running);
   const ha = (desde: number) => m.atividade_shell_ha({ t: formatElapsed(agora - desde) });
   const paiRodando = subAgentId ? parentRunning(subAgentId) : null;
@@ -264,7 +265,7 @@ export default function ActivitySheet() {
     setLevel('subagent');
   }
 
-  function back() {
+  const back = useCallback(() => {
     if (level === 'subagent') {
       setSubAgentId(null);
       setSubTitle('');
@@ -282,13 +283,24 @@ export default function ActivitySheet() {
       setDetail(null);
       setRunId(null);
     }
-  }
+  }, [level, refreshSubs]);
+
+  useFocusEffect(useCallback(() => {
+    if (Platform.OS !== 'android') return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (level === 'list') return false;
+      back();
+      return true;
+    });
+    return () => sub.remove();
+  }, [back, level]));
 
   const headerTitle = level === 'list' ? m.ctx_atividade() : level === 'subagent' ? subTitle || m.atividade_subagente() : level === 'workflow' ? (detail?.name ?? m.atividade_workflow()) : (agentDetail?.label ?? m.atividade_agente());
   const countBadge = level === 'list' && activity.total > 0 ? `${activity.done}/${activity.total}` : null;
   const wfBadge = level === 'workflow' && detail ? detail.status : null;
   const headerOptions = {
     ...header,
+    headerShown: Platform.OS !== 'android',
     title: headerTitle,
     headerLeft: level === 'list' ? undefined : () => <HeaderBack onPress={back} />,
     headerRight: countBadge ? () => <Text style={[styles.count, { color: theme.tokens.text.secondary }]}>{countBadge}</Text> : wfBadge ? () => (
@@ -299,11 +311,20 @@ export default function ActivitySheet() {
     contentStyle: { backgroundColor: 'transparent' },
   };
 
+  const androidHeader = Platform.OS === 'android' ? (
+    <View style={styles.header}>
+      {headerOptions.headerLeft?.()}
+      <Text style={[styles.title, { color: theme.tokens.text.primary }]} numberOfLines={1} accessibilityRole="header">{headerTitle}</Text>
+      {headerOptions.headerRight?.()}
+    </View>
+  ) : null;
+
   if (!server) {
     return (
       <>
         <Stack.Screen options={headerOptions} />
-        <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.root, { backgroundColor: theme.tokens.bg.base, paddingTop: headerHeight }]}>
+        <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.root, { backgroundColor: theme.tokens.bg.base, paddingTop: Platform.OS === 'android' ? 0 : headerHeight }]}>
+          {androidHeader}
           <Text style={[styles.error, { color: theme.tokens.status.error }]}>{m.compare_servidor_nao_encontrado()}</Text>
         </SafeAreaView>
       </>
@@ -313,7 +334,8 @@ export default function ActivitySheet() {
   return (
     <>
       <Stack.Screen options={headerOptions} />
-      <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.root, { backgroundColor: theme.tokens.bg.base, paddingTop: level === 'list' && Platform.OS === 'ios' ? 0 : headerHeight }]}>
+      <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.root, { backgroundColor: theme.tokens.bg.base, paddingTop: Platform.OS === 'android' || (level === 'list' && Platform.OS === 'ios') ? 0 : headerHeight }]}>
+        {androidHeader}
         {level === 'list' ? (
           <ScrollView contentContainerStyle={styles.body} contentInsetAdjustmentBehavior="automatic" showsVerticalScrollIndicator={false}>
             {workflows.length > 0 ? <WorkflowList workflows={workflows} onSelect={openWorkflow} /> : null}
@@ -361,6 +383,13 @@ export default function ActivitySheet() {
                   );
                 })}
                 {runningSubs.map(renderSub)}
+              </View>
+            ) : null}
+
+            {uncertainSubs.length > 0 ? (
+              <View style={styles.section}>
+                <Text style={[styles.label, { color: theme.tokens.text.muted }]}>{m.atividade_subagentes()}</Text>
+                {uncertainSubs.map(renderSub)}
               </View>
             ) : null}
 
@@ -450,7 +479,9 @@ export default function ActivitySheet() {
             onTentar={() => openAgent(agentAberto)}
           />
         ) : level === 'subagent' && subAgentId ? (
-          <SubagentLive key={`${serverId}::${name}::${subAgentId}`} server={server} sessionName={name} agentId={subAgentId} paiRodando={paiRodando} />
+          <View style={styles.subagentDetail}>
+            <SubagentLive key={`${serverId}::${name}::${subAgentId}`} server={server} sessionName={name} agentId={subAgentId} paiRodando={paiRodando} />
+          </View>
         ) : (
           <View style={styles.center}>
             <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.atividade_sem_transcript()}</Text>
@@ -463,9 +494,12 @@ export default function ActivitySheet() {
 
 const styles = StyleSheet.create((theme) => ({
   root: { flex: 1 },
+  header: { flexDirection: 'row', alignItems: 'center', minHeight: 44, paddingHorizontal: theme.base.space[4], paddingVertical: theme.base.space[2], gap: theme.base.space[2] },
+  title: { flex: 1, fontSize: theme.base.text.lg, fontWeight: '600' },
   count: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.sm, fontVariant: ['tabular-nums'] },
   wfStatus: { fontSize: theme.base.text.xs, fontWeight: '600', paddingHorizontal: theme.base.space[2], paddingVertical: 2, borderRadius: theme.base.radius.full, overflow: 'hidden' },
   body: { padding: theme.base.space[4], gap: theme.base.space[4], paddingBottom: theme.base.space[6] },
+  subagentDetail: { flex: 1, minHeight: 0, paddingHorizontal: theme.base.space[4] },
   section: { gap: theme.base.space[2] },
   olderToggle: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], minHeight: 44, minWidth: 44 },
   label: { fontSize: theme.base.text.xs, textTransform: 'uppercase', letterSpacing: 0.6, fontWeight: '600' },
