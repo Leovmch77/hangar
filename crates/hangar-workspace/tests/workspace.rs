@@ -219,7 +219,8 @@ fn branches_say_which_ones_are_open_in_another_worktree() {
 fn undoing_a_worktree_deletes_only_the_branch_it_created() {
     use hangar_workspace::git::{create_branch_worktree, undo_worktree};
     let base = tempfile::tempdir().unwrap();
-    let root = base.path().canonicalize().unwrap();
+    // Sem o prefixo `\\?\` do Windows: o git não cria pasta por ele.
+    let root = hangar_workspace::simplify(base.path().canonicalize().unwrap());
     let origin = root.join("origin");
     fs::create_dir_all(&origin).unwrap();
     git(&origin, &["init", "-q", "-b", "main"]);

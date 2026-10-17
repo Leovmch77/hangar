@@ -227,7 +227,9 @@ mod tests {
         let raw = std::fs::read_to_string(repo.join(format!("backend/tests/fixtures/contract/session-open/{name}.json"))).unwrap();
         let root = tempfile::tempdir().unwrap().keep();
         let (sid, key) = ("0c657c79-1745-406b-a97f-bbbf5402ff19".to_owned(), "ab".repeat(16));
-        let text = raw.replace("<ROOT>", &root.to_string_lossy()).replace("<REPO>", &repo.to_string_lossy())
+        // A troca acontece dentro de strings JSON: a barra invertida do caminho no Windows vai escapada.
+        let quoted = |path: &Path| path.to_string_lossy().replace('\\', "\\\\");
+        let text = raw.replace("<ROOT>", &quoted(&root)).replace("<REPO>", &quoted(&repo))
             .replace("<uuid:1>", &sid).replace("<hex:2>", &key);
         Case { root, repo, fixture: serde_json::from_str(&text).unwrap(), sid, key }
     }

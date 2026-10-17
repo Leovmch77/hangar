@@ -122,10 +122,17 @@ fn install(root: &Path, env_file: &str) -> std::path::PathBuf {
     bin
 }
 
+/// Ambiente vazio; no Windows o `SystemRoot` fica, porque sem ele o Winsock não sobe e nenhuma conexão sai.
+fn clean_env(command: &mut Command) -> &mut Command {
+    command.env_clear();
+    if let Some(system_root) = std::env::var_os("SystemRoot") { command.env("SystemRoot", system_root); }
+    command
+}
+
 /// Roda fora do runtime: o servidor falso do teste continua atendendo enquanto o comando espera.
 async fn hangar_open(bin: &Path, root: &Path, args: &[&str], extra_env: &[(&str, String)]) -> (i32, Value, String) {
     let mut command = Command::new(bin);
-    command.args(args).env_clear().env("HOME", root.join("home")).env("PATH", root.join("bin"));
+    clean_env(&mut command).args(args).env("HOME", root.join("home")).env("PATH", root.join("bin"));
     for (key, value) in extra_env { command.env(key, value); }
     let out = tokio::task::spawn_blocking(move || command.output().unwrap()).await.unwrap();
     (out.status.code().unwrap(), serde_json::from_slice(&out.stdout).unwrap_or(Value::Null), String::from_utf8_lossy(&out.stderr).into_owned())
@@ -139,6 +146,8 @@ async fn the_command_resolves_from_the_same_files_with_the_server_down() {
     let dir = tempfile::tempdir().unwrap();
     // Raiz canônica: o catálogo de contas compara o caminho resolvido.
     let root = dir.path().canonicalize().unwrap();
+    // O prefixo `\\?\` do Windows não aceita `/`, e os caminhos do fixture vêm com ela.
+    let root = std::path::PathBuf::from(root.to_string_lossy().strip_prefix(r"\\?\").map_or(root.clone().into_os_string(), Into::into));
     let fixture = fixture("create_inherit_from_headless_creator");
     materialize(&fixture, &root);
     // PATH vazio: nem tmux nem agentes, como uma máquina sem sessão de terminal.
@@ -190,7 +199,7 @@ async fn a_server_refusal_goes_to_stderr() {
     let bin = install(dir.path(), &format!("CP_AUTH_TOKEN=t\nCP_PORT={port}\n"));
     let out = {
         let mut command = Command::new(&bin);
-        command.args(["open", r#"{"name":"dup","cwd":"/x"}"#]).env_clear().env("HOME", dir.path());
+        clean_env(&mut command).args(["open", r#"{"name":"dup","cwd":"/x"}"#]).env("HOME", dir.path());
         tokio::task::spawn_blocking(move || command.output().unwrap()).await.unwrap()
     };
     assert_eq!(out.status.code(), Some(1));
