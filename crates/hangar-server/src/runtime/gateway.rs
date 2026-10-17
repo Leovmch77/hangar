@@ -1634,6 +1634,9 @@ impl RuntimeRegistry {
         entry.handle=EntryHandle::Headless(handle.clone().with_generation(next.generation));
         entry.generation=next.generation;entry.runtime_target=Some(next.clone());
         entry.mode_source.binding=crate::interactions::InteractionBinding {key:next.key.clone(),conversation:next_sid.into(),generation:next.generation};entry.mode_source.transcript=next.transcript.clone();
+        // A loja do plugin segue a conversa nova, como na abertura (`bind_plugin`): presa à antiga, todo fato
+        // lido dava `erro_interacao_desatualizada` até a sessão reabrir.
+        if let Some(plugin)=&self.plugin {plugin.bind(&entry.mode_source.binding).map_err(|error|failure(error.0))?;}
         self.forget_claude_rate(&crate::interactions::InteractionBinding {key:target.key.clone(),conversation:previous.into(),generation:target.generation})?;
         Ok(next)
     }
@@ -2601,6 +2604,47 @@ mod tests {
         registry.bind_lifecycle();
         let hubs=crate::side::Hubs::default();registry.bind_hubs(hubs.downgrade());
         (registry,hubs)
+    }
+
+    /// `/clear` sem terminal: a conversa nova do Claude passa à loja do plugin. Sem isso a loja ficava presa à
+    /// antiga e todo fato lido dava `erro_interacao_desatualizada` ("estado talvez velho") até reabrir.
+    #[tokio::test]
+    async fn a_headless_clear_rebinds_the_plugin_store_to_the_new_conversation() {
+        use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader};
+        let home=tempfile::tempdir().unwrap();
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+        let server=tokio::spawn(async move {
+            let (socket,_)=listener.accept().await.unwrap();let mut socket=BufReader::new(socket);let mut line=String::new();socket.read_line(&mut line).await.unwrap();
+            let snapshot=json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,"pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+            socket.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+            // O `/clear` chega com a sessão já aberta.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let init=json!({"type":"cano_output","frame":json!({"type":"system","subtype":"init","session_id":"b"}).to_string()});
+            socket.get_mut().write_all(format!("{init}\n").as_bytes()).await.unwrap();
+            loop {line.clear();if socket.read_line(&mut line).await.unwrap_or(0)==0 {break;}}
+        });
+        let key="cd".repeat(16);
+        let meta=json!({"name":"cl-rebind","key":key,"cwd":home.path(),"session_id":"a","headless":true,
+            "permission_mode":"manual","cano":{"pid":42,"escuta":format!("tcp:{address}"),"token":"fixture","versao":2}}).to_string();
+        // A troca de conversa grava o sidecar na pasta do ciclo de vida (a temporária, nos testes).
+        for dir in [home.path().join(".hangar/claude-headless"),super::super::lifecycle::claude_sidecar_dir().unwrap()] {
+            std::fs::create_dir_all(&dir).unwrap();std::fs::write(dir.join("cl-rebind.json"),&meta).unwrap();
+        }
+        let env=crate::accounts::environment::AccountEnvironment::from_map([("HOME".to_owned(),home.path().to_string_lossy().into_owned())].into());
+        let plugin=Arc::new(crate::plugin::Store::new(Arc::new(crate::interactions::InteractionStore::default())));
+        let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"fixture".into(),"instance".into())
+            .with_processes(Arc::new(SidRecipeProcesses {dir:home.path().into()})).with_codex_environment(env).with_plugin(plugin.clone()));
+        registry.bind_lifecycle();
+        let hubs=crate::side::Hubs::default();registry.bind_hubs(hubs.downgrade());
+        registry.open_claude_headless("cl-rebind",false).await.expect("é dela").expect("abriu");
+        let binding=tokio::time::timeout(Duration::from_secs(5),async {
+            loop {
+                if let Ok(binding)=registry.interaction_binding_readonly("cl-rebind").await && binding.conversation=="b" {break binding;}
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("a conversa nova chegou à entrada");
+        assert!(plugin.facts(&binding,std::time::Instant::now()).is_ok(),"a loja do plugin segue a conversa nova");
+        registry.close(&key,binding.generation).await.unwrap();server.abort();
     }
 
     /// A escrita (ou a subida) acha a sessão parada pelo sidecar: o Rust a abre sozinho, administrada, sem
