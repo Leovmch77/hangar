@@ -119,6 +119,13 @@ pub fn join(argv: &[String], windows: bool) -> String {
     argv.iter().map(|arg| crate::runtime::claude_relaunch::quote(arg, windows)).collect::<Vec<_>>().join(" ")
 }
 
+/// O agente dentro do envelope do só leitura (`bwrap …`), por um `/bin/sh -c` lá dentro. O `exec` troca o
+/// shell pelo agente: no dash ele ficaria de pai, e a restauração veria o shell em vez do agente.
+pub fn sandboxed(prefix: &[String], command: &[String], windows: bool) -> Vec<String> {
+    let inner = if windows { join(command, windows) } else { format!("exec {}", join(command, windows)) };
+    prefix.iter().cloned().chain(["/bin/sh".into(), "-c".into(), inner]).collect()
+}
+
 /// S-63: o que só a sessão põe (ou a configuração do servidor, relida na abertura) e o que é
 /// segredo do servidor. Servidor tmux subido de dentro de outra sessão teria os dela; o pane sai sem
 /// os que esta não pôs por `-e`. As do motor são as que o `hangar-engine` exporta (`engines.env_de`).
@@ -394,6 +401,27 @@ pub(crate) mod tests {
         pub(crate) fn runs(&self) -> Vec<Vec<String>> { self.seen.lock().unwrap().clone() }
         /// Só os `new-session`: a prova de vida acrescenta consultas.
         pub(crate) fn creations(&self) -> Vec<Vec<String>> { self.runs().into_iter().filter(|run| run.iter().any(|a| a == "new-session")).collect() }
+    }
+
+    /// No dash (Ubuntu, Debian) o `sh -c` fica de pai do comando: sem `exec` a restauração via o shell, não o
+    /// agente. O envelope falso entrega o `sh -c` a um dash falso, que só sai do caminho com `exec`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_read_only_agent_replaces_the_shell_inside_the_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let (dash, bwrap) = (dir.path().join("dash"), dir.path().join("bwrap"));
+        std::fs::write(&dash, "#!/bin/bash\nshift\neval \"$1\"\n").unwrap();
+        std::fs::write(&bwrap, format!("#!/bin/bash\nshift\nexec '{}' \"$@\"\n", dash.display())).unwrap();
+        for file in [&dash, &bwrap] { std::fs::set_permissions(file, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap(); }
+        let argv = sandboxed(&[bwrap.to_string_lossy().into_owned()], &["sleep".into(), "30".into()], false);
+        let mut child = std::process::Command::new(&argv[0]).args(&argv[1..]).spawn().unwrap();
+        let comm = || std::fs::read_to_string(format!("/proc/{}/comm", child.id())).unwrap_or_default().trim().to_owned();
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        while comm() != "sleep" && std::time::Instant::now() < end { std::thread::sleep(Duration::from_millis(20)); }
+        let seen = comm();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(seen, "sleep", "o processo da sessão é o agente, não o shell");
     }
 
     impl Mux for FakeMux {

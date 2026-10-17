@@ -84,8 +84,7 @@ pub fn pane(name: &str, key: &str, launch: &Launch, jev: bool, runtime_config: &
     -> Result<PaneSpec, OpenError> {
     let mut command = launcher_argv(launch)?;
     if let Some(prefix) = read_only {
-        let inner = super::terminal::join(&command, windows);
-        command = prefix.iter().cloned().chain(["/bin/sh".into(), "-c".into(), inner]).collect();
+        command = super::terminal::sandboxed(prefix, &command, windows);
     }
     let mut env = super::claude::jev_pairs(jev, runtime_config);
     env.push(("HANGAR_CLAUDE_SETTINGS".into(), String::new()));
@@ -205,7 +204,7 @@ mod tests {
     fn the_pane_carries_jev_and_the_read_only_envelope() {
         let pane = pane("cx", "k", &launch(), false, &json!({}), Some(&["bwrap".into(), "--".into()]), false).unwrap();
         assert_eq!(pane.command[..4], ["bwrap", "--", "/bin/sh", "-c"].map(str::to_owned));
-        assert!(pane.command[4].starts_with("hangar-codex-tui --cwd /w"), "{:?}", pane.command);
+        assert!(pane.command[4].starts_with("exec hangar-codex-tui --cwd /w"), "{:?}", pane.command);
         assert_eq!(pane.env, [("HANGAR_JEV".to_owned(), "off".to_owned()), ("HANGAR_CLAUDE_SETTINGS".to_owned(), String::new())]);
         assert_eq!((pane.provider, pane.key.as_str(), pane.config_dir), (AgentProvider::Codex, "k", None));
     }

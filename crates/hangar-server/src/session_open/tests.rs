@@ -1002,9 +1002,14 @@ fn the_claude_pane_is_the_one_python_launched() {
             runtime_config: &runtime, server_env: &Default::default(), settings: Some(&settings).filter(|s| !s.is_null()),
             read_only: read_only.as_deref(), windows: false, initial_prompt: None, engine_route: None, resume: false, allow_bypass: false };
         let ours = terminal::new_session_argv(&terminal::tests::machine_at("<ROOT>/home/.claude"), &claude::pane(&spec, "<uuid:1>", &ctx));
-        // O comando de dentro do `sh -c` do só leitura também é comparado por palavra.
+        // O comando de dentro do `sh -c` do só leitura também é comparado por palavra. Diferença aceita: o
+        // Rust abre com `exec` (no dash o shell ficava de pai do agente).
         let inner = |words: Vec<String>| words.iter().enumerate()
-            .flat_map(|(i, w)| if i > 0 && words[i - 1] == "-c" { shell_words(w) } else { vec![w.clone()] }).collect::<Vec<_>>();
+            .flat_map(|(i, w)| if i > 0 && words[i - 1] == "-c" {
+                let mut inner = shell_words(w);
+                if inner.first().is_some_and(|word| word == "exec") { inner.remove(0); }
+                inner
+            } else { vec![w.clone()] }).collect::<Vec<_>>();
         let (env, words) = launched_pane(&python);
         let words = inner(words);
         let (our_env, _) = launched_pane(&ours);

@@ -107,8 +107,7 @@ pub fn pane(spec: &SessionSpec, conversation: Conversation, ctx: &AgentContext) 
     };
     command.extend(choice(spec));
     if let Some(prefix) = ctx.read_only {
-        let inner = super::terminal::join(&command, ctx.windows);
-        command = prefix.iter().cloned().chain(["/bin/sh".into(), "-c".into(), inner]).collect();
+        command = super::terminal::sandboxed(prefix, &command, ctx.windows);
     }
     let mut env = super::claude::jev_pairs(spec.jev, ctx.runtime_config);
     env.push(("HANGAR_CLAUDE_SETTINGS".into(), String::new()));

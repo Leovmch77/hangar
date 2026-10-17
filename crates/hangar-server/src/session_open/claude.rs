@@ -149,8 +149,7 @@ pub fn pane(spec: &SessionSpec, sid: &str, ctx: &ClaudeContext) -> PaneSpec {
     }
     command.extend(claude);
     if let Some(prefix) = ctx.read_only {
-        let inner = super::terminal::join(&command, ctx.windows);
-        command = prefix.iter().cloned().chain(["/bin/sh".into(), "-c".into(), inner]).collect();
+        command = super::terminal::sandboxed(prefix, &command, ctx.windows);
     }
     let mut env = jev_pairs(spec.jev, ctx.runtime_config);
     env.push(("HANGAR_CLAUDE_SETTINGS".into(), ctx.settings.filter(|s| s.as_object().is_some_and(|o| !o.is_empty()))
