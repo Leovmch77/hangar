@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, View, useWindowDimensions } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
@@ -142,6 +142,8 @@ export function LiveVoiceSheet({ open, view, servers, serverId, onSelectServer, 
   const { height } = useWindowDimensions();
   const markdownStyle = useMemo(() => mkMarkdownStyle(theme), [theme]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [serverPickerOpen, setServerPickerOpen] = useState(false);
+  const scroll = useRef<ScrollView>(null);
   const [now, setNow] = useState(Date.now);
   const inCall = view.phase === 'connecting' || view.phase === 'live';
   const { settings, memory, state } = view;
@@ -159,6 +161,8 @@ export function LiveVoiceSheet({ open, view, servers, serverId, onSelectServer, 
     return () => clearInterval(timer);
   }, [open, view.phase, view.liveSince]);
   useEffect(() => { setSettingsOpen(false); }, [open, serverId]);
+  useEffect(() => { setServerPickerOpen(false); }, [open, serverId, inCall]);
+  useEffect(() => { if (serverPickerOpen) scroll.current?.scrollTo({ y: 0, animated: false }); }, [serverPickerOpen]);
 
   const save = (next: LiveVoiceSettings) => { if (!disabled) onSaveSettings(next); };
   const savePair = (mode: Mode, field: 'model' | 'effort' | 'tier', value: string | null) => {
@@ -185,10 +189,8 @@ export function LiveVoiceSheet({ open, view, servers, serverId, onSelectServer, 
             <Text style={styles.title} accessibilityRole="header">{m.live_voice_open()}</Text>
             {servers.length > 0 ? <View style={styles.field}>
               <Text style={styles.detail}>{m.live_voice_server()}</Text>
-              <QuietPill label={view.serverLabel} aria={m.live_voice_server()} menuTitle={m.live_voice_server()} disabled={inCall}
-                actions={servers.map(server => ({ id: server.id, title: server.id === serverId ? view.serverLabel : server.label,
-                  state: server.id === serverId ? 'on' : 'off' }))}
-                onAction={id => { if (!inCall) onSelectServer(id); }} />
+              <QuietPill label={view.serverLabel} aria={m.live_voice_server()} disabled={inCall}
+                onPress={() => { if (!inCall) setServerPickerOpen(!serverPickerOpen); }} />
             </View> : <Text style={styles.detail} selectable>{m.live_voice_server()}: {view.serverLabel}</Text>}
           </View>
           <Pressable onPress={onDismiss} accessibilityRole="button" accessibilityLabel={m.native_live_voice_close()}
@@ -210,7 +212,16 @@ export function LiveVoiceSheet({ open, view, servers, serverId, onSelectServer, 
               onChange={mode => onMode(mode === 'direct' ? 'direto' : 'planejar')} /> : null}
           </>
         ) : null}
-        <ScrollView style={styles.scroll} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+        <ScrollView ref={scroll} style={styles.scroll} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+          {serverPickerOpen ? <View accessibilityRole="radiogroup" accessibilityLabel={m.live_voice_server()}>
+            {servers.map(server => <Pressable key={server.id} disabled={inCall}
+              onPress={() => { if (!inCall) { setServerPickerOpen(false); onSelectServer(server.id); } }}
+              accessibilityRole="radio" accessibilityLabel={server.label}
+              accessibilityState={{ selected: server.id === serverId, disabled: inCall }} style={styles.serverItem}>
+              <Text style={[styles.serverName, { fontWeight: server.id === serverId ? '700' : '500' }]} numberOfLines={1}>{server.label}</Text>
+              {server.id === serverId ? <Icon name="Check" size={16} color={theme.tokens.accent.base} /> : null}
+            </Pressable>)}
+          </View> : null}
           {inCall && view.dictating ? <Text style={styles.detail}>{m.native_live_voice_dictation_hold()}</Text> : null}
           {view.error ? (
             <View style={styles.section}>
@@ -366,6 +377,9 @@ const styles = StyleSheet.create((theme) => ({
   row: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[3] },
   section: { gap: theme.base.space[2] },
   scroll: { flex: 1 },
+  serverItem: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[3], minHeight: 48,
+    paddingHorizontal: theme.base.space[2], borderRadius: theme.base.radius.md },
+  serverName: { flex: 1, fontSize: theme.base.text.base, color: theme.tokens.text.primary },
   content: { gap: theme.base.space[4], paddingBottom: theme.base.space[4] },
   close: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   action: { flexGrow: 1, minHeight: 44, paddingHorizontal: theme.base.space[3], paddingVertical: theme.base.space[2],

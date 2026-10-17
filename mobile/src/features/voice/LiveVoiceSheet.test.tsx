@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement, type ReactNode } from 'react';
+import { act, createElement, forwardRef, useImperativeHandle, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseLiveVoiceMessage, type Credencial, type LiveVoiceState, type LiveVoiceSettingsReply } from '@hangar/core';
@@ -8,9 +8,13 @@ import { LiveVoiceButton } from './LiveVoiceButton';
 import * as m from '../../paraglide/messages';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-const native = vi.hoisted(() => ({ markdown: vi.fn() }));
+const native = vi.hoisted(() => ({ markdown: vi.fn(), scroll: vi.fn() }));
 vi.mock('react-native', async original => ({
   ...await original<typeof import('react-native')>(),
+  ScrollView: forwardRef(function VoiceScroll({ children }: { children?: ReactNode }, ref) {
+    useImperativeHandle(ref, () => ({ scrollTo: native.scroll }));
+    return createElement('div', { 'data-scroll-content': true }, children);
+  }),
   Pressable: ({ children, onPress, accessibilityRole, accessibilityLabel, accessibilityState, disabled }: {
     children?: ReactNode; onPress?: () => void; accessibilityRole?: string; accessibilityLabel?: string; disabled?: boolean;
     accessibilityState?: { selected?: boolean; expanded?: boolean; busy?: boolean; disabled?: boolean };
@@ -24,7 +28,7 @@ vi.mock('../../ui/Sheet', () => ({
 }));
 vi.mock('../../ui/AnchoredPanel', () => ({
   AnchoredPanel: ({ open, children }: { open: boolean; children: ReactNode }) => open
-    ? createElement('div', null, children) : null,
+    ? createElement('div', { 'data-popup-layer': true }, children) : null,
 }));
 // Fronteira do renderizador nativo; não monta a árvore de bolhas do chat.
 vi.mock('../../chat/AssistantBubble', () => ({ mkMarkdownStyle: () => ({ paragraph: {} }) }));
@@ -67,6 +71,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-10-15T12:00:00Z'));
   native.markdown.mockClear();
+  native.scroll.mockClear();
   container = document.createElement('div');
   root = createRoot(container);
   view = initialView();
@@ -88,6 +93,36 @@ const choose = async (title: string, option: string) => {
 };
 
 describe('LiveVoiceSheet', () => {
+  it('oferece cinco destinos no fluxo da folha sem popup e fecha ao escolher primeiro ou último', async () => {
+    const destinations = [
+      { id: 'server-a', label: 'server-fixture' },
+      { id: 'server-b', label: 'orion-fixture' },
+      { id: 'server-c', label: 'lyra-fixture' },
+      { id: 'server-d', label: 'vega-fixture' },
+      { id: 'server-e', label: 'draco-fixture' },
+    ];
+    await act(async () => root.render(createElement(LiveVoiceSheet, { open: true, view, servers: destinations, serverId, ...callbacks })));
+    expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+    for (const [label, id] of [['server-fixture', 'server-a'], ['draco-fixture', 'server-e']]) {
+      await click(`${m.live_voice_server()}: server-fixture`);
+      const options = [...container.querySelectorAll<HTMLButtonElement>('button[role="radio"]')];
+      expect(options.map(option => option.getAttribute('aria-label'))).toEqual([
+        'server-fixture', 'orion-fixture', 'lyra-fixture', 'vega-fixture', 'draco-fixture',
+      ]);
+      for (const option of options) expect(option.closest('[data-popup-layer]')).toBeNull();
+      const group = container.querySelector('[role="radiogroup"]')!;
+      expect(group.getAttribute('aria-label')).toBe(m.live_voice_server());
+      expect(container.querySelector('section [data-scroll-content]')?.firstElementChild).toBe(group);
+      expect(container.querySelectorAll('[data-scroll-content]')).toHaveLength(1);
+      expect(options.map(option => option.getAttribute('aria-selected'))).toEqual(['true', 'false', 'false', 'false', 'false']);
+      await click(label);
+      expect(callbacks.onSelectServer).toHaveBeenLastCalledWith(id);
+      expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+    }
+    expect(callbacks.onSelectServer).toHaveBeenCalledTimes(2);
+    expect(callbacks.onStart).not.toHaveBeenCalled();
+  });
+
   it.each(['idle', 'closed'] as const)('seletor de servidor permite escolher próxima chamada em %s mesmo após erro', async phase => {
     view.phase = phase;
     if (phase === 'closed') view.error = { code: 'connection_lost' };
@@ -104,12 +139,32 @@ describe('LiveVoiceSheet', () => {
     await act(async () => root.render(createElement(LiveVoiceSheet, { open: true, view, servers: [servers[1]], serverId, ...callbacks })));
     const trigger = button(`${m.live_voice_server()}: server-fixture`);
     expect(trigger).toBeDefined();
+    expect(container.textContent).toContain(m.chat_servidor_removido());
+    expect(callbacks.onSelectServer).not.toHaveBeenCalled();
     await act(async () => trigger.click());
     const options = [...container.querySelectorAll<HTMLButtonElement>('button[role="radio"]')];
     expect(options.map(option => option.getAttribute('aria-label'))).toEqual(['other-server']);
+    expect(container.textContent).toContain(m.chat_servidor_removido());
+    expect(callbacks.onSelectServer).not.toHaveBeenCalled();
     await act(async () => options[0].click());
     expect(callbacks.onSelectServer).toHaveBeenCalledExactlyOnceWith('server-b');
     expect(callbacks.onStart).not.toHaveBeenCalled();
+  });
+
+  it.each(['connecting', 'live'] as const)('fecha a lista já aberta ao entrar em %s e impede seleção', async phase => {
+    await render();
+    await click(`${m.live_voice_server()}: server-fixture`);
+    expect(button('other-server')).toBeDefined();
+    view.phase = phase;
+    await render();
+    expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+    expect(button(`${m.live_voice_server()}: server-fixture`).disabled).toBe(true);
+    await click(`${m.live_voice_server()}: server-fixture`);
+    expect(container.querySelectorAll('button[role="radio"]')).toHaveLength(0);
+    expect(callbacks.onSelectServer).not.toHaveBeenCalled();
+    view.phase = 'closed';
+    await render();
+    expect(container.querySelector('[role="radiogroup"]')).toBeNull();
   });
 
   it.each(['connecting', 'live'] as const)('seletor de servidor fica desabilitado em %s', async phase => {
@@ -121,6 +176,40 @@ describe('LiveVoiceSheet', () => {
     await act(async () => trigger.click());
     expect(container.querySelectorAll('button[role="radio"]')).toHaveLength(0);
     expect(callbacks.onSelectServer).not.toHaveBeenCalled();
+  });
+
+  it('seletor de servidor pede rolagem ao topo somente quando abre a lista', async () => {
+    await render();
+    expect(native.scroll).not.toHaveBeenCalled();
+    await click(`${m.live_voice_server()}: server-fixture`);
+    expect(native.scroll).toHaveBeenCalledExactlyOnceWith({ y: 0, animated: false });
+    await click(`${m.live_voice_server()}: server-fixture`);
+    expect(native.scroll).toHaveBeenCalledTimes(1);
+    await click(`${m.live_voice_server()}: server-fixture`);
+    expect(native.scroll).toHaveBeenCalledTimes(2);
+    expect(native.scroll).toHaveBeenLastCalledWith({ y: 0, animated: false });
+  });
+
+  it('seletor de servidor alterna a lista e a fecha ao reabrir a folha ou mudar de servidor', async () => {
+    await render();
+    await click(`${m.live_voice_server()}: server-fixture`);
+    expect(button('other-server')).toBeDefined();
+    await click(`${m.live_voice_server()}: server-fixture`);
+    expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+    await click(`${m.live_voice_server()}: server-fixture`);
+    await render(false);
+    await render();
+    expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+    await click(`${m.live_voice_server()}: server-fixture`);
+    expect(button('other-server')).toBeDefined();
+    serverId = 'server-b';
+    view = { ...initialView(), serverLabel: 'other-server' };
+    await render();
+    expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+    expect(callbacks.onSelectServer).not.toHaveBeenCalled();
+    await click(`${m.live_voice_server()}: other-server`);
+    expect(button('other-server').getAttribute('aria-selected')).toBe('true');
+    expect(button('server-fixture').getAttribute('aria-selected')).toBe('false');
   });
 
   it('seletor de servidor fecha ajustes da máquina anterior quando a escolha muda', async () => {
