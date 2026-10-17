@@ -261,8 +261,8 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Promovem camada que renderiza preto durante o scroll.
 - **A lista de mensagens é janelada** (`WINDOW=120`). Não renderize o transcript inteiro.
 - **O app renderiza `AskUserQuestion` nativamente**; use à vontade. Texto numerado é só fallback.
-- **Mods no nativo têm altura estável entre abas; Minimizar é local.** Perguntas ocupam o mesmo
-  espaço do mod e só devolvem o painel quando a interação termina. Minimização manual, aba e
+- **Mods no nativo começam minimizados e têm altura estável entre abas; Minimizar é local.**
+  Perguntas ocupam o mesmo espaço do mod e só devolvem o painel quando a interação termina. Minimização manual, aba e
   rolagem pertencem à sessão. Evidência em [frontend.md](docs/decisoes/frontend.md#mods-altura-estável-e-pergunta-no-mesmo-espaço-16102026).
 - **Mensagem esperando na fila do Hangar aparece no painel "Na fila", não como bolha.** A lista e a
   ordem vêm do evento `queue`; o modelo é `packages/core/src/queuePanel.ts` (o nativo repete em
