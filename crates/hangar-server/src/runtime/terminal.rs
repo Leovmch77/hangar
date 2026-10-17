@@ -24,10 +24,10 @@ pub type ModsAnchor=Arc<std::sync::Mutex<Option<String>>>;
 /// o executor devolve o teclado ao prompt e escreve. `clear_wait`: quanto a trava do `/clear` espera a
 /// conversa nova antes de conferir se ele foi aplicado. `give_up_after`: quanto a entrega incerta espera a
 /// prova antes de ser desistida sozinha (com o Claude parado).
-pub struct TerminalOptions { pub lifecycle:Option<std::sync::Weak<super::gateway::RuntimeRegistry>>,pub permissions:Option<Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>>,pub interactions:Option<Arc<InteractionStore>>,pub plugin:Option<Arc<crate::plugin::Store>>,pub mode_facts:Option<crate::terminal_facts::ModeReader>,pub terms:Option<Arc<crate::term::Terms>>,pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration,pub give_up_after:Duration,pub status:Option<StatusSender>,pub turn_start_wait:Duration,pub btw:crate::btw_control::BtwLimits }
+pub struct TerminalOptions { pub lifecycle:Option<std::sync::Weak<super::gateway::RuntimeRegistry>>,pub permissions:Option<Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>>,pub interactions:Option<Arc<InteractionStore>>,pub plugin:Option<Arc<crate::plugin::Store>>,pub mode_facts:Option<crate::terminal_facts::ModeReader>,pub terms:Option<Arc<crate::term::Terms>>,pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration,pub give_up_after:Duration,pub status:Option<StatusSender>,pub turn_start_wait:Duration }
 impl Default for TerminalOptions {
     fn default()->Self {Self {lifecycle:None,permissions:None,interactions:None,plugin:None,mode_facts:None,terms:None,io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1),stall_notice:Duration::from_secs(30),
-        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT,give_up_after:GIVE_UP_AFTER,status:None,turn_start_wait:TURN_START_WAIT,btw:Default::default()}}
+        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT,give_up_after:GIVE_UP_AFTER,status:None,turn_start_wait:TURN_START_WAIT}}
 }
 /// Quanto uma linha espera, desde a primeira vez que viu o foco num mod, antes de o executor devolver o
 /// teclado ao prompt. Cobre quem acabou de levar o foco a um painel no terminal, sem deixar a mensagem do
@@ -266,13 +266,7 @@ struct Executor {
     /// trata a sessão como trabalhando, para a próxima não cair no mesmo turno.
     turn_wait:Option<tokio::time::Instant>,
     diag:crate::diag::DiagClient,
-    /// Pergunta lateral em curso: o pane é dela até o fim, como o `_send_lock` do Python; escrita e
-    /// drenagem esperam guardadas, e retrato, fila e diário seguem atendidos.
-    btw:Option<BtwRun>,
 }
-/// A tarefa da pergunta lateral e quem espera a resposta.
-struct BtwRun {id:String,task:tokio::task::JoinHandle<()>,response:oneshot::Sender<Result<RuntimeReply,RuntimeError>>}
-type BtwDone=(String,Result<Value,crate::btw_control::BtwError>);
 /// Leitura do tamanho do transcript enquanto uma entrega espera confirmação: só `stat`.
 const CONFIRM_POLL:Duration=Duration::from_millis(50);
 const CONFIRM_WINDOW:Duration=Duration::from_secs(30);
@@ -351,7 +345,7 @@ impl TerminalActor {
         let status=options.status.clone();
         if let Some(sender)=&status { sender.send_replace(Default::default()); }
         let executor=Executor {batch_blocked:false,target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,mode_unproved:false,modes_cache:None,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,reconciliation:None,confirm_until:None,confirm_seen:None,
-            unproved_since:None,no_safe_delivery:false,heal_requested:None,turn_wait:None,diag:policy.diag(),btw:None};
+            unproved_since:None,no_safe_delivery:false,heal_requested:None,turn_wait:None,diag:policy.diag()};
         let run=executor.run(receiver,closed.clone());
         let task=tokio::spawn(async move {
             let mut guard=terminal_status::PanicMark(status);
@@ -479,23 +473,21 @@ impl Executor {
         if self.cleared(&*self.queue.snapshot().await.map_err(|_|error("queue_io"))?) {self.clear_watch=Some(tokio::time::Instant::now()+self.options.clear_wait);}
         if let Some(sender)=&self.options.status { terminal_status::publish_snapshot(sender,&self.snapshot().await?); }
         let mut timer=tokio::time::interval(self.options.tick.max(Duration::from_millis(1))); timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let (btw_done,mut btw_finished)=mpsc::channel::<BtwDone>(1);
         loop {
             // Guardadas durante um clique de mod: saem na ordem em que chegaram, assim que ele solta o pane.
             // `unparked`: a mensagem saiu da fila local e não volta para ela (sem laço).
-            let (message,unparked)=if !self.parked.is_empty() && !self.held() && self.btw.is_none() {(self.parked.pop_front(),true)} else {
+            let (message,unparked)=if !self.parked.is_empty() && !self.held() {(self.parked.pop_front(),true)} else {
                 // A reserva que vence sem `Release` solta o que estava guardado na hora, mesmo com o relógio
                 // desligado pelo erro de manutenção.
                 let release_at=self.hold.filter(|_|!self.parked.is_empty());
                 let message=tokio::select! {biased;
-                    Some((id,result))=btw_finished.recv()=>{self.btw_finish(&id,result).await; continue;},
                     message=receiver.recv()=>message,
                     _=tokio::time::sleep_until(release_at.unwrap_or_else(tokio::time::Instant::now)),if release_at.is_some()=>continue,
                     _=timer.tick(),if !closed.load(Ordering::Acquire) && (self.last_error.is_none() || self.last_error.as_deref()==Some("terminal_facts") || self.reconciling() || self.clear_watch.is_some() || self.clear_notice.is_some() || self.options.lifecycle.is_some())=>{
                         if self.clear_notice.is_some_and(|until|tokio::time::Instant::now()>=until) {self.clear_notice=None; self.publish().await?;}
                         // Clique de mod em curso, ou o que ele guardou ainda por sair: a fila não entrega nem
-                        // reconcilia no pane antes disso (C6). Nem com a pergunta lateral no pane.
-                        if self.held() || !self.parked.is_empty() || self.btw.is_some() {continue;}
+                        // reconcilia no pane antes disso (C6).
+                        if self.held() || !self.parked.is_empty() {continue;}
                         // Sem ciclo de vida ligado a reconciliação só falharia; a trava do `/clear` sai pelo `expire_clear` da drenagem.
                         if self.options.lifecycle.is_some() && let Err(failure)=self.reconcile_life().await {self.enter_error(failure).await?;}
                         self.watch_proof().await?;
@@ -530,13 +522,12 @@ impl Executor {
             // O que escreve no pane (comando e drenagem pedida) espera o clique de mod soltar, e o que chega
             // com algo ainda guardado entra atrás dele (ordem da caixa); operação de mod, fila, retrato,
             // confirmação e parada seguem.
-            let wait=!unparked && (self.held() || self.btw.is_some() || !self.parked.is_empty());
+            let wait=!unparked && (self.held() || !self.parked.is_empty());
             let message=match message {
                 Some(message@(Message::Command {..}|Message::Drain(_))) if wait=>{self.parked.push_back(message);continue;},
                 other=>other,
             };
             match message {
-                Some(Message::Command {id,kind,payload,response}) if kind=="btw"=>self.btw_start(id,payload,response,btw_done.clone()).await,
                 Some(Message::Command {id,kind,payload,response})=>{
                     let result=if matches!(kind.as_str(),"keyboard_loan"|"keyboard_return") {self.loan_control(&id,&kind,&payload)}
                         // Fora do `execute`: o Orientar entrega pela drenagem, que já chama o `execute`.
@@ -579,19 +570,17 @@ impl Executor {
                     let _=response.send(result);},
                 Some(Message::Stop(response))=>{
                     closed.store(true,Ordering::Release);
-                    self.refuse_parked().await;
+                    self.refuse_parked();
                     let queue=Arc::try_unwrap(self.queue).map_err(|_|error("terminal_lease_inflight"))?;
                     let result=queue.shutdown().await.map_err(|_|error("queue_stop")); let _=response.send(result.clone()); return result;
                 },
-                None=>{self.refuse_parked().await; let queue=Arc::try_unwrap(self.queue).map_err(|_|error("terminal_lease_inflight"))?;return queue.shutdown().await.map_err(|_|error("queue_stop"));}
+                None=>{self.refuse_parked(); let queue=Arc::try_unwrap(self.queue).map_err(|_|error("terminal_lease_inflight"))?;return queue.shutdown().await.map_err(|_|error("queue_stop"));}
             }
         }
     }
     /// Parada com algo guardado pelo clique de mod: quem esperava ouve `runtime_stopping`, como quem chama
     /// um ator que já está parando, e não a caixa fechada.
-    async fn refuse_parked(&mut self) {
-        // A pergunta lateral segura o diário da fila (`Services`): termina antes de a fila fechar.
-        if let Some(run)=self.btw.take() {run.task.abort(); let _=run.task.await; let _=run.response.send(Err(error("runtime_stopping")));}
+    fn refuse_parked(&mut self) {
         for message in self.parked.drain(..) {
             match message {
                 Message::Command {response,..}=>{let _=response.send(Err(error("runtime_stopping")));},
@@ -770,8 +759,6 @@ impl Executor {
         // Soltar vale sempre: é a limpeza do clique.
         if op==PaneOp::Release {self.hold=None; self.hold_checked=false; self.focus_refused=false; return Ok(PaneReply::Done);}
         if self.loaned() {return Err(error("keyboard_loan"));}
-        // O clique cairia dentro do overlay da pergunta lateral.
-        if self.btw.is_some() {return Err(error("btw_in_progress"));}
         if op==PaneOp::ReturnFocus {
             // Uma tentativa por reserva e só com o plugin vivo: sem isso, cada volta da limpeza pagaria o
             // diário e a espera do aviso antes do anel, dentro do prazo curto dela.
@@ -838,51 +825,6 @@ impl Executor {
             Ok(_)=>result(input::Disposition::Unknown,"plugin_control_uncertain"),
             Err(error)=>result(input::Disposition::Rejected,error.0),
         }
-    }
-
-    /// Pergunta lateral: diário como o da troca de modo (Prepare, despacho, Finish), e a sequência numa
-    /// tarefa própria, com o pane reservado a ela; o ator segue respondendo retrato e fila enquanto isso.
-    async fn btw_start(&mut self,id:String,payload:Value,response:oneshot::Sender<Result<RuntimeReply,RuntimeError>>,done:mpsc::Sender<BtwDone>) {
-        let prepared=async {
-            if !valid_operation_id(&id) {return Err(error("operation_id"));}
-            let question=payload["question"].as_str().filter(|_|payload.as_object().is_some_and(|p|p.len()==1)).ok_or_else(||error("terminal_payload"))?.to_owned();
-            let original=json!({"operation_id":id,"kind":"btw","payload":payload});
-            let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
-            if state.generation!=self.target.generation {return Err(error("runtime_generation"));}
-            if let Some(old)=state.operations.get(&id) {
-                if old.payload!=original {return Err(error("operation_payload"));}
-                return Ok(Err(serde_json::from_value(old.result.clone()).unwrap_or_else(|_|reply(&id,Disposition::Unknown,json!({"code":"recovered_operation"})))));
-            }
-            if self.loaned() || self.cleared(&state) {return Err(error("btw_control_busy"));}
-            self.action(Action::Prepare {id:id.clone(),payload:original,entry_id:None}).await?;
-            self.action(Action::BeginDispatch {id:id.clone(),wire_id:format!("btw:{}:{id}",self.target.generation),staged:false}).await?;
-            Ok(Ok(question))
-        }.await;
-        let question=match prepared {
-            Err(failure)=>{let _=response.send(Err(failure)); return;},
-            Ok(Err(stored))=>{let _=response.send(Ok(stored)); return;},
-            Ok(Ok(question))=>question,
-        };
-        let driver=TerminalDriver::new(self.target.binding.clone(),self.services(&id,&id,""),self.options.io.clone(),self.options.limits.clone()).controls();
-        let (limits,task_id)=(self.options.btw.clone(),id.clone());
-        let task=tokio::spawn(async move {
-            let result=crate::btw_control::contained(crate::btw_control::ask(&driver,&question,&limits)).await;
-            let _=done.send((task_id,result)).await;
-        });
-        self.btw=Some(BtwRun {id,task,response});
-    }
-    async fn btw_finish(&mut self,id:&str,result:Result<Value,crate::btw_control::BtwError>) {
-        let Some(run)=self.btw.take_if(|run|run.id==id) else {return};
-        let (disposition,payload)=match result {
-            Ok(item)=>(Disposition::Accepted,item),
-            Err(failure)=>(Disposition::Rejected,json!({"status":failure.status,"code":failure.code,"msg":failure.message})),
-        };
-        let result=reply(id,disposition,payload);
-        // A resposta já foi lida na TUI: o diário que falha vai ao log, não tira a resposta de quem perguntou.
-        if let Err(failure)=self.action(Action::Finish {id:id.into(),status:status(disposition),result:serde_json::to_value(&result).unwrap()}).await {
-            tracing::warn!(key=%self.target.key,session=%self.target.name,code=%failure.code,"btw: diário não gravou o fim da pergunta lateral");
-        }
-        let _=run.response.send(Ok(result));
     }
 
     async fn permission(&mut self,id:&str,kind:&str,payload:Value)->Result<RuntimeReply,RuntimeError> {

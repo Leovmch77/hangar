@@ -413,6 +413,18 @@ impl RuntimeRegistry {
         Some(self.claude_current(name,false,false).await.map(|current|current.spec))
     }
 
+    /// O que o fork do `/btw` precisa da sessão Claude com terminal `name`, nas chaves do sidecar sem
+    /// terminal: a conversa de agora do pane, a pasta, a conta, o modelo e o motor.
+    pub async fn claude_fork_meta(&self,name:&str) -> Result<Value,RuntimeError> {
+        let current=self.claude_current(name,false,false).await?;
+        let Life::Terminal { target }=&current.life else { return Err(refused("runtime_provider","a sessão não tem terminal")) };
+        let spec=&current.spec;
+        // A pasta do processo vivo, não a do spec: é nela que a CLI gravou a conversa.
+        let mut meta=json!({"session_id":current.sid,"cwd":spec.cwd,"config_dir":target.metadata.config_dir,"model":spec.model});
+        if let Account::Engine { name,context_window,.. }=&spec.account { meta["engine"]=json!(name); meta["context_window"]=json!(context_window); }
+        Ok(meta)
+    }
+
     /// O modo que o Rust confirmou por último na conversa (memória dele, sem leitura do rodapé).
     pub fn observed_claude_mode(&self,conversation:&str) -> Option<String> { self.permission_view(conversation).map(|view|view.current) }
 

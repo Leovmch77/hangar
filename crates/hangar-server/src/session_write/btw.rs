@@ -1,16 +1,25 @@
-//! Pergunta lateral (`POST|GET /api/sessions/{name}/btw`), toda no Rust. Com terminal, o executor da
-//! sessão dirige o overlay (`btw_control`); sem terminal, a pergunta vira um fork descartável da
-//! conversa (`claude -p --resume … --fork-session`). O histórico fica no mesmo arquivo do Python.
+//! Pergunta lateral (`POST|GET /api/sessions/{name}/btw`), toda no Rust. Com e sem terminal, a
+//! pergunta vira um fork descartável da conversa (`claude -p --resume … --fork-session`), sem tocar o
+//! pane. O histórico fica no mesmo arquivo do Python.
 use std::{net::SocketAddr, path::{Path, PathBuf}, sync::Arc, time::Duration};
 
 use axum::{body::to_bytes, extract::{ConnectInfo, Request, State}, http::StatusCode, response::Response};
 use serde_json::{Value, json};
 
-use crate::btw_control::{BtwError, fail, normalize};
 use crate::routes::{AppState, cors, pass, who};
 use crate::runtime::gateway::EntryHandle;
-use crate::runtime::protocol::Disposition;
 use super::{BODY_LIMIT, busy_body, detail, enter_then_find, json_response, session_name};
+
+/// Recusa com o status HTTP e o código que o app já traduz.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BtwError { pub status: u16, pub code: String, pub message: String }
+pub fn fail(status: u16, code: &str, message: &str) -> BtwError { BtwError { status, code: code.into(), message: message.into() } }
+
+/// O `isspace` do Python: o Rust não conta os separadores U+001C–U+001F.
+fn py_space(c: char) -> bool { c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c) }
+/// `" ".join(pergunta.split())`.
+pub fn normalize(question: &str) -> String { question.split(py_space).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ") }
+fn now() -> f64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()) }
 
 pub const HISTORY_MAX: usize = 50;
 const QUESTION_MAX: usize = 4000;
@@ -237,7 +246,7 @@ pub async fn ask_headless(meta: &Value, question: &str, projects: &Path, program
         return Err(fail(502, "erro_btw_fork_falhou", "a pergunta lateral falhou"));
     }
     let answer = fork_answer(&stdout)?;
-    Ok(json!({"question": question, "answer": answer, "fonte": "fork", "ts": crate::btw_control::now()}))
+    Ok(json!({"question": question, "answer": answer, "fonte": "fork", "ts": now()}))
 }
 
 // ── Rotas ─────────────────────────────────────────────────────────────────────────────────────────
@@ -249,24 +258,7 @@ fn refusal(error: &BtwError) -> (StatusCode, Value) {
     (StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY), super::detail_body(&error.code, &error.message, json!({})))
 }
 
-fn reply_of(reply: crate::runtime::protocol::RuntimeReply) -> Result<Value, BtwError> {
-    if reply.disposition == Disposition::Accepted { return Ok(reply.payload); }
-    let payload = &reply.payload;
-    match (payload["status"].as_u64(), payload["code"].as_str()) {
-        (Some(status), Some(code)) => Err(BtwError { status: status as u16, code: code.into(), message: payload["msg"].as_str().unwrap_or_default().into() }),
-        _ => Err(fail(502, payload["code"].as_str().unwrap_or("btw_unconfirmed"), "não consegui confirmar a pergunta lateral")),
-    }
-}
-
-/// Erro do executor (ocupado, parando): o pane não foi tocado.
-fn actor_refusal(error: &crate::runtime::protocol::RuntimeError) -> BtwError {
-    match error.code.as_str() {
-        "btw_control_busy" => fail(409, "btw_control_busy", "o terminal da sessão está ocupado com outra operação; tente de novo"),
-        code => fail(503, code, "o terminal da sessão não respondeu"),
-    }
-}
-
-enum Mode { Terminal(crate::runtime::terminal::TerminalHandle), Headless }
+enum Mode { Terminal, Headless }
 
 /// Quem responde a pergunta, pelo provedor e pelo terminal da sessão; `Err` com status e código.
 #[derive(Debug, PartialEq, Eq)]
@@ -316,7 +308,7 @@ pub async fn ask(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo
     let (_held, mode) = match found {
         Some((held, target)) => match (route(&target.provider, target.terminal), target.handle) {
             (Err(refusal), _) => return refused(refusal),
-            (Ok(Route::Terminal), EntryHandle::Terminal { handle, .. }) => (Some(held), Mode::Terminal(handle)),
+            (Ok(Route::Terminal), EntryHandle::Terminal { .. }) => (Some(held), Mode::Terminal),
             (Ok(Route::Headless), _) => (Some(held), Mode::Headless),
             _ => return refused((StatusCode::SERVICE_UNAVAILABLE, "btw_terminal_unowned")),
         },
@@ -333,15 +325,11 @@ pub async fn ask(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo
     };
     let projects = claude_dir(&st).unwrap_or_else(|| runtime.codex_environment().claude_base).join("projects");
     let item = match mode {
-        Mode::Terminal(handle) => {
-            let id = headers.get("x-hangar-operation-id").and_then(|v| v.to_str().ok())
-                .filter(|id| !id.is_empty() && id.len() <= 200 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b)))
-                .map(str::to_owned).unwrap_or_else(|| crate::mods::state::random_hex(16));
-            match handle.control(id, "btw".into(), json!({"question": question})).await {
-                Ok(reply) => reply_of(reply),
-                Err(error) => Err(actor_refusal(&error)),
-            }
-        }
+        // Digitado no pane, o /btw cai no plugin (que o responde no painel dele) e a rota não acha o overlay.
+        Mode::Terminal => match runtime.claude_fork_meta(&name).await {
+            Ok(meta) => ask_headless(&meta, &question, &projects, &st.btw_programs, FORK_TIMEOUT).await,
+            Err(error) => Err(fail(503, &error.code, &error.message)),
+        },
         Mode::Headless => {
             let path = crate::runtime::codex_sidecar::path(&runtime.codex_environment().home.join(".hangar").join("claude-headless"), &name);
             let meta = match tokio::task::spawn_blocking(move || crate::runtime::codex_sidecar::read(&path)).await {
@@ -352,7 +340,7 @@ pub async fn ask(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo
                 }
             };
             // Sem sidecar o `meta` é nulo: a pergunta vazia e o 404 saem do mesmo lugar.
-            ask_headless(&meta, &question, &projects, &Programs::default(), FORK_TIMEOUT).await
+            ask_headless(&meta, &question, &projects, &st.btw_programs, FORK_TIMEOUT).await
         }
     };
     let mut item = match item { Ok(item) => item, Err(error) => { let (status, body) = refusal(&error); return answer(status, body); } };

@@ -78,6 +78,8 @@ pub struct AppState {
     pub chromium: fn() -> Option<std::path::PathBuf>,
     /// Quanto uma escrita espera a porta de entrada da sessão reabrir (os testes encurtam).
     pub write_gate_wait: std::time::Duration,
+    /// O `claude` e o `hangar-engine` do fork do `/btw` (os testes trocam por falsos).
+    pub btw_programs: crate::session_write::btw::Programs,
     /// Grupos de sessões em `.hangar-pair`; `None` sem as pastas da lista (as rotas seguem ao Python).
     pub groups: Option<Arc<crate::groups::service::GroupService>>,
     /// Outras máquinas do dono (`peers.json`), para o par 1:1 entre máquinas.
@@ -163,6 +165,7 @@ impl AppState {
             artifacts: Arc::default(),
             chromium: crate::pages::chrome::find,
             write_gate_wait: std::time::Duration::from_secs(30),
+            btw_programs: Default::default(),
             voice: Arc::new(crate::voice::hub::VoiceHub::new()),
             share, guest_bound: Default::default() }
     }

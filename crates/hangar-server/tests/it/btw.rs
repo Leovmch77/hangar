@@ -1,459 +1,10 @@
-//! Pergunta lateral (`/btw`): os casos de `backend/tests/test_btw.py`, com o overlay simulado por uma
-//! sequência de telas e o multiplexador falso nos dois sabores (tmux e psmux 3.3.8, como lá).
-use hangar_server::btw_control::{self, BtwLimits};
+//! Pergunta lateral (`/btw`): os casos de `backend/tests/test_btw.py` da rota, do histórico e do fork,
+//! que responde com e sem terminal.
 use hangar_server::session_write::btw::*;
-use hangar_server::terminal_input::*;
 use serde_json::{Value, json};
-use std::{collections::VecDeque, path::Path, sync::{Arc, Mutex}, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
-// Rodapés reais do overlay (os mesmos do teste Python).
-const WALKING: &str = "    ⇧←/→ to browse · x to clear history · Esc to close";
-const READY: &str = "    ↑/↓ to scroll · c to copy · f to fork · Esc to close";
-const COPIED: &str = "    ↑/↓ to scroll · Copied to clipboard · f to fork · Esc to close";
-const WIN_ESC: &str = "\u{1b}[27;1;27;1;0;1_\u{1b}[27;1;27;0;0;1_";
-
-fn screen(lines: &[&str]) -> String { format!("conversa\n{}\n", lines.join("\n")) }
-
-#[derive(Clone, Copy, PartialEq)]
-enum Mux { Tmux, Psmux }
-
-/// O `TmuxFalso` do Python: cada captura tira uma tela da fila (a última fica); o composer é o texto
-/// digitado sem espaço, e `resist` é o que o C-u não apaga.
-struct Fake {
-    screens: Mutex<VecDeque<String>>, keys: Mutex<Vec<String>>, raw: Mutex<Vec<Vec<String>>>,
-    buffers: Mutex<Vec<(String, String)>>, mux: Mux, answer: String, buffer_after_c: bool,
-    composer: Mutex<String>, resist: String, lose_slash: Mutex<usize>,
-    after_typing: Mutex<Option<VecDeque<Option<String>>>>, typed_once: Mutex<bool>,
-    fail_enter: bool, fail_literal: bool, fail_escape: bool, close_to: Option<String>,
-    target_gone: bool, at_typing: Mutex<Option<String>>, name: String, fail_lists: Mutex<usize>,
-}
-impl Fake {
-    fn new(screens: &[String]) -> Self {
-        Self { screens: Mutex::new(screens.iter().cloned().collect()), keys: Mutex::default(), raw: Mutex::default(),
-            buffers: Mutex::default(), mux: Mux::Tmux, answer: "1. Apple\n2. Banana\n".into(), buffer_after_c: true,
-            composer: Mutex::default(), resist: String::new(), lose_slash: Mutex::new(0), after_typing: Mutex::new(None),
-            typed_once: Mutex::new(false), fail_enter: false, fail_literal: false, fail_escape: false,
-            close_to: Some(screen(&["❯ "])), target_gone: false, at_typing: Mutex::new(None), name: "s".into(), fail_lists: Mutex::new(0) }
-    }
-    fn keys(&self) -> Vec<String> { self.keys.lock().unwrap().clone() }
-    fn composer_screen(&self) -> String {
-        let scripted = if *self.typed_once.lock().unwrap() { self.after_typing.lock().unwrap().as_mut().and_then(VecDeque::pop_front) } else { None };
-        let rule = "─".repeat(30);
-        match scripted {
-            Some(None) => "sem réguas\n".into(),
-            Some(Some(text)) => format!("{rule}\n❯ {text}\n{rule}\n"),
-            None => format!("{rule}\n❯ {}{}\n{rule}\n", self.resist, self.composer.lock().unwrap()),
-        }
-    }
-    fn buffer(&self, args: &[String]) -> (bool, String, String) {
-        let (sub, rest) = (args[0].as_str(), &args[1..]);
-        let targeted = rest.iter().any(|a| a == "-t");
-        let named = rest.iter().position(|a| a == "-b").map(|i| rest[i + 1].clone());
-        if targeted && self.target_gone { return (false, String::new(), "can't find session: =s\n".into()); }
-        if self.mux == Mux::Tmux && targeted { return (false, String::new(), format!("command {sub}: unknown flag -t\n")); }
-        let mut all = self.buffers.lock().unwrap();
-        let mut none = Vec::new();
-        // psmux sem alvo: a sessão padrão é outra, que não tem os buffers desta.
-        let buffers = if self.mux == Mux::Tmux || targeted { &mut *all } else { &mut none };
-        if sub == "list-buffers" {
-            let mut fails = self.fail_lists.lock().unwrap();
-            if *fails > 0 { *fails -= 1; return (false, String::new(), "server busy\n".into()); }
-        }
-        match sub {
-            "list-buffers" if self.mux == Mux::Psmux => (true, (0..buffers.len()).map(|i| format!("buffer{i:04}\n")).collect(), String::new()),
-            "list-buffers" => (true, buffers.iter().map(|(n, _)| format!("{n}\n")).collect(), String::new()),
-            "show-buffer" if self.mux == Mux::Psmux && named.is_some() => (true, String::new(), String::new()),
-            "show-buffer" => (true, buffers.iter().find(|(n, _)| named.as_ref().is_none_or(|b| b == n)).map(|(_, c)| c.clone()).unwrap_or_default(), String::new()),
-            "delete-buffer" if self.mux == Mux::Psmux && named.is_some() => (true, String::new(), String::new()),
-            "delete-buffer" => {
-                if let Some(i) = buffers.iter().position(|(n, _)| named.as_ref().is_none_or(|b| b == n)) { buffers.remove(i); }
-                (true, String::new(), String::new())
-            }
-            other => panic!("comando de buffer inesperado: {other}"),
-        }
-    }
-    fn send(&self, rest: &[String]) -> bool {
-        let key = match rest {
-            [l, dash, cr] if l == "-l" && dash == "--" && cr == "\r" => "Enter".to_owned(),
-            [l, dash, esc] if l == "-l" && dash == "--" && esc == WIN_ESC => "Escape".to_owned(),
-            [l, dash, text] if l == "-l" && dash == "--" => {
-                if self.fail_literal { return false; }
-                *self.at_typing.lock().unwrap() = self.screens.lock().unwrap().front().cloned();
-                let mut text = text.clone();
-                let mut lose = self.lose_slash.lock().unwrap();
-                if text.starts_with('/') && *lose > 0 { *lose -= 1; text.remove(0); }
-                *self.composer.lock().unwrap() = text.split_whitespace().collect();
-                *self.typed_once.lock().unwrap() = true;
-                self.keys.lock().unwrap().push(rest[2].clone());
-                return true;
-            }
-            [key] => key.clone(),
-            other => panic!("tecla inesperada: {other:?}"),
-        };
-        self.keys.lock().unwrap().push(key.clone());
-        match key.as_str() {
-            "Enter" => { if self.fail_enter { return false; } self.composer.lock().unwrap().clear(); }
-            "C-u" => self.composer.lock().unwrap().clear(),
-            "Escape" => {
-                if self.fail_escape { return false; }
-                if let Some(to) = &self.close_to { *self.screens.lock().unwrap() = [to.clone()].into(); }
-            }
-            "c" if self.buffer_after_c => {
-                // O OSC 52 do psmux vira DOIS buffers iguais (medido).
-                let mut buffers = self.buffers.lock().unwrap();
-                for _ in 0..if self.mux == Mux::Psmux { 2 } else { 1 } {
-                    let name = format!("buffer{}", 7 + buffers.len());
-                    buffers.insert(0, (name, self.answer.clone()));
-                }
-            }
-            _ => {}
-        }
-        true
-    }
-}
-impl TerminalIo for Fake {
-    fn command<'a>(&'a self, r: CommandRequest) -> IoFuture<'a, CommandOutput> {
-        Box::pin(async move { let (output, _) = self.command_stderr(r).await?; Ok(output) })
-    }
-    fn command_stderr<'a>(&'a self, r: CommandRequest) -> IoFuture<'a, (CommandOutput, Vec<u8>)> {
-        Box::pin(async move {
-            self.raw.lock().unwrap().push(r.args.clone());
-            let ok = |stdout: String| Ok((CommandOutput { success: true, stdout: stdout.into_bytes() }, vec![]));
-            match r.args[0].as_str() {
-                "display-message" => ok(format!("{}\t%7\t17\n", self.name)),
-                "capture-pane" if r.args.iter().any(|a| a == "-e") => ok(self.composer_screen()),
-                "capture-pane" => {
-                    let mut screens = self.screens.lock().unwrap();
-                    let pane = if screens.len() > 1 { screens.pop_front().unwrap() } else { screens[0].clone() };
-                    if pane == CAPTURE_FAILS { return Err(hangar_server::terminal_input::IoFailure { code: "capture_failed", may_have_written: false }); }
-                    ok(pane)
-                }
-                "send-keys" => {
-                    let sent = self.send(&r.args[3..]);
-                    Ok((CommandOutput { success: sent, stdout: vec![] }, vec![]))
-                }
-                _ => {
-                    let (success, stdout, stderr) = self.buffer(&r.args);
-                    Ok((CommandOutput { success, stdout: stdout.into_bytes() }, stderr.into_bytes()))
-                }
-            }
-        })
-    }
-    fn socket<'a>(&'a self, _: &'a NativeMessage, _: Vec<u8>) -> IoFuture<'a, WriteOutcome> { Box::pin(async { Ok(WriteOutcome::NotWritten) }) }
-}
-
-fn binding(tag: &str, windows: bool) -> TerminalBinding {
-    TerminalBinding { name: "s".into(), pane: if windows { "=s:0.0" } else { "%7" }.into(), conversation: "sid".into(), generation: 1, created: 17,
-        mux_argv: vec![format!("fake-{tag}")], windows, clipboard_lock_path: None }
-}
-struct Services { binding: TerminalBinding, panel: bool }
-impl TerminalServices for Services {
-    fn facts<'a>(&'a self, _: &'a TerminalBinding) -> ServiceFuture<'a, InputFacts> {
-        Box::pin(async { Ok(InputFacts { binding: self.binding.clone(), ready: true, idle: true, open_question: false, plugin_live: false,
-            plugin_user: false, clipboard_available: false, native: None, screen: None }) })
-    }
-    fn publish<'a>(&'a self, _: &'a TerminalBinding, _: PluginRequest) -> ServiceFuture<'a, PluginReply> { Box::pin(async { Ok(PluginReply::Unavailable) }) }
-    fn permission_guard<'a>(&'a self, _: &'a TerminalBinding) -> ServiceFuture<'a, ()> {
-        Box::pin(async { if self.panel { Err(ServiceError("terminal_panel_active")) } else { Ok(()) } })
-    }
-}
-fn limits() -> BtwLimits {
-    BtwLimits { poll: Duration::from_millis(1), settle: Duration::from_millis(1), open: Duration::from_millis(40), copy: Duration::from_millis(40), answer: Duration::from_secs(5) }
-}
-/// Cada teste com o seu multiplexador: a medida do `-t` é por multiplexador, e os testes correm juntos.
-async fn ask_with(fake: Arc<Fake>, tag: &str, question: &str, windows: bool, panel: bool, limits: BtwLimits) -> Result<Value, btw_control::BtwError> {
-    let binding = binding(tag, windows);
-    let driver = TerminalDriver::new(binding.clone(), Arc::new(Services { binding, panel }), fake, InputLimits::default()).controls();
-    btw_control::ask(&driver, question, &limits).await
-}
-async fn ask(fake: &Arc<Fake>, tag: &str, question: &str) -> Result<Value, btw_control::BtwError> { ask_with(fake.clone(), tag, question, false, false, limits()).await }
-fn code(result: Result<Value, btw_control::BtwError>) -> (u16, String) { let e = result.unwrap_err(); (e.status, e.code) }
-
-/// Tela que o terminal falso não consegue capturar.
-const CAPTURE_FAILS: &str = "\u{0}captura falha";
-
-/// Captura que falha não é tela vazia: com o overlay aberto ela não vira "fechado por fora", e diz o que foi.
-#[tokio::test]
-async fn a_capture_failure_is_its_own_code_not_a_closed_overlay() {
-    let fake = Arc::new(Fake::new(&[screen(&["❯ "]), screen(&["    /btw q", "      · Answering…", WALKING]), CAPTURE_FAILS.to_owned()]));
-    assert_eq!(code(ask(&fake, "capture", "q").await), (503, "erro_btw_captura_falhou".into()));
-}
-
-/// A lista de buffers de antes do `c` que falha não vira "nenhum": a cópia do usuário passaria por resposta e seria apagada.
-#[tokio::test]
-async fn a_failed_buffer_list_before_the_copy_keeps_the_users_buffer() {
-    let mut fake = Fake::new(&answered());
-    fake.buffers = Mutex::new(vec![("buffer0".into(), "cópia do usuário".into())]);
-    fake.fail_lists = Mutex::new(1);
-    let fake = Arc::new(fake);
-    let r = ask(&fake, "list-fails", "q").await.unwrap();
-    assert_eq!((r["answer"].as_str(), r["fonte"].as_str()), (Some("4"), Some("pane")));
-    assert!(fake.buffers.lock().unwrap().iter().any(|(_, c)| c == "cópia do usuário"));
-}
-
-fn answered() -> Vec<String> { vec![screen(&["❯ "]), screen(&["    /btw q", "      4", READY]), screen(&["    /btw q", "      4", COPIED])] }
-
-/// B7, B15, B20, B23 (`test_le_a_resposta_do_buffer_e_fecha_o_overlay`). O `C-u` da sequência do
-/// Python vem do composer falso dele, que apaga sempre: aqui o composer começa com um rascunho.
-#[tokio::test]
-async fn reads_the_answer_from_the_buffer_and_closes_the_overlay() {
-    let mut fake = Fake::new(&[screen(&["❯ "]), screen(&["    /btw list fruits", "      · Answering…", WALKING]),
-        screen(&["    /btw list fruits", "      1. Apple", READY]), screen(&["    /btw list fruits", "      1. Apple", COPIED])]);
-    fake.composer = Mutex::new("rascunho".into());
-    let fake = Arc::new(fake);
-    let r = ask(&fake, "read", "list   fruits").await.unwrap();
-    assert_eq!((r["answer"].as_str(), r["fonte"].as_str(), r["question"].as_str()), (Some("1. Apple\n2. Banana"), Some("buffer"), Some("list fruits")));
-    assert!(r["ts"].as_f64().is_some_and(|ts| ts > 1.0e9));
-    assert_eq!(r.as_object().unwrap().keys().collect::<Vec<_>>(), ["question", "answer", "fonte", "ts"]);
-    assert_eq!(fake.keys(), ["C-u", "/btw list fruits", "Enter", "c", "Escape"]);
-    assert!(fake.buffers.lock().unwrap().is_empty());
-}
-
-/// B20 (`test_close_failure_is_not_reported_as_success`): Esc que não sai, overlay que não fecha e tela
-/// ilegível depois dele não viram sucesso, e o Esc não se repete.
-#[tokio::test]
-async fn close_failure_is_not_reported_as_success() {
-    for (tag, failure) in [("close-a", "not_sent"), ("close-b", "still_open"), ("close-c", "unreadable")] {
-        let mut fake = Fake::new(&answered());
-        fake.buffer_after_c = true;
-        match failure { "not_sent" => fake.fail_escape = true, "still_open" => fake.close_to = Some(screen(&["x", READY])), _ => fake.close_to = Some(String::new()) }
-        let fake = Arc::new(fake);
-        assert_eq!(code(ask(&fake, tag, "q").await), (502, "erro_btw_overlay_aberto".into()), "{failure}");
-        assert_eq!(fake.keys().iter().filter(|k| *k == "Escape").count(), 1, "{failure}");
-    }
-}
-
-/// B16, B17, B18 (`test_psmux_le_o_buffer_da_sessao_e_apaga_as_duas_copias`).
-#[tokio::test]
-async fn psmux_reads_the_session_buffer_and_deletes_both_copies() {
-    let mut fake = Fake::new(&[screen(&["❯ "]), screen(&["    /btw q", "      corte da tela", READY]), screen(&["    /btw q", "      corte da tela", COPIED])]);
-    (fake.mux, fake.answer) = (Mux::Psmux, "resposta inteira\ncom duas linhas\n".into());
-    let fake = Arc::new(fake);
-    let r = ask(&fake, "psmux", "q").await.unwrap();
-    assert_eq!((r["answer"].as_str(), r["fonte"].as_str()), (Some("resposta inteira\ncom duas linhas"), Some("buffer")));
-    assert!(fake.buffers.lock().unwrap().is_empty());
-}
-
-/// B19 (`test_buffer_vazio_cai_no_pane`).
-#[tokio::test]
-async fn empty_buffer_falls_back_to_the_pane() {
-    let mut fake = Fake::new(&answered());
-    fake.answer = String::new();
-    let fake = Arc::new(fake);
-    let r = ask(&fake, "empty-buffer", "q").await.unwrap();
-    assert_eq!((r["answer"].as_str(), r["fonte"].as_str()), (Some("4"), Some("pane")));
-}
-
-/// B19 (`test_sem_buffer_cai_no_pane`).
-#[tokio::test]
-async fn no_buffer_falls_back_to_the_pane_and_still_closes() {
-    let mut fake = Fake::new(&answered());
-    fake.buffer_after_c = false;
-    let fake = Arc::new(fake);
-    let r = ask(&fake, "no-buffer", "q").await.unwrap();
-    assert_eq!((r["answer"].as_str(), r["fonte"].as_str()), (Some("4"), Some("pane")));
-    assert_eq!(fake.keys().last().map(String::as_str), Some("Escape"));
-}
-
-/// B16 (`test_sessao_que_sumiu_nao_desliga_o_alvo_pra_sempre`): recusa sem "unknown flag" não decide
-/// pelo psmux sem alvo: nenhum comando de buffer sai sem `-t`.
-#[tokio::test]
-async fn vanished_session_does_not_turn_the_target_off() {
-    let mut fake = Fake::new(&answered());
-    (fake.mux, fake.target_gone) = (Mux::Psmux, true);
-    let fake = Arc::new(fake);
-    assert_eq!(ask(&fake, "gone", "q").await.unwrap()["fonte"], "pane");
-    let buffer_calls: Vec<Vec<String>> = fake.raw.lock().unwrap().iter().filter(|a| a[0].ends_with("-buffer") || a[0] == "list-buffers").cloned().collect();
-    assert!(!buffer_calls.is_empty());
-    assert!(buffer_calls.iter().all(|a| a.iter().any(|x| x == "-t")), "{buffer_calls:?}");
-}
-
-/// B16: a recusa da flag no tmux desliga o `-t` uma vez para esse multiplexador.
-#[tokio::test]
-async fn tmux_refusing_the_flag_turns_the_target_off_once() {
-    let fake = Arc::new(Fake::new(&answered()));
-    ask(&fake, "flag-once", "q").await.unwrap();
-    let targeted = fake.raw.lock().unwrap().iter().filter(|a| (a[0].ends_with("-buffer") || a[0] == "list-buffers") && a.iter().any(|x| x == "-t")).count();
-    assert_eq!(targeted, 1);
-}
-
-/// B18 (`test_tmux_nao_apaga_por_contagem`).
-#[tokio::test]
-async fn tmux_never_deletes_by_count() {
-    let fake = Arc::new(Fake::new(&[screen(&["❯ "]), screen(&["    /btw q", "      x", READY]), screen(&["    /btw q", "      x", COPIED])]));
-    fake.buffers.lock().unwrap().push(("alheio".into(), "copia de outra pessoa".into()));
-    assert_eq!(ask(&fake, "count", "q").await.unwrap()["fonte"], "buffer");
-    assert_eq!(*fake.buffers.lock().unwrap(), [("alheio".to_owned(), "copia de outra pessoa".to_owned())]);
-}
-
-/// B14 (`test_overlay_que_nao_abre_e_409`).
-#[tokio::test]
-async fn overlay_that_never_opens_is_409_without_escape() {
-    let fake = Arc::new(Fake::new(&[screen(&["❯ "])]));
-    assert_eq!(code(ask(&fake, "never", "q").await), (409, "erro_btw_nao_abriu".into()));
-    assert!(!fake.keys().contains(&"Escape".to_owned()));
-}
-
-/// B7 (`test_pergunta_vazia_nao_digita`).
-#[tokio::test]
-async fn blank_question_types_nothing() {
-    let fake = Arc::new(Fake::new(&[screen(&["❯ "])]));
-    assert_eq!(code(ask(&fake, "blank", "   ").await), (400, "erro_btw_vazia".into()));
-    assert!(fake.keys().is_empty());
-}
-
-/// B10 (`test_rascunho_que_sai_com_c_u_nao_impede_a_pergunta`).
-#[tokio::test]
-async fn draft_cleared_by_ctrl_u_does_not_stop_the_question() {
-    let mut fake = Fake::new(&answered());
-    (fake.buffer_after_c, fake.composer) = (false, Mutex::new("rascunho".into()));
-    let fake = Arc::new(fake);
-    assert_eq!(ask(&fake, "draft", "q").await.unwrap()["answer"], "4");
-    assert!(fake.keys().contains(&"Enter".to_owned()));
-}
-
-/// B12 (`test_residuo_que_resiste_ao_c_u_para_sem_enter`).
-#[tokio::test]
-async fn residue_that_resists_ctrl_u_stops_without_enter() {
-    let mut fake = Fake::new(&[screen(&["❯ lixo"])]);
-    fake.resist = "lixo".into();
-    let fake = Arc::new(fake);
-    assert_eq!(code(ask(&fake, "residue", "q").await), (409, "erro_btw_composer_ocupado".into()));
-    assert!(!fake.keys().contains(&"Enter".to_owned()));
-}
-
-/// B14 (`test_overlay_fechado_por_fora_aborta_sem_escape`).
-#[tokio::test]
-async fn overlay_closed_from_outside_aborts_without_escape() {
-    let fake = Arc::new(Fake::new(&[screen(&["❯ "]), screen(&["    /btw q", "      · Answering…", WALKING]), screen(&["❯ "])]));
-    assert_eq!(code(ask(&fake, "outside", "q").await), (409, "erro_btw_fechado".into()));
-    assert!(!fake.keys().contains(&"Escape".to_owned()));
-}
-
-/// B12 (`test_barra_perdida_redigita_sem_mandar_a_pergunta_pra_conversa`). Rascunho inicial pelo mesmo
-/// motivo do primeiro teste.
-#[tokio::test]
-async fn lost_slash_retypes_without_sending_to_the_conversation() {
-    let mut fake = Fake::new(&answered());
-    (fake.buffer_after_c, fake.composer, fake.lose_slash) = (false, Mutex::new("x".into()), Mutex::new(1));
-    let fake = Arc::new(fake);
-    assert_eq!(ask(&fake, "slash", "q").await.unwrap()["answer"], "4");
-    let keys = fake.keys();
-    let enter = keys.iter().position(|k| k == "Enter").unwrap();
-    assert_eq!(keys[..enter], ["C-u", "/btw q", "C-u", "/btw q"]);
-}
-
-/// B12 (`test_barra_perdida_de_novo_para_sem_enter`).
-#[tokio::test]
-async fn lost_slash_twice_stops_without_enter_and_clears_blindly() {
-    let mut fake = Fake::new(&[screen(&["❯ "])]);
-    fake.lose_slash = Mutex::new(5);
-    let fake = Arc::new(fake);
-    assert_eq!(code(ask(&fake, "slash-twice", "q").await), (502, "erro_btw_barra_perdida".into()));
-    let keys = fake.keys();
-    assert!(!keys.contains(&"Enter".to_owned()));
-    assert!(fake.composer.lock().unwrap().is_empty());
-    assert_eq!(keys[keys.len() - 3..], ["C-u", "C-u", "C-u"]);
-}
-
-/// B9 (`test_espera_o_overlay_anterior_fechar_antes_de_digitar`).
-#[tokio::test]
-async fn waits_for_the_previous_overlay_to_close_before_typing() {
-    let mut fake = Fake::new(&[screen(&["    /btw antiga", "      x", READY]), screen(&["❯ "]), screen(&["❯ "]),
-        screen(&["    /btw q", "      4", READY]), screen(&["    /btw q", "      4", COPIED])]);
-    fake.buffer_after_c = false;
-    let fake = Arc::new(fake);
-    ask(&fake, "previous", "q").await.unwrap();
-    assert!(!fake.at_typing.lock().unwrap().clone().unwrap().contains("Esc to close"));
-}
-
-/// B9 (`test_overlay_que_nao_fecha_para_sem_digitar`).
-#[tokio::test]
-async fn stuck_overlay_stops_without_typing() {
-    let fake = Arc::new(Fake::new(&[screen(&["    /btw alheia", "      x", READY])]));
-    assert_eq!(code(ask(&fake, "stuck", "q").await), (409, "erro_btw_overlay_aberto".into()));
-    assert!(fake.keys().is_empty());
-}
-
-/// B12 (`test_composer_ilegivel_depois_de_digitar_para_sem_enter`).
-#[tokio::test]
-async fn unreadable_composer_after_typing_stops_without_enter() {
-    let fake = Arc::new(Fake::new(&[screen(&["❯ "])]));
-    *fake.after_typing.lock().unwrap() = Some([None, None].into());
-    assert_eq!(code(ask(&fake, "unreadable", "q").await), (502, "erro_btw_composer_ilegivel".into()));
-    let keys = fake.keys();
-    assert!(!keys.contains(&"Enter".to_owned()));
-    assert_eq!(keys[keys.len() - 3..], ["C-u", "C-u", "C-u"]);
-}
-
-/// B13 (`test_enter_que_nao_chega_diz_isso_na_hora`).
-#[tokio::test]
-async fn enter_that_does_not_arrive_says_so_at_once() {
-    let mut fake = Fake::new(&[screen(&["❯ "])]);
-    fake.fail_enter = true;
-    let fake = Arc::new(fake);
-    assert_eq!(code(ask(&fake, "enter", "q").await), (502, "erro_btw_enter_nao_enviado".into()));
-    let keys = fake.keys();
-    assert_eq!(keys[keys.len() - 3..], ["C-u", "C-u", "C-u"]);
-}
-
-/// B12 (`test_composer_ilegivel_uma_vez_relê_e_segue`).
-#[tokio::test]
-async fn composer_unreadable_once_rereads_and_goes_on() {
-    let mut fake = Fake::new(&answered());
-    fake.buffer_after_c = false;
-    let fake = Arc::new(fake);
-    *fake.after_typing.lock().unwrap() = Some([None, Some("/btwq".into())].into());
-    assert_eq!(ask(&fake, "once", "q").await.unwrap()["answer"], "4");
-}
-
-/// B11 (`btw.py:180`): o texto que não chega ao pane para antes do Enter.
-#[tokio::test]
-async fn text_that_cannot_be_typed_is_502() {
-    let mut fake = Fake::new(&[screen(&["❯ "])]);
-    fake.fail_literal = true;
-    let fake = Arc::new(fake);
-    assert_eq!(code(ask(&fake, "literal", "q").await), (502, "erro_btw_nao_digitou".into()));
-    assert!(!fake.keys().contains(&"Enter".to_owned()));
-}
-
-/// B14 (`btw.py:228`): aberto sem resposta no prazo fecha com Esc e responde 504.
-#[tokio::test]
-async fn open_overlay_without_answer_closes_and_is_504() {
-    let fake = Arc::new(Fake::new(&[screen(&["❯ "]), screen(&["    /btw q", "      · Answering…", WALKING])]));
-    let short = BtwLimits { answer: Duration::from_millis(30), ..limits() };
-    assert_eq!(code(ask_with(fake.clone(), "slow", "q", false, false, short).await), (504, "erro_btw_sem_resposta".into()));
-    assert_eq!(fake.keys().last().map(String::as_str), Some("Escape"));
-}
-
-/// B22 (`btw.py:255`): nem buffer nem pane trazem texto.
-#[tokio::test]
-async fn nothing_readable_is_502() {
-    let mut fake = Fake::new(&[screen(&["❯ "]), screen(&["sem pergunta", READY])]);
-    fake.buffer_after_c = false;
-    let fake = Arc::new(fake);
-    assert_eq!(code(ask(&fake, "nothing", "q").await), (502, "erro_btw_ilegivel".into()));
-}
-
-/// B21 (`tmux.py:1077`): no Windows o Esc vai como a sequência Win32.
-#[tokio::test]
-async fn windows_escape_is_the_win32_sequence() {
-    let mut fake = Fake::new(&answered());
-    fake.buffer_after_c = false;
-    let fake = Arc::new(fake);
-    ask_with(fake.clone(), "windows", "q", true, false, limits()).await.unwrap();
-    let raw = fake.raw.lock().unwrap();
-    let escape = raw.iter().find(|a| a[0] == "send-keys" && a.last().is_some_and(|k| k == WIN_ESC)).expect("Esc Win32");
-    assert_eq!(escape[3..], ["-l", "--", WIN_ESC]);
-}
-
-/// B5 (`api.py:5036`): painel de terminal aberto recusa com o código do app, sem tecla.
-#[tokio::test]
-async fn open_terminal_panel_refuses_without_keys() {
-    let fake = Arc::new(Fake::new(&answered()));
-    assert_eq!(code(ask_with(fake.clone(), "panel", "q", false, true, limits()).await), (409, "erro_terminal_aberto".into()));
-    assert!(fake.keys().is_empty());
-}
+fn code(result: Result<Value, BtwError>) -> (u16, String) { let e = result.unwrap_err(); (e.status, e.code) }
 
 // ── Rota: corpo, decisão, histórico ─────────────────────────────────────────────────────────────
 
@@ -590,7 +141,7 @@ exit {code}
         Case { dir, meta }
     }
     fn project(c: &Case) -> std::path::PathBuf { std::fs::read_dir(c.dir.path().join("conta/projects")).unwrap().next().unwrap().unwrap().path() }
-    async fn run(c: &Case, question: &str, out: &str, code: i32, sleep: u32, timeout: Duration) -> Result<Value, btw_control::BtwError> {
+    async fn run(c: &Case, question: &str, out: &str, code: i32, sleep: u32, timeout: Duration) -> Result<Value, BtwError> {
         let claude = fake_claude(c.dir.path(), out, code, sleep);
         ask_headless(&c.meta, question, &c.dir.path().join("padrao/projects"), &Programs { claude: claude.clone(), engine: claude }, timeout).await
     }
@@ -655,18 +206,41 @@ exit {code}
         assert_eq!(argv[..6], ["--exec", "kimi", "--model", "k3", "--context", "256000"]);
         assert_eq!(argv[argv.iter().position(|a| a == "--").unwrap() + 1], "claude");
     }
+
+    /// Claude com terminal responde pelo mesmo fork, na conversa do pane e na conta dele, sem tecla no pane:
+    /// digitado, o /btw caía no plugin e a rota esperava um overlay que não abria.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_terminal_session_answers_through_the_fork_without_touching_the_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = Arc::new(hangar_server::runtime::gateway::RuntimeRegistry::new(crate::session_write_control::policy(calls).await, "secret-test".into(), "instance-test".into()));
+        let log = crate::session_write_control::open_terminal(&registry, dir.path(), "t").await;
+        std::fs::create_dir_all(dir.path().join("projects/p")).unwrap();
+        std::fs::write(dir.path().join("projects/p/sid.jsonl"), "{}\n").unwrap();
+        let claude = fake_claude(dir.path(), r#"{"result":"4"}"#, 0, 0);
+        let (_python, upstream) = crate::fake::spawn_fake().await;
+        let mut state = hangar_server::routes::AppState::new(crate::fake::config(upstream, "127.0.0.1"));
+        state.btw_programs = Programs { claude: claude.clone(), engine: claude };
+        assert!(state.state.runtime.set(registry).is_ok());
+        let server = crate::fake::spawn_state(state).await;
+        let (status, reply) = crate::session_write_control::send(server, "POST", "t/btw", r#"{"question":"q"}"#).await;
+        assert_eq!((status, reply["answer"].as_str(), reply["fonte"].as_str()), (200, Some("4"), Some("fork")), "{reply}");
+        let argv: Vec<String> = std::fs::read_to_string(dir.path().join("rodou.argv")).unwrap().lines().map(str::to_owned).collect();
+        assert_eq!(argv[argv.iter().position(|a| a == "--resume").unwrap() + 1], "sid");
+        assert_eq!(std::fs::read_to_string(dir.path().join("rodou.conta")).unwrap(), dir.path().to_str().unwrap());
+        assert_eq!(crate::session_write_control::keys_sent(&log), 0);
+    }
 }
 
 // ── Entradas externas: nenhuma derruba o servidor ───────────────────────────────────────────────
 
 proptest::proptest! {
     #[test]
-    fn pane_text_never_panics(screen in "\\PC*", raw in proptest::collection::vec(proptest::prelude::any::<char>(), 0..400)) {
+    fn question_text_never_panics(screen in "\\PC*", raw in proptest::collection::vec(proptest::prelude::any::<char>(), 0..400)) {
         let raw: String = raw.into_iter().collect();
         for text in [screen.as_str(), raw.as_str()] {
-            let _ = btw_control::answer_from_pane(text);
-            let _ = btw_control::footer(text);
-            let _ = btw_control::normalize(text);
+            let _ = normalize(text);
         }
     }
     #[test]

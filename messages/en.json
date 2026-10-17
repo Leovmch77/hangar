@@ -3079,7 +3079,6 @@
   "erro_btw_ilegivel": "/btw answered, but the answer could not be read",
   "erro_btw_composer_ocupado": "text left in the terminal input box that Ctrl-U won't clear; clear it in the terminal before asking",
   "erro_btw_fechado": "/btw was closed in the terminal before the answer could be read",
-  "erro_btw_captura_falhou": "could not read the session terminal; /btw may still be open there",
   "erro_modelo_sem_resposta": "Claude did not answer the model switch in time; check the session before trying again",
   "erro_modelo_adiado": "the model switch was not applied now; check the session's model before trying again",
   "erro_seletor_modelo_nao_abriu": "the /model picker did not open in the session's terminal",
