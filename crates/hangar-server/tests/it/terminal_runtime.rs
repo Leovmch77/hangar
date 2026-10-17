@@ -999,7 +999,8 @@ async fn terminal_runtime_a_starting_life_without_its_conversation_waits_without
     let f=Fixture::new().await;
     let native=f.target.metadata.config_dir.join("sessions").join(format!("{}.json",f.target.metadata.agent_pid));
     let saved=f.io.native_record.lock().unwrap().take();std::fs::remove_file(&native).unwrap();
-    let h=f.start_grace(Duration::from_secs(60));
+    // O agente do teste é este processo: o prazo cobre a idade dele numa suíte longa.
+    let h=f.start_grace(Duration::from_secs(24*3600));
     assert_eq!(h.command(f.command("primeira","oi")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
     assert!(h.drain().await.is_ok(),"subindo não é erro");
     tokio::time::sleep(Duration::from_millis(150)).await;

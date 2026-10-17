@@ -1636,7 +1636,11 @@ impl RuntimeRegistry {
         entry.mode_source.binding=crate::interactions::InteractionBinding {key:next.key.clone(),conversation:next_sid.into(),generation:next.generation};entry.mode_source.transcript=next.transcript.clone();
         // A loja do plugin segue a conversa nova, como na abertura (`bind_plugin`): presa à antiga, todo fato
         // lido dava `erro_interacao_desatualizada` até a sessão reabrir.
-        if let Some(plugin)=&self.plugin {plugin.bind(&entry.mode_source.binding).map_err(|error|failure(error.0))?;}
+        // A troca já está gravada: falha aqui vai ao log e ao diário, e o resto da troca segue.
+        if let Some(plugin)=&self.plugin && let Err(error)=plugin.bind(&entry.mode_source.binding) {
+            tracing::error!(key=%target.key,session=%target.name,code=error.0,"troca de conversa: a loja do plugin não seguiu a conversa nova");
+            self.diag.report("rust.plugin_rebind_failed",&target.name,error.0,"a loja do plugin não seguiu a conversa nova do /clear");
+        }
         self.forget_claude_rate(&crate::interactions::InteractionBinding {key:target.key.clone(),conversation:previous.into(),generation:target.generation})?;
         Ok(next)
     }

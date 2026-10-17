@@ -266,8 +266,7 @@ struct Executor {
     /// trata a sessão como trabalhando, para a próxima não cair no mesmo turno.
     turn_wait:Option<tokio::time::Instant>,
     diag:crate::diag::DiagClient,
-    /// Quando o ator nasceu e se esta vida já provou a conversa: até lá, sem a prova é o Claude subindo.
-    started:tokio::time::Instant,
+    /// Se esta vida já provou a conversa: até lá, com o agente novo, sem a prova é o Claude subindo.
     conversation_proved:bool,
 }
 /// Leitura do tamanho do transcript enquanto uma entrega espera confirmação: só `stat`.
@@ -350,7 +349,7 @@ impl TerminalActor {
         let status=options.status.clone();
         if let Some(sender)=&status { sender.send_replace(Default::default()); }
         let executor=Executor {batch_blocked:false,target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,mode_unproved:false,modes_cache:None,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,reconciliation:None,confirm_until:None,confirm_seen:None,
-            unproved_since:None,no_safe_delivery:false,heal_requested:None,turn_wait:None,diag:policy.diag(),started:tokio::time::Instant::now(),conversation_proved:false};
+            unproved_since:None,no_safe_delivery:false,heal_requested:None,turn_wait:None,diag:policy.diag(),conversation_proved:false};
         let run=executor.run(receiver,closed.clone());
         let task=tokio::spawn(async move {
             let mut guard=terminal_status::PanicMark(status);
@@ -1330,8 +1329,9 @@ impl Executor {
         let facts=match services.facts(&self.target.binding).await {
             Ok(facts)=>{self.conversation_proved=true;facts},
             // O Claude Code só registra e abre a conversa depois de subir: a entrada espera, sem erro na sessão.
+            // O prazo conta da idade do processo do agente: sessão adotada com o Claude de pé há tempo não espera.
             Err(failure) if failure.0=="terminal_conversation_unavailable" && !self.conversation_proved
-                && self.started.elapsed()<self.options.start_grace=>return Ok(json!({"drained":0,"starting":true})),
+                && sample().epoch_s-self.target.metadata.agent_birth<self.options.start_grace.as_secs_f64()=>return Ok(json!({"drained":0,"starting":true})),
             Err(_)=>return Err(error("terminal_facts")),
         };
         // O composer legível e sem pergunta é o que libera a escrita; o turno é conferido logo abaixo.

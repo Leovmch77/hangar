@@ -261,7 +261,12 @@ impl Entry {
             Ok(file) => file,
             // Nunca lido nesta vida: o Claude só cria o transcript na primeira mensagem. O que sumiu depois
             // de lido continua erro.
-            Err(error) if error.kind() == io::ErrorKind::NotFound && !self.seen => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound && !self.seen => {
+                if crate::warn_limit::allow(None, "artifacts_transcript_absent") {
+                    tracing::info!(path=%self.binding.jsonl.display(), "artefatos: transcript ainda não criado; catálogo vazio");
+                }
+                return Ok(());
+            }
             Err(error) => return Err(error),
         };
         self.seen = true;
