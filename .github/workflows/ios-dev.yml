@@ -40,7 +40,10 @@ jobs:
           cp -R "build/Build/Products/$CONFIGURATION-iphoneos/"*.app Payload/
           if [ "$CONFIGURATION" = Release ]; then
             python3 -I - Payload/*.app <<'PY'
+          import json
+          import plistlib
           import sys
+          import uuid
           from pathlib import Path
 
           for app_path in sys.argv[1:]:
@@ -54,6 +57,32 @@ jobs:
               for name in ("EXDevLauncher.bundle", "EXDevMenu.bundle"):
                   if any(app.rglob(name)):
                       raise SystemExit(f"Recurso de desenvolvimento no Release: {name}")
+              with (app / "Expo.plist").open("rb") as stream:
+                  updates = plistlib.load(stream)
+              with (app / "Info.plist").open("rb") as stream:
+                  version = plistlib.load(stream)["CFBundleShortVersionString"]
+              expected = {
+                  "EXUpdatesEnabled": True,
+                  "EXUpdatesURL": "https://u.expo.dev/9fd06001-323e-4b82-835f-6dfc3674236d",
+                  "EXUpdatesRequestHeaders": {"expo-channel-name": "preview"},
+                  "EXUpdatesRuntimeVersion": version,
+                  "EXUpdatesCheckOnLaunch": "ALWAYS",
+                  "EXUpdatesLaunchWaitMs": 0,
+              }
+              for key, value in expected.items():
+                  if updates.get(key) != value:
+                      raise SystemExit(f"Release com OTA inválida: {key} = {updates.get(key)!r}")
+              try:
+                  manifest = json.loads((app / "EXUpdates.bundle" / "app.manifest").read_text())
+                  if not isinstance(manifest, dict) or type(manifest.get("commitTime")) is not int or not isinstance(manifest.get("assets"), list):
+                      raise ValueError("commitTime ou assets inválidos")
+                  if str(uuid.UUID(manifest["id"])) != manifest["id"].lower():
+                      raise ValueError("id inválido")
+                  for asset in manifest["assets"]:
+                      if not isinstance(asset, dict) or not all(isinstance(asset.get(key), str) for key in ("packagerHash", "type", "nsBundleFilename")):
+                          raise ValueError("asset inválido")
+              except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+                  raise SystemExit(f"Release sem app.manifest válido: {error}")
           PY
           fi
           zip -qry "$IPA_NAME.ipa" Payload
