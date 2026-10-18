@@ -2,16 +2,17 @@ import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { useHeaderHeight } from 'expo-router/react-navigation';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { fetchSessionsForServer, formataErro, getCredentialsForServer, getEnginesForServer, listAccountTargets, setSessionAccount, setSessionEngineAccount, type AccountTarget, type Server, type SessionInfo } from '@hangar/core';
+import { fetchSessionsForServer, formataErro, getCredentialsForServer, getEnginesForServer, listAccountTargets, setSessionAccount, setSessionEngineAccount, type Credencial, type Server } from '@hangar/core';
 import { chatStore } from '../stores/chat';
 import { useServers } from '../stores/servers';
 import { useSessions } from '../stores/sessions';
 import { sessionAccountLabel } from './sessionAccountLabel';
+import { accountOptions, isCurrentAccount, sessionCredential, type AccountSession, type SwitchTarget } from './sessionAccountOptions';
+import { SessionAccountCard } from './SessionAccountCard';
+import { Icon } from '../ui/Icon';
 import * as m from '../paraglide/messages';
 
-type AccountSession = SessionInfo & { config_dir?: string | null; engine_account?: string | null; lifecycle_id?: string | null };
-type SwitchTarget = AccountTarget & { engineAccount?: string; unavailable?: boolean };
-type Catalog = { identity: string; loading: boolean; error: string; targets: SwitchTarget[]; restricted?: boolean };
+type Catalog = { identity: string; loading: boolean; error: string; targets: SwitchTarget[]; credentials?: Credencial[]; restricted?: boolean };
 type AccountTransition = { scope: string; source: AccountSession; destination: AccountSession };
 type Feedback = { identity: string; error: string; success: string; transition?: AccountTransition };
 const normalizedPath = (path?: string | null) => path?.replace(/\\/g, '/');
@@ -93,8 +94,11 @@ export function SessionAccount({ serverId, name }: { serverId: string; name: str
     if (!ready || refused || !server || !session || session.provider !== 'claude' || session.guest_kind === 'pair') return;
     let active = true;
     setCatalog({ identity, loading: true, error: '', targets: [] });
-    const load = async (): Promise<Pick<Catalog, 'targets' | 'restricted'>> => {
-      if (!session.engine) return { targets: await listAccountTargets(name, server) };
+    const load = async (): Promise<Pick<Catalog, 'targets' | 'credentials' | 'restricted'>> => {
+      if (!session.engine) {
+        const [targets, credentials] = await Promise.all([listAccountTargets(name, server), getCredentialsForServer(server)]);
+        return { targets: accountOptions(targets, credentials), credentials };
+      }
       const engines = await getEnginesForServer(server);
       const engine = engines.motores[session.engine];
       if (engines.arquivo_corrompido || !engine) throw new Error(m.native_invalid_response());
@@ -109,10 +113,9 @@ export function SessionAccount({ serverId, name }: { serverId: string; name: str
         const windows = credential.cota?.estado === 'lida' ? credential.cota.janelas.filter(w => Number.isFinite(w.pct)).map(w => w.pct) : [];
         const pct = windows.length ? Math.max(...windows) : null;
         targets.push({ path: account.credential_id, engineAccount: account.account,
-          label: account.label || account.email || account.account, pct, full: pct !== null && pct >= 99, low: pct !== null && pct >= 95,
-          unavailable: credential.login?.loggedIn === false || credential.login?.estado === 'indisponivel' });
+          label: account.label || account.email || account.account, pct, full: pct !== null && pct >= 99, low: pct !== null && pct >= 95 });
       }
-      return { targets };
+      return { targets: accountOptions(targets, credentials), credentials };
     };
     void load().then(result => {
       if (active && isCurrent()) setCatalog({ identity, loading: false, error: '', ...result });
@@ -134,12 +137,12 @@ export function SessionAccount({ serverId, name }: { serverId: string; name: str
   const success = feedbackMatches ? feedback.success : '';
   const displayedSession = success && feedback.transition ? feedback.transition.destination : session;
   const label = displayedSession ? sessionAccountLabel(displayedSession) : null;
-  const shownTargets = current.targets.filter(target => target.engineAccount
-    ? target.path !== displayedSession?.conta && target.engineAccount !== displayedSession?.engine_account
-    : `claude:${target.path}` !== displayedSession?.conta && target.path !== displayedSession?.config_dir);
+  const activeTarget = displayedSession ? current.targets.find(target => isCurrentAccount(target, displayedSession)) : undefined;
+  const activeCredential = displayedSession ? sessionCredential(displayedSession, 'credentials' in current ? current.credentials ?? [] : []) ?? activeTarget?.credential : undefined;
+  const shownTargets = current.targets.filter(target => !displayedSession || !isCurrentAccount(target, displayedSession));
   const requestSwitch = (target: SwitchTarget) => {
     if (!server || refused || !session || session.provider !== 'claude' || session.guest_kind === 'pair'
-      || !idle || operation.current || target.full || target.unavailable || !isCurrent()) return;
+      || !idle || operation.current || target.full || !isCurrent()) return;
     const pending = { phase: 'confirm' as 'confirm' | 'post' };
     operation.current = pending;
     setConfirming(true);
@@ -198,14 +201,12 @@ export function SessionAccount({ serverId, name }: { serverId: string; name: str
   </View>;
   return <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={[styles.content, Platform.OS !== 'ios' && { paddingTop: headerHeight }]}>
     {!ready ? loading : refused ? <Text accessibilityRole="alert" style={styles.error}>{m.chat_servidor_removido()}</Text> : <>
-      <View style={styles.notice}>
-        <Text style={styles.caption}>{m.cota_conta_ativa()}</Text>
-        <Text selectable style={styles.title}>{label || m.native_invalid_response()}</Text>
-      </View>
+      <SessionAccountCard current label={activeTarget?.label || activeCredential?.apelido || activeCredential?.nome || label || m.native_invalid_response()}
+        context={displayedSession?.engine ? label : null} credential={activeCredential} path={displayedSession?.conta?.replace(/^(claude|codex):/, '')} />
       {!session ? sessionError ? failure(sessionError) : listed ? <Text style={styles.error}>{m.chat_sessao_encerrada()}</Text> : bucket?.error ? failure(bucket.error) : loading
         : session.provider !== 'claude' || session.guest_kind === 'pair' ? <Text style={styles.text}>{m.conta_mesma_so_claude()}</Text>
           : <>
-            <Text style={styles.text}>{m.conta_mesma_conversa_sub()}</Text>
+            <View style={styles.explanation}><Icon name="ArrowLeftRight" size={18} color={theme.tokens.text.muted} /><Text style={[styles.text, styles.grow]}>{m.conta_mesma_conversa_sub()}</Text></View>
             {!idle ? <Text style={styles.text}>{m.native_usage_card_move_busy()}</Text> : null}
             {applying ? loading : null}
             {actionError ? <Text accessibilityRole="alert" style={styles.error}>{actionError}</Text> : null}
@@ -213,26 +214,22 @@ export function SessionAccount({ serverId, name }: { serverId: string; name: str
             {current.loading ? loading : current.error ? failure(m.conta_erro_listar({ erro: current.error }))
               : current.restricted ? <Text style={styles.text}>{m.mobile_session_engine_account_unavailable()}</Text>
                 : shownTargets.length === 0 ? <Text style={styles.text}>{session.engine ? m.accounts_none() : m.conta_nenhuma_outra()}</Text>
-                : shownTargets.map(target => <Pressable key={target.path} accessibilityRole="button" accessibilityLabel={target.label} disabled={target.full || target.unavailable || !idle || applying || confirming} onPress={() => requestSwitch(target)} style={styles.button}>
-                  <Text style={styles.title}>{target.label}</Text>
-                  <Text style={styles.text}>{quotaLabel(target)}</Text>
-                  {target.unavailable ? <Text style={styles.error}>{m.contas_login_nao_conferido()}</Text> : null}
-                </Pressable>)}
+                : <>
+                  <Text accessibilityRole="header" style={styles.caption}>{m.mobile_account_order()}</Text>
+                  {shownTargets.map(target => <SessionAccountCard key={target.path} label={target.label} credential={target.credential} path={target.path}
+                    pct={target.pct} full={target.full} unconfirmed={target.unconfirmed}
+                    disabled={target.full || !idle || applying || confirming} onPress={() => requestSwitch(target)} />)}
+                </>}
           </>}
     </>}
   </ScrollView>;
 }
 
-function quotaLabel(target: AccountTarget): string {
-  const pct = target.pct;
-  return pct === null ? m.conta_cota_sem_leitura() : target.full ? m.conta_cota_cheia({ pct })
-    : target.low ? m.conta_cota_acabando({ pct }) : m.conta_cota_uso({ pct });
-}
-
 const styles = StyleSheet.create(theme => ({
+  grow: { flex: 1 },
+  explanation: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },
   content: { padding: theme.base.space[4], paddingBottom: theme.base.space[8], gap: theme.base.space[3] },
   notice: { gap: theme.base.space[2] },
-  title: { fontSize: theme.base.text.base, color: theme.tokens.text.primary, fontWeight: '600' },
   caption: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted },
   text: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary },
   error: { fontSize: theme.base.text.sm, color: theme.tokens.status.error },

@@ -8676,5 +8676,11 @@
   "native_last_error_copy_failed": "Não foi possível copiar o relatório.",
   "native_last_error_export_failed": "Não foi possível exportar o relatório.",
   "native_last_error_available": "O app registrou um erro fatal. O relatório está em Ajustes > Sobre > Último erro.",
-  "native_last_error_privacy": "Diagnóstico salvo neste aparelho. Dados variáveis são ocultados. Pilhas de Release podem precisar do mapa da atualização indicada."
+  "native_last_error_privacy": "Diagnóstico salvo neste aparelho. Dados variáveis são ocultados. Pilhas de Release podem precisar do mapa da atualização indicada.",
+  "mobile_account_current": "Conta desta conversa",
+  "mobile_account_exhausted": "Esgotada",
+  "mobile_account_order": "Outras contas · mais livres primeiro",
+  "mobile_account_reset_unknown": "Retorno da janela não informado",
+  "mobile_account_windows_unknown": "Janelas de 5 h e 7 d sem leitura detalhada",
+  "mobile_account_login_unknown": "Login não confirmado pelo servidor"
 }

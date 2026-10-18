@@ -16,6 +16,7 @@ vi.mock('react-native', async (original) => {
   const native = await original<typeof import('react-native')>();
   return {
   ...native,
+  Switch: ({ value, onValueChange, disabled }: { value: boolean; onValueChange: (value: boolean) => void; disabled?: boolean }) => createElement('button', { role: 'switch', 'aria-checked': value, disabled, onClick: () => onValueChange(!value) }),
   View: ({ onLayout, testID, ...props }: import('react-native').ViewProps) => {
     if (onLayout && testID) layouts.set(testID, onLayout);
     return createElement(native.View, { ...props, onLayout, ...{ 'data-testid': testID } });
@@ -91,6 +92,8 @@ vi.mock('@hangar/core', async (original) => ({
   recarregarSessao: vi.fn(async () => ({ ok: true })),
   implementCodexPlan: vi.fn(async () => {}),
   setPermissionMode: vi.fn(async () => ({ mode: 'acceptEdits', current: 'acceptEdits', previous_non_plan: 'acceptEdits' })),
+  getCredentialsForServer: vi.fn(async () => []),
+  getCodexModels: vi.fn(async () => ({ current: { model: 'gpt-test', effort: 'high' }, models: [] })),
   getModelOptions: realSettings.models, getPermissionModes: realSettings.permissions, getCommands: realSettings.commands,
   sendInputForServer: realFirstInput.send,
   steerSession: realFirstInput.steer,
@@ -489,11 +492,11 @@ describe('ações e atualização da conversa na rota', () => {
       expect(panel(container)).toBeNull();
     };
 
-    it('modo e conta abrem e reabrem a mesma folha, que mostra a conta e navega para trocar na rota certa', async () => {
+    it('modo abre os ajustes e conta abre direto a troca na rota certa', async () => {
       const { container, root } = await render(createElement(ChatScreen));
       try {
         expect(panel(container)).toBeNull();
-        for (const label of ['native_mode_bypassPermissions', 'native_mode_bypassPermissions', 'route-account', 'route-account']) {
+        for (const label of ['native_mode_bypassPermissions', 'native_mode_bypassPermissions']) {
           await openFooter(container, label);
           expect(container.querySelectorAll('[role="dialog"][aria-label="composer_session_settings"]')).toHaveLength(1);
           expect(panel(container)!.textContent).toContain('cota_conta_ativa');
@@ -507,17 +510,27 @@ describe('ações e atualização da conversa na rota', () => {
         expect(setPermissionMode).not.toHaveBeenCalled();
         expect(realFirstInput.send).not.toHaveBeenCalled();
         expect(realSettings.models).toHaveBeenCalledWith('sess', useServers.getState().servers[0]);
-        await openFooter(container, 'route-account');
-        await act(async () => button(container, 'accounts_switch_title')!.click());
+        await measureFooter();
+        await act(async () => button(container, 'route-account')!.click());
         expect(panel(container)).toBeNull();
         expect(routerPush).toHaveBeenLastCalledWith('/s/s1/sess/account');
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('chip de Codex nativo mantém os ajustes porque a troca só existe para Claude e seus motores', async () => {
+      sessionsState.rows[2] = { ...sessionsState.rows[2], provider: 'codex', conta: 'codex:/home/test/.codex-route-account' };
+      const { container, root } = await render(createElement(ChatScreen));
+      try {
+        await openFooter(container, 'route-account');
+        expect(routerPush).not.toHaveBeenCalled();
+        expect(button(panel(container)! as HTMLElement, 'accounts_switch_title')).toBeUndefined();
       } finally { act(() => root.unmount()); }
     });
 
     it('pedido consumido não reabre depois de remontar o Composer nem ao trocar servidor ou sessão', async () => {
       const { container, root } = await render(createElement(ChatScreen));
       try {
-        await openFooter(container, 'route-account');
+        await openFooter(container, 'native_mode_bypassPermissions');
         await closePanel(container);
         // O rodapé de orquestração desmonta o Composer mantendo a mesma tela e rota.
         sessionsState.rows[2] = { ...sessionsState.rows[2], provider: 'orq' };
@@ -531,19 +544,19 @@ describe('ações e atualização da conversa na rota', () => {
         route.params = { server: 's2', name: 'sess' };
         await act(async () => root.render(createElement(ChatScreen)));
         expect(panel(container)).toBeNull();
-        await openFooter(container, 'active-server');
+        await openFooter(container, 'chat_mode_label');
         route.params = { server: 's1', name: 'another' };
         chatRow.extra = { name: 'another' };
         await act(async () => root.render(createElement(ChatScreen)));
         expect(panel(container)).toBeNull();
-        await openFooter(container, 'other-session');
+        await openFooter(container, 'chat_mode_label');
       } finally { act(() => root.unmount()); }
     });
 
     it('/model e /effort continuam reabrindo a folha depois do pedido externo, sem enviar comandos', async () => {
       const { container, root } = await render(createElement(ChatScreen));
       try {
-        await openFooter(container, 'route-account');
+        await openFooter(container, 'native_mode_bypassPermissions');
         await closePanel(container);
         for (const command of ['/model', '/model', '/effort', '/effort']) {
           const field = container.querySelector('textarea')!;

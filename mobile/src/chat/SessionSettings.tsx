@@ -7,6 +7,7 @@ import { chatStore } from '../stores/chat';
 import { useSessions } from '../stores/sessions';
 import { useServers } from '../stores/servers';
 import { sessionAccountLabel } from './sessionAccountLabel';
+import { SessionAccountSummary } from './SessionAccountSummary';
 import { AnchoredPanel } from '../ui/AnchoredPanel';
 import { SettingsList } from '../ui/SettingsList';
 import { Icon, type IconName } from '../ui/Icon';
@@ -91,12 +92,11 @@ export function SessionSettingsButton({ serverId, name, provider, headless, open
     model={model} effort={effort} fast={fast} plan={plan} icon={icon} modeText={modeText}
     header={<>
       <Title text={m.cota_conta_ativa()} />
-      {account ? <Text style={styles.note}>{account}</Text> : null}
-      {canSwitchAccount ? <Pressable accessibilityRole="button" accessibilityLabel={m.accounts_switch_title()}
-        style={({ pressed }) => [styles.accountAction, pressed && styles.accountPressed]}
-        onPress={() => { close(); router.push(`/s/${serverId}/${name}/account` as never); }}>
-        <Icon name="RefreshCw" size={16} /><Text style={styles.effortText}>{m.accounts_switch_title()}</Text>
-      </Pressable> : null}
+      {open && account && session && server && !server.removed && !server.invite && !server.inviteEnded ? <SessionAccountSummary
+        key={JSON.stringify([serverId, name, server.baseUrl, server.token, session.conta, session.engine, session.jsonl])}
+        server={server} session={session} label={account}
+        onPress={canSwitchAccount ? () => { close(); router.push(`/s/${encodeURIComponent(serverId)}/${encodeURIComponent(name)}/account` as never); } : undefined} />
+        : account ? <Text style={styles.note}>{account}</Text> : null}
       <Separator />
     </>}>
     {permission.enabled ? <>
@@ -233,8 +233,6 @@ const styles = StyleSheet.create((theme) => ({
   chipStrong: { fontWeight: '600' },
   panel: { flexShrink: 1 },
   panelContent: { gap: 2 },
-  accountAction: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 8, borderRadius: 6 },
-  accountPressed: { backgroundColor: theme.tokens.bg.hover },
   title: { paddingHorizontal: 8, paddingTop: 6, paddingBottom: 4, fontSize: theme.base.text.xxxs, fontWeight: '500', letterSpacing: 0.4, textTransform: 'uppercase', color: theme.tokens.text.muted },
   separator: { height: 1, marginHorizontal: -4, marginVertical: 2, backgroundColor: theme.tokens.border.default },
   efforts: { flexDirection: 'row', gap: 2, paddingHorizontal: 4, paddingBottom: 2 },

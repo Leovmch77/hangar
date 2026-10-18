@@ -8676,5 +8676,11 @@
   "native_last_error_copy_failed": "Could not copy the report.",
   "native_last_error_export_failed": "Could not export the report.",
   "native_last_error_available": "The app recorded a fatal error. The report is in Settings > About > Last error.",
-  "native_last_error_privacy": "Diagnostic saved on this device. Variable data is hidden. Release stacks may need the source map of the indicated update."
+  "native_last_error_privacy": "Diagnostic saved on this device. Variable data is hidden. Release stacks may need the source map of the indicated update.",
+  "mobile_account_current": "Current conversation account",
+  "mobile_account_exhausted": "Exhausted",
+  "mobile_account_order": "Other accounts · most available first",
+  "mobile_account_reset_unknown": "Window reset time unavailable",
+  "mobile_account_windows_unknown": "Detailed 5 h and 7 d windows unavailable",
+  "mobile_account_login_unknown": "Login not confirmed by the server"
 }

@@ -1,0 +1,55 @@
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, Pressable, Text, View } from 'react-native';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { getCredentialsForServer, resumoCota, type Credencial, type Server } from '@hangar/core';
+import { Icon } from '../ui/Icon';
+import { superficie } from '../theme/superficie';
+import { sessionCredential, type AccountSession } from './sessionAccountOptions';
+import * as m from '../paraglide/messages';
+
+export function SessionAccountSummary({ server, session, label, onPress }: {
+  server: Server; session: AccountSession; label: string; onPress?: () => void;
+}) {
+  const { theme } = useUnistyles();
+  const [state, setState] = useState<{ loading: boolean; credential?: Credencial; error?: string }>({ loading: true });
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    let active = true;
+    setState({ loading: true });
+    void getCredentialsForServer(server).then(credentials => {
+      if (active) setState({ loading: false, credential: sessionCredential(session, credentials) });
+    }).catch(error => {
+      if (active) setState({ loading: false, error: error instanceof Error ? error.message : m.native_invalid_response() });
+    });
+    return () => { active = false; };
+  }, [server, session.conta, session.config_dir, session.codex_home, session.codex_account, retry]);
+  const credential = state.credential;
+  const quota = credential?.cota ? resumoCota({ ...credential.cota, id: credential.id }) : '';
+  const accountName = credential?.apelido || credential?.nome || label;
+  const detail = state.loading ? m.comum_carregando() : state.error ? m.conta_erro_listar({ erro: state.error }) : quota || m.conta_cota_sem_leitura();
+  const content = <>
+    <Icon name="CircleUser" size={22} color={theme.tokens.accent.base} />
+    <View style={styles.body}>
+      <Text style={styles.name}>{accountName}</Text>
+      {state.loading ? <ActivityIndicator size="small" color={theme.tokens.text.muted} />
+        : <Text style={styles.quota}>{detail}</Text>}
+    </View>
+    {onPress ? <Icon name="ChevronRight" size={18} color={theme.tokens.text.muted} /> : null}
+  </>;
+  return <View>
+    {onPress ? <Pressable accessibilityRole="button" accessibilityLabel={m.accounts_switch_title()} accessibilityValue={{ text: `${accountName}, ${detail}` }} onPress={onPress}
+      style={({ pressed }) => [styles.row, { backgroundColor: superficie(theme, 0.4) }, pressed && styles.pressed]}>{content}</Pressable>
+      : <View style={styles.row}>{content}</View>}
+    {state.error ? <Pressable accessibilityRole="button" accessibilityLabel={m.native_retry()} onPress={() => setRetry(n => n + 1)} style={styles.retry}>
+      <Text style={styles.quota}>{m.native_retry()}</Text>
+    </Pressable> : null}
+  </View>;
+}
+const styles = StyleSheet.create(theme => ({
+  row: { flexDirection: 'row', alignItems: 'center', gap: 10, borderRadius: theme.base.radius.lg, padding: 12, minHeight: 44, marginHorizontal: 4, marginVertical: 4 },
+  body: { flex: 1, minWidth: 0, gap: 4 },
+  name: { fontSize: theme.base.text.sm, fontWeight: '600', color: theme.tokens.text.primary },
+  quota: { fontSize: theme.base.text.xxs, color: theme.tokens.text.secondary },
+  pressed: { opacity: 0.7 },
+  retry: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 16 },
+}));
