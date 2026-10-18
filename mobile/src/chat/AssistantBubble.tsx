@@ -10,7 +10,7 @@ import { toast } from '../ui/Toast';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 import type { MarkdownStyle } from 'react-native-enriched-markdown';
 import { useRouter } from 'expo-router';
-import { fileUrlNative, fileAuthHeader, fileKind, hideAttachmentPaths, lerTabelaMarkdown, linkCodeReferences, parseCodePaths, parseFileLink, parseFilePaths, parseMediaUrls, proposedPlan, planDisplayText, splitMermaidBlocks, buildQuoteRef, quoteAffixesInMarkdown, quoteTooLong } from '@hangar/core';
+import { codeCitation, fileUrlNative, fileAuthHeader, hideAttachmentPaths, lerTabelaMarkdown, linkCodeReferences, parseCodePaths, parseFileLink, parseFilePaths, parseMediaUrls, proposedPlan, planDisplayText, splitMermaidBlocks, buildQuoteRef, quoteAffixesInMarkdown, quoteTooLong } from '@hangar/core';
 import type { TextContextMenuItem, TextSelectionMenuConfig } from 'react-native-enriched-markdown';
 import { MermaidBlock } from './MermaidBlock';
 import { contextRefsKey } from '../stores/contextRefs';
@@ -201,9 +201,9 @@ export const AssistantBubble = memo(function AssistantBubble({
     Linking.openURL(url).catch((e: unknown) => toast.erro(e instanceof Error ? e.message : String(e)));
   }, [abrirArquivo, podeAbrirArquivo]);
   // Arquivo de CÓDIGO citado na prosa (o parseFilePaths acima só pega mídia/pdf/html, que viram
-  // miniatura). Só vira chip quando dá pra abrir na aba Arquivos. O `fileKind` tira a mídia daqui:
+  // miniatura). Só vira chip quando dá pra abrir na aba Arquivos. O `codeCitation` tira a mídia daqui:
   // com extensão aberta no absoluto o `parseCodePaths` casa `.png` e o arquivo saía nos dois.
-  const codigos = useMemo(() => parseCodePaths(text).filter((p) => !fileKind(p)), [text]);
+  const codigos = useMemo(() => parseCodePaths(text).filter(codeCitation), [text]);
   const hasCodigos = codigos.length > 0 && !!sessionName && !!serverId;
   const tabelas = useMemo(() => lerTabelaMarkdown(display), [display]);
   const [pref, setPref] = useState(() => getTableChartPref());

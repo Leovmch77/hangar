@@ -8665,5 +8665,6 @@
   "file_card_empty": "Arquivo vazio",
   "file_card_missing": "Arquivo não encontrado",
   "file_card_failed": "Não deu para baixar",
-  "file_card_retry": "Tentar de novo"
+  "file_card_retry": "Tentar de novo",
+  "file_card_no_app": "Nenhum app do aparelho abre este arquivo"
 }

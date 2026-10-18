@@ -7,7 +7,7 @@ import { Icon, type IconName } from '../ui/Icon';
 import { superficie } from '../theme/superficie';
 import * as m from '../paraglide/messages';
 
-type Status = 'idle' | 'loading' | 'done' | 'empty' | 'missing' | 'failed';
+type Status = 'idle' | 'loading' | 'done' | 'empty' | 'missing' | 'failed' | 'no-app';
 
 const ARCHIVE = /\.(zip|tar|gz|tgz|7z|rar)$/i;
 const SHEET = /\.(xls|xlsx|ods|csv|tsv)$/i;
@@ -23,6 +23,7 @@ const statusText: Record<Status, (() => string) | null> = {
   empty: m.file_card_empty,
   missing: m.file_card_missing,
   failed: m.file_card_failed,
+  'no-app': m.file_card_no_app,
 };
 
 // Documento citado na conversa (docx, planilha, zip, csv, txt…): o card do nativo, com a ação que o
@@ -43,9 +44,9 @@ export const FileCard = memo(function FileCard({ uri, headers, name }: {
     try {
       const r = await deliverFile(uri, headers, name);
       if (!alive.current) return;
-      setStatus(r === 'empty' ? 'empty' : 'done');
-      if (r === 'empty') haptic.error();
-      else haptic.success();
+      setStatus(r === 'cancelled' ? 'idle' : r);
+      if (r === 'empty' || r === 'no-app') haptic.error();
+      else if (r === 'done') haptic.success();
     } catch (e) {
       if (!alive.current) return;
       // O download recusa resposta fora de 2xx com "status 404" (iOS) ou "status: 404" (Android).
@@ -56,7 +57,7 @@ export const FileCard = memo(function FileCard({ uri, headers, name }: {
 
   const ext = name.includes('.') ? name.split('.').pop()!.toUpperCase() : '';
   const statusLine = statusText[status]?.();
-  const erro = status === 'missing' || status === 'failed' || status === 'empty';
+  const erro = status === 'missing' || status === 'failed' || status === 'empty' || status === 'no-app';
   // Arquivo vazio não melhora tentando de novo.
   const retry = status === 'missing' || status === 'failed';
   const label = retry ? m.file_card_retry() : ios ? m.file_card_download() : m.file_card_open();

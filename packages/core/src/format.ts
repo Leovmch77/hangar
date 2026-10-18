@@ -403,6 +403,16 @@ export function fileKind(filename: string): FileKind | null {
   return EXT_KIND[ext] ?? null;
 }
 
+// csv/tsv/txt: lidos e citados como código antes de virarem anexo.
+export function isTextData(path: string): boolean {
+  return /\.(csv|tsv|txt)$/i.test(path);
+}
+
+// Citação que vira chip de código. Anexo exige pasta no caminho; o nome solto de csv/txt continua chip.
+export function codeCitation(path: string): boolean {
+  return !fileKind(path) || (!path.includes('/') && isTextData(path));
+}
+
 // Tamanho legível em unidades binárias (o que o backend mede: st_size). 1 casa só a partir de MB —
 // "1.2 KB" é ruído; abaixo de 1 KB mostra os bytes crus.
 export function fmtBytes(n: number): string {
@@ -438,9 +448,15 @@ export function hideAttachmentPaths(text: string, refs: FileRef[]): string {
   if (!paths.length) return text;
   const alt = paths.slice().sort((a, b) => b.length - a.length)
     .map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  // Código inline é uma unidade: só some quando é exatamente o caminho (um comando fica intacto).
   const re = new RegExp(
-    `!?\\[([^\\]\\n]*)\\]\\(<?(?:${alt})>?\\)|(\`?)(?<![\\w.~/-])(${alt})(?![\\w-]|\\.\\w)\\2`, 'g');
+    `!?\\[([^\\]\\n]*)\\]\\(<?(?:${alt})>?\\)|\`([^\`\\n]*)\`|(?<![\\w.~/-])(${alt})(?![\\w-]|\\.\\w)`, 'g');
+  const isPath = new Set(paths);
   const name = (p: string) => p.split('/').filter(Boolean).pop() || p;
+  const swap = (blank: boolean) => (whole: string, label?: string, code?: string, path?: string) =>
+    label !== undefined ? (blank ? '' : label)
+      : code !== undefined ? (isPath.has(code) ? (blank ? '' : `\`${name(code)}\``) : whole)
+        : blank ? '' : name(path!);
   let fence = false;
   let squeeze = false;
   const out: string[] = [];
@@ -451,12 +467,11 @@ export function hideAttachmentPaths(text: string, refs: FileRef[]): string {
     if (fence || /^\s*(```|~~~)/.test(line)) { out.push(line); continue; }
     re.lastIndex = 0;
     if (!re.test(line)) { out.push(line); continue; }
-    if (!/[\p{L}\p{N}]/u.test(line.replace(re, ''))) {
+    if (!/[\p{L}\p{N}]/u.test(line.replace(re, swap(true)))) {
       squeeze = !out.length || !out[out.length - 1].trim();
       continue;
     }
-    out.push(line.replace(re, (_m, label: string | undefined, tick: string, path: string | undefined) =>
-      label !== undefined ? label : `${tick}${name(path!)}${tick}`));
+    out.push(line.replace(re, swap(false)));
   }
   return out.join('\n');
 }

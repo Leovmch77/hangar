@@ -17,6 +17,7 @@ vi.mock('../paraglide/messages', () => ({
   file_card_missing: () => 'missing',
   file_card_failed: () => 'failed',
   file_card_retry: () => 'retry',
+  file_card_no_app: () => 'no-app',
 }));
 
 import { FileCard } from './FileCard';
@@ -52,6 +53,22 @@ describe('FileCard', () => {
     await act(async () => done('done'));
     expect(c.textContent).toContain('saved');
     expect(c.querySelector('button')!.getAttribute('aria-label')).toBe('open rel.docx');
+  });
+
+  it('sem app para abrir avisa sem oferecer tentar de novo', async () => {
+    deliver.mockResolvedValue('no-app');
+    const c = await mount();
+    await press(c);
+    expect(c.textContent).toContain('no-app');
+    expect(c.textContent).not.toContain('retry');
+  });
+
+  it('cancelar a folha do sistema não marca como baixado', async () => {
+    deliver.mockResolvedValue('cancelled');
+    const c = await mount();
+    await press(c);
+    expect(c.textContent).not.toContain('saved');
+    expect(c.textContent).not.toContain('downloading');
   });
 
   it('arquivo vazio avisa sem oferecer tentar de novo', async () => {

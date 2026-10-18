@@ -5240,13 +5240,15 @@ pub(super) fn sends_files(call: &ChatEvent) -> bool {
 /// bytes; o caminho citado vem pelo `/file` (regra do web).
 pub(super) fn tool_file_refs(call: &ChatEvent) -> Vec<(Source, String, bool)> {
     let input = call.tool_input.as_ref();
+    let read = call.tool_name.as_deref().is_some_and(|name| name.eq_ignore_ascii_case("read"));
     let paths: Vec<&str> = match call.tool_name.as_deref() {
-        Some(name) if name.eq_ignore_ascii_case("read") => vec![crate::editdiff::input_path(input)],
+        _ if read => vec![crate::editdiff::input_path(input)],
         _ if sends_files(call) => input.and_then(|i| i.get("files")).and_then(|f| f.as_array())
             .map(|files| files.iter().filter_map(|f| f.as_str()).collect()).unwrap_or_default(),
         _ => Vec::new(),
     };
-    paths.into_iter().flat_map(composer::cited_paths).map(cited_ref).collect()
+    // csv/txt lidos são texto: o cartão da ferramenta já mostra o conteúdo.
+    paths.into_iter().flat_map(composer::cited_paths).filter(|path| !(read && composer::is_text_data(path))).map(cited_ref).collect()
 }
 
 /// Cartão de um arquivo que não tem prévia (pdf, planilha, zip, texto): ícone, nome, extensão ou o estado do último

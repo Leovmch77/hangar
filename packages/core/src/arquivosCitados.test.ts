@@ -97,6 +97,11 @@ describe('linkCodeReferences / parseFileLink', () => {
     ]);
   });
 
+  it('csv/txt solto segue link de código; com caminho vira anexo e fica de fora', () => {
+    expect(linkCodeReferences('abre `dados.csv` e `/tmp/rel.csv`'))
+      .toBe('abre [`dados.csv`](hangar-file:dados.csv) e `/tmp/rel.csv`');
+  });
+
   it('lê o link gerado e o caminho cru de [x](a/b.ts:4); URL de verdade não é arquivo', () => {
     expect(parseFileLink(fileLinkUrl('src/a b.ts', 7))).toEqual({ path: 'src/a b.ts', line: 7 });
     expect(parseFileLink('docs/x.md:4')).toEqual({ path: 'docs/x.md', line: 4 });

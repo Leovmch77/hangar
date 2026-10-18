@@ -9,7 +9,7 @@ import {
   summarizeText, summarizeToolInput, summarizeToolResult, toolPhase, toolGroupLabel, toolGroupCounts, toolGroupTitulo, splitTerminalRun, terminalFoldKind, terminalFoldTitle, toolVerbo,
   rotuloEstado,
   splitTodoBlock, parseImageMessage, parseCanal, parseRealtimeDelegation, parsePeerMessage, basename,
-  parseFilePaths, hideAttachmentPaths, separarComando, nomeFerramenta, terminalFileTool, terminalToolName,
+  parseFilePaths, hideAttachmentPaths, codeCitation, separarComando, nomeFerramenta, terminalFileTool, terminalToolName,
 } from './format';
 import type { ChatEvent, State } from './types';
 import { overwriteGetLocale } from './paraglide/runtime';
@@ -1122,6 +1122,17 @@ describe('arquivos para baixar', () => {
   });
 });
 
+describe('codeCitation', () => {
+  it('nome solto de csv/txt segue chip; com pasta vira anexo; mídia solta segue como antes', () => {
+    expect(codeCitation('data.csv')).toBe(true);
+    expect(codeCitation('notas.txt')).toBe(true);
+    expect(codeCitation('src/app.ts')).toBe(true);
+    expect(codeCitation('/tmp/data.csv')).toBe(false);
+    expect(codeCitation('docs/data.csv')).toBe(false);
+    expect(codeCitation('foto.png')).toBe(false);
+  });
+});
+
 describe('hideAttachmentPaths', () => {
   const hide = (t: string) => hideAttachmentPaths(t, parseFilePaths(t));
 
@@ -1144,6 +1155,11 @@ describe('hideAttachmentPaths', () => {
   it('bloco de código e caminho de código ficam intactos', () => {
     const t = '```\n/tmp/a.png\n```\nVer /tmp/app.ts e /tmp/a.png';
     expect(hide(t)).toBe('```\n/tmp/a.png\n```\nVer /tmp/app.ts e a.png');
+  });
+
+  it('código inline com mais que o caminho fica intacto', () => {
+    const t = 'Rode `rsync /tmp/a.zip host:` e pronto';
+    expect(hide(t)).toBe(t);
   });
 
   it('caminho parecido mais longo não é cortado', () => {

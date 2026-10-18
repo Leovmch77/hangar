@@ -30,7 +30,7 @@
   async function save(r: FileRef) {
     saving[r.path] = 'busy';
     try {
-      const result = await saveFile(url(r, true), r.name);
+      const result = await saveFile(url(r, true), r.name, { refuseEmpty: true });
       if (result === 'tap-again') saving[r.path] = 'again';
       else if (result === 'empty') saving[r.path] = 'empty';
       else if (result === 'saved' && r.kind === 'document') saving[r.path] = 'saved';

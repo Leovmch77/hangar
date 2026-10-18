@@ -15,13 +15,14 @@ function shouldShare(file: File): boolean {
   );
 }
 
-export async function saveFile(url: string, name: string): Promise<SaveResult> {
+// `refuseEmpty`: quem tem como avisar "arquivo vazio" recebe 'empty' em vez de salvar 0 bytes.
+export async function saveFile(url: string, name: string, { refuseEmpty = false } = {}): Promise<SaveResult> {
   let file = ready.get(url);
   if (!file) {
     const resp = await fetch(url);
     if (!resp.ok) throw Object.assign(new Error(`HTTP ${resp.status}`), { status: resp.status });
     const blob = await resp.blob();
-    if (!blob.size) return 'empty';
+    if (refuseEmpty && !blob.size) return 'empty';
     file = new File([blob], name, { type: blob.type || 'application/octet-stream' });
   }
   if (shouldShare(file)) {

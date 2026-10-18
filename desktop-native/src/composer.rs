@@ -20,6 +20,11 @@ fn extension(name: &str) -> String {
     name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase()).unwrap_or_default()
 }
 
+/// csv/tsv/txt: anexo quando citados com pasta; o nome solto e o lido pela ferramenta seguem como texto (`isTextData` do core).
+pub fn is_text_data(name: &str) -> bool {
+    matches!(extension(name).as_str(), "csv" | "tsv" | "txt")
+}
+
 pub fn image_format(name: &str) -> Option<ImageFormat> {
     Some(match extension(name).as_str() {
         "png" => ImageFormat::Png, "jpg" | "jpeg" => ImageFormat::Jpeg, "webp" => ImageFormat::Webp,
@@ -440,6 +445,7 @@ pub fn citation_markdown_mapped(source: &str, dead: &dyn Fn(&str) -> bool, hidde
                 if let Some(reference) = reference.filter(|r| {
                     let ext = extension(&r.path);
                     !EXTS.contains(&ext.as_str()) || matches!(ext.as_str(), "json" | "tif" | "tiff")
+                        || !r.path.contains('/') && is_text_data(&r.path)
                 })
                     .filter(|_| at == 0 || !line[..at].ends_with('!'))
                     .filter(|r| !dead(&r.path)) {
@@ -719,6 +725,9 @@ mod tests {
         // O mais longo segue o caminho dele: aqui, chip de citação.
         assert!(hide("Ver /tmp/a.png e /tmp/a.png.bak").starts_with("Ver a.png e [a.png.bak](hangar-file:?path=%2Ftmp%2Fa.png.bak"));
         assert_eq!(hide("Veja ![a](/tmp/a.png) aqui"), "Veja a aqui");
+        assert_eq!(hide("Rode `rsync /tmp/a.zip host:` e pronto"), "Rode `rsync /tmp/a.zip host:` e pronto");
+        let bare = hide("abre `dados.csv` e `/tmp/rel.csv`");
+        assert!(bare.starts_with("abre [dados.csv](hangar-file:") && bare.ends_with(" e `rel.csv`"), "{bare}");
     }
 
     #[test]
