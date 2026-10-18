@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Pressable, Text, TextInput, View } from 'react-native';
-import { StyleSheet } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { Screen } from '../src/ui/Screen';
 import { Glass } from '../src/ui/Glass';
@@ -16,6 +16,7 @@ import { superficie } from '../src/theme/superficie';
 
 export default function Login() {
   const router = useRouter();
+  const { theme } = useUnistyles();
   const [baseUrl, setBaseUrl] = useState('');
   const [token, setToken] = useState('');
   const [error, setError] = useState('');
@@ -97,7 +98,7 @@ export default function Login() {
                 value={baseUrl}
                 onChangeText={setBaseUrl}
                 placeholder="http://192.168.x.x:8000"
-                placeholderTextColor="#8d8489"
+                placeholderTextColor={theme.tokens.text.muted}
                 autoCapitalize="none"
                 autoCorrect={false}
                 spellCheck={false}
@@ -114,7 +115,7 @@ export default function Login() {
                 value={token}
                 onChangeText={setToken}
                 placeholder="••••••••••••••••"
-                placeholderTextColor="#8d8489"
+                placeholderTextColor={theme.tokens.text.muted}
                 secureTextEntry
                 autoCapitalize="none"
                 autoCorrect={false}

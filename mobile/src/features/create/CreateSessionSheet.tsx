@@ -737,7 +737,7 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
         accessibilityLabel={m.comum_nome()}
         autoCapitalize="none"
         autoCorrect={false}
-        placeholderTextColor="#8d8489"
+        placeholderTextColor={theme.tokens.text.muted}
       />
       <Text style={styles.hintSm}>{m.nova_conversa_nome_automatico()}</Text>
     </View>
