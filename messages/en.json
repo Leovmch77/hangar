@@ -8656,5 +8656,14 @@
   "mobile_git_status": "Status",
   "mobile_git_context_changed": "The session, Git folder or branch changed or is unavailable. The operation was stopped. Check the refreshed repository before trying again.",
   "mobile_git_read_timeout": "The Git read did not respond within 20 s. Reload to try again.",
-  "mobile_git_write_timeout": "The Git operation did not respond within 60 s. Its outcome is uncertain: it may have completed on the server. The repository will be reloaded; check before repeating it."
+  "mobile_git_write_timeout": "The Git operation did not respond within 60 s. Its outcome is uncertain: it may have completed on the server. The repository will be reloaded; check before repeating it.",
+  "native_last_error_title": "Last error",
+  "native_last_error_empty": "No fatal error recorded on this device.",
+  "native_last_error_copy": "Copy report",
+  "native_last_error_export": "Export report",
+  "native_last_error_read_failed": "Could not read the last saved error.",
+  "native_last_error_copy_failed": "Could not copy the report.",
+  "native_last_error_export_failed": "Could not export the report.",
+  "native_last_error_available": "The app recorded a fatal error. The report is in Settings > About > Last error.",
+  "native_last_error_privacy": "Diagnostic saved on this device. Variable data is hidden. Release stacks may need the source map of the indicated update."
 }
