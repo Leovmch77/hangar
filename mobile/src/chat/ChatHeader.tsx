@@ -29,11 +29,14 @@ export function ChatHeader({
   onBack,
   onMore,
   onTitlePress,
+  onHome,
   chipLoop,
 }: {
   name: string;
   state: State | null;
   onBack: () => void;
+  // Só quando o voltar não leva direto ao Início (pilha com mais de uma tela).
+  onHome?: () => void;
   onMore: () => void;
   onTitlePress: () => void;
   chipLoop?: React.ReactNode;
@@ -63,6 +66,17 @@ export function ChatHeader({
         >
           <Icon name="ChevronLeft" size={22} color={theme.tokens.text.primary} />
         </EdgePressable>
+        {onHome ? (
+          <EdgePressable
+            onPress={onHome}
+            hitSlop={8}
+            style={styles.back}
+            accessibilityRole="button"
+            accessibilityLabel={m.chat_ir_inicio()}
+          >
+            <Icon name="House" size={19} color={theme.tokens.text.primary} />
+          </EdgePressable>
+        ) : null}
         <Pressable
           onPress={onTitlePress}
           style={({ pressed }) => [styles.titulo, pressed && styles.tocado]}
@@ -104,7 +118,7 @@ export function ChatHeader({
           <Icon name="Ellipsis" size={18} color={theme.tokens.text.secondary} />
         </Pressable>
       </View>
-      {chipLoop ? <View style={styles.chips}>{chipLoop}</View> : null}
+      {chipLoop ? <View style={[styles.chips, onHome && styles.chipsHome]}>{chipLoop}</View> : null}
     </View>
   );
 }
@@ -131,6 +145,7 @@ const styles = StyleSheet.create((theme) => ({
     paddingRight: theme.base.space[2],
     paddingBottom: theme.base.space[1],
   },
+  chipsHome: { paddingLeft: 118 },
   titulo: {
     flex: 1,
     flexShrink: 1,

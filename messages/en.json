@@ -1190,6 +1190,7 @@
   "chat_transcript_trocado_2": ") or the backend restarted. Trying again usually fixes it.",
   "chat_nao_carregou_historico": "Couldn't load the history.",
   "chat_voltar_sessoes": "Back to sessions",
+  "chat_ir_inicio": "Go to Home",
   "chat_historico_antigo": "Older history didn't load — tap to retry",
   "chat_sem_historico_anterior": "No earlier history — the transcript changed",
   "chat_sessao_encerrada": "This session was ended.",

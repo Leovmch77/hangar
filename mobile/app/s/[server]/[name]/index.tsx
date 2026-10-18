@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from 'react';
 import { AccessibilityInfo, ActivityIndicator, AppState, Platform, ScrollView, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { useIsFocused, useLocalSearchParams, useRouter } from 'expo-router';
+import { useIsFocused, useLocalSearchParams, useRootNavigationState, useRouter } from 'expo-router';
 import { useShallow } from 'zustand/react/shallow';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { chatStore } from '../../../../src/stores/chat';
@@ -472,6 +472,9 @@ export default function ChatScreen() {
     if (router.canGoBack()) router.back();
     else router.replace('/');
   }, [router]);
+  // Índice 1 = chat logo acima do Início: o ‹ já leva lá e a casa sobraria.
+  const deepStack = (useRootNavigationState()?.index ?? 0) >= 2;
+  const onHome = useCallback(() => router.dismissTo('/'), [router]);
   const onMore = useCallback(() => setMoreOpen(true), []);
   const onTitlePress = useCallback(() => setPickerOpen(true), []);
   const onAbrirAgentes = useCallback(() => router.push(`/s/${serverId}/${name}/activity` as never), [router, serverId, name]);
@@ -494,6 +497,7 @@ export default function ChatScreen() {
           name={name}
           state={codexPreThread ? currentSession.state : stateEvent?.state ?? null}
           onBack={onBack}
+          onHome={deepStack ? onHome : undefined}
           onMore={onMore}
           onTitlePress={onTitlePress}
           chipLoop={chipLoop}

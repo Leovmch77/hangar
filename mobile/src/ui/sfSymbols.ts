@@ -55,6 +55,7 @@ export const SF_SYMBOLS: Partial<Record<IconName, SFSymbol>> = {
   Hash: 'number',
   History: 'clock.arrow.circlepath',
   Hourglass: 'hourglass',
+  House: 'house',
   Image: 'photo',
   Info: 'info.circle',
   Key: 'key',

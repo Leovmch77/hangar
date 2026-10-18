@@ -60,7 +60,7 @@ const nativeNavigation = {
 };
 const routerPush = vi.hoisted(() => vi.fn());
 const chatRow = vi.hoisted(() => ({ extra: {} as Record<string, unknown> }));
-const navigation = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), dismissTo: vi.fn(), canGoBack: true }));
+const navigation = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), dismissTo: vi.fn(), canGoBack: true, depth: 1 }));
 const route = vi.hoisted(() => ({ params: { server: 's1', name: 'sess' }, segments: ['s'] }));
 const realSettings = vi.hoisted(() => ({ enabled: false, models: vi.fn(), permissions: vi.fn(), commands: vi.fn() }));
 const realFirstInput = vi.hoisted(() => ({ enabled: false, send: vi.fn(), steer: vi.fn(), history: vi.fn(), transcribe: vi.fn(), relimpar: vi.fn(),
@@ -75,6 +75,7 @@ vi.mock('expo-router', () => ({
   useNavigation: () => nativeNavigation,
   useRouter: () => ({ push: routerPush, back: navigation.back, replace: navigation.replace, dismissTo: navigation.dismissTo, canGoBack: () => navigation.canGoBack }),
   useLocalSearchParams: () => route.params, useSegments: () => route.segments,
+  useRootNavigationState: () => ({ index: navigation.depth }),
 }));
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
@@ -150,7 +151,7 @@ vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 vi.mock('../paraglide/messages', async (importOriginal) => ({
   ...await importOriginal<typeof import('../paraglide/messages')>(),
   ...Object.fromEntries(
-  ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo compartilhar_menu ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes mods_celular_mostrar mods_celular_mostrar_um mods_celular_mostrar_paineis mods_celular_ocultar mods_celular_sub plugin_band_label navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de switcher_buscar_conversas term_titulo '
+  ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_ir_inicio chat_voltar_sessoes codex_limites_titulo compartilhar_menu ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes mods_celular_mostrar mods_celular_mostrar_um mods_celular_mostrar_paineis mods_celular_ocultar mods_celular_sub plugin_band_label navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de switcher_buscar_conversas term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
     .concat(' sessao_git chat_acao_git_detalhe cota_conta_ativa accounts_switch_title native_ctl_model_title native_new_chat_reasoning native_mode_bypassPermissions chat_mode_label')
     .concat(' live_voice_open composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint composer_steer_current_text ditado_estilo_titulo uso_aria codex_orientar_ajuda composer_fila_titulo composer_submission_recover_first queue_steer_uncertain')
@@ -558,6 +559,21 @@ describe('ações e atualização da conversa na rota', () => {
         expect(realFirstInput.send).not.toHaveBeenCalled();
       } finally { act(() => root.unmount()); }
     });
+  });
+
+  it('casa no cabeçalho só aparece com outra tela entre o chat e o Início, e leva direto ao Início', async () => {
+    navigation.dismissTo.mockClear();
+    navigation.depth = 1;
+    const first = await render(createElement(ChatScreen));
+    try {
+      expect(button(first.container, 'chat_ir_inicio')).toBeUndefined();
+    } finally { act(() => first.root.unmount()); }
+    navigation.depth = 2;
+    const { container, root } = await render(createElement(ChatScreen));
+    try {
+      await act(async () => button(container, 'chat_ir_inicio')!.click());
+      expect(navigation.dismissTo).toHaveBeenLastCalledWith('/');
+    } finally { act(() => root.unmount()); navigation.depth = 1; }
   });
 
   it('Nova conversa da gaveta do chat pede compose na inicial, sem mudar o fechamento das demais navegações', async () => {
