@@ -203,7 +203,7 @@ export const AssistantBubble = memo(function AssistantBubble({
   // Arquivo de CÓDIGO citado na prosa (o parseFilePaths acima só pega mídia/pdf/html, que viram
   // miniatura). Só vira chip quando dá pra abrir na aba Arquivos. O `codeCitation` tira a mídia daqui:
   // com extensão aberta no absoluto o `parseCodePaths` casa `.png` e o arquivo saía nos dois.
-  const codigos = useMemo(() => parseCodePaths(text).filter(codeCitation), [text]);
+  const codigos = useMemo(() => parseCodePaths(text).filter((p) => codeCitation(p)), [text]);
   const hasCodigos = codigos.length > 0 && !!sessionName && !!serverId;
   const tabelas = useMemo(() => lerTabelaMarkdown(display), [display]);
   const [pref, setPref] = useState(() => getTableChartPref());

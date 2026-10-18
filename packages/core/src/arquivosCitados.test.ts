@@ -100,6 +100,7 @@ describe('linkCodeReferences / parseFileLink', () => {
   it('csv/txt solto segue link de código; com caminho vira anexo e fica de fora', () => {
     expect(linkCodeReferences('abre `dados.csv` e `/tmp/rel.csv`'))
       .toBe('abre [`dados.csv`](hangar-file:dados.csv) e `/tmp/rel.csv`');
+    expect(linkCodeReferences('veja logs/app.txt:12')).toBe('veja [logs/app.txt:12](hangar-file:logs%2Fapp.txt#L12)');
   });
 
   it('lê o link gerado e o caminho cru de [x](a/b.ts:4); URL de verdade não é arquivo', () => {

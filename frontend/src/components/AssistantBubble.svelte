@@ -106,7 +106,7 @@
   // Anexos por caminho citado na minha msg (img/video/html/pdf que eu "mandar").
   // Mídia/html/pdf fica de fora dos caminhos de código: com extensão aberta no absoluto o
   // `parseCodePaths` também casa `.png`, e o filtro abaixo apagava a miniatura.
-  const codePaths = $derived(new Set(parseCodePaths(text).filter(codeCitation)));
+  const codePaths = $derived(new Set(parseCodePaths(text).filter((p) => codeCitation(p))));
   const fileRefs = $derived(!preview && sessionName
     ? parseFilePaths(text).filter((ref) => !codePaths.has(ref.path)) : []);
   // Midia remota (URL http) -> preview inline; nao depende do backend/sessionName.

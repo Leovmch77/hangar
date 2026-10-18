@@ -408,9 +408,9 @@ export function isTextData(path: string): boolean {
   return /\.(csv|tsv|txt)$/i.test(path);
 }
 
-// Citação que vira chip de código. Anexo exige pasta no caminho; o nome solto de csv/txt continua chip.
-export function codeCitation(path: string): boolean {
-  return !fileKind(path) || (!path.includes('/') && isTextData(path));
+// Citação que vira chip de código. Anexo exige pasta no caminho; csv/txt solto ou com linha continua chip.
+export function codeCitation(path: string, line?: number | null): boolean {
+  return !fileKind(path) || (isTextData(path) && (!path.includes('/') || line != null));
 }
 
 // Tamanho legível em unidades binárias (o que o backend mede: st_size). 1 casa só a partir de MB —
@@ -432,6 +432,7 @@ export function parseFilePaths(text: string): FileRef[] {
     for (const m of text.matchAll(re)) {
       const path = m[1];
       if (seen.has(path)) continue;
+      if (isTextData(path) && /^:\d/.test(text.slice(m.index + path.length))) continue;
       seen.add(path);
       const kind = EXT_KIND[m[2].toLowerCase()];
       out.push({ path, name: path.split('/').filter(Boolean).pop() || path, kind });

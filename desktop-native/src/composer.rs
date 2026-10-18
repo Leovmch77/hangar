@@ -160,7 +160,11 @@ fn close_path(text: &str, start: usize, spaces: bool) -> Option<usize> {
 /// Caminhos citados com extensão conhecida: absolutos (`/`, `~/`) e relativos com diretório.
 pub fn cited_paths(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let mut push = |path: &str| if !out.iter().any(|p| p == path) { out.push(path.to_owned()); };
+    // csv/txt seguido de `:linha` é referência a código (chip), não anexo.
+    let mut push = |path: &str, end: usize| {
+        let line = text[end..].strip_prefix(':').is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()));
+        if !(line && is_text_data(path)) && !out.iter().any(|p| p == path) { out.push(path.to_owned()); }
+    };
     let prev = |i: usize| text[..i].chars().next_back();
     let mut skip_to = 0;
     for (i, ch) in text.char_indices() {
@@ -168,14 +172,14 @@ pub fn cited_paths(text: &str) -> Vec<String> {
         let absolute = ch == '/' || (ch == '~' && text[i + 1..].starts_with('/'));
         // `*` antes vale: caminho em negrito (`**/tmp/x.jpg**`) também é citado.
         if absolute && prev(i).is_none_or(|p| !(p.is_alphanumeric() || "_.~:/".contains(p))) {
-            if let Some(end) = close_path(text, i, true) { push(&text[i..end]); skip_to = end; continue; }
+            if let Some(end) = close_path(text, i, true) { push(&text[i..end], end); skip_to = end; continue; }
         }
         let word = |c: char| c.is_alphanumeric() || "_.-".contains(c);
         if word(ch) && prev(i).is_none_or(|p| !(p.is_alphanumeric() || "_/~.:*-".contains(p))) {
             if let Some(end) = close_path(text, i, false) {
                 let candidate = &text[i..end];
                 if candidate.contains('/') && candidate.chars().all(|c| word(c) || c == '/') && !candidate.contains("//") {
-                    push(candidate);
+                    push(candidate, end);
                     skip_to = end;
                 }
             }
@@ -445,7 +449,7 @@ pub fn citation_markdown_mapped(source: &str, dead: &dyn Fn(&str) -> bool, hidde
                 if let Some(reference) = reference.filter(|r| {
                     let ext = extension(&r.path);
                     !EXTS.contains(&ext.as_str()) || matches!(ext.as_str(), "json" | "tif" | "tiff")
-                        || !r.path.contains('/') && is_text_data(&r.path)
+                        || is_text_data(&r.path) && (!r.path.contains('/') || r.line.is_some())
                 })
                     .filter(|_| at == 0 || !line[..at].ends_with('!'))
                     .filter(|r| !dead(&r.path)) {
@@ -728,6 +732,8 @@ mod tests {
         assert_eq!(hide("Rode `rsync /tmp/a.zip host:` e pronto"), "Rode `rsync /tmp/a.zip host:` e pronto");
         let bare = hide("abre `dados.csv` e `/tmp/rel.csv`");
         assert!(bare.starts_with("abre [dados.csv](hangar-file:") && bare.ends_with(" e `rel.csv`"), "{bare}");
+        assert_eq!(cited_paths("veja /tmp/log.txt:12 e /tmp/dados.csv"), vec!["/tmp/dados.csv"]);
+        assert!(hide("veja logs/app.txt:12").starts_with("veja [app.txt:12](hangar-file:"), "{}", hide("veja logs/app.txt:12"));
     }
 
     #[test]

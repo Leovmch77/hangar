@@ -100,7 +100,7 @@ function codeRef(code: string): { path: string; line: number | null } | null {
 function linkProse(text: string): string {
   let s = text;
   for (const ref of parseCodeReferences(text).reverse()) {
-    if (!codeCitation(ref.path)) continue;
+    if (!codeCitation(ref.path, ref.line)) continue;
     s = `${s.slice(0, ref.start)}[${s.slice(ref.start, ref.end)}](${fileLinkUrl(ref.path, ref.line)})${s.slice(ref.end)}`;
   }
   return s;
@@ -115,7 +115,7 @@ function linkLine(line: string): string {
   for (const mt of line.matchAll(PROTEGIDO)) {
     out += linkProse(line.slice(last, mt.index));
     const ref = mt[1] !== undefined ? codeRef(mt[1]) : null;
-    out += ref && codeCitation(ref.path) ? `[${mt[0]}](${fileLinkUrl(ref.path, ref.line)})` : mt[0];
+    out += ref && codeCitation(ref.path, ref.line) ? `[${mt[0]}](${fileLinkUrl(ref.path, ref.line)})` : mt[0];
     last = mt.index + mt[0].length;
   }
   return out + linkProse(line.slice(last));

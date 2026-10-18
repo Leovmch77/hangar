@@ -1131,6 +1131,11 @@ describe('codeCitation', () => {
     expect(codeCitation('docs/data.csv')).toBe(false);
     expect(codeCitation('foto.png')).toBe(false);
   });
+
+  it('csv/txt com número de linha é referência a código, não anexo', () => {
+    expect(codeCitation('/tmp/log.txt', 12)).toBe(true);
+    expect(parseFilePaths('veja /tmp/log.txt:12 e /tmp/dados.csv').map((r) => r.path)).toEqual(['/tmp/dados.csv']);
+  });
 });
 
 describe('hideAttachmentPaths', () => {

@@ -52,7 +52,7 @@ function renderInline(input: string, opts: MarkdownOptions): string {
         const ref = reference(code ?? target ?? '', target !== undefined);
         // Mídia não vira chip (o anexo já desenha miniatura), mas também não pode cair no fallback:
         // ali `[foto](/a/b.png)` sairia com a sintaxe markdown à mostra. Fica o rótulo, ou o código.
-        if (ref && !codeCitation(ref.path)) {
+        if (ref && !codeCitation(ref.path, ref.line)) {
           return keep(code !== undefined ? `<code>${escapeHtml(code)}</code>` : escapeHtml(label ?? ref.path));
         }
         if (ref) return chip(ref.path, ref.line);
@@ -61,7 +61,7 @@ function renderInline(input: string, opts: MarkdownOptions): string {
     const refs = parseCodeReferences(source);
     for (const ref of refs.reverse()) {
       // Mídia, html e pdf não viram chip: o anexo da bolha já desenha miniatura e visor pra eles.
-      if (!codeCitation(ref.path)) continue;
+      if (!codeCitation(ref.path, ref.line)) continue;
       source = source.slice(0, ref.start) + chip(ref.path, ref.line) + source.slice(ref.end);
     }
   }
