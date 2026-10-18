@@ -371,6 +371,8 @@ const EXT_KIND: Record<string, FileKind> = {
   doc: 'document', docx: 'document', odt: 'document', rtf: 'document',
   xls: 'document', xlsx: 'document', ods: 'document',
   ppt: 'document', pptx: 'document', odp: 'document',
+  csv: 'document', tsv: 'document', txt: 'document',
+  zip: 'document', tar: 'document', gz: 'document', tgz: 'document', '7z': 'document', rar: 'document',
 };
 const _EXTS = Object.keys(EXT_KIND).join('|');
 // Caminho ABSOLUTO (/ ou ~/) — lazy ate a 1a extensao conhecida, seguida de fim/espaco/delimitador
@@ -378,11 +380,12 @@ const _EXTS = Object.keys(EXT_KIND).join('|');
 // de URL ("https://…") ou logo apos "." (o "/" do "./rel.png" e do REL, nao deste). Global + ci.
 // O lookahead inclui `*`: path citado em **negrito** ("**/tmp/x.jpg**") parava de casar e a imagem
 // nunca era servida (bug real de 2026-08-03 — o path existia, o endpoint 200, e nada renderizava).
+// Espaço seguido de `/` abre outro caminho: "/tmp/app.ts e /tmp/a.png" são dois, não um.
 // Crase fecha o path: sem isso "`/proc/x`, … e `foto.png`" vira UM caminho da frase inteira.
 // O lookahead casa o do `_ABS_RE` de arquivosCitados.ts de proposito: quem decide "vira chip de
 // codigo" e quem decide "vira miniatura" precisa enxergar o MESMO fim de caminho. Divergiu uma vez
 // e "salvei em /tmp/x.png." (ponto final colado) perdeu os dois — nem chip nem imagem.
-const _PATH_RE = new RegExp(`(?<![\\w.~:/*])(~?/[^\\n\`]*?\\.(${_EXTS}))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*>])`, 'gi');
+const _PATH_RE = new RegExp(`(?<![\\w.~:/*])(~?/(?:[^\\s\`]|[^\\S\\n](?!~?/))*?\\.(${_EXTS}))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*>])`, 'gi');
 // Caminho RELATIVO com DIRETORIO (./x.png, ../a/x.png, sub/dir/x.png) — jeito comum do Claude citar
 // arquivo que criou no cwd. Exige >=1 segmento "dir/" -> NAO casa nome puro "x.png" (ruido de prosa).
 // O backend resolve contra o cwd da sessao. Lookbehind tira word/`/`/~/./:/- (nao pega pedaco de path
@@ -425,6 +428,37 @@ export function parseFilePaths(text: string): FileRef[] {
     }
   }
   return out;
+}
+
+// O caminho que virou anexo precisa continuar no transcript (é ele que autoriza o servidor a
+// servir o arquivo), mas não precisa aparecer duas vezes: some a linha que só tinha caminhos e,
+// no meio da frase, fica o nome do arquivo. Bloco de código não é tocado.
+export function hideAttachmentPaths(text: string, refs: FileRef[]): string {
+  const paths = refs.filter((r) => !r.url).map((r) => r.path);
+  if (!paths.length) return text;
+  const alt = paths.slice().sort((a, b) => b.length - a.length)
+    .map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const re = new RegExp(
+    `\\[([^\\]\\n]*)\\]\\(<?(?:${alt})>?\\)|(\`?)(?<![\\w.~/-])(${alt})(?![\\w-]|\\.\\w)\\2`, 'g');
+  const name = (p: string) => p.split('/').filter(Boolean).pop() || p;
+  let fence = false;
+  let squeeze = false;
+  const out: string[] = [];
+  for (const line of text.split('\n')) {
+    if (squeeze && !line.trim()) continue;
+    squeeze = false;
+    if (/^\s*(```|~~~)/.test(line)) fence = !fence;
+    if (fence || /^\s*(```|~~~)/.test(line)) { out.push(line); continue; }
+    re.lastIndex = 0;
+    if (!re.test(line)) { out.push(line); continue; }
+    if (!/[\p{L}\p{N}]/u.test(line.replace(re, ''))) {
+      squeeze = !out.length || !out[out.length - 1].trim();
+      continue;
+    }
+    out.push(line.replace(re, (_m, label: string | undefined, tick: string, path: string | undefined) =>
+      label !== undefined ? label : `${tick}${name(path!)}${tick}`));
+  }
+  return out.join('\n');
 }
 
 // URLs http(s) de MIDIA (imagem/video/audio) na conversa -> preview inline no chat, pra ver sem sair

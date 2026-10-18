@@ -9,7 +9,7 @@ import {
   summarizeText, summarizeToolInput, summarizeToolResult, toolPhase, toolGroupLabel, toolGroupCounts, toolGroupTitulo, splitTerminalRun, terminalFoldKind, terminalFoldTitle, toolVerbo,
   rotuloEstado,
   splitTodoBlock, parseImageMessage, parseCanal, parseRealtimeDelegation, parsePeerMessage, basename,
-  parseFilePaths, separarComando, nomeFerramenta, terminalFileTool, terminalToolName,
+  parseFilePaths, hideAttachmentPaths, separarComando, nomeFerramenta, terminalFileTool, terminalToolName,
 } from './format';
 import type { ChatEvent, State } from './types';
 import { overwriteGetLocale } from './paraglide/runtime';
@@ -628,7 +628,7 @@ describe('fileKind', () => {
   });
 
   it('extensao sem preview -> null (chip generico na galeria)', () => {
-    expect(fileKind('pacote.zip')).toBeNull();
+    expect(fileKind('app.ts')).toBeNull();
     expect(fileKind('Makefile')).toBeNull();
   });
 });
@@ -1103,6 +1103,51 @@ describe('parseFilePaths', () => {
     expect(parseFilePaths('Veja /tmp/foto.jpg: pronto').map((r) => r.path)).toEqual(['/tmp/foto.jpg']);
     expect(parseFilePaths('Veja sub/dir/foto.png.').map((r) => r.path)).toEqual(['sub/dir/foto.png']);
     expect(parseFilePaths('backup /tmp/a.png.bak aqui')).toEqual([]);
+  });
+
+  it('espaço seguido de barra começa outro caminho', () => {
+    expect(parseFilePaths('Ver /tmp/app.ts e /tmp/a.png').map((r) => r.path)).toEqual(['/tmp/a.png']);
+    expect(parseFilePaths('/a/06 x.png /b/07.png').map((r) => r.path)).toEqual(['/a/06 x.png', '/b/07.png']);
+  });
+});
+
+describe('arquivos para baixar', () => {
+  it('zip, csv e txt viram anexo; código e markdown não', () => {
+    const t = '/tmp/pacote.zip /tmp/dados.csv /tmp/notas.txt /tmp/LEIA.md /tmp/app.ts';
+    expect(parseFilePaths(t).map(({ path, kind }) => ({ path, kind }))).toEqual([
+      { path: '/tmp/pacote.zip', kind: 'document' },
+      { path: '/tmp/dados.csv', kind: 'document' },
+      { path: '/tmp/notas.txt', kind: 'document' },
+    ]);
+  });
+});
+
+describe('hideAttachmentPaths', () => {
+  const hide = (t: string) => hideAttachmentPaths(t, parseFilePaths(t));
+
+  it('linha só com caminhos some; o resto fica', () => {
+    const t = 'Prints prontos.\n\n/home/j/pdf/06-viewer.png /home/j/pdf/07-leitor.png\n\nConfere?';
+    expect(hide(t)).toBe('Prints prontos.\n\nConfere?');
+  });
+
+  it('caminho no meio da frase vira o nome do arquivo', () => {
+    expect(hide('Salvei em /tmp/print.png. Veja.')).toBe('Salvei em print.png. Veja.');
+    expect(hide('Gerei `docs/rel.pdf` agora')).toBe('Gerei `rel.pdf` agora');
+    expect(hide('O [relatório](</tmp/Relatório final.docx>) saiu')).toBe('O relatório saiu');
+  });
+
+  it('item de lista só com caminho some', () => {
+    expect(hide('Arquivos:\n- /tmp/a.png\n- `/tmp/b.zip`\nFim')).toBe('Arquivos:\nFim');
+  });
+
+  it('bloco de código e caminho de código ficam intactos', () => {
+    const t = '```\n/tmp/a.png\n```\nVer /tmp/app.ts e /tmp/a.png';
+    expect(hide(t)).toBe('```\n/tmp/a.png\n```\nVer /tmp/app.ts e a.png');
+  });
+
+  it('caminho parecido mais longo não é cortado', () => {
+    const t = 'Ver /tmp/a.png e /tmp/a.png.bak';
+    expect(hide(t)).toBe('Ver a.png e /tmp/a.png.bak');
   });
 });
 
