@@ -571,7 +571,8 @@ print(home + "\t" + achada)' "$configs" "$conta")
                 echo "erro: conta '$conta' não existe em '$remoto' — lá há: $(python3 -c 'import json,sys; print(", ".join(c["label"] for c in json.loads(sys.argv[1])))' "$configs")" >&2
                 exit 2
             fi
-            if [[ -z "$cwd" ]]; then
+            # Com --resume a pasta vem da conversa, lá.
+            if [[ -z "$cwd" && -z "$resume" ]]; then
                 [[ -z "$home_remota" ]] && { echo "erro: não achei a home de '$remoto' — informe a pasta: hangar-send --new $remoto::$name <cwd>" >&2; exit 2; }
                 cwd="$home_remota"
             fi
