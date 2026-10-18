@@ -293,11 +293,17 @@ def refresh_members(proc):
                 logging.getLogger('hangar.runtime').warning('kernel sem /proc/<pid>/task/*/children; Supervisor varre a máquina a cada volta')
             found = _group_members(containment)
             containment.swept = now
-        for pid in found:
-            try:
-                members[str(pid)] = psutil.Process(pid).create_time()
-            except psutil.NoSuchProcess:
-                continue
+    else:
+        # Fechado o último handle, o nome do Job some antes de os membros saírem: o reinício só espera os gravados.
+        try:
+            found = containment.job.members()
+        except OSError:
+            found = []
+    for pid in found:
+        try:
+            members[str(pid)] = psutil.Process(pid).create_time()
+        except psutil.NoSuchProcess:
+            continue
     from app import atomico
     with _record_guard:
         path = containment.record
@@ -362,6 +368,14 @@ def reconcile_startup(path=None, *, allow_current=False, lease=None):
                     orphan = Containment(saved['pid'], saved['birth'], job)
                     holder = type('ContainedProcess', (), {'runtime_containment':orphan, 'poll':lambda self:None})()
                     cleanup(holder)
+                else:
+                    # Job sumido = o último handle fechou e o Windows ainda encerra os membros: espera cada um sair.
+                    gravados = [(saved['pid'], saved['birth']), *((int(pid), birth) for pid, birth in saved['members'].items())]
+                    deadline = time.monotonic() + 5
+                    while any(_still_there(pid, birth) for pid, birth in gravados):
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError('descendentes Rust ainda ativos sem o Job')
+                        time.sleep(.02)
             else:
                 containment = Containment(saved['pid'], saved['birth'])
                 members = _group_members(containment)

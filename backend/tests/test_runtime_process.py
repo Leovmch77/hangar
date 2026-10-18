@@ -245,6 +245,7 @@ def _fake_job_holder(tmp_path, monkeypatch):
     from app.runtime_process import Containment
     class Job:
         name = 'Global\\Hangar-runtime-' + 'b' * 32
+        def members(self): return []
     monkeypatch.setattr(runtime_process, '_same_process', lambda pid, birth: True)
     containment = Containment(os.getpid(), 1.0, Job(), record=tmp_path / 'containment.json', life='t')
     return type('Contained', (), {'runtime_containment': containment})()
