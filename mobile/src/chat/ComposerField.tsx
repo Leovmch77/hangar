@@ -2,6 +2,7 @@ import { forwardRef, type ComponentProps, type ReactNode } from 'react';
 import { ActivityIndicator, Pressable, Text, View, type TextInput } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import type { SharedValue } from 'react-native-reanimated';
 import { hexParaRgb } from '@hangar/core';
 import { Glass } from '../ui/Glass';
 import { MultilineInput } from '../ui/MultilineInput';
@@ -16,9 +17,9 @@ export function ComposerBox({ focused, children }: { focused: boolean; children:
 }
 
 export const ComposerInput = forwardRef<TextInput, ComponentProps<typeof MultilineInput> & {
-  recording: boolean; rms: number; onCancelRecording: () => void;
+  recording: boolean; rms: SharedValue<number>; onCancelRecording: () => void;
 }>(function ComposerInput({ recording, rms, onCancelRecording, ...props }, ref) {
-  return <View style={styles.inputWrap}>
+  return <View style={[styles.inputWrap, recording && styles.recordingWrap]}>
     <MultilineInput {...props} ref={ref} maxHeight={props.maxHeight ?? 120}
       style={[props.style, recording && styles.hidden]} editable={!recording && props.editable !== false}
       accessibilityElementsHidden={recording} importantForAccessibility={recording ? 'no-hide-descendants' : 'auto'} />
@@ -45,7 +46,7 @@ export function ComposerActions({ attach, mic, send, settings, beforeMic, afterM
     {beforeMic}
     <Pressable onPress={mic.onPress} disabled={mic.disabled} hitSlop={5}
       accessibilityState={{ disabled: mic.disabled, busy: mic.busy }}
-      style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed, mic.disabled && styles.disabled]}
+      style={({ pressed }) => [styles.iconBtn, mic.recording && styles.recordingBtn, pressed && styles.pressed, mic.disabled && styles.disabled]}
       accessibilityLabel={mic.recording ? m.composer_parar_gravacao() : m.composer_gravar_audio()} accessibilityRole="button"
       onLongPress={mic.recording ? undefined : mic.onStyle}
       accessibilityHint={m.composer_mic_style_hint({ estilo: mic.styleLabel })}
@@ -75,11 +76,13 @@ export function ComposerActions({ attach, mic, send, settings, beforeMic, afterM
 const styles = StyleSheet.create((theme) => ({
   box: { marginHorizontal: theme.base.space[2], borderRadius: theme.base.radius.xl, paddingHorizontal: theme.base.space[3], paddingTop: theme.base.space[3], paddingBottom: theme.base.space[2], gap: theme.base.space[1] },
   inputWrap: { minHeight: 40, justifyContent: 'center', paddingHorizontal: theme.base.space[1] },
-  hidden: { opacity: 0 },
-  wave: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', paddingHorizontal: theme.base.space[1] },
+  hidden: { display: 'none' },
+  recordingWrap: { minHeight: 92 },
+  wave: { justifyContent: 'center', paddingHorizontal: theme.base.space[1] },
   row: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5] },
   spacer: { flex: 1, minWidth: 0 },
   iconBtn: { width: 34, height: 34, borderRadius: theme.base.radius.full, alignItems: 'center', justifyContent: 'center' },
+  recordingBtn: { width: 44, height: 44 },
   pressed: { backgroundColor: theme.tokens.bg.hover },
   disabled: { opacity: 0.5 },
   roundBtn: { width: 34, height: 34, borderRadius: theme.base.radius.full, alignItems: 'center', justifyContent: 'center' },

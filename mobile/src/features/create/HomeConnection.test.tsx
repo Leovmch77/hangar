@@ -64,6 +64,7 @@ vi.mock('expo-image-picker', () => ({}));
 vi.mock('expo-document-picker', () => ({}));
 vi.mock('expo-clipboard', () => ({}));
 vi.mock('expo-audio', () => ({ AudioModule: {}, RecordingPresets: {} }));
+vi.mock('expo-updates', () => ({ runtimeVersion: 'native-2' }));
 vi.mock('react-native-keyboard-controller', async () => ({
   KeyboardAvoidingView: (await import('react-native')).View,
   useReanimatedKeyboardAnimation: () => ({ height: { value: 0 }, progress: { value: 0 } }),
