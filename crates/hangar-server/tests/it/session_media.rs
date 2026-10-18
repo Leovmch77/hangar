@@ -93,7 +93,8 @@ impl Scene {
 }
 
 fn info(path: &Path, provider: &str) -> InternalInfo {
-    serde_json::from_value(json!({"provider": provider, "jsonl": path, "session_key": path.file_stem().unwrap().to_str().unwrap(), "lifecycle_id": "life", "history": {}})).unwrap()
+    let cwd = path.parent().unwrap().join("projeto");
+    serde_json::from_value(json!({"provider": provider, "jsonl": path, "cwd": cwd, "session_key": path.file_stem().unwrap().to_str().unwrap(), "lifecycle_id": "life", "history": {}})).unwrap()
 }
 
 // --- tool-progress ---
@@ -231,6 +232,87 @@ async fn transcript_image_of_a_transfer_stays_with_python() {
     assert_eq!(scene.python.hits_to(path), 1);
     let _ = scene.get_raw("/api/sessions/s/transcript-image/u/0").await;
     assert_eq!(scene.python.hits_to("/api/sessions/s/transcript-image/u/0"), 0);
+}
+
+// --- anexos ---
+
+impl Scene {
+    async fn upload(&self, name: &str, body: &'static [u8], filename: &str) -> (StatusCode, Value) {
+        let response = client().post(format!("http://{}/api/sessions/{name}/upload", self.address)).bearer_auth(OWNER)
+            .header("x-filename", filename).body(body).send().await.unwrap();
+        let status = response.status();
+        (status, serde_json::from_str(&response.text().await.unwrap()).unwrap_or(Value::Null))
+    }
+    fn facts_asked(&self, name: &str) -> usize {
+        self.python.hits_to(&format!("/internal/sessions/{name}/uploads-facts"))
+    }
+}
+
+#[tokio::test]
+async fn uploads_never_ask_python_for_the_session_facts() {
+    let scene = Scene::new().await;
+    scene.claude("s", &[]);
+    let (status, saved) = scene.upload("s", b"abc", "nota%20final.TXT").await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let path = PathBuf::from(saved["path"].as_str().unwrap());
+    assert!(path.starts_with(scene.dir.path().join(".hangar/uploads")), "{path:?}");
+    assert_eq!(path.parent().unwrap().file_name().unwrap(), "s", "pasta chaveada pelo id do transcript");
+    assert_eq!(path.extension().unwrap(), "txt");
+    assert_eq!((saved["frames"].clone(), saved["transcript"].clone()), (json!([]), json!("")));
+    let (status, listed) = scene.get("/api/sessions/s/uploads").await;
+    let filename = path.file_name().unwrap().to_str().unwrap();
+    assert_eq!((status, listed["files"][0]["filename"].clone(), listed["files"][0]["size"].clone()), (StatusCode::OK, json!(filename), json!(3)));
+    let response = scene.get_raw(&format!("/api/sessions/s/uploads/{filename}")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"].to_str().unwrap().split(';').next(), Some("text/plain"));
+    assert_eq!(response.bytes().await.unwrap().as_ref(), b"abc");
+    assert_eq!(scene.facts_asked("s"), 0);
+}
+
+#[tokio::test]
+async fn uploads_answer_missing_session_and_cwd_with_python_codes() {
+    let scene = Scene::new().await;
+    let (status, body) = scene.upload("nenhuma", b"abc", "a.txt").await;
+    assert_eq!((status, body["detail"]["code"].clone()), (StatusCode::NOT_FOUND, json!("erro_sessao_inexistente")));
+    let path = scene.claude("semcwd", &[]);
+    let mut without = info(&path, "claude");
+    without.cwd = None;
+    scene.sessions.0.lock().unwrap().insert("semcwd".into(), without);
+    let (status, body) = scene.upload("semcwd", b"abc", "a.txt").await;
+    assert_eq!((status, body["detail"]["code"].clone()), (StatusCode::CONFLICT, json!("erro_cwd_indisponivel")));
+    let (status, body) = scene.get("/api/sessions/semcwd/uploads").await;
+    assert_eq!((status, body["detail"]["code"].clone()), (StatusCode::NOT_FOUND, json!("erro_cwd_indisponivel")));
+    assert_eq!(scene.facts_asked("nenhuma") + scene.facts_asked("semcwd"), 0);
+}
+
+#[tokio::test]
+async fn upload_waits_for_the_transfer_but_listing_does_not() {
+    let scene = Scene::new().await;
+    scene.claude("s", &[]);
+    scene.runtime.ingress().hold("s", std::time::Duration::from_millis(10)).await.unwrap();
+    let (status, body) = scene.upload("s", b"abc", "a.txt").await;
+    assert_eq!((status, body["detail"]["code"].clone()), (StatusCode::CONFLICT, json!("session_transfer_busy")));
+    assert_eq!(scene.get("/api/sessions/s/uploads").await, (StatusCode::OK, json!({"files": []})));
+}
+
+#[test]
+fn upload_retention_follows_runtime_config_then_environment_then_thirty_days() {
+    use hangar_server::uploads::http::retention_days;
+    assert_eq!(retention_days(&json!({"upload_retention_days": 7}), Some("9")), 7);
+    assert_eq!(retention_days(&json!({"upload_retention_days": 0}), Some("9")), 0);
+    assert_eq!(retention_days(&json!({}), Some(" 9 ")), 9);
+    assert_eq!(retention_days(&Value::Null, Some("x")), 30);
+    assert_eq!(retention_days(&Value::Null, None), 30);
+}
+
+#[tokio::test]
+async fn video_transcription_never_goes_through_python() {
+    let (python, upstream) = spawn_fake().await;
+    let state = AppState::new(Config { listen: "127.0.0.1:0".parse().unwrap(), upstream, auth_token: OWNER.into(),
+        internal_secret: "isolated".into(), log_path: None, trusted: TrustedHosts::parse("127.0.0.1") });
+    let text = hangar_server::uploads::media::transcribe(&state, b"audio".to_vec()).await;
+    assert_eq!(text, "");
+    assert_eq!(python.hits_to("/internal/sessions/s/upload-transcript"), 0);
 }
 
 // --- bash-output ---

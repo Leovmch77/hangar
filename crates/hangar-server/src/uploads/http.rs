@@ -1,4 +1,4 @@
-//! O Python fornece identidade/configuração; o Rust mantém o cofre e os bytes HTTP.
+//! O cofre de anexos e as rotas dele; a sessão vem da descoberta da lista do próprio Rust.
 use super::{
     media,
     store::{UploadStore, project_key},
@@ -10,12 +10,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::StreamExt;
-use http_body_util::BodyExt;
-use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
 
-#[derive(Deserialize)]
 pub struct Facts {
     pub cwd: PathBuf,
     pub session: String,
@@ -77,67 +74,62 @@ pub fn matches(method: &Method, path: &str) -> bool {
                     .is_some_and(|v| !v.is_empty() && !v.contains('/'))))
 }
 
+/// `runtime_config.get("upload_retention_days")`: o `runtime-config.json` vence, depois
+/// `CP_UPLOAD_RETENTION_DAYS`, depois 30 dias.
+pub fn retention_days(runtime: &Value, env: Option<&str>) -> i64 {
+    let from_file = match &runtime["upload_retention_days"] {
+        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f.trunc() as i64)),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    };
+    from_file.or_else(|| env?.trim().parse().ok()).unwrap_or(30)
+}
+
+async fn retention(st: &AppState) -> i64 {
+    let path = st.accounts.env.claude_base.join("runtime-config.json");
+    let runtime = match tokio::fs::read(&path).await {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    };
+    retention_days(&runtime, std::env::var("CP_UPLOAD_RETENTION_DAYS").ok().as_deref())
+}
+
+/// Sessão, pasta e configuração do cofre, pela descoberta da lista; o envio confere antes a troca
+/// de conversa e solta, como o `_transfer_check`.
 async fn facts(
     st: &AppState,
     name: &str,
     filename: &str,
     writing: bool,
 ) -> Result<Facts, Box<Response>> {
-    let unavailable = || {
-        Box::new(failure(
-            503,
-            "upload_facts_unavailable",
-            "dados da sessão indisponíveis",
-        ))
-    };
-    let encoded = percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC);
-    let query = form_urlencoded::Serializer::new(String::new())
-        .append_pair("filename", filename)
-        .append_pair("writing", if writing { "true" } else { "false" })
-        .finish();
-    let request = axum::http::Request::get(format!(
-        "http://{}/internal/sessions/{encoded}/uploads-facts?{query}",
-        st.cfg.upstream
-    ))
-    .header("x-hangar-internal", &st.cfg.internal_secret)
-    .body(axum::body::Body::empty())
-    .map_err(|_| unavailable())?;
-    // Cliente do servidor: os GET/Range de um anexo reaproveitam a conexão.
-    let (status, bytes) = tokio::time::timeout(Duration::from_secs(15), async {
-        let response = st.http.request(request).await.ok()?;
-        let status = response.status().as_u16();
-        let bytes = response.into_body().collect().await.ok()?.to_bytes();
-        Some((status, bytes))
-    })
-    .await
-    .ok()
-    .flatten()
-    .ok_or_else(unavailable)?;
-    if !(200..300).contains(&status) {
-        return Err(Box::new(response(
-            serde_json::from_slice(&bytes)
-                .unwrap_or(json!({"detail":"dados da sessão indisponíveis"})),
-            status,
-        )));
-    }
-    let value: Facts = serde_json::from_slice(&bytes).map_err(|_| {
-        Box::new(failure(
-            503,
-            "upload_facts_unavailable",
-            "dados da sessão inválidos",
-        ))
-    })?;
-    if !value.cwd.is_absolute()
-        || !value.root.is_absolute()
-        || axum::http::HeaderValue::from_str(&value.media).is_err()
+    if writing
+        && let Some(runtime) = st.state.runtime.get()
+        && runtime.ingress().enter(name, st.write_gate_wait).await.is_err()
     {
-        return Err(Box::new(failure(
-            503,
-            "upload_facts_unavailable",
-            "dados da sessão inválidos",
+        return Err(Box::new(crate::diag::coded(
+            crate::session_write::json_response(StatusCode::CONFLICT, crate::session_write::busy_body()),
+            "session_transfer_busy",
         )));
     }
-    Ok(value)
+    let info = match tokio::time::timeout(crate::locate::LOCATE_TIMEOUT, st.side.locate.info(name)).await {
+        Ok(Ok(info)) => info,
+        _ => return Err(Box::new(failure(503, "upload_facts_unavailable", "dados da sessão indisponíveis"))),
+    };
+    let Some(info) = info else {
+        return Err(Box::new(failure(404, "erro_sessao_inexistente", "sessão não encontrada")));
+    };
+    let Some(cwd) = info.cwd.filter(|c| c.is_absolute()) else {
+        return Err(Box::new(failure(if writing { 409 } else { 404 }, "erro_cwd_indisponivel", "cwd da sessão indisponível")));
+    };
+    // Sessão sem transcript ainda cai no nome: anexo mandado nela fica para trás num rename.
+    let session = if info.session_key.is_empty() { name.to_owned() } else { info.session_key };
+    Ok(Facts {
+        cwd,
+        session,
+        root: st.hangar_dir.join("uploads"),
+        retention: retention(st).await,
+        media: mime_guess::from_path(filename).first_or_octet_stream().to_string(),
+    })
 }
 
 pub async fn public(st: Arc<AppState>, req: Request) -> Response {
@@ -209,7 +201,7 @@ async fn handle(st: &AppState, name: &str, tail: &str, req: Request) -> Response
         Ok(f) => f,
         Err(r) => return *r,
     };
-    execute(st, name, tail, req, facts, &filename, query).await
+    execute(st, tail, req, facts, &filename, query).await
 }
 
 /// A verificação de identidade do cofre faz várias chamadas de sistema por arquivo e espera o disco:
@@ -224,7 +216,6 @@ async fn blocking<T: Send + 'static>(
 
 async fn execute(
     st: &AppState,
-    name: &str,
     tail: &str,
     req: Request,
     facts: Facts,
@@ -277,7 +268,7 @@ async fn execute(
             media::extract(&store, &project, &facts.session, &path).await
         };
         let transcript = match audio {
-            Some(audio) => media::transcribe(st, name, audio).await,
+            Some(audio) => media::transcribe(st, audio).await,
             None => String::new(),
         };
         return response(
@@ -377,7 +368,6 @@ mod tests {
         let req = Request::builder().body(Body::from("binary-data")).unwrap();
         let saved = execute(
             &st,
-            "test",
             "upload",
             req,
             facts(tmp.path()),
@@ -392,7 +382,6 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"binary-data");
         let list = execute(
             &st,
-            "test",
             "uploads",
             Request::new(Body::empty()),
             facts(tmp.path()),
@@ -424,7 +413,6 @@ mod tests {
             assert_eq!(
                 execute(
                     &st,
-                    "test",
                     "upload",
                     req,
                     facts(tmp.path()),
@@ -472,7 +460,6 @@ mod tests {
         info.media = "text/xml".into();
         let response = execute(
             &st,
-            "test",
             "uploads/file.xml",
             req,
             info,
@@ -492,7 +479,6 @@ mod tests {
         );
         let download = execute(
             &st,
-            "test",
             "uploads/file.xml",
             Request::new(Body::empty()),
             facts(tmp.path()),
@@ -521,7 +507,6 @@ mod tests {
         info.media = "text/html".into();
         let response = execute(
             &st,
-            "test",
             "uploads/test.html",
             Request::new(Body::empty()),
             info,
@@ -565,7 +550,6 @@ mod tests {
         assert_eq!(
             execute(
                 &st,
-                "test",
                 "resolve",
                 req,
                 facts(tmp.path()),
@@ -579,7 +563,6 @@ mod tests {
         assert_eq!(
             execute(
                 &st,
-                "test",
                 "resolve",
                 Request::new(Body::empty()),
                 facts(tmp.path()),
