@@ -3,6 +3,8 @@
   import { abrirVisor } from '../lib/visor';
   import { hasContextRefs, type QuoteRef } from '@hangar/core';
   import ContextRefSegments from './ContextRefSegments.svelte';
+  import FileAttachment from './FileAttachment.svelte';
+  import type { FileRef } from '@hangar/core';
 
   interface Props {
     caption: string;
@@ -10,8 +12,10 @@
     // Versão reduzida para desenhar; o visor abre sempre o `srcs` original.
     thumbs?: string[];
     onQuoteClick?: ((ref: QuoteRef) => void) | null;
+    // Anexos que não são foto: o card de download embaixo das miniaturas.
+    files?: FileRef[];
   }
-  let { caption, srcs, thumbs, onQuoteClick = null }: Props = $props();
+  let { caption, srcs, thumbs, onQuoteClick = null, files = [] }: Props = $props();
   let thumbFailed = $state(new Set<number>());
 
   // Abre no visor compartilhado (lib/visor.ts) com TODAS as imagens desta bolha: quem manda 4 fotos
@@ -35,6 +39,7 @@
 
 <div class="image-bubble">
   <!-- Anexos primeiro (miniaturas), legenda embaixo — disposicao estilo Claude. -->
+  {#if srcs.length}
   <div class="thumb-row" class:thumb-row--multi={srcs.length > 1}>
     {#each srcs as src, i}
       <button class="thumb-btn" bind:this={botoes[i]} onclick={() => abrir(i)} aria-label={m.anexos_ver_original()}>
@@ -44,6 +49,8 @@
       </button>
     {/each}
   </div>
+  {/if}
+  {#if files.length}<FileAttachment sessionName="" refs={files} />{/if}
   {#if caption && hasContextRefs(caption)}
     <div class="image-caption"><ContextRefSegments text={caption} {onQuoteClick} /></div>
   {:else if caption}<p class="image-caption">{caption}</p>{/if}

@@ -1861,7 +1861,7 @@ class ClaudeHeadlessAdapter:
 # Anexo de imagem do composer ("legenda — 📎 imagem: <path>"). No terminal a TUI reconhece o path
 # e anexa a imagem de verdade; aqui é o adapter que anexa, como bloco `image` ao lado do texto.
 # O texto vai inteiro (com o path): é o que o .jsonl grava e o que a fila usa pra confirmar.
-_IMG_RE = re.compile(r"📎\s*imagem:\s*(.+?)(?=\s*📎|$)", re.M)
+_IMG_RE = re.compile(r"📎\s*imag(?:em|e):\s*(.+?)(?=\s*📎|$)", re.M)
 _IMG_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
              ".gif": "image/gif", ".webp": "image/webp"}
 _IMG_TETO = 5 * 1024 * 1024   # teto da API por imagem; acima disso fica só o path (o Read abre)

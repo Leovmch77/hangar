@@ -6504,14 +6504,10 @@ async def orq_history_panel(exec_id: str):
 
 
 @app.get("/api/orq/{exec_id}/conductor", dependencies=[Depends(require_auth)])
-async def orq_conductor_panel(exec_id: str):
-    """Painel do condutor: o vigia vivo ou parado e o feed do que passou pelo orq. Só leitura."""
-    d = orq.exec_dir(orq.raiz_padrao(), exec_id)
-    if d is None or not await asyncio.to_thread(d.is_dir):
-        raise HTTPException(404, detail=erro("erro_nao_encontrado", "execucao nao encontrada"))
-    unidades = await asyncio.to_thread(orq_conductor.units)
-    return await asyncio.to_thread(orq_conductor.conductor, d, unidades)
-
+async def orq_conductor_panel(exec_id: str, request: Request):
+    """O Rust monta o painel; nesta porta fica somente o repasse autenticado."""
+    return await _repasse_ao_rust(request, erro("orq_conductor_need_rust_server", "o condutor precisa do servidor Rust, que não está rodando"),
+                                  "/__hangar_server/forwarded")
 
 @app.get("/api/sessions/{name}/branches", dependencies=[Depends(require_auth)])
 def branches(name: str):

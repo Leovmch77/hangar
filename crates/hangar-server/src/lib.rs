@@ -4,6 +4,7 @@ pub mod artifacts;
 pub mod auth;
 pub mod config;
 pub mod commands;
+pub mod orq_conductor;
 pub mod claude_customizations;
 pub mod jev_aux;
 pub mod claude_defaults;

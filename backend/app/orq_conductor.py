@@ -1,9 +1,7 @@
 """Painel do condutor da orquestração: o vigia está vivo? o que passou pelo `orq`?
 
-Fontes, todas só de leitura: `<dir>/vigia.json` (batimento que o vigia grava a cada volta), a
-unidade systemd `vigia-*` cujo `-e` aponta pra pasta, e o feed montado de `registro.md`,
-`jev-shadow.jsonl` e `eventos.jsonl`. Linha que não se lê é contada em `skipped`, nunca derruba
-a resposta.
+O watchdog é compartilhado pela lista e pelo fato interno do condutor. O feed de registro,
+sombra e eventos é montado somente no Rust. Os auxiliares de leitura ainda servem à timeline.
 """
 from __future__ import annotations
 
@@ -18,31 +16,11 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from app import orq
-
 _log = logging.getLogger(__name__)
 
-JOURNAL_TAIL = 300
-FEED_CAP = 500
-# A sombra é gravada no mesmo `notify` que a linha do registro, segundos antes dela.
-MATCH_S = 10
 SYSTEMCTL_TIMEOUT_S = 3
 # O mesmo VETO_P de skills/orquestrar/scripts/orq.py: veto acima dele manteve o árbitro acordado.
 JEV_VETO_P = 0.40
-# (prefixo, tipo, tira o prefixo do texto). Os que ficam com ele se explicam sozinhos no feed.
-_PREFIXES = (
-    ("notify → arbiter: ", "woke", True),
-    ("(jev: no action) ", "dropped", True),
-    ("(regex: no action) ", "dropped", True),
-    ("aviso: ", "notice", True),
-    ("alarm: ", "alarm", True),
-    ("notify FAILED: ", "alarm", False),
-    ("close failed: ", "alarm", False),
-    ("join failed: ", "alarm", False),
-    ("closed session: ", "notice", False),
-    ("joined group: ", "notice", False),
-)
-_LINE = re.compile(r"^- (\S+) · (.*)$")
 _TASK = re.compile(r"\bT(\d+)\b|\bTask (\d+)\b")
 _EXEC_DIR = re.compile(r"(?:^|\s)(?:-e|--eventos)\s+(\S+)")
 
@@ -82,51 +60,6 @@ def _task_of(text: str) -> int | None:
     return int(m.group(1) or m.group(2)) if m else None
 
 
-def _journal(d: Path) -> tuple[list[dict], int]:
-    lines = _lines(d / "registro.md")
-    start = max(0, len(lines) - JOURNAL_TAIL)
-    items: list[dict] = []
-    skipped = 0
-    for n, line in enumerate(lines[start:], start + 1):
-        if not line.strip():
-            continue
-        m = _LINE.match(line)
-        when = _when(m.group(1)) if m else None
-        if when is None:
-            skipped += 1
-            continue
-        body = m.group(2)
-        # Linha sem prefixo (evento, trava da tela, init) fica fora: o evento vem do eventos.jsonl.
-        for prefix, kind, strip in _PREFIXES:
-            if body.startswith(prefix):
-                text = body[len(prefix):] if strip else body
-                items.append({"id": f"r{n}", "when": when, "ts": m.group(1), "kind": kind,
-                              "text": text, "task": _task_of(text), "jev": None})
-                break
-    return items, skipped
-
-
-def _shadow(d: Path) -> tuple[list[dict], int]:
-    # Cada linha da sombra tem a sua no registro: fora da cauda dele, não casaria com nada.
-    out: list[dict] = []
-    skipped = 0
-    for line in _lines(d / "jev-shadow.jsonl")[-JOURNAL_TAIL:]:
-        if not line.strip():
-            continue
-        try:
-            r = json.loads(line)
-        except ValueError:
-            skipped += 1
-            continue
-        when = _when(r.get("ts")) if isinstance(r, dict) else None
-        if when is None or not isinstance(r.get("text"), str):
-            skipped += 1
-            continue
-        out.append({"when": when, "norm": " ⏎ ".join(r["text"].strip().splitlines()),
-                    "cut": len(r["text"]) >= 500, "row": r})
-    return out, skipped
-
-
 def _jev(r: dict) -> dict:
     raw = r.get("veto") if isinstance(r.get("veto"), dict) else {}
     veto = {str(k): _num(v) for k, v in raw.items()}
@@ -134,66 +67,6 @@ def _jev(r: dict) -> dict:
             # Valor ilegível conta como veto que segurou, como no orq (NaN nunca descarta).
             "held": [k for k, v in veto.items() if v is None or v > JEV_VETO_P],
             "would_drop": r.get("would_drop"), "error": r.get("error")}
-
-
-def _attach_jev(items: list[dict], shadow: list[dict]) -> None:
-    used: set[int] = set()
-    for it in items:
-        if it["kind"] not in ("woke", "dropped"):
-            continue
-        for i, s in enumerate(shadow):
-            if i in used or abs((s["when"] - it["when"]).total_seconds()) > MATCH_S:
-                continue
-            if s["norm"] == it["text"] or (s["cut"] and it["text"].startswith(s["norm"])):
-                it["jev"] = _jev(s["row"])
-                used.add(i)
-                break
-
-
-def _event_text(ev: dict) -> str:
-    # O mesmo formato da linha que o orq escreve no registro para o evento.
-    parts = [ev["tipo"]]
-    if (t := orq._int_ou_none(ev.get("task"))) is not None:
-        parts.append(f"T{t}")
-    if (r := orq._int_ou_none(ev.get("rodada"))) is not None:
-        parts.append(f"r{r}")
-    for k in ("resultado", "commit", "sessao", "executor", "par", "de", "para", "motivo"):
-        if ev.get(k) not in (None, ""):
-            parts.append(f"{k}={ev[k]}")
-    if ev.get("reincide") is True:
-        parts.append("reincide")
-    return " ".join(parts)
-
-
-def _events(d: Path) -> tuple[list[dict], int]:
-    items: list[dict] = []
-    skipped = 0
-    for n, line in enumerate(_lines(d / "eventos.jsonl"), 1):
-        if not line.strip():
-            continue
-        try:
-            ev = json.loads(line)
-        except ValueError:
-            skipped += 1
-            continue
-        ok = isinstance(ev, dict) and ev.get("tipo") in orq._TIPOS
-        when = _when(ev.get("ts")) if ok else None
-        if when is None:
-            skipped += 1
-            continue
-        items.append({"id": f"e{n}", "when": when, "ts": str(ev["ts"]), "kind": "event",
-                      "text": _event_text(ev), "task": orq._int_ou_none(ev.get("task")), "jev": None})
-    return items, skipped
-
-
-def feed(d: Path) -> dict:
-    journal, s1 = _journal(d)
-    shadow, s2 = _shadow(d)
-    events, s3 = _events(d)
-    _attach_jev(journal, shadow)
-    items = sorted(journal + events, key=lambda i: i["when"], reverse=True)
-    return {"feed": [{k: v for k, v in i.items() if k != "when"} for i in items[:FEED_CAP]],
-            "truncated": len(items) > FEED_CAP, "skipped": s1 + s2 + s3}
 
 
 def _pid_alive(pid) -> bool:
@@ -274,7 +147,3 @@ def watchdog(d: Path, units: dict[str, dict] | None, now: datetime | None = None
         "watching": [str(w) for w in watching] if isinstance(watching, list) else [],
         "source": source,
     }
-
-
-def conductor(d: Path, units: dict[str, dict] | None) -> dict:
-    return {"watchdog": watchdog(d, units), **feed(d)}

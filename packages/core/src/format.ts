@@ -371,6 +371,8 @@ const EXT_KIND: Record<string, FileKind> = {
   doc: 'document', docx: 'document', odt: 'document', rtf: 'document',
   xls: 'document', xlsx: 'document', ods: 'document',
   ppt: 'document', pptx: 'document', odp: 'document',
+  csv: 'document', tsv: 'document', txt: 'document',
+  zip: 'document', tar: 'document', gz: 'document', tgz: 'document', '7z': 'document', rar: 'document',
 };
 const _EXTS = Object.keys(EXT_KIND).join('|');
 // Caminho ABSOLUTO (/ ou ~/) — lazy ate a 1a extensao conhecida, seguida de fim/espaco/delimitador
@@ -378,11 +380,12 @@ const _EXTS = Object.keys(EXT_KIND).join('|');
 // de URL ("https://…") ou logo apos "." (o "/" do "./rel.png" e do REL, nao deste). Global + ci.
 // O lookahead inclui `*`: path citado em **negrito** ("**/tmp/x.jpg**") parava de casar e a imagem
 // nunca era servida (bug real de 2026-08-03 — o path existia, o endpoint 200, e nada renderizava).
+// Espaço seguido de `/` abre outro caminho: "/tmp/app.ts e /tmp/a.png" são dois, não um.
 // Crase fecha o path: sem isso "`/proc/x`, … e `foto.png`" vira UM caminho da frase inteira.
 // O lookahead casa o do `_ABS_RE` de arquivosCitados.ts de proposito: quem decide "vira chip de
 // codigo" e quem decide "vira miniatura" precisa enxergar o MESMO fim de caminho. Divergiu uma vez
 // e "salvei em /tmp/x.png." (ponto final colado) perdeu os dois — nem chip nem imagem.
-const _PATH_RE = new RegExp(`(?<![\\w.~:/*])(~?/[^\\n\`]*?\\.(${_EXTS}))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*>])`, 'gi');
+const _PATH_RE = new RegExp(`(?<![\\w.~:/*])(~?/(?:[^\\s\`]|[^\\S\\n](?!~?/))*?\\.(${_EXTS}))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*>])`, 'gi');
 // Caminho RELATIVO com DIRETORIO (./x.png, ../a/x.png, sub/dir/x.png) — jeito comum do Claude citar
 // arquivo que criou no cwd. Exige >=1 segmento "dir/" -> NAO casa nome puro "x.png" (ruido de prosa).
 // O backend resolve contra o cwd da sessao. Lookbehind tira word/`/`/~/./:/- (nao pega pedaco de path
@@ -398,6 +401,16 @@ export interface FileRef { path: string; name: string; kind: FileKind; url?: str
 export function fileKind(filename: string): FileKind | null {
   const ext = filename.split('.').pop()?.toLowerCase() ?? '';
   return EXT_KIND[ext] ?? null;
+}
+
+// csv/tsv/txt: lidos e citados como código antes de virarem anexo.
+export function isTextData(path: string): boolean {
+  return /\.(csv|tsv|txt)$/i.test(path);
+}
+
+// Citação que vira chip de código. Anexo exige pasta no caminho; csv/txt solto ou com linha continua chip.
+export function codeCitation(path: string, line?: number | null): boolean {
+  return !fileKind(path) || (isTextData(path) && (!path.includes('/') || line != null));
 }
 
 // Tamanho legível em unidades binárias (o que o backend mede: st_size). 1 casa só a partir de MB —
@@ -419,12 +432,50 @@ export function parseFilePaths(text: string): FileRef[] {
     for (const m of text.matchAll(re)) {
       const path = m[1];
       if (seen.has(path)) continue;
+      if (isTextData(path) && /^:\d/.test(text.slice(m.index + path.length))) continue;
       seen.add(path);
       const kind = EXT_KIND[m[2].toLowerCase()];
       out.push({ path, name: path.split('/').filter(Boolean).pop() || path, kind });
     }
   }
   return out;
+}
+
+// O caminho que virou anexo precisa continuar no transcript (é ele que autoriza o servidor a
+// servir o arquivo), mas não precisa aparecer duas vezes: some a linha que só tinha caminhos e,
+// no meio da frase, fica o nome do arquivo. Bloco de código não é tocado.
+export function hideAttachmentPaths(text: string, refs: FileRef[]): string {
+  const paths = refs.filter((r) => !r.url).map((r) => r.path);
+  if (!paths.length) return text;
+  const alt = paths.slice().sort((a, b) => b.length - a.length)
+    .map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  // Código inline é uma unidade: só some quando é exatamente o caminho (um comando fica intacto).
+  const re = new RegExp(
+    `!?\\[([^\\]\\n]*)\\]\\(<?(?:${alt})>?\\)|\`([^\`\\n]*)\`|(?<![\\w.~/-])(${alt})(?![\\w-]|\\.\\w|:\\d)`, 'g');
+  const isPath = new Set(paths);
+  const swap = (blank: boolean) => (whole: string, label?: string, code?: string, path?: string) =>
+    label !== undefined ? (blank ? '' : label)
+      : code !== undefined ? (isPath.has(code) ? (blank ? '' : `\`${basename(code)}\``) : whole)
+        : blank ? '' : basename(path!);
+  const [erase, show] = [swap(true), swap(false)];
+  let fence = false;
+  let squeeze = false;
+  const out: string[] = [];
+  for (const line of text.split('\n')) {
+    if (squeeze && !line.trim()) continue;
+    squeeze = false;
+    const marker = /^\s*(```|~~~)/.test(line);
+    if (marker) fence = !fence;
+    if (fence || marker) { out.push(line); continue; }
+    re.lastIndex = 0;
+    if (!re.test(line)) { out.push(line); continue; }
+    if (!/[\p{L}\p{N}]/u.test(line.replace(re, erase))) {
+      squeeze = !out.length || !out[out.length - 1].trim();
+      continue;
+    }
+    out.push(line.replace(re, show));
+  }
+  return out.join('\n');
 }
 
 // URLs http(s) de MIDIA (imagem/video/audio) na conversa -> preview inline no chat, pra ver sem sair
@@ -450,34 +501,38 @@ export function parseMediaUrls(text: string): FileRef[] {
 // "<legenda> — 📎 imagem: <path1> 📎 imagem: <path2> ..." (1+ imagens, ou sem legenda).
 // Devolve { caption, filenames } ou null. Cada filename e o basename do path (sem espaco,
 // nome gerado), entao da pra separar varias numa linha so pelo proprio marcador.
-export function parseImageMessage(text: string): { caption: string; filenames: string[]; marcadores: number } | null {
+const isImageMark = (mark: string) => mark === 'imagem' || mark === 'image';
+
+export function parseImageMessage(text: string): { caption: string; filenames: string[]; files: string[]; marcadores: number } | null {
   // O separador e uma REGEX, nao a string "📎 imagem: ": o que a fila digita numa linha so volta do
   // transcript reescrito pelo Claude Code — quebra de linha depois do marcador, prefixo "[Image #N]"
   // na frente e o path da ULTIMA imagem consumido (ela virou anexo de verdade, entao o marcador fica
   // sozinho no fim). Com o indexOf da string exata nada disso casava e a bolha real caia no texto
   // cru: o usuario via os paths escritos no chat em vez das miniaturas (medido em 03/08/2026).
-  const marker = /📎\s*imagem:\s*/g;
+  // `arquivo:` é o anexo que não é foto (o Composer marca pelo tipo): vai para `files`, nunca miniatura.
+  // O marcador sai no idioma da tela de quem enviou: `image:`/`file:` em inglês.
+  const marker = /📎\s*(imagem|arquivo|image|file):\s*/g;
   // Marcador dentro de um bloco `<hangar-ref>` (trecho citado, comentário) é texto: só vale depois do
   // último bloco lido.
   const tail = contextRefsEnd(text);
   const found = text.slice(tail).search(marker);
   if (found < 0) return null;
   const first = tail + found;
-  const filenames = text
-    .slice(first)
-    .split(marker)
-    .map((s) => s.trim())
-    .filter(Boolean)
-    // Os DOIS separadores: no Windows o marcador traz o caminho nativo
-    // (`C:\cockpit\.hangar-uploads\<arquivo>.png`), que não tem `/` nenhum — o split por `/`
-    // devolvia o caminho INTEIRO como se fosse o basename. Aí `uploadUrl` montava
-    // `/uploads/C%3A%5C…` e o backend recusava com 400 "filename invalido" (resolve_upload rejeita
-    // `\` de propósito, contra path traversal): no celular a foto virava o quadrinho de imagem
-    // quebrada, com a legenda do lado. Medido em 21/08/2026, mandando um print do celular pra uma
-    // sessão no Windows. Dividir por `\` também é seguro no Linux: o nome é GERADO pelo servidor
-    // (`<epoch>-<hex>.<ext>`, uploads.py:30) e nunca contém separador.
-    .map((p) => p.split(/[\\/]/).filter(Boolean).pop() ?? '')
-    .filter(Boolean);
+  const parts = text.slice(first).split(marker);
+  const filenames: string[] = [];
+  const files: string[] = [];
+  // Os DOIS separadores: no Windows o marcador traz o caminho nativo
+  // (`C:\cockpit\.hangar-uploads\<arquivo>.png`), que não tem `/` nenhum — o split por `/`
+  // devolvia o caminho INTEIRO como se fosse o basename. Aí `uploadUrl` montava
+  // `/uploads/C%3A%5C…` e o backend recusava com 400 "filename invalido" (resolve_upload rejeita
+  // `\` de propósito, contra path traversal): no celular a foto virava o quadrinho de imagem
+  // quebrada, com a legenda do lado. Medido em 21/08/2026, mandando um print do celular pra uma
+  // sessão no Windows. Dividir por `\` também é seguro no Linux: o nome é GERADO pelo servidor
+  // (`<epoch>-<hex>.<ext>`, uploads.py:30) e nunca contém separador.
+  for (let i = 1; i < parts.length; i += 2) {
+    const name = parts[i + 1].trim().split(/[\\/]/).filter(Boolean).pop();
+    if (name) (isImageMark(parts[i]) ? filenames : files).push(name);
+  }
   // `filenames` VAZIO nao e "nao e mensagem de imagem": e o caso mais comum do celular — UMA foto,
   // que o Claude Code absorve como anexo de verdade e cujo path ele apaga, deixando so o marcador
   // pendurado. Devolver null aqui jogava a bolha pro texto cru ("legenda — 📎 imagem:"), que e
@@ -487,8 +542,8 @@ export function parseImageMessage(text: string): { caption: string; filenames: s
   // `marcadores` > `filenames.length` = o Claude Code apagou o path da foto que absorveu como
   // anexo (comportamento antigo); iguais = o path ficou escrito E a foto veio no transcript, e
   // quem desenha precisa descontar uma delas — senão a mesma imagem sai duas vezes na bolha.
-  const marcadores = (text.slice(first).match(marker) ?? []).length;
-  return { caption, filenames, marcadores };
+  const marcadores = parts.filter((p, i) => i % 2 === 1 && isImageMark(p)).length;
+  return { caption, filenames, files, marcadores };
 }
 
 // Painel de tarefas do TUI dentro da PREVIA AO VIVO. Ele nao e prosa: e o mesmo TodoWrite/TodoList

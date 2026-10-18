@@ -127,6 +127,13 @@ mod batch_tests {
     use super::*;
 
     #[test]
+    fn english_attachment_marker_is_read_like_the_portuguese_one() {
+        // O web grava o marcador no idioma da tela de quem enviou.
+        assert_eq!(marker_captures("look — 📎 image: /tmp/a.png 📎 file: /tmp/b.txt"), vec!["/tmp/a.png".to_owned()]);
+        assert_eq!(marker_captures("olha — 📎 imagem: /tmp/a.png"), vec!["/tmp/a.png".to_owned()]);
+    }
+
+    #[test]
     fn queued_batch_runtime_prepared_images_are_frozen_across_retries() {
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("image.png");std::fs::write(&path,b"original").unwrap();
         let mut rows=json!([{"text":format!("texto \u{1f4ce} imagem: {}",path.display()),"batch_entries":[]}]);
@@ -217,8 +224,9 @@ mod batch_tests {
 
 /// Trechos depois de `📎 imagem:` até o próximo `📎` ou o fim da linha, como o
 /// `📎\s*imagem:\s*(.+?)(?=\s*📎|$)` multilinha do Python (o `regex` não tem lookahead).
+/// O web grava o marcador no idioma da tela de quem enviou: `image:` em inglês.
 fn marker_captures(text: &str) -> Vec<String> {
-    const LABEL: [char; 7] = ['i', 'm', 'a', 'g', 'e', 'm', ':'];
+    const LABELS: [&[char]; 2] = [&['i', 'm', 'a', 'g', 'e', 'm', ':'], &['i', 'm', 'a', 'g', 'e', ':']];
     let chars: Vec<char> = text.chars().collect();
     let ends_at = |p: usize| -> bool {
         if p == chars.len() || chars[p] == '\n' { return true; }
@@ -231,8 +239,8 @@ fn marker_captures(text: &str) -> Vec<String> {
         if chars[i] != '📎' { i += 1; continue; }
         let mut j = i + 1;
         while j < chars.len() && py_space(chars[j]) { j += 1; }
-        if !chars[j..].starts_with(&LABEL) { i += 1; continue; }
-        let label_end = j + LABEL.len();
+        let Some(label) = LABELS.iter().find(|label| chars[j..].starts_with(label)) else { i += 1; continue; };
+        let label_end = j + label.len();
         let mut blanks_end = label_end;
         while blanks_end < chars.len() && py_space(chars[blanks_end]) { blanks_end += 1; }
         // O `\s*` guloso devolve espaço quando o `.+?` não tem outro caractere (e `.` não casa `\n`).
