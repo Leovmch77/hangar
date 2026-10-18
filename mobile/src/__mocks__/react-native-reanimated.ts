@@ -10,6 +10,8 @@ export const useReducedMotion = () => true;
 export const useAnimatedReaction = () => {};
 export const useFrameCallback = () => ({ setActive: () => {} });
 export const withTiming = passa;
+export const withRepeat = passa;
+export const cancelAnimation = () => {};
 export const withSpring = passa;
 export const withDelay = (_ms: number, v: any) => v;
 export const withSequence = (...vs: any[]) => vs[vs.length - 1];

@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from 'react';
 import { AccessibilityInfo, ActivityIndicator, AppState, Platform, ScrollView, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useIsFocused, useLocalSearchParams, useRouter } from 'expo-router';
 import { useShallow } from 'zustand/react/shallow';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { chatStore } from '../../../../src/stores/chat';
@@ -9,6 +9,7 @@ import { useServers } from '../../../../src/stores/servers';
 import { useSessions } from '../../../../src/stores/sessions';
 import { confirmFirstInput, readFirstInput, useNewConversation } from '../../../../src/stores/newConversation';
 import { Screen } from '../../../../src/ui/Screen';
+import { WorkingMarkPaused } from '../../../../src/ui/WorkingMark';
 import { ChatHeader } from '../../../../src/chat/ChatHeader';
 import { LoopChip } from '../../../../src/chat/LoopChip';
 import { useActivity } from '../../../../src/features/activity/useActivity';
@@ -57,6 +58,7 @@ const MemoComposer = memo(Composer);
 
 export default function ChatScreen() {
   const router = useRouter();
+  const focused = useIsFocused();
   const params = useLocalSearchParams<{ server: string; name: string; askFallback?: string }>();
   const serverId = Array.isArray(params.server) ? params.server[0] : (params.server ?? '');
   const name = Array.isArray(params.name) ? params.name[0] : (params.name ?? '');
@@ -484,6 +486,7 @@ export default function ChatScreen() {
 
   // A lista sai deste chat antes de empurrar outro destino; Nova conversa pede o campo na inicial.
   return (
+    <WorkingMarkPaused.Provider value={!focused}>
     <Screen edges={[]}>
       <SessionsDrawer edgeStart={Platform.OS === 'ios' ? IOS_BACK_EDGE : undefined} onClose={() => router.dismissTo('/')} onOpenServers={() => setServersOpen(true)}
         onNewConversation={() => router.dismissTo({ pathname: '/', params: { compose: '1' } })}>
@@ -654,6 +657,7 @@ export default function ChatScreen() {
       </SessionsDrawer>
       <ServerSheet open={serversOpen} onFechar={() => setServersOpen(false)} />
     </Screen>
+    </WorkingMarkPaused.Provider>
   );
 }
 

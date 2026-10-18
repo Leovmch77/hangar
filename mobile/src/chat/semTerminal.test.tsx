@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement, useState, type ReactNode } from 'react';
+import { act, createElement, useContext, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { configureApi, estilosDitado, fetchSessionsForServer, implementCodexPlan, interrupt, loadLiveVoiceSettings, recarregarSessao, setPermissionMode, _limparEsfriamentoParaTestes, _resetRotasForTests, type FirstConversationAttempt, type MotivoFim, type QueuePanel, type SessionInfo } from '@hangar/core';
@@ -71,6 +71,7 @@ const voiceInput = vi.hoisted(() => ({ recording: false, simulateRecorder: false
   onFim: null as null | ((file: File, reason: MotivoFim, uri: string) => Promise<void>),
   finishRecording: null as null | ((reason: MotivoFim) => void), onStopError: null as null | ((e: Error) => void) }));
 vi.mock('expo-router', () => ({
+  useIsFocused: () => focusNavigation.focused,
   useNavigation: () => nativeNavigation,
   useRouter: () => ({ push: routerPush, back: navigation.back, replace: navigation.replace, dismissTo: navigation.dismissTo, canGoBack: () => navigation.canGoBack }),
   useLocalSearchParams: () => route.params, useSegments: () => route.segments,
@@ -107,7 +108,7 @@ const screenRenders = vi.hoisted(() => ({ n: 0 }));
 // A gaveta puxa o gesture-handler nativo, que o vitest não carrega; aqui só o conteúdo importa.
 vi.mock('../features/sessions/SessionsDrawer', () => ({ SessionsDrawer: ({ children, onClose, onNewConversation }: { children: ReactNode; onClose: () => void; onNewConversation?: () => void }) => {
   screenRenders.n++;
-  return createElement('div', null, children,
+  return createElement('div', { 'data-working-paused': String(useContext(WorkingMarkPaused)) }, children,
     createElement('button', { 'aria-label': 'drawer-new-conversation', onClick: onNewConversation ?? onClose }),
     createElement('button', { 'aria-label': 'drawer-navigation-close', onClick: onClose }));
 } }));
@@ -357,6 +358,7 @@ vi.mock('./ArquivoChip', () => ({
 }));
 
 import { ChatHeader } from './ChatHeader';
+import { WorkingMarkPaused } from '../ui/WorkingMark';
 import { MessageList } from './MessageList';
 import { MoreSheet } from './MoreSheet';
 import { Composer } from './Composer';
@@ -428,6 +430,24 @@ describe('ações e atualização da conversa na rota', () => {
         onerror: null, onopen: null, readyState: 1 }) });
   });
   afterEach(() => { _resetChatsForTests(); chatRow.extra = {}; vi.useRealTimers(); });
+
+  it('pausa as marcas do chat e da gaveta quando outra tela cobre a conversa', async () => {
+    focusNavigation.focused = true;
+    const { container, root } = await render(createElement(ChatScreen));
+    const paused = () => container.querySelector('[data-working-paused]')?.getAttribute('data-working-paused');
+    try {
+      expect(paused()).toBe('false');
+      focusNavigation.focused = false;
+      await act(async () => root.render(createElement(ChatScreen)));
+      expect(paused()).toBe('true');
+      focusNavigation.focused = true;
+      await act(async () => root.render(createElement(ChatScreen)));
+      expect(paused()).toBe('false');
+    } finally {
+      focusNavigation.focused = true;
+      act(() => root.unmount());
+    }
+  });
 
   describe('ajustes pelo rodapé na tela real', () => {
     beforeEach(() => {
