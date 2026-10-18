@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { FlatList, Pressable, Text, TextInput, View, ScrollView } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { getRootsForServer, relativeTime, scanDirForServer } from '@hangar/core';
-import type { FsRoot, FsEntry, FsScanError, Server } from '@hangar/core';
+import { getRootsForServer, getWorktreesForServer, relativeTime, scanDirForServer } from '@hangar/core';
+import type { FsRoot, FsEntry, FsScanError, Server, WorktreeRepo, WorktreeStatus } from '@hangar/core';
+import { groupFolders, type FolderRow } from './folderGroups';
 import { readProject } from '../../stores/createPreferences';
 import { loadErrorText } from './loadError';
 import { useCanceledLoadRetry } from './useCanceledLoadRetry';
@@ -30,6 +31,12 @@ function parentOf(path: string): string {
   const cut = path.replace(/[/\\]+$/, '').search(/[/\\][^/\\]*$/);
   return cut > 0 ? path.slice(0, cut) : path;
 }
+
+type Item =
+  | { kind: 'folder'; entry: FsEntry; group?: FolderRow }
+  | { kind: 'worktree'; entry: FsEntry; status: WorktreeStatus }
+  | { kind: 'merged'; repo: string; count: number };
+const itemKey = (it: Item) => (it.kind === 'merged' ? `merged:${it.repo}` : it.entry.path);
 
 export function CwdPicker({
   server,
@@ -68,6 +75,9 @@ export function CwdPicker({
   const [manualOpen, setManualOpen] = useState(false);
   const [manualPath, setManualPath] = useState('');
   const selectedAtOpen = useRef(selected);
+  const [repos, setRepos] = useState<WorktreeRepo[]>([]);
+  const [openGroups, setOpenGroups] = useState<ReadonlySet<string>>(new Set());
+  const [openMerged, setOpenMerged] = useState<ReadonlySet<string>>(new Set());
   const initialScanIndex = useRef(0);
   const startRootsRetry = useCanceledLoadRetry(useCallback(() => setRootsTry((n) => n + 1), []));
   const startScanRetry = useCanceledLoadRetry(useCallback(() => setScanTry((n) => n + 1), []));
@@ -102,6 +112,16 @@ export function CwdPicker({
   }, [server, autoSelect, rootsTry, startRootsRetry]);
 
   useEffect(() => { initialScanIndex.current = 0; }, [server, roots, autoSelect]);
+
+  // Só agrupa: sem a leitura (convidado, falha), a lista sai plana como antes.
+  useEffect(() => {
+    const controller = new AbortController();
+    setRepos([]);
+    getWorktreesForServer(server, controller.signal, { sizes: false })
+      .then((r) => { if (!controller.signal.aborted) setRepos(r); })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [server]);
 
   useEffect(() => {
     if (rootsLoading || rootsError || !roots.length || !autoSelect) return;
@@ -184,6 +204,51 @@ export function CwdPicker({
   const q = query.trim().toLowerCase();
   const filtered = !q || !activeRoot ? entries
     : entries.filter((e) => e.name.toLowerCase().includes(q) || relPath(activeRoot.path, e.path).toLowerCase().includes(q));
+  // Buscando, a lista é plana: o nome da worktree precisa aparecer mesmo com o grupo fechado.
+  const items: Item[] = q ? filtered.map((entry) => ({ kind: 'folder', entry })) : groupFolders(filtered, repos).flatMap((row) => {
+    const sized = row.visible.length + row.merged.length > 0;
+    const out: Item[] = [{ kind: 'folder', entry: row.entry, group: sized ? row : undefined }];
+    if (!sized || !openGroups.has(row.entry.path)) return out;
+    out.push(...row.visible.map((w): Item => ({ kind: 'worktree', entry: w.entry, status: w.status })));
+    if (openMerged.has(row.entry.path)) out.push(...row.merged.map((w): Item => ({ kind: 'worktree', entry: w.entry, status: w.status })));
+    else if (row.merged.length) out.push({ kind: 'merged', repo: row.entry.path, count: row.merged.length });
+    return out;
+  });
+  const toggle = (set: (fn: (cur: ReadonlySet<string>) => ReadonlySet<string>) => void, key: string) => set((cur) => {
+    const next = new Set(cur);
+    if (!next.delete(key)) next.add(key);
+    return next;
+  });
+  const groupButton = (row: FolderRow, compactStyle: boolean) => {
+    const open = openGroups.has(row.entry.path);
+    return (
+      <Pressable onPress={() => toggle(setOpenGroups, row.entry.path)} hitSlop={6} accessibilityRole="button"
+        accessibilityLabel={m.native_create_worktrees({ n: row.visible.length + row.merged.length })} accessibilityState={{ expanded: open }}
+        style={({ pressed }) => [compactStyle ? styles.cGroup : styles.group, pressed && { backgroundColor: c.hover }]}>
+        <Icon name={open ? 'ChevronDown' : 'ChevronRight'} size={12} color={c.faint} />
+        <Text style={[styles.groupTxt, { color: c.muted }]}>{row.visible.length + row.merged.length}</Text>
+        <Icon name="GitBranch" size={12} color={c.faint} />
+      </Pressable>
+    );
+  };
+  const worktreeRow = (e: FsEntry, status: WorktreeStatus) => {
+    const on = selected === e.path;
+    return (
+      <Pressable onPress={() => choose(e.path, activeRoot?.path)} accessibilityRole="button" accessibilityLabel={e.name}
+        accessibilityState={{ selected: on }}
+        style={({ pressed }) => [styles.wtRow, on && { backgroundColor: c.accentDim }, pressed && !on && { backgroundColor: c.hover }]}>
+        <Text style={[styles.wtName, { color: c.text }]} numberOfLines={1}>{e.name}</Text>
+        <Text style={[styles.wtBranch, { color: c.faint }]} numberOfLines={1}>{status.branch ?? ''}</Text>
+        {status.sessions.length ? <Text style={[styles.wtChip, { color: c.accent }]}>{m.native_create_worktree_session()}</Text> : null}
+      </Pressable>
+    );
+  };
+  const mergedRow = (repo: string, count: number) => (
+    <Pressable onPress={() => toggle(setOpenMerged, repo)} accessibilityRole="button"
+      accessibilityLabel={m.native_create_worktrees_merged({ n: count })} style={styles.wtRow}>
+      <Text style={[styles.wtMore, { color: c.faint }]}>{m.native_create_worktrees_merged({ n: count })}</Text>
+    </Pressable>
+  );
 
   const crumbs = (() => {
     if (!activeRoot) return [] as { label: string; path: string }[];
@@ -227,14 +292,17 @@ export function CwdPicker({
       note(q ? m.native_create_no_results() : m.native_create_no_subfolders())
     ) : (
       <FlatList
-        data={filtered}
-        keyExtractor={(e) => e.path}
+        data={items}
+        keyExtractor={itemKey}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
         // Altura explícita: dentro do painel que encolhe, a lista sem altura colapsava em uma linha.
-        style={[styles.cList, { height: Math.min(filtered.length, 5) * 44.5 }]}
+        style={[styles.cList, { height: Math.min(items.length, 5) * 44.5 }]}
         ItemSeparatorComponent={() => <View style={[styles.cSep, { backgroundColor: c.border }]} />}
-        renderItem={({ item: e }) => {
+        renderItem={({ item }) => {
+          if (item.kind === 'worktree') return worktreeRow(item.entry, item.status);
+          if (item.kind === 'merged') return mergedRow(item.repo, item.count);
+          const e = item.entry;
           const on = selected === e.path;
           const when = relativeTime(e.mtime);
           return (
@@ -251,6 +319,7 @@ export function CwdPicker({
                 {e.is_git ? <Icon name="GitBranch" size={12} color={c.faint} /> : null}
                 {when ? <Text style={[styles.cWhen, { color: c.faint }]}>{when}</Text> : null}
               </Pressable>
+              {item.group ? groupButton(item.group, true) : null}
               <Pressable onPress={() => drill(e.path)} style={({ pressed }) => [styles.cDrill, pressed && { backgroundColor: c.hover }]}
                          accessibilityRole="button" accessibilityLabel={m.native_create_open({ nome: e.name })}>
                 <Icon name="ChevronRight" size={14} color={c.faint} />
@@ -408,12 +477,15 @@ export function CwdPicker({
     <Text style={styles.muted}>{q ? m.native_create_no_results() : m.native_create_no_subfolders()}</Text>
   ) : (
     <FlatList
-      data={filtered}
-      keyExtractor={(e) => e.path}
+      data={items}
+      keyExtractor={itemKey}
       keyboardShouldPersistTaps="handled"
       keyboardDismissMode="on-drag"
       style={styles.list}
-      renderItem={({ item: e }) => {
+      renderItem={({ item }) => {
+        if (item.kind === 'worktree') return worktreeRow(item.entry, item.status);
+        if (item.kind === 'merged') return mergedRow(item.repo, item.count);
+        const e = item.entry;
         const on = selected === e.path;
         const when = relativeTime(e.mtime);
         return (
@@ -433,6 +505,7 @@ export function CwdPicker({
                 {when ? <Text style={styles.when}>{when}</Text> : null}
               </View>
             </Pressable>
+            {item.group ? groupButton(item.group, false) : null}
             <Pressable onPress={() => drill(e.path)} style={({ pressed }) => [styles.drill, pressed && styles.rowPressed]}
                        accessibilityRole="button" accessibilityLabel={m.native_create_open({ nome: e.name })}>
               <Icon name="ChevronRight" size={16} color={theme.tokens.text.secondary} />
@@ -644,4 +717,13 @@ const styles = StyleSheet.create((theme) => ({
   cPill: { height: 32, paddingHorizontal: 14, borderRadius: 9999, borderWidth: 1, justifyContent: 'center' },
   cPillTxt: { fontSize: theme.base.text.sm, fontWeight: '500' },
   cManualInput: { flex: 1, fontFamily: theme.base.fontMono, fontSize: theme.base.text.sm },
+  group: { minWidth: 44, height: 44, borderRadius: 8, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 3, paddingHorizontal: 6 },
+  cGroup: { minWidth: 44, height: 44, borderRadius: 8, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 3, paddingHorizontal: 4 },
+  groupTxt: { fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
+  // Recuo de um nível: a worktree mora dentro do repositório da linha de cima.
+  wtRow: { minHeight: 44, marginLeft: 26, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 8, borderRadius: 8 },
+  wtName: { flexShrink: 1, fontSize: theme.base.text.sm },
+  wtBranch: { flex: 1, minWidth: 0, fontSize: theme.base.text.xs, fontFamily: theme.base.fontMono },
+  wtChip: { fontSize: theme.base.text.xs, fontWeight: '600' },
+  wtMore: { fontSize: theme.base.text.xs },
 }));

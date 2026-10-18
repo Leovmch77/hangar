@@ -43,10 +43,9 @@ vi.mock('../voice/LiveVoiceChatButton', () => ({ LiveVoiceChatButton: () => null
 vi.mock('../sessions/SessionList', () => ({ SessionList: ({ variant }: { variant?: string }) => React.createElement('div', { 'data-list': variant }) }));
 vi.mock('../sessions/ServerSheet', () => ({ ServerSheet: () => null }));
 vi.mock('../sessions/SessionsDrawer', () => ({
-  SessionsDrawer: ({ ref, children, onNewConversation }: { ref: React.RefObject<unknown>; children: ReactNode; onNewConversation?: () => void }) => {
+  SessionsDrawer: ({ ref, children }: { ref: React.RefObject<unknown>; children: ReactNode }) => {
     React.useImperativeHandle(ref, () => ({ openDrawer: calls.openDrawer, closeDrawer: calls.closeDrawer }));
-    return React.createElement('div', null, children,
-      React.createElement('button', { 'aria-label': 'drawer-new', onClick: onNewConversation }));
+    return React.createElement('div', null, children);
   },
 }));
 vi.mock('./CreateSessionSheet', () => ({
@@ -145,11 +144,10 @@ describe('inicial Expo', () => {
     expect(calls.back).toBeNull();
   });
 
-  it('gaveta abre Nova conversa e microfone não pede foco; gesto só começa para baixo', async () => {
+  it('microfone não pede foco; gesto só começa para baixo', async () => {
     await act(async () => root.render(React.createElement(Index)));
-    await act(async () => click('drawer-new'));
+    await act(async () => click('open-text'));
     expect(mode()).toBe('newConversation');
-    expect(calls.closeDrawer).toHaveBeenCalledTimes(1);
     expect(calls.pan?.onMoveShouldSetPanResponder(null, { dx: 30, dy: 15 })).toBe(false);
     expect(calls.pan?.onMoveShouldSetPanResponder(null, { dx: 1, dy: 50 })).toBe(true);
     await act(async () => calls.pan?.onPanResponderRelease(null, { dy: 60 }));

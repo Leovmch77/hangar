@@ -1,11 +1,11 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, type ComponentProps } from 'react';
 import { Icon } from '../../ui/Icon';
-import { AccessibilityInfo, ActivityIndicator, Pressable, Text, TextInput, View } from 'react-native';
-import { StyleSheet } from 'react-native-unistyles';
+import { AccessibilityInfo, ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { getArchivePorCwd, getCodexAccountsForServer, defaultCodexAccount,
   getEnginesForServer, fetchSessionsForServer, listClaudeConfigsForServer, probeServerResponse,
-  modelOptionsForServer, resumeArchivedConversation, getProvidersForServer } from '@hangar/core';
+  modelOptionsForServer, resumeArchivedConversation, getProvidersForServer, createSessionForServer, sanitizeSessionName } from '@hangar/core';
 import { basename, ctxWindow, providerName, contaComFolga, cotaDaConta, cotaParada, janelaEsgotada, motivoCotaAntiga, resumoCota, CLAUDE_PERMISSION_MODES, EFFORT_LEVELS,
   SESSION_PROVIDERS, hasExecutionMode, effortLevels, contextRefsPlainText } from '@hangar/core';
 import type { ArchiveEntry, CodexAccount, ConfigDirInfo, Provider, ModelOption, CotaContaResumo, Server, WorktreeChoice } from '@hangar/core';
@@ -13,8 +13,8 @@ import { SessionSettingsControl } from '../../chat/SessionSettings';
 import { semEsforco } from '../pills/pills';
 import { SettingsList } from '../../ui/SettingsList';
 import { useServers } from '../../stores/servers';
-import { rememberProject } from '../../stores/createPreferences';
-import type { NewConversationInput } from '../../stores/newConversation';
+import { readProject, rememberProject } from '../../stores/createPreferences';
+import { defaultSessionName, type NewConversationInput } from '../../stores/newConversation';
 import { CwdPicker } from './CwdPicker';
 import { loadErrorText } from './loadError';
 import { useCanceledLoadRetry } from './useCanceledLoadRetry';
@@ -23,12 +23,14 @@ import { BranchPicker } from './BranchPicker';
 import { CodexContextControl, useCodexContextControl } from './CodexContextControl';
 import { NewConversation, type HomePresentation } from './NewConversation';
 import { QuietPill } from './QuietPill';
+import { SettingRow } from './SettingRow';
 import { readChoices, readMachine, rememberChoices, rememberMachine, type NewChatChoices } from './choicesPrefs';
 import { superficie } from '../../theme/superficie';
 import { AnchoredPanel } from '../../ui/AnchoredPanel';
 import * as m from '../../paraglide/messages';
 
 type ProviderProbe = Record<string, { disponivel: boolean; motivo: string | null; default?: boolean }>;
+type Choice = Omit<ComponentProps<typeof QuietPill>, 'ref'>;
 
 function valorModelo(mm: ModelOption): string {
   return mm.provider ? `${mm.provider}/${mm.id}` : mm.id;
@@ -60,7 +62,10 @@ function PanelSelect({
   </>;
 }
 
-export function CreateSessionSheet({ onClose, keyboardOffset, home }: { onClose?: () => void; keyboardOffset?: number; home?: HomePresentation }) {
+// `layout: 'form'`: o formulário completo em linhas (Nova sessão do menu); o padrão é a conversa nova da inicial.
+export function CreateSessionSheet({ onClose, keyboardOffset, home, layout = 'conversation' }: {
+  onClose?: () => void; keyboardOffset?: number; home?: HomePresentation; layout?: 'conversation' | 'form';
+}) {
   const servers = useServers((s) => s.servers);
   const activeId = useServers((s) => s.activeId);
   // A máquina escolhida na pílula vale só para onde a conversa nasce; o servidor ativo é das Configurações.
@@ -75,15 +80,17 @@ export function CreateSessionSheet({ onClose, keyboardOffset, home }: { onClose?
     rememberMachine(id);
     setMachine(id);
   }, []);
-  return target ? <CreateSessionForm key={`${target.id}:${target.baseUrl}`} active={target} machines={servers} onPickMachine={pickMachine} onClose={onClose} keyboardOffset={keyboardOffset} home={home} />
+  return target ? <CreateSessionForm key={`${target.id}:${target.baseUrl}`} active={target} machines={servers} onPickMachine={pickMachine} onClose={onClose} keyboardOffset={keyboardOffset} home={home} layout={layout} />
     : home?.mode === 'sessions' ? <View style={{ flex: 1 }}>{home.sessions}</View>
       : <Text accessibilityRole="alert">{m.servidor_nao_existe()}</Text>;
 }
 
-function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, home }: {
+function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardOffset, home, layout }: {
   active: Server; machines: Server[]; onPickMachine: (id: string) => void; onClose?: () => void; keyboardOffset?: number; home?: HomePresentation;
+  layout: 'conversation' | 'form';
 }) {
   const router = useRouter();
+  const { theme } = useUnistyles();
   const [initialized, setInitialized] = useState(home?.mode !== 'sessions');
   const enabled = initialized || home?.mode !== 'sessions';
   useEffect(() => {
@@ -102,6 +109,8 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
   const [worktree, setWorktree] = useState<WorktreeChoice | null>(null);
   const onWorktree = useCallback((v: WorktreeChoice | null) => setWorktree(v), []);
   const [branchOpen, setBranchOpen] = useState(false);
+  const [folderOpen, setFolderOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [hasSameFolder, setHasSameFolder] = useState(false);
   const [error, setError] = useState('');
   const [configsError, setConfigsError] = useState('');
@@ -131,7 +140,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
   const [modelsLoading, setModelsLoading] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [extrasOpen, setExtrasOpen] = useState(false);
-  const contextOpen = provider === 'codex' && settingsOpen && extrasOpen;
+  const contextOpen = provider === 'codex' && extrasOpen && (settingsOpen || layout === 'form');
   const context = useCodexContextControl(active, contextOpen);
   const contextBusy = context.busy;
   const [catalogFast, setCatalogFast] = useState(false);
@@ -458,6 +467,13 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
     }
   }, [active]);
 
+  // O formulário abre na última pasta usada nesta máquina, como a conversa nova.
+  useEffect(() => {
+    if (layout !== 'form') return;
+    const saved = readProject(active.id);
+    if (saved) void handlePick(saved.cwd);
+  }, [layout, active.id, handlePick]);
+
   // Nome em branco: o store gera projeto + sufixo da tentativa.
   const canHeadless = hasExecutionMode(provider);
   const settings: Omit<NewConversationInput['body'], 'cwd'> = provider === 'codex'
@@ -578,38 +594,38 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
   const on = (yes: boolean) => (yes ? 'on' : 'off') as 'on' | 'off';
 
   const terminalOnly = m.nova_conversa_so_terminal({ provider: providerName(provider) });
-  const terminalPill = (
-    <QuietPill
-      icon="SquareTerminal"
-      label={canHeadless && headless ? m.criar_modo_exec_headless() : m.criar_modo_exec_tmux()}
-      aria={m.criar_modo_exec()}
-      menuTitle={canHeadless ? m.criar_modo_exec() : terminalOnly}
-      actions={[
-        {
-          id: 'headless', title: m.criar_modo_exec_headless(), state: on(canHeadless && headless), attributes: { disabled: !canHeadless },
-          subtitle: !canHeadless ? terminalOnly
-            : provider === 'codex' ? m.criar_modo_exec_headless_resumo_codex() : m.criar_modo_exec_headless_resumo(),
-        },
-        {
-          id: 'tmux', title: m.criar_modo_exec_tmux(), state: on(!canHeadless || !headless),
-          subtitle: provider === 'codex' ? m.criar_modo_exec_tmux_resumo_codex() : m.criar_modo_exec_tmux_resumo(),
-        },
-      ]}
-      onAction={(id) => { if (canHeadless) chooseHeadless(id === 'headless'); }}
-    />
-  );
+  // A mesma escolha vira pílula na conversa nova e linha no formulário completo.
+  const terminalChoice: Choice = {
+    icon: 'SquareTerminal',
+    label: canHeadless && headless ? m.criar_modo_exec_headless() : m.criar_modo_exec_tmux(),
+    aria: m.criar_modo_exec(),
+    menuTitle: canHeadless ? m.criar_modo_exec() : terminalOnly,
+    actions: [
+      {
+        id: 'headless', title: m.criar_modo_exec_headless(), state: on(canHeadless && headless), attributes: { disabled: !canHeadless },
+        subtitle: !canHeadless ? terminalOnly
+          : provider === 'codex' ? m.criar_modo_exec_headless_resumo_codex() : m.criar_modo_exec_headless_resumo(),
+      },
+      {
+        id: 'tmux', title: m.criar_modo_exec_tmux(), state: on(!canHeadless || !headless),
+        subtitle: provider === 'codex' ? m.criar_modo_exec_tmux_resumo_codex() : m.criar_modo_exec_tmux_resumo(),
+      },
+    ],
+    onAction: (id) => { if (canHeadless) chooseHeadless(id === 'headless'); },
+  };
+  const terminalPill = <QuietPill {...terminalChoice} />;
 
   const janelaCheia = provider === 'claude' ? janelaEsgotada(cotaSelecionada) : null;
-  const accountPill = (() => {
+  const accountChoice = ((): Choice | null => {
     if (provider !== 'claude' && provider !== 'codex') return null;
     const aria = provider === 'claude' ? m.comum_conta_claude() : m.native_create_codex_account();
     if (provider === 'claude' ? configsLoading : codexLoading) {
-      return <QuietPill icon="CircleUser" label={m.comum_carregando()} aria={aria} disabled />;
+      return { icon: 'CircleUser', label: m.comum_carregando(), aria, disabled: true };
     }
     // Falha de carga já aparece nos avisos; aqui fica só o vazio.
     if (provider === 'claude' ? !configs.length : !codexAccounts.length) {
       return (provider === 'claude' ? catalogError : codexError) ? null
-        : <QuietPill icon="CircleUser" label={m.native_new_chat_no_accounts()} aria={aria} disabled />;
+        : { icon: 'CircleUser', label: m.native_new_chat_no_accounts(), aria, disabled: true };
     }
     // O estado da cota mora na pílula da conta: esgotada mostra a janela cheia em cor de aviso, e o
     // motivo (ou a troca automática) vem no título do menu, junto da cota de cada conta.
@@ -617,35 +633,32 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
     const full = janelaCheia ? cotaSelecionada?.janelas.find((j) => j.rotulo === janelaCheia) : undefined;
     const detail = janelaCheia ? m.cota_conta_no_limite({ janela: janelaCheia })
       : switchedFrom ? m.new_chat_account_switched({ conta: switchedFrom }) : '';
-    return provider === 'claude' ? (
-      <QuietPill
-        icon={janelaCheia ? 'TriangleAlert' : switchedFrom ? 'ArrowLeftRight' : 'CircleUser'}
-        tone={janelaCheia ? 'warning' : switchedFrom ? 'accent' : undefined}
-        label={full ? `${label} · ${full.rotulo} ${Math.round(full.pct)}%` : label}
-        aria={detail ? `${aria} (${detail})` : aria}
-        menuTitle={detail || aria}
-        actions={configs.map((c) => ({
-          id: c.path, title: c.label, state: on(c.path === selectedConfig),
-          subtitle: [c.active ? (m.switcher_atual() as string) : '', resumoCota(cotaDaConta(cotas, c.path))].filter(Boolean).join(' · ') || undefined,
-        }))}
-        onAction={chooseConfig}
-      />
-    ) : (
-      <QuietPill
-        icon="CircleUser"
-        label={contaCodex?.name ?? m.criar_padrao()}
-        aria={aria}
-        menuTitle={aria}
-        actions={codexAccounts.map((account) => ({
-          id: account.id, title: account.name, state: on(account.id === codexAccount),
-          subtitle: account.auth.status === 'connected'
-            ? (account.auth.email ?? m.codex_ui_account())
-            : account.auth.status === 'disconnected' ? m.contas_nao_conectada() : m.codex_ui_unknown(),
-        }))}
-        onAction={chooseCodexAccount}
-      />
-    );
+    return provider === 'claude' ? {
+      icon: janelaCheia ? 'TriangleAlert' : switchedFrom ? 'ArrowLeftRight' : 'CircleUser',
+      tone: janelaCheia ? 'warning' : switchedFrom ? 'accent' : undefined,
+      label: full ? `${label} · ${full.rotulo} ${Math.round(full.pct)}%` : label,
+      aria: detail ? `${aria} (${detail})` : aria,
+      menuTitle: detail || aria,
+      actions: configs.map((c) => ({
+        id: c.path, title: c.label, state: on(c.path === selectedConfig),
+        subtitle: [c.active ? (m.switcher_atual() as string) : '', resumoCota(cotaDaConta(cotas, c.path))].filter(Boolean).join(' · ') || undefined,
+      })),
+      onAction: chooseConfig,
+    } : {
+      icon: 'CircleUser',
+      label: contaCodex?.name ?? m.criar_padrao(),
+      aria,
+      menuTitle: aria,
+      actions: codexAccounts.map((account) => ({
+        id: account.id, title: account.name, state: on(account.id === codexAccount),
+        subtitle: account.auth.status === 'connected'
+          ? (account.auth.email ?? m.codex_ui_account())
+          : account.auth.status === 'disconnected' ? m.contas_nao_conectada() : m.codex_ui_unknown(),
+      })),
+      onAction: chooseCodexAccount,
+    };
   })();
+  const accountPill = accountChoice ? <QuietPill {...accountChoice} /> : null;
   // Leitura nova falhou e ficaram os números da anterior: sem o motivo, eles pareceriam atuais.
   const cotaAntiga = motivoCotaAntiga(cotaSelecionada);
   // Conta com a janela em 100% não responde: o aviso diz isso em cor de alerta, além dos números.
@@ -682,63 +695,56 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
     </View>
   );
 
-  const options = (
+  const nameField = !retomavel ? (
+    <View style={styles.field}>
+      <Text style={styles.label}>{m.comum_nome()}</Text>
+      <TextInput
+        style={styles.input}
+        value={name}
+        onChangeText={setName}
+        placeholder={m.criar_nome_placeholder()}
+        accessibilityLabel={m.comum_nome()}
+        autoCapitalize="none"
+        autoCorrect={false}
+        placeholderTextColor="#8d8489"
+      />
+      <Text style={styles.hintSm}>{m.nova_conversa_nome_automatico()}</Text>
+    </View>
+  ) : null;
+  const codexContextField = provider === 'codex' ? <CodexContextControl control={context} /> : null;
+  const engineField = provider === 'claude' && Object.keys(motores).length ? (
+    <View style={styles.field}>
+      <Text style={styles.label}>{m.comum_motor()}</Text>
+      <PanelSelect
+        value={engine}
+        options={[{ value: '', label: m.criar_claude_sua_conta() }, ...Object.entries(motores).map(([k, v]) => ({ value: k, label: (v as any).label ?? k, hint: (v as any).model }))]}
+        onChange={(v) => setEngine(v)}
+      />
+    </View>
+  ) : null;
+  const permissionField = provider === 'claude' && (
+    <View style={styles.field}>
+      <Text style={styles.label}>{m.criar_permissao()}</Text>
+      <PanelSelect
+        value={permissao}
+        options={[{ value: '', label: m.criar_permissao_padrao() }, ...CLAUDE_PERMISSION_MODES.map((n) => ({ value: n, label: n }))]}
+        onChange={(v) => setPermissao(v)}
+      />
+    </View>
+  );
+  const subagentField = provider === 'claude' && !engine && modelos.length > 0 && (
+    <View style={styles.field}>
+      <Text style={styles.label}>{m.criar_subagente()}</Text>
+      <PanelSelect
+        value={subagente}
+        options={[{ value: '', label: m.criar_subagente_padrao() }, ...modelos.filter((md) => md.id !== 'default').map((md) => ({ value: valorModelo(md), label: md.name ?? md.id }))]}
+        onChange={(v) => setSubagente(v)}
+      />
+      <Text style={styles.hintSm}>{m.criar_subagente_ajuda()}</Text>
+    </View>
+  );
+  const resumeField = (
     <>
-      {picked ? <Text style={styles.pickedPath}>{picked}</Text> : null}
-      {quotaNotice}
-      {!retomavel ? (
-        <View style={styles.field}>
-          <Text style={styles.label}>{m.comum_nome()}</Text>
-          <TextInput
-            style={styles.input}
-            value={name}
-            onChangeText={setName}
-            placeholder={m.criar_nome_placeholder()}
-            accessibilityLabel={m.comum_nome()}
-            autoCapitalize="none"
-            autoCorrect={false}
-            placeholderTextColor="#8d8489"
-          />
-          <Text style={styles.hintSm}>{m.nova_conversa_nome_automatico()}</Text>
-        </View>
-      ) : null}
-
-      {provider === 'codex' ? <CodexContextControl control={context} /> : null}
-
-      {provider === 'claude' && Object.keys(motores).length ? (
-        <View style={styles.field}>
-          <Text style={styles.label}>{m.comum_motor()}</Text>
-          <PanelSelect
-            value={engine}
-            options={[{ value: '', label: m.criar_claude_sua_conta() }, ...Object.entries(motores).map(([k, v]) => ({ value: k, label: (v as any).label ?? k, hint: (v as any).model }))]}
-            onChange={(v) => setEngine(v)}
-          />
-        </View>
-      ) : null}
-
-      {provider === 'claude' && (
-        <View style={styles.field}>
-          <Text style={styles.label}>{m.criar_permissao()}</Text>
-          <PanelSelect
-            value={permissao}
-            options={[{ value: '', label: m.criar_permissao_padrao() }, ...CLAUDE_PERMISSION_MODES.map((n) => ({ value: n, label: n }))]}
-            onChange={(v) => setPermissao(v)}
-          />
-        </View>
-      )}
-
-      {provider === 'claude' && !engine && modelos.length > 0 && (
-        <View style={styles.field}>
-          <Text style={styles.label}>{m.criar_subagente()}</Text>
-          <PanelSelect
-            value={subagente}
-            options={[{ value: '', label: m.criar_subagente_padrao() }, ...modelos.filter((md) => md.id !== 'default').map((md) => ({ value: valorModelo(md), label: md.name ?? md.id }))]}
-            onChange={(v) => setSubagente(v)}
-          />
-          <Text style={styles.hintSm}>{m.criar_subagente_ajuda()}</Text>
-        </View>
-      )}
-
       {provider === 'codex' && retomaveis.length ? (
         <View style={styles.field}>
           <Text style={styles.label}>{m.criar_retomar()}</Text>
@@ -765,6 +771,151 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
       ) : null}
     </>
   );
+
+  const options = (
+    <>
+      {picked ? <Text style={styles.pickedPath}>{picked}</Text> : null}
+      {quotaNotice}
+      {nameField}
+      {codexContextField}
+      {engineField}
+      {permissionField}
+      {subagentField}
+      {resumeField}
+    </>
+  );
+
+  const toggleFast = async () => {
+    if (!fastAvailable) return;
+    if (provider === 'codex' && !modelo && codexFastModel) chooseModel(valorModelo(codexFastModel));
+    setServiceTier((cur) => cur === 'priority' ? undefined : 'priority');
+  };
+
+  // Mesmo painel preso à linha/pílula de branch nas duas apresentações.
+  const branchPanel = (
+    <AnchoredPanel
+      open={branchOpen && !!picked}
+      anchor={branchRef.current}
+      onClose={() => setBranchOpen(false)}
+      onDismissed={() => { if (branchRef.current) AccessibilityInfo.sendAccessibilityEvent(branchRef.current, 'focus'); }}
+      label={m.native_create_checkout_branch()}
+      closeLabel={m.native_close()}
+    >
+      {picked ? <BranchPicker server={active} cwd={picked} sessionName={name.trim() || basename(picked)}
+                              value={worktree} onChange={onWorktree} /> : null}
+    </AnchoredPanel>
+  );
+
+  const blocked = contextBusy || retomando || !!retomavel || (!!picked && !codexReady);
+  const canCreate = !!body && !blocked && !creating;
+  // Sem primeira mensagem: cria e abre a conversa vazia, como o formulário do PWA.
+  const createSession = async () => {
+    if (!body || !canCreate) return;
+    setCreating(true);
+    setError('');
+    try {
+      const finalName = name.trim() || defaultSessionName(body.cwd);
+      const session = await createSessionForServer(active, { ...body, name: finalName,
+        ...(body.new_branch && !body.branch?.trim() ? { branch: sanitizeSessionName(finalName) } : {}) });
+      router.replace(`/s/${active.id}/${session.name}` as never);
+    } catch (cause: unknown) {
+      if (mounted.current) setError(cause instanceof Error ? cause.message : m.criar_sessao_erro());
+    } finally {
+      if (mounted.current) setCreating(false);
+    }
+  };
+
+  if (layout === 'form') {
+    const sep = <View style={styles.sep} />;
+    const providerActions = SESSION_PROVIDERS.map((p) => {
+      const probe = providerProbe?.[p];
+      const off = !!probe && !probe.disponivel;
+      return { id: p, title: providerName(p), state: on(p === provider), attributes: { disabled: off },
+        subtitle: !off ? undefined : probe.motivo == null || probe.motivo === 'nao_encontrado'
+          ? m.native_create_provider_missing({ p: providerName(p) })
+          : probe.motivo === 'sem_permissao' ? m.native_create_provider_execution_denied({ p: providerName(p) }) : probe.motivo };
+    });
+    const modelActions = [{ id: '', title: m.criar_padrao(), state: on(!modelo) },
+      ...modelos.filter((md) => md.id !== 'default').map((md) => ({ id: valorModelo(md), title: md.name ?? md.id, state: on(valorModelo(md) === modelo),
+        subtitle: [md.provider, md.context ?? (md.context_length ? ctxWindow(md.context_length).toUpperCase() : '')].filter(Boolean).join(' · ') || undefined }))];
+    const accountLabel = provider === 'claude' ? m.comum_conta_claude() : m.native_create_codex_account();
+    return (
+      <View style={styles.form}>
+        <View style={styles.navbar}>
+          <Pressable onPress={folderOpen ? () => setFolderOpen(false) : onClose} hitSlop={8} style={styles.navSide}
+            accessibilityRole="button" accessibilityLabel={folderOpen ? m.comum_voltar() : m.comum_cancelar()}>
+            {folderOpen ? <Icon name="ChevronLeft" size={22} color={theme.tokens.accent.base} /> : <Text style={styles.navAction}>{m.comum_cancelar()}</Text>}
+          </Pressable>
+          <Text style={styles.navTitle} accessibilityRole="header" numberOfLines={1}>{folderOpen ? m.native_new_chat_folder() : m.sessao_nova()}</Text>
+          {folderOpen ? <View style={styles.navSide} /> : (
+            <Pressable onPress={() => void createSession()} disabled={!canCreate} hitSlop={8} style={[styles.navSide, styles.navRight]}
+              accessibilityRole="button" accessibilityLabel={m.criar_criar()} accessibilityState={{ disabled: !canCreate, busy: creating }}>
+              {creating ? <ActivityIndicator /> : <Text style={[styles.navAction, styles.navStrong, !canCreate && styles.primaryDis]}>{m.criar_criar()}</Text>}
+            </Pressable>
+          )}
+        </View>
+        {folderOpen ? (
+          <View style={styles.folderScreen}>
+            <CwdPicker server={active} onPick={handlePick} selected={picked} autoSelect={false} onDone={() => setFolderOpen(false)} />
+          </View>
+        ) : (
+          <ScrollView contentContainerStyle={styles.formScroll} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
+            <View style={styles.group}>
+              <SettingRow icon="Monitor" label={m.native_new_chat_machine()} value={active.label}
+                actions={machines.map((sv) => ({ id: sv.id, title: sv.label, state: on(sv.id === active.id) }))}
+                onAction={(id) => { if (id !== active.id) onPickMachine(id); }} />
+              {sep}
+              <SettingRow ref={folderRef} icon="Folder" label={m.native_new_chat_folder()} detail={picked ?? undefined}
+                value={picked ? basename(picked) : m.criar_escolher_pasta()} onPress={() => setFolderOpen(true)} />
+              {picked ? <>{sep}<SettingRow ref={branchRef} icon="GitBranch" label={m.native_create_checkout_branch()} value={branchLabel}
+                onPress={() => setBranchOpen(true)} /></> : null}
+            </View>
+            <View style={styles.group}>
+              <SettingRow icon="Bot" label={m.criar_agente()} value={providerName(provider)} actions={providerActions}
+                onAction={(id) => chooseProvider(id as Provider)} />
+              {accountChoice ? <>{sep}<SettingRow icon={accountChoice.icon ?? 'CircleUser'} label={accountLabel} value={accountChoice.label}
+                tone={accountChoice.tone} disabled={accountChoice.disabled} actions={accountChoice.actions}
+                menuTitle={accountChoice.menuTitle} onAction={accountChoice.onAction} /></> : null}
+              {!retomavel ? <>{sep}<SettingRow icon="Sparkles" label={m.composer_modelo()} disabled={modelsLoading}
+                value={modelsLoading ? m.comum_carregando() : chipLabel} actions={modelActions} onAction={chooseModel} /></> : null}
+              {!retomavel && niveisEsforco.length ? <>{sep}<SettingRow icon="Gauge" label={m.composer_esforco()} value={esforco || m.criar_padrao()}
+                actions={[{ id: '', title: m.criar_padrao(), state: on(!esforco) }, ...niveisEsforco.map((lv) => ({ id: lv, title: lv, state: on(lv === esforco) }))]}
+                onAction={chooseEffort} /></> : null}
+              {provider === 'claude' ? <>{sep}<SettingRow icon="ShieldCheck" label={m.criar_permissao()} value={permissao || m.criar_padrao()}
+                actions={[{ id: '', title: m.criar_permissao_padrao(), state: on(!permissao) }, ...CLAUDE_PERMISSION_MODES.map((n) => ({ id: n, title: n, state: on(n === permissao) }))]}
+                onAction={setPermissao} /></> : null}
+              {sep}
+              <SettingRow icon="SquareTerminal" label={m.criar_modo_exec()} value={terminalChoice.label} actions={terminalChoice.actions}
+                menuTitle={terminalChoice.menuTitle} onAction={terminalChoice.onAction} />
+            </View>
+            {nameField}
+            {quotaNotice}
+            {notices}
+            <Pressable accessibilityRole="button" accessibilityState={{ expanded: extrasOpen }}
+              onPress={() => setExtrasOpen((value) => !value)} style={styles.more}>
+              <Text style={styles.hint}>{m.criar_mais_opcoes()}</Text>
+            </Pressable>
+            {extrasOpen ? (
+              <View style={styles.extras}>
+                {codexContextField}
+                {engineField}
+                {subagentField}
+                {fastVisible && !retomavel ? (
+                  <View style={styles.group}>
+                    <SettingRow icon="Zap" label={m.native_ctl_fast()} disabled={!fastAvailable}
+                      value={fastAvailable && serviceTier === 'priority' ? m.native_ctl_fast_on() : m.native_ctl_fast_off()}
+                      onPress={() => void toggleFast()} />
+                  </View>
+                ) : null}
+                {resumeField}
+              </View>
+            ) : null}
+          </ScrollView>
+        )}
+        {branchPanel}
+      </View>
+    );
+  }
 
   return (
     <>
@@ -806,11 +957,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
             items: [{ id: '', label: m.criar_padrao(), selected: !esforco }, ...niveisEsforco.map((lv) => ({ label: lv, selected: lv === esforco }))],
             select: async (value) => chooseEffort(value) }}
           fast={{ hidden: !!retomavel || !fastVisible, on: fastAvailable && serviceTier === 'priority', available: fastAvailable,
-            toggle: async () => {
-              if (!fastAvailable) return;
-              if (provider === 'codex' && !modelo && codexFastModel) chooseModel(valorModelo(codexFastModel));
-              setServiceTier((cur) => cur === 'priority' ? undefined : 'priority');
-            } }}>
+            toggle: toggleFast }}>
           <Pressable accessibilityRole="button" accessibilityState={{ expanded: extrasOpen }}
             onPress={() => setExtrasOpen((value) => !value)} style={styles.more}>
             <Text style={styles.hint}>{m.criar_mais_opcoes()}</Text>
@@ -825,26 +972,26 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset, ho
       } : null}
       notices={notices}
       body={body}
-      blocked={contextBusy || retomando || !!retomavel || (!!picked && !codexReady)}
+      blocked={blocked}
       keyboardOffset={keyboardOffset}
     />
-    {/* Mesmo painel preso à pílula que o de pasta abre. */}
-    <AnchoredPanel
-      open={branchOpen && !!picked}
-      anchor={branchRef.current}
-      onClose={() => setBranchOpen(false)}
-      onDismissed={() => { if (branchRef.current) AccessibilityInfo.sendAccessibilityEvent(branchRef.current, 'focus'); }}
-      label={m.native_create_checkout_branch()}
-      closeLabel={m.native_close()}
-    >
-      {picked ? <BranchPicker server={active} cwd={picked} sessionName={name.trim() || basename(picked)}
-                              value={worktree} onChange={onWorktree} /> : null}
-    </AnchoredPanel>
+    {branchPanel}
     </>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
+  form: { flex: 1 },
+  navbar: { minHeight: 48, flexDirection: 'row', alignItems: 'center', paddingHorizontal: theme.base.space[3] },
+  navSide: { minWidth: 72, minHeight: 44, justifyContent: 'center' },
+  navRight: { alignItems: 'flex-end' },
+  navTitle: { flex: 1, textAlign: 'center', fontSize: theme.base.text.base, fontWeight: '600', color: theme.tokens.text.primary },
+  navAction: { fontSize: theme.base.text.base, color: theme.tokens.accent.base },
+  navStrong: { fontWeight: '600' },
+  folderScreen: { flex: 1, paddingHorizontal: theme.base.space[3], paddingBottom: theme.base.space[3] },
+  formScroll: { gap: theme.base.space[3], paddingHorizontal: theme.base.space[3], paddingBottom: theme.base.space[8] },
+  group: { backgroundColor: superficie(theme), borderRadius: theme.base.radius.lg, overflow: 'hidden' },
+  sep: { height: StyleSheet.hairlineWidth, marginLeft: 42, backgroundColor: theme.tokens.border.default },
   pickerWrap: { minHeight: 380, flex: 1 },
   more: { minHeight: 36, paddingHorizontal: 8, justifyContent: 'center' },
   extras: { gap: 12, padding: 8 },

@@ -130,6 +130,9 @@ function stableName(cwd: string, id: string): string {
   return `${clean}-${id.slice(-4)}`;
 }
 
+// Nome que a sessão recebe quando a pessoa deixa o campo em branco.
+export const defaultSessionName = (cwd: string) => stableName(cwd, newId());
+
 // Processo reaberto: creating/sending não voltam a disparar POST, viram incertos.
 export function restoreAttempt(serverId: string): FirstConversationAttempt | null {
   const raw = prefs.getString(KEY(serverId));
