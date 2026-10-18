@@ -107,10 +107,9 @@ vi.mock('../ui/Screen', () => ({ Screen: ({ children }: { children: ReactNode })
 // Conta os renders da tela: a gaveta é filha direta dela, sem memo.
 const screenRenders = vi.hoisted(() => ({ n: 0 }));
 // A gaveta puxa o gesture-handler nativo, que o vitest não carrega; aqui só o conteúdo importa.
-vi.mock('../features/sessions/SessionsDrawer', () => ({ SessionsDrawer: ({ children, onClose, onNewConversation }: { children: ReactNode; onClose: () => void; onNewConversation?: () => void }) => {
+vi.mock('../features/sessions/SessionsDrawer', () => ({ SessionsDrawer: ({ children, onClose }: { children: ReactNode; onClose: () => void }) => {
   screenRenders.n++;
   return createElement('div', { 'data-working-paused': String(useContext(WorkingMarkPaused)) }, children,
-    createElement('button', { 'aria-label': 'drawer-new-conversation', onClick: onNewConversation ?? onClose }),
     createElement('button', { 'aria-label': 'drawer-navigation-close', onClick: onClose }));
 } }));
 vi.mock('../features/sessions/ServerSheet', () => ({ ServerSheet: () => null }));
@@ -576,12 +575,10 @@ describe('ações e atualização da conversa na rota', () => {
     } finally { act(() => root.unmount()); navigation.depth = 1; }
   });
 
-  it('Nova conversa da gaveta do chat pede compose na inicial, sem mudar o fechamento das demais navegações', async () => {
+  it('o menu da gaveta do chat volta ao Início antes de navegar', async () => {
     navigation.dismissTo.mockClear();
     const { container, root } = await render(createElement(ChatScreen));
     try {
-      await act(async () => button(container, 'drawer-new-conversation')!.click());
-      expect(navigation.dismissTo).toHaveBeenLastCalledWith({ pathname: '/', params: { compose: '1' } });
       await act(async () => button(container, 'drawer-navigation-close')!.click());
       expect(navigation.dismissTo).toHaveBeenLastCalledWith('/');
     } finally { act(() => root.unmount()); }

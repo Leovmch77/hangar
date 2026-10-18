@@ -1191,6 +1191,7 @@
   "chat_nao_carregou_historico": "Não deu pra carregar o histórico.",
   "chat_voltar_sessoes": "Voltar às sessões",
   "chat_ir_inicio": "Ir para o Início",
+  "menu_inicio": "Início",
   "chat_historico_antigo": "Histórico antigo não carregou — tocar pra tentar",
   "chat_sem_historico_anterior": "Sem o histórico anterior — o transcript mudou",
   "chat_sessao_encerrada": "Esta sessão foi encerrada.",

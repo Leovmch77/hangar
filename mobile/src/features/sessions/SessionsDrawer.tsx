@@ -14,17 +14,16 @@ import ReanimatedDrawerLayout, {
 } from 'react-native-gesture-handler/ReanimatedDrawerLayout';
 import { Glass } from '../../ui/Glass';
 import { WorkingMarkPaused } from '../../ui/WorkingMark';
-import { SessionList } from './SessionList';
+import { DrawerMenu } from './DrawerMenu';
 
-// Gaveta de sessões da tela inicial e do chat. Ocupa a altura toda (passa por baixo da barra de
+// Gaveta de navegação da tela inicial e do chat. Ocupa a altura toda (passa por baixo da barra de
 // status, como Claude/ChatGPT): quem usa monta numa `Screen edges={[]}`, e a margem segura fica só
 // no conteúdo, aqui dentro. `onClose` roda antes de toda navegação que a lista faz.
 // `edgeStart`: a faixa de arrasto começa a essa distância da borda, que fica com o voltar do iOS.
-export function SessionsDrawer({ ref, edgeStart, onClose, onNewConversation, onOpenServers, children }: {
+export function SessionsDrawer({ ref, edgeStart, onClose, onOpenServers, children }: {
   ref?: Ref<DrawerLayoutMethods>;
   edgeStart?: number;
   onClose: () => void;
-  onNewConversation?: () => void;
   onOpenServers: () => void;
   children: ReactNode;
 }) {
@@ -69,7 +68,7 @@ export function SessionsDrawer({ ref, edgeStart, onClose, onNewConversation, onO
       keyboardDismissMode={DrawerKeyboardDismissMode.ON_DRAG}
       renderNavigationView={(progress) => (
         <DrawerPanel progress={progress}>
-          <SessionList onClose={onClose} onNewConversation={onNewConversation} onOpenServers={onOpenServers} />
+          <DrawerMenu onClose={onClose} onOpenServers={onOpenServers} />
         </DrawerPanel>
       )}
     >

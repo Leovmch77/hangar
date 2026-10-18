@@ -487,12 +487,11 @@ export default function ChatScreen() {
   ) : null, [loopStatus, loopIter, loopMax, router, serverId, name]);
   const onReturnedAdopted = useCallback(() => setReturned((cur) => (cur?.route === rota ? null : cur)), [rota]);
 
-  // A lista sai deste chat antes de empurrar outro destino; Nova conversa pede o campo na inicial.
+  // O menu sai deste chat antes de empurrar outro destino.
   return (
     <WorkingMarkPaused.Provider value={!focused}>
     <Screen edges={[]}>
-      <SessionsDrawer edgeStart={Platform.OS === 'ios' ? IOS_BACK_EDGE : undefined} onClose={() => router.dismissTo('/')} onOpenServers={() => setServersOpen(true)}
-        onNewConversation={() => router.dismissTo({ pathname: '/', params: { compose: '1' } })}>
+      <SessionsDrawer edgeStart={Platform.OS === 'ios' ? IOS_BACK_EDGE : undefined} onClose={() => router.dismissTo('/')} onOpenServers={() => setServersOpen(true)}>
         <MemoChatHeader
           name={name}
           state={codexPreThread ? currentSession.state : stateEvent?.state ?? null}
