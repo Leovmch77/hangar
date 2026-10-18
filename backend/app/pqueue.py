@@ -18,7 +18,7 @@ from watchfiles import awatch
 from app import atomico
 from app.config import settings
 from app.models import ChatEvent, dumps_safe, scrub_surrogates
-from app.transcript import RewriteFilter, parse_obj, silent_attachment_timestamp
+from app.transcript import RewriteFilter, comando_digitado, parse_obj, silent_attachment_timestamp
 
 _log = logging.getLogger("hangar.pqueue")
 
@@ -307,9 +307,6 @@ _IMG_PREFIX = re.compile(r"^(?:\[Image #\d+\])+\s*")
 # "📎 imagem: <path>" que o app digitou (2.1.270). Sem traduzir de volta, a entrega nunca casava e
 # o print era redigitado.
 _IMG_SOURCE = re.compile(r"\[Image: source: ([^\]]+)\]")
-# `/comando args` digitado vira `<command-name>/comando</command-name>` + `<command-args>` no transcript.
-_COMMAND_NAME = re.compile(r"<command-name>([^<]*)</command-name>")
-_COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 # Recados que chegam durante um turno viram UM registro com um bloco por recado: cada corpo é uma entrega.
 _PEER_BODY = re.compile(r"<cross-session-message\b[^>]*>\n?(.*?)\n?</cross-session-message>", re.S)
 _PEER_STARTS = ("<cross-session-message", "Another Claude session sent a message:")
@@ -330,13 +327,9 @@ def _chaves_de_commit(text: str) -> set[str]:
     t = text.strip()
     base = _IMG_PREFIX.sub("", t)
     fonte = _IMG_SOURCE.sub(lambda m: f"📎 imagem: {m.group(1)}", t)
-    # Só a mensagem que É o comando conta (citar a tag não conta), e ele entra inteiro, sem quebrar por linha.
-    nome = _COMMAND_NAME.search(t) if t.startswith(("<command-name>", "<command-message>")) else None
-    if nome:
-        args = _COMMAND_ARGS.search(t)
-        comando = f"{nome.group(1).strip()} {args.group(1).strip() if args else ''}".strip()
-        if comando:
-            out.add(comando)
+    comando = comando_digitado(t)
+    if comando:
+        out.add(comando)
     if t.startswith(_PEER_STARTS):
         out.update(b.strip() for b in _PEER_BODY.findall(t) if b.strip())
     for variant in (t, base, _strip_attach(t), _strip_attach(base), fonte):

@@ -502,7 +502,11 @@ fn user_text(uid: &str, s: &str) -> Vec<ChatEvent> {
         };
     }
     if is_command_meta(s) {
-        return Vec::new();
+        // O `/clear` abre a conversa nova; mostrá-lo seria a primeira bolha dela.
+        return super::history::typed_command(s)
+            .filter(|c| c.split_whitespace().next() != Some("/clear"))
+            .map(|c| vec![text_event(ChatKind::UserMsg, uid.into(), c)])
+            .unwrap_or_default();
     }
     if INTERRUPTED.is_match(strip(s)) {
         return vec![text_event(ChatKind::Notice, uid.into(), "interrupted".into())];
@@ -807,6 +811,20 @@ mod tests {
         let source_first = json!({"type": "user", "uuid": "u-src", "message": {"content": [
             {"type": "text", "text": "[Image: source: /tmp/a.png]"}, {"type": "text", "text": "outra"}]}});
         assert!(LineParser::new(Provider::Claude).feed(source_first.to_string().as_bytes(), 0).is_empty());
+    }
+
+    #[test]
+    fn typed_command_shows_as_the_text_the_user_typed() {
+        let feed = |content: &str| LineParser::new(Provider::Claude)
+            .feed(json!({"type": "user", "uuid": "u-cmd", "message": {"role": "user", "content": content}}).to_string().as_bytes(), 0)
+            .into_iter().map(|e| (e.kind, e.text)).collect::<Vec<_>>();
+        let user = |t: &str| vec![(ChatKind::UserMsg, Some(t.to_string()))];
+        assert_eq!(feed("<command-message>pr-review-auto</command-message>\n<command-name>/pr-review-auto</command-name>\n<command-args>225</command-args>"), user("/pr-review-auto 225"));
+        assert_eq!(feed("<command-name>/effort</command-name>\n            <command-message>effort</command-message>\n            <command-args>xhigh</command-args>"), user("/effort xhigh"));
+        // A fronteira da conversa nova e o que o comando local imprime seguem fora.
+        assert!(feed("<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>").is_empty());
+        assert!(feed("<local-command-stdout>Set model to opus</local-command-stdout>").is_empty());
+        assert!(feed("Base directory for this skill: /s\n\n# Skill").is_empty());
     }
 
     #[test]
