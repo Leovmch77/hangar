@@ -255,7 +255,9 @@ async fn uploads_never_ask_python_for_the_session_facts() {
     let (status, saved) = scene.upload("s", b"abc", "nota%20final.TXT").await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     let path = PathBuf::from(saved["path"].as_str().unwrap());
-    assert!(path.starts_with(scene.dir.path().join(".hangar/uploads")), "{path:?}");
+    // O cofre grava pelo caminho real: no macOS a pasta temporária é link para /private/var.
+    let vault = std::fs::canonicalize(scene.dir.path().join(".hangar/uploads")).unwrap();
+    assert!(std::fs::canonicalize(&path).unwrap().starts_with(&vault), "{path:?}");
     assert_eq!(path.parent().unwrap().file_name().unwrap(), "s", "pasta chaveada pelo id do transcript");
     assert_eq!(path.extension().unwrap(), "txt");
     assert_eq!((saved["frames"].clone(), saved["transcript"].clone()), (json!([]), json!("")));
@@ -646,6 +648,8 @@ fn task_output_paths_follow_the_claude_layout() {
     assert!(!is_task_output(Path::new("/tmp/claude-1000/proj/tasks/b1.log")));
 }
 
+// No macOS a saída ao vivo do Bash não é lida (ver `stdout_files`).
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn stdout_files_of_a_child_include_its_redirected_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -661,7 +665,7 @@ fn stdout_files_of_a_child_include_its_redirected_file() {
         c
     };
     let mut child = command.stdout(file).spawn().unwrap();
-    let files = hangar_server::session_media::stdout_files(child.id() as i64);
+    let files = hangar_server::session_media::stdout_files(child.id() as i64).unwrap();
     let _ = child.kill();
     let _ = child.wait();
     let wanted = std::fs::canonicalize(&path).unwrap();
@@ -670,9 +674,9 @@ fn stdout_files_of_a_child_include_its_redirected_file() {
 
 /// Agente de mentira: um `sh` que roda o Bash do Claude Code (`… && eval '<cmd>' && pwd`) com a
 /// saída num arquivo; o grupo inteiro morre no fim.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 struct Agent(std::process::Child);
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl Agent {
     fn spawn(mark: &str, out: &Path) -> Self {
         use std::os::unix::process::CommandExt;
@@ -681,7 +685,7 @@ impl Agent {
     }
     fn pid(&self) -> i64 { self.0.id() as i64 }
 }
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl Drop for Agent {
     fn drop(&mut self) {
         let _ = std::process::Command::new("kill").args(["-TERM", "--", &format!("-{}", self.0.id())]).status();
@@ -689,13 +693,13 @@ impl Drop for Agent {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn native(cfg: &Path, sid: &str, pid: i64) {
     std::fs::create_dir_all(cfg.join("sessions")).unwrap();
     std::fs::write(cfg.join(format!("sessions/{pid}.json")), json!({"sessionId": sid, "pid": pid, "status": "busy", "updatedAt": 1000}).to_string()).unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn written(path: &Path) {
     let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) == 0 {
@@ -704,7 +708,7 @@ fn written(path: &Path) {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn bash_output_reads_only_the_command_under_the_session_agent() {
     use hangar_server::{list::procs::SystemProcs, session_media::bash_output};

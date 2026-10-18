@@ -264,20 +264,32 @@ pub fn read_tail(path: &Path, max: u64) -> Result<Option<String>, &'static str> 
 
 /// Para onde vai a saída padrão do processo.
 #[cfg(target_os = "linux")]
-pub fn stdout_files(pid: i64) -> Vec<std::path::PathBuf> {
-    std::fs::read_link(format!("/proc/{pid}/fd/1")).into_iter().collect()
+pub fn stdout_files(pid: i64) -> Result<Vec<std::path::PathBuf>, &'static str> {
+    Ok(std::fs::read_link(format!("/proc/{pid}/fd/1")).into_iter().collect())
 }
 
 /// No Windows não há descritor 1 para ler: vale todo arquivo de disco que o processo tem aberto.
+/// A pergunta pelo tipo e pelo nome de um handle de pipe pode não voltar nunca: ela roda numa thread
+/// com prazo, uma por vez, e a que travou segura a vaga (as seguintes recusam com código).
 #[cfg(windows)]
-pub fn stdout_files(pid: i64) -> Vec<std::path::PathBuf> {
-    open_files::of(pid)
+pub fn stdout_files(pid: i64) -> Result<Vec<std::path::PathBuf>, &'static str> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static BUSY: AtomicBool = AtomicBool::new(false);
+    if BUSY.swap(true, Ordering::AcqRel) {
+        return Err("bash_output_handles_busy");
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(open_files::of(pid));
+        BUSY.store(false, Ordering::Release);
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(2)).map_err(|_| "bash_output_handles_timeout")
 }
 
 // shortcut: no macOS a saída ao vivo do Bash fica vazia; ler os arquivos abertos por libproc quando houver servidor macOS.
 #[cfg(not(any(target_os = "linux", windows)))]
-pub fn stdout_files(_pid: i64) -> Vec<std::path::PathBuf> {
-    Vec::new()
+pub fn stdout_files(_pid: i64) -> Result<Vec<std::path::PathBuf>, &'static str> {
+    Ok(Vec::new())
 }
 
 /// A saída ao vivo de um Bash da sessão `sid`: só os processos abaixo do agente dela contam, e o
@@ -302,7 +314,7 @@ pub fn bash_output(dirs: &[std::path::PathBuf], sid: &str, command: &str, procs:
         if crate::state::shells::requested(&procs.argv(pid).join(" ")) != wanted {
             continue;
         }
-        if let Some(file) = stdout_files(pid).into_iter().find(|f| is_task_output(f)) {
+        if let Some(file) = stdout_files(pid)?.into_iter().find(|f| is_task_output(f)) {
             return read_tail(&file, OUTPUT_TAIL);
         }
     }
