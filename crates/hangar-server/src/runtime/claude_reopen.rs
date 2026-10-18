@@ -425,6 +425,18 @@ impl RuntimeRegistry {
         Ok(meta)
     }
 
+    /// Fecha com Esc o menu do limite do Claude Code com terminal, se ele está no rodapé do pane. `Ok(false)`: sem
+    /// terminal (o menu é da TUI) ou sem o menu.
+    pub async fn dismiss_claude_limit_menu(&self,name:&str) -> Result<bool,RuntimeError> {
+        use crate::mods::click::{PaneOp,PaneReply};
+        let Some((_,handle))=self.claude_terminal_entry(name).await else { return Ok(false) };
+        let PaneReply::Screen(screen)=handle.pane(PaneOp::Screen,std::time::Instant::now()+std::time::Duration::from_secs(5)).await? else { return Ok(false) };
+        if !crate::session_write::limit_switch::limit_menu_open(&screen) { return Ok(false); }
+        let reply=handle.control(crate::mods::state::random_hex(16),"navigation_key".into(),json!({"key":"Escape"})).await?;
+        if reply.disposition!=crate::runtime::protocol::Disposition::Accepted { return Err(refused("limit_menu_escape","o Esc não chegou ao menu do limite")); }
+        Ok(true)
+    }
+
     /// O modo que o Rust confirmou por último na conversa (memória dele, sem leitura do rodapé).
     pub fn observed_claude_mode(&self,conversation:&str) -> Option<String> { self.permission_view(conversation).map(|view|view.current) }
 
