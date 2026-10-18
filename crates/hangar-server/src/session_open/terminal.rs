@@ -51,7 +51,7 @@ pub struct TerminalEnv {
     pub server_config_dir: Option<String>,
     /// `~/.claude`: a conta padrão, que para o Claude Code é a ausência da variável.
     pub default_config_dir: PathBuf,
-    /// Quanto o pane precisa ficar de pé depois de criado para não contar como morto ao nascer (S-15).
+    /// Quanto o pane precisa ficar de pé depois de criado para não contar como morto ao nascer.
     pub birth: Duration,
 }
 
@@ -126,7 +126,7 @@ pub fn sandboxed(prefix: &[String], command: &[String], windows: bool) -> Vec<St
     prefix.iter().cloned().chain(["/bin/sh".into(), "-c".into(), inner]).collect()
 }
 
-/// S-63: o que só a sessão põe (ou a configuração do servidor, relida na abertura) e o que é
+/// O que só a sessão põe (ou a configuração do servidor, relida na abertura) e o que é
 /// segredo do servidor. Servidor tmux subido de dentro de outra sessão teria os dela; o pane sai sem
 /// os que esta não pôs por `-e`. As do motor são as que o `hangar-engine` exporta (`engines.env_de`).
 pub const NOT_INHERITED: [&str; 46] = [
@@ -193,7 +193,7 @@ pub async fn spawn(mux: &dyn Mux, env: &TerminalEnv, pane: &PaneSpec) -> Result<
     let mut scoped = scope.clone();
     scoped.extend(argv.iter().cloned());
     let mut output = mux.run(scoped.clone()).await;
-    // S-31: escopos criados juntos (o `orq` cria em rajada) recebem do systemd uma recusa passageira;
+    // Escopos criados juntos (o `orq` cria em rajada) recebem do systemd uma recusa passageira;
     // ela se repete, com o escopo e com espera; esgotada, é erro com o código dela.
     let mut waits = crate::runtime::process::SCOPE_RETRY.iter();
     while !scope.is_empty() && !output.ok() && crate::runtime::process::scope_unit_missing(output.stderr.as_bytes()).is_some() {
@@ -208,7 +208,7 @@ pub async fn spawn(mux: &dyn Mux, env: &TerminalEnv, pane: &PaneSpec) -> Result<
         mux.diary(serde_json::json!({"evento": "mux.scope_perdido", "nivel": "aviso", "retorno": output.code, "comando": "new-session"}));
         output = mux.run(argv).await;
     }
-    // S-32: sem resposta, a sessão pode ter nascido (e o psmux devolve diferente de zero com ela de
+    // Sem resposta, a sessão pode ter nascido (e o psmux devolve diferente de zero com ela de
     // pé). Só vale se for esta: outra de mesmo nome ganhou a corrida e o pedido é recusado.
     if !output.ok() {
         match is_this_one(mux, env, pane).await {
@@ -220,7 +220,7 @@ pub async fn spawn(mux: &dyn Mux, env: &TerminalEnv, pane: &PaneSpec) -> Result<
     born(mux, env, &pane.name).await
 }
 
-/// S-15: o `new-session` devolve 0 com o comando morto ao nascer (binário ausente, flag recusada).
+/// O `new-session` devolve 0 com o comando morto ao nascer (binário ausente, flag recusada).
 /// A janela é de relógio. Com o pid do pane (Linux), a saída do processo chega como sinal pelo
 /// `pidfd`; sem ele (psmux), o `has-session` é conferido a cada 100 ms até o prazo. Sem resposta até
 /// o fim é incerto, nunca "morreu".
@@ -493,7 +493,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// O comando sem o `env -u` do S-63, como o Python o montava.
+    /// O comando sem o `env -u` das variáveis não herdadas, como o Python o montava.
     pub(crate) fn undo_not_inherited(command: &str) -> String {
         let words: Vec<&str> = command.split(' ').collect();
         let mut out = Vec::new();
@@ -575,7 +575,7 @@ pub(crate) mod tests {
         assert_eq!(argv.last().unwrap(), "claude --settings '{\"a\":\"it''s\"}'");
     }
 
-    /// S-63: nada que o servidor tmux herdou de outra sessão (subagente, Jev, ponte, portão de hooks,
+    /// Nada que o servidor tmux herdou de outra sessão (subagente, Jev, ponte, portão de hooks,
     /// motor, cano) nem segredo do servidor chega ao pane; o que a sessão põe por `-e` fica.
     #[test]
     fn the_pane_does_not_inherit_what_belongs_to_another_session() {
@@ -601,7 +601,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// S-63: o que o `hangar-engine` exporta (`engines.py`) é da sessão de motor que o pôs; o pane novo
+    /// O que o `hangar-engine` exporta (`engines.py`) é da sessão de motor que o pôs; o pane novo
     /// não herda de um servidor tmux subido de dentro dela.
     #[test]
     fn the_pane_does_not_inherit_what_an_engine_exports() {
@@ -622,11 +622,11 @@ pub(crate) mod tests {
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0][..6], scope[..]);
         assert_eq!(runs[1][0], "tmux", "a segunda vez sem o escopo");
-        // TMX-035: o escopo perdido vai ao diário, como o `mux.scope_perdido` do Python.
+        // O escopo perdido vai ao diário, como o `mux.scope_perdido` do Python.
         assert_eq!(*mux.notes.lock().unwrap(), [serde_json::json!({"evento": "mux.scope_perdido", "nivel": "aviso", "retorno": 1, "comando": "new-session"})]);
     }
 
-    /// CRI-101: comando do multiplexador que falha (fora a ausência esperada) ou passa de 1 s vai ao
+    /// Comando do multiplexador que falha (fora a ausência esperada) ou passa de 1 s vai ao
     /// diário como `mux.comando`, sem argv nem stderr.
     #[cfg(unix)]
     #[tokio::test]
@@ -649,7 +649,7 @@ pub(crate) mod tests {
         assert!(!text.contains("segredo") && !text.contains("s1"), "{text}");
     }
 
-    /// S-31: a recusa passageira do systemd a escopos criados juntos se repete, com espera, até três
+    /// A recusa passageira do systemd a escopos criados juntos se repete, com espera, até três
     /// vezes, sempre com o escopo; esgotada, é erro com o código dela.
     #[tokio::test(start_paused = true)]
     async fn the_transient_scope_refusal_is_retried_with_the_scope() {
@@ -665,7 +665,7 @@ pub(crate) mod tests {
         assert_eq!(error.stderr, "Failed to start transient scope unit: Unit run-p4242.scope not found.");
     }
 
-    /// S-32: sem resposta no prazo (ou o psmux com código diferente de zero), a sessão pode ter nascido;
+    /// Sem resposta no prazo (ou o psmux com código diferente de zero), a sessão pode ter nascido;
     /// ela só vale se for esta (a chave dela), e uma de mesmo nome que não é esta é recusa.
     #[tokio::test]
     async fn an_unanswered_new_session_counts_only_when_the_session_is_this_one() {
@@ -682,7 +682,7 @@ pub(crate) mod tests {
         assert_eq!(spawn(&gone, &machine(), &claude(Vec::new(), None)).await.unwrap_err().code, "terminal_nao_criado");
     }
 
-    /// S-15: o `new-session` devolve 0 com o comando morto ao nascer (binário ausente, flag que o CLI
+    /// O `new-session` devolve 0 com o comando morto ao nascer (binário ausente, flag que o CLI
     /// recusa); o pane é conferido até o fim da janela de nascimento e a morte é erro com código.
     #[tokio::test(start_paused = true)]
     async fn a_pane_that_dies_at_birth_is_an_error() {
@@ -727,7 +727,7 @@ pub(crate) mod tests {
         living.wait().unwrap();
     }
 
-    /// S-55: todo pane nasce com o provedor dele em `CP_PROVIDER` (o `/resume` do Python o deixava
+    /// Todo pane nasce com o provedor dele em `CP_PROVIDER` (o `/resume` do Python o deixava
     /// vazio); o tipo não tem o vazio, e o `-e` vem antes de qualquer outro da sessão.
     #[test]
     fn every_pane_carries_its_provider() {

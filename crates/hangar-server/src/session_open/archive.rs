@@ -1,6 +1,6 @@
 //! Retomar uma conversa do Arquivo (`POST /api/archive/{project}/{session_id}/resume`): acha a conversa
 //! (a conta dona, a pasta gravada no cabeçalho, a worktree apagada que volta para a principal) e a abre
-//! pela mesma resolução da criação (S-08), retomando a conversa em vez de abrir outra. Port do
+//! pela mesma resolução da criação, retomando a conversa em vez de abrir outra. Port do
 //! `resume_archived` com `archive.py` e `archive_providers.py`.
 use std::collections::BTreeMap;
 use std::io::BufRead;
@@ -355,7 +355,7 @@ fn move_with(rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>, server_projec
 }
 
 /// Abre a retomada resolvida: a conversa muda para a conta em que a sessão vai nascer (a pedida, ou a de
-/// mais folga pela regra dos 95%, D-003) e volta para a de antes se a abertura falhar.
+/// mais folga pela regra dos 95%) e volta para a de antes se a abertura falhar.
 pub async fn open(host: &dyn super::open::OpenHost, plan: Plan, mut resolved: super::Resolved, project: &str, sid: &str)
     -> Result<Value, OpenError> {
     resolved.resume = Some(sid.to_owned());

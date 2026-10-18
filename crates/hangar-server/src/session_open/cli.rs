@@ -1,4 +1,4 @@
-//! `hangar-server open|resolve`: o lançador do Hangar como comando de terminal (D-013, T-006). O mesmo
+//! `hangar-server open|resolve`: o lançador do Hangar como comando de terminal. O mesmo
 //! `resolve_open()` do servidor, lendo os mesmos arquivos, para o terminal decidir igual com o servidor
 //! fora do ar. Subcomando do `hangar-server` porque ele já está instalado em toda máquina.
 //!
@@ -87,7 +87,7 @@ pub fn run(args: &[String]) -> ExitCode {
     };
     // Sem terminal o processo é do servidor: com ele fora, o comando só resolve.
     if command == "open" && opens_here(&resolved.spec) && resolved.spec.surface == super::Surface::Terminal {
-        // A mesma abertura do servidor (D-013): token e porta do `.env` dele, para a ponte do plugin
+        // A mesma abertura do servidor: token e porta do `.env` dele, para a ponte do plugin
         // valer quando ele voltar.
         let bridge = server.get("CP_AUTH_TOKEN").filter(|t| !t.is_empty())
             .map(|token| PluginBridge { port: server.get("CP_PORT").and_then(|p| p.parse().ok()).unwrap_or(8765), secret: token.clone() });
@@ -193,7 +193,7 @@ mod tests {
         assert!(OPEN_TIMEOUT > std::time::Duration::from_secs(180), "{OPEN_TIMEOUT:?}");
     }
 
-    /// O Hangar no modo Python (Rust caído) não abre: o comando abre na máquina, como com ele fora (D-013).
+    /// O Hangar no modo Python (Rust caído) não abre: o comando abre na máquina, como com ele fora.
     #[test]
     fn a_server_without_rust_counts_as_down() {
         let python = r#"{"detail":{"code":"session_open_needs_rust_server","params":{},"msg":"abrir e reabrir sessão precisam do servidor Rust, que não está rodando"}}"#;

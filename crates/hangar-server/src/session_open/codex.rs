@@ -38,7 +38,7 @@ pub fn home(server_env: &BTreeMap<String, String>, account_id: &str) -> Result<S
     Ok(std::path::absolute(&account.home).unwrap_or(account.home).to_string_lossy().into_owned())
 }
 
-/// `PERMISSION_POLICIES`: modo do app → (aprovação, sandbox). Fora da lista não abre (S-05).
+/// `PERMISSION_POLICIES`: modo do app → (aprovação, sandbox). Fora da lista não abre.
 pub fn policy(mode: &str) -> Result<(&'static str, &'static str), OpenError> {
     crate::runtime::codex_launch::policy_of(mode).ok_or_else(|| OpenError::new(409, "erro_permissao_invalida",
         format!("modo de permissão desconhecido: {mode:?}; a sessão não foi aberta")))
@@ -67,7 +67,7 @@ pub fn launcher_argv(launch: &Launch) -> Result<Vec<String>, OpenError> {
     Ok(argv)
 }
 
-/// O lançador da criação: a conta resolvida e a escolha do spec; o modo do spec vale (T-001).
+/// O lançador da criação: a conta resolvida e a escolha do spec; o modo do spec vale.
 pub fn creation(spec: &SessionSpec, codex_home: &str, prompt: Option<&str>) -> Launch {
     let account = match &spec.account { super::Account::Codex { account_id } => account_id.clone(), _ => "default".into() };
     Launch {
@@ -165,7 +165,7 @@ mod tests {
         Launch { cwd: "/w".into(), codex_home: "/h/.codex".into(), account: "default".into(), mode: "Full Access".into(), ..Launch::default() }
     }
 
-    /// CDX-025: aberturas ao mesmo tempo na mesma conta não perdem a confiança uma da outra.
+    /// Aberturas ao mesmo tempo na mesma conta não perdem a confiança uma da outra.
     #[test]
     fn simultaneous_pretrusts_keep_every_folder() {
         let home = tempfile::tempdir().unwrap();
@@ -192,7 +192,7 @@ mod tests {
         assert_eq!(policy("Approve for me").unwrap(), ("on-request", "workspace-write"));
     }
 
-    /// S-05: modo fora da lista nunca vira Full Access.
+    /// Modo fora da lista nunca vira Full Access.
     #[test]
     fn an_unknown_mode_refuses_instead_of_full_access() {
         for mode in ["Read Only", "", "yolo"] {

@@ -691,13 +691,13 @@ pub(super) async fn folders(machines: &Machines, machine: &str) -> Result<(Vec<(
     Ok((folders, unread))
 }
 
-/// Os `avisos` da resposta de abertura (troca de conta no limite, D-003), em frase para o fim da resposta da ferramenta.
+/// Os `avisos` da resposta de abertura (troca de conta no limite), em frase para o fim da resposta da ferramenta.
 pub(super) fn warnings_notice(info: &Value) -> String {
     info["avisos"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|w| format!(" Aviso do servidor: {w}")).collect()
 }
 
 /// Cria a sessão; devolve o nome com que ela nasceu e os avisos dela. O que o usuário não disse fica com o padrão do servidor, como a tela de
-/// criação sem toque, inclusive o modo de permissão (o da conta, D-010).
+/// criação sem toque, inclusive o modo de permissão (o da conta).
 pub(super) async fn create(machines: &Machines, machine: &str, request: &OpenRequest) -> Result<(String, String), String> {
     let cwd = folder(machines, machine, &request.folder).await?;
     let name = match &request.name {

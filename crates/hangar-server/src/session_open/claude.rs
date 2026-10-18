@@ -35,13 +35,13 @@ pub struct ClaudeContext<'a> {
     /// O envelope `bwrap … --` do só leitura.
     pub read_only: Option<&'a [String]>,
     pub windows: bool,
-    /// A primeira mensagem da conversa (S-40).
+    /// A primeira mensagem da conversa.
     pub initial_prompt: Option<&'a str>,
     /// A conta ChatGPT fixa do motor, resolvida na abertura.
     pub engine_route: Option<&'a EngineRoute>,
     /// Reabertura de uma conversa que já tem transcript: `--resume` em vez de `--session-id`.
     pub resume: bool,
-    /// Plano sobre base bypass: sem a flag a CLI não volta ao bypass ao aprovar o plano (S-04).
+    /// Plano sobre base bypass: sem a flag a CLI não volta ao bypass ao aprovar o plano.
     pub allow_bypass: bool,
 }
 
@@ -126,7 +126,7 @@ pub fn pane(spec: &SessionSpec, sid: &str, ctx: &ClaudeContext) -> PaneSpec {
     if let Some(settings) = ctx.settings.filter(|s| s.as_object().is_some_and(|o| !o.is_empty())) {
         claude.extend(["--settings".into(), settings_json(settings)]);
     }
-    // S-40: o prompt inicial é o posicional do `claude`, depois das opções; começando com `-`, o `--`
+    // O prompt inicial é o posicional do `claude`, depois das opções; começando com `-`, o `--`
     // impede que vire flag.
     if let Some(prompt) = ctx.initial_prompt.filter(|p| !p.is_empty()) {
         if prompt.starts_with('-') { claude.push("--".into()); }

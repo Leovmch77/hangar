@@ -1,7 +1,7 @@
 //! Restaurar as sessões com terminal depois do reboot: o Rust guarda, enquanto roda, quais sessões do
 //! Hangar estão abertas e em que conversa (`~/.hangar/session-restore.json`), e na subida, quando o servidor
 //! do multiplexador não é mais o da fotografia (reboot, queda ou `kill-server` do tmux), reabre cada uma pelo
-//! spec gravado, retomando a conversa (S-68, S-69, S-70). O comando vai no `new-session`, nunca digitado num
+//! spec gravado, retomando a conversa. O comando vai no `new-session`, nunca digitado num
 //! shell. Não depende do tmux-resurrect, e vale no Windows (psmux).
 //!
 //! Uma sessão sai da fotografia só depois de ausente por `ABSENT` com o servidor de pé: o desligamento
@@ -42,7 +42,7 @@ pub struct Entry {
     pub missing_since: Option<f64>,
 }
 
-/// O spec com que a sessão volta: o gravado, com o modo da hora em que caiu (S-68, P-02). No Codex o modo
+/// O spec com que a sessão volta: o gravado, com o modo da hora em que caiu. No Codex o modo
 /// é o que a TUI gravou no sidecar (`record::live`); no Claude, o que a fotografia viu.
 pub fn spec_for_restore(home: &Path, key: &str, entry: &Entry) -> Result<super::SessionSpec, &'static str> {
     let read = if entry.provider == AgentProvider::Codex { super::record::live(home, &entry.name) } else { super::record::read(home, key) };
@@ -99,7 +99,7 @@ pub fn to_restore(snap: &Snapshot, current: MuxStart, live: &HashSet<String>) ->
     Some(snap.sessions.iter().filter(|(_, e)| !live.contains(&e.name)).map(|(k, e)| (k.clone(), e.clone())).collect())
 }
 
-/// T-019: o psmux sobe um servidor por sessão (o `#{start_time}` é o da mais nova e `#{server_sessions}` vem
+/// O psmux sobe um servidor por sessão (o `#{start_time}` é o da mais nova e `#{server_sessions}` vem
 /// vazio), então fim normal e queda não se distinguem com o Rust de pé. A decisão é uma só, na subida:
 /// `Some(true)` restaura, `Some(false)` só fotografa daí em diante, `None` = o psmux não respondeu ainda.
 pub fn windows_startup(current: MuxStart, snap: &Snapshot) -> Option<bool> {
@@ -586,7 +586,7 @@ mod tests {
         super::super::record::write(home, &spec).unwrap();
     }
 
-    /// T-019: no Windows só a subida do Rust sem nenhum servidor psmux e com sessões na fotografia
+    /// No Windows só a subida do Rust sem nenhum servidor psmux e com sessões na fotografia
     /// restaura; com servidor vivo nunca, e sem resposta do psmux a decisão espera.
     #[test]
     fn on_windows_only_a_start_without_any_psmux_server_restores() {
@@ -599,7 +599,7 @@ mod tests {
         assert_eq!(windows_startup(MuxStart::Unknown, &full), None);
     }
 
-    /// RET-148: o servidor que saiu porque a única sessão dele terminou (o agente saiu) não traz nada de
+    /// O servidor que saiu porque a única sessão dele terminou (o agente saiu) não traz nada de
     /// volta; com mais sessões de uma vez, no desligamento ou sem a contagem vista nesta execução, é queda.
     #[test]
     fn a_server_that_ended_with_its_last_session_brings_nothing_back() {

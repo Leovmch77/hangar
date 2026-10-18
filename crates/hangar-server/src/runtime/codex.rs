@@ -1152,7 +1152,7 @@ impl Engine {
         }
         // Cano vivo já tem o esforço que a vida anterior aplicou: como no Python, religar não o reenvia.
         if let Some(effort) = self.metadata["effort"].as_str().filter(|_|self.fresh_process).map(str::to_owned) {
-            // O modelo escolhido vai junto (S-77): sem ele o Codex aplica o nível ao modelo que a thread abriu.
+            // O modelo escolhido vai junto: sem ele o Codex aplica o nível ao modelo que a thread abriu.
             let model = self.metadata["model"].as_str().map(str::to_owned).or_else(||self.model.clone());
             let request = ClientRequest::ThreadSettingsUpdate(wire::ThreadSettingsUpdateParams { thread_id:self.thread_id.clone(),
                 model:model.map(Some),effort:Some(Some(effort)),..Default::default() });
@@ -1160,7 +1160,7 @@ impl Engine {
         } else { self.ready = true; effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Accepted,payload:json!({"ready":true}) }); effects.push(Effect::WakeQueue); }
     }
 
-    /// S-77: processo novo sem terminal que devolve outro Fast que o gravado não sobe (o Python recusava): a
+    /// Processo novo sem terminal que devolve outro Fast que o gravado não sobe (o Python recusava): a
     /// escolha fica no arquivo da sessão e a recusa aparece, em vez de abrir num Fast que ninguém escolheu.
     fn fast_dropped(&self,rpc:&Rpc,result:&Value) -> Option<String> {
         let parent = rpc.continuation.as_ref().filter(|next|next["kind"] == "bootstrap_thread")?["parent"].as_str()?.to_owned();

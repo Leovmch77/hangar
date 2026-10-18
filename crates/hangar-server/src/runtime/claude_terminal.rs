@@ -191,7 +191,7 @@ impl Watcher {
     }
 
     /// O Claude de um pane sem conversa provada (aberto sem id, sem o registro nativo): o pane, o agente,
-    /// a pasta dele (não a do pane, que um `cd` no shell muda, S-23) e a chave da fila. `Ok(None)`: o pane
+    /// a pasta dele (não a do pane, que um `cd` no shell muda) e a chave da fila. `Ok(None)`: o pane
     /// não roda um Claude.
     pub async fn bare_claude(&self, name: &str) -> Result<Option<BareClaude>, RuntimeError> {
         let panes = self.cfg.mux.list_panes().await.map_err(|e| refused("mux_unavailable", e.code))?;

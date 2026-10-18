@@ -1,4 +1,4 @@
-//! D-002: a sessão Claude que para no limite de uso da conta reabre sozinha na conta de mais folga, pela
+//! A sessão Claude que para no limite de uso da conta reabre sozinha na conta de mais folga, pela
 //! mesma reabertura do `/conta`, e recebe pela fila um recado para continuar de onde parou.
 use std::collections::BTreeMap;
 use std::sync::{Arc,Mutex};

@@ -558,7 +558,7 @@ pub async fn bridge(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
 }
 
 /// `POST /api/archive/{project}/{session_id}/resume`: a conversa do Arquivo volta numa sessão nova, pela
-/// resolução da criação (S-08). Dono pela porta pública ou pelo repasse do Python (Connect).
+/// resolução da criação. Dono pela porta pública ou pelo repasse do Python (Connect).
 pub async fn serve_archive_resume(st: &Arc<AppState>, project: &str, sid: &str, bytes: &[u8]) -> Response {
     let body = match super::archive::ArchiveBody::parse(bytes) {
         Ok(body) => body,

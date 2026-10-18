@@ -1,4 +1,4 @@
-//! A abertura com o servidor fora do ar (`hangar-server open`, D-013): a mesma biblioteca do servidor,
+//! A abertura com o servidor fora do ar (`hangar-server open`): a mesma biblioteca do servidor,
 //! sem o que só ele guarda (fila, grupos, lista, diário). A sessão nasce igual, com o spec gravado, e
 //! o servidor a adota quando voltar, pela varredura de sempre.
 use std::collections::BTreeMap;

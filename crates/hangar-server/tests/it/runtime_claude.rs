@@ -811,7 +811,7 @@ fn old_cli_rate_limit_counts_only_with_a_current_rejected_quota() {
     assert!(usage_limits(&feed(&mut engine,&lines,11.0)).is_empty());
 }
 
-/// CSH-095: a abertura que sobe e responde o `initialize` limpa a queda gravada da vida anterior, na tela e
+/// A abertura que sobe e responde o `initialize` limpa a queda gravada da vida anterior, na tela e
 /// no arquivo da sessão, como o `open_succeeded` do Python; não espera o primeiro turno.
 #[test]
 fn a_good_open_clears_the_persisted_problem() {

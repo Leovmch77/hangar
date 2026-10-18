@@ -185,7 +185,7 @@ mod tests {
         }
     }
 
-    /// S-77: a identidade da sessão vai ao shell dos comandos do Codex (`identity_override` do Python);
+    /// A identidade da sessão vai ao shell dos comandos do Codex (`identity_override` do Python);
     /// sem ela, com `inherit` diferente de `all`, o `hangar-send` de dentro assinava `cli`.
     #[test]
     fn launch_carries_the_session_identity_to_the_command_shell() {

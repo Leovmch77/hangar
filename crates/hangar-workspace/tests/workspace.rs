@@ -213,7 +213,7 @@ fn branches_say_which_ones_are_open_in_another_worktree() {
     assert!(from_other["elsewhere"].get("feat").is_none());
 }
 
-/// S-66/S-67: desfazer a worktree apaga só a branch local que a criação fez (a nova e a trazida do
+/// Desfazer a worktree apaga só a branch local que a criação fez (a nova e a trazida do
 /// remoto com `--track -b`), nunca a que já existia; a pasta ocupada ganha `-2`.
 #[test]
 fn undoing_a_worktree_deletes_only_the_branch_it_created() {

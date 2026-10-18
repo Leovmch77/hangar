@@ -111,7 +111,7 @@ pub fn pane(spec: &SessionSpec, conversation: Conversation, ctx: &AgentContext) 
     }
     let mut env = super::claude::jev_pairs(spec.jev, ctx.runtime_config);
     env.push(("HANGAR_CLAUDE_SETTINGS".into(), String::new()));
-    // Por `-e`, como o resto da sessão (S-58, S-73): o pane recebe no Windows também, e o Pi aberto
+    // Por `-e`, como o resto da sessão: o pane recebe no Windows também, e o Pi aberto
     // pelo app ganha a reserva do bilhete que só o omp tinha.
     if spec.provider != AgentProvider::Kimi { env.push(("CP_PI_SESSION".into(), id.into())); }
     if let Some(profile) = profile { env.push(("OMP_PROFILE".into(), profile.into())); }
@@ -119,7 +119,7 @@ pub fn pane(spec: &SessionSpec, conversation: Conversation, ctx: &AgentContext) 
         config_dir: spec.account.config_dir().map(str::to_owned), command })
 }
 
-/// S-40: o prompt inicial de Pi, omp e Kimi vai à fila durável do nome (`PromptQueue`, que entrega
+/// O prompt inicial de Pi, omp e Kimi vai à fila durável do nome (`PromptQueue`, que entrega
 /// quando o agente fica pronto), carimbado antes da conversa existir. Grava antes do pane: depois
 /// dele o Python já pode estar drenando o arquivo.
 pub fn queue_initial_prompt(claude_base: &Path, name: &str, text: &str, now: f64) -> std::io::Result<PathBuf> {

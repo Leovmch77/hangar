@@ -124,7 +124,7 @@ impl LocalFacts {
                 &mut Default::default(), name, &pane.cwd, pid).jsonl
         });
         let cache = Mutex::new(crate::list::capped::Capped::new(1));
-        // Sem fala no transcript, o modo de abertura (CRI-030).
+        // Sem fala no transcript, o modo de abertura.
         let permission_mode = transcript.and_then(|jsonl| crate::terminal_facts::transcript_mode(Path::new(&jsonl), &cache).ok().flatten()
             .or_else(|| super::record::launch_mode(&self.env().home, Path::new(&jsonl).file_stem()?.to_str()?)));
         Some(CreatorFacts { provider, headless: false, config_dir, permission_mode, codex_account: None })
@@ -536,7 +536,7 @@ impl OpenFacts for LocalFacts {
     }
 
     fn account_mode(&self, config_dir: Option<&str>) -> Result<Option<String>, String> {
-        // A conta padrão é a do servidor (`CLAUDE_CONFIG_DIR`), não `~/.claude` fixo (S-07).
+        // A conta padrão é a do servidor (`CLAUDE_CONFIG_DIR`), não `~/.claude` fixo.
         let dir = config_dir.map_or_else(|| self.env().claude_base.clone(), |dir| expand_home(dir, &self.env().home));
         Ok(read_json(&dir.join("settings.json"))?.and_then(|settings| text(&settings["permissions"]["defaultMode"])))
     }

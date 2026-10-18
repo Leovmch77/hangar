@@ -1,5 +1,5 @@
 //! O esperado vem das fixtures do Python (`backend/tests/fixtures/contract/session-open/`), nunca
-//! da saída do Rust; as diferenças dos consertos (D-001, D-011) estão nomeadas onde aparecem.
+//! da saída do Rust; as diferenças dos consertos estão nomeadas onde aparecem.
 use super::*;
 use proptest::prelude::*;
 use regex::Regex;
@@ -32,7 +32,7 @@ fn the_bodies_python_refused_as_shape_are_refused_with_a_code() {
         let parsed = SessionOpenRequest::parse(&request_body(&fixture));
         // Pydantic recusa a forma com 422 e a lista de erros; o Rust, com `erro_corpo_invalido`.
         let python_refused_shape = python_status(&fixture) == 422 && fixture["result"]["steps"][0]["body"]["detail"].is_array();
-        // D-001: `inherit` é campo novo; o Python de 601bc62a0 ainda o recusava.
+        // `inherit` é campo novo; o Python de 601bc62a0 ainda o recusava.
         let expected_refused = python_refused_shape && name != "create_inherit_flag_not_supported";
         match parsed {
             Err(error) => {
@@ -314,11 +314,11 @@ fn launched(fixture: &Value) -> Option<Launched> {
 /// (Task 4), e o `resolve_open()` as deixa passar.
 const LAUNCH_REFUSALS: [&str; 3] = ["create_claude_terminal_tmux_fails", "create_worktree_outside_roots", "create_worktree_rollback_on_tmux_failure"];
 
-/// Recusas do Python que o Rust já nasce sem (D-011, D-001), com o que vale no lugar.
+/// Recusas do Python que o Rust já nasce sem, com o que vale no lugar.
 const FIXED: [&str; 2] = [
-    // S-40: o prompt inicial é entregue em todo provedor, também sem terminal.
+    // O prompt inicial é entregue em todo provedor, também sem terminal.
     "create_claude_headless_initial_prompt_refused",
-    // D-001: `inherit: false` é aceito (o Python de 601bc62a0 dava 422).
+    // `inherit: false` é aceito (o Python de 601bc62a0 dava 422).
     "create_inherit_flag_not_supported",
 ];
 
@@ -347,7 +347,7 @@ fn expected(name: &str, fixture: &Value, local: bool) -> Expected {
         _ if status == 200 => Expected::Created,
         _ => Expected::Refused {
             status, code: detail["code"].as_str().map(str::to_owned),
-            // S-40: sem o prompt inicial na regra, a frase da recusa do só leitura sem terminal perde o "nem prompt inicial".
+            // Sem o prompt inicial na regra, a frase da recusa do só leitura sem terminal perde o "nem prompt inicial".
             msg: Some(detail["msg"].as_str().or(detail.as_str()).unwrap()
                 .replace("sessao sem terminal nao aceita read_only nem prompt inicial", "sessao sem terminal nao aceita read_only")),
             params: Some(if detail.is_object() { detail["params"].clone() } else { json!({}) }),
@@ -390,7 +390,7 @@ fn check_created(name: &str, fixture: &Value, result: Result<resolve::Resolved, 
         let mode = spec.permission_mode.map(|m| m.name().to_owned());
         match spec.provider {
             AgentProvider::Claude => assert_eq!(mode, launched.permission, "{name}"),
-            // O Codex sem modo abre em Full Access: o spec diz isso por extenso (D-012).
+            // O Codex sem modo abre em Full Access: o spec diz isso por extenso.
             AgentProvider::Codex => assert_eq!(mode.as_deref(), Some(launched.permission.as_deref().unwrap_or("Full Access")), "{name}"),
             _ => assert_eq!(mode, None, "{name}"),
         }
@@ -444,7 +444,7 @@ fn every_creation_fixture_resolves_like_python_with_the_real_facts() {
     assert_eq!(total, (43, 43, 29));
 }
 
-/// CRI-094: o POST que o Rust atende deixa a linha do middleware de acesso do Python.
+/// O POST que o Rust atende deixa a linha do middleware de acesso do Python.
 #[test]
 fn a_post_answered_in_rust_leaves_the_access_line() {
     assert_eq!(server::access_line("POST /api/sessions", 409, 209, "r-1"),
@@ -454,7 +454,7 @@ fn a_post_answered_in_rust_leaves_the_access_line() {
     assert_eq!(server::access_line("POST /api/archive/{project}/{session_id}/resume", 503, 3, "")["nivel"], "erro");
 }
 
-/// CRI-030: criadora com terminal que ainda não falou (sem modo no transcript) passa o modo com que
+/// Criadora com terminal que ainda não falou (sem modo no transcript) passa o modo com que
 /// nasceu, o do registro gravado na abertura dela, e não o padrão da conta.
 #[cfg(target_os = "linux")]
 #[test]
@@ -589,7 +589,7 @@ fn launch_refusals_and_fixed_refusals_resolve() {
         let resolved = resolve_fixture(&fixture).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(resolved.warnings.is_empty(), "{name}");
     }
-    // S-40: o prompt inicial viaja até o lançamento em todo provedor, também sem terminal.
+    // O prompt inicial viaja até o lançamento em todo provedor, também sem terminal.
     let (_, fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_claude_headless_initial_prompt_refused").unwrap();
     assert_eq!(resolve_fixture(&fixture).unwrap().initial_prompt.as_deref(), Some("olá"));
 }
@@ -636,7 +636,7 @@ fn claude_permission_mode_default_opens_in_manual() {
     assert_eq!(resolve_fixture(&fixture).map(|r| r.spec.permission_mode).map_err(|e| e.code), Ok(Some(PermissionMode::Manual)));
 }
 
-/// D-001 `inherit: false`: o mesmo que pedir sem criadora (fixture irmã com o corpo sem `creator`).
+/// Herança `inherit: false`: o mesmo que pedir sem criadora (fixture irmã com o corpo sem `creator`).
 #[test]
 fn inherit_false_resolves_like_no_creator() {
     let fixtures = create_fixtures();
@@ -653,7 +653,7 @@ fn inherit_false_resolves_like_no_creator() {
     assert_eq!(opted_out.permission_mode, Some(PermissionMode::BypassPermissions));
 }
 
-/// D-001 para o Codex: o modo da criadora vale também numa sessão Codex, com e sem terminal, e a
+/// Para o Codex: o modo da criadora vale também numa sessão Codex, com e sem terminal, e a
 /// nova nunca é mais permissiva que ela.
 #[test]
 fn a_codex_session_inherits_the_creator_mode_never_more_permissive() {
@@ -689,7 +689,7 @@ fn resolve_as(name: &str, caller: &resolve::OpenCaller, patch: impl FnOnce(&mut 
     resolve::resolve_open(&request, caller, &facts(FixtureFacts::of(&fixture)))
 }
 
-/// CRI-022 e CRI-071: o convidado só abre dentro da pasta dele, não herda de sessão do dono, não usa
+/// O convidado só abre dentro da pasta dele, não herda de sessão do dono, não usa
 /// plugins do dono, fica na conta Codex padrão e não muda o provedor lembrado.
 #[test]
 fn a_guest_opens_only_inside_its_folder_and_without_the_owner_choices() {
@@ -839,7 +839,7 @@ fn unlisted_codex_accounts_refuse_instead_of_counting_as_none() {
 }
 
 /// Janela do motor como o Python: `context_length` (ou `context_window`) do catálogo do provedor,
-/// 1M para `gpt-…[1m]`; catálogo fora do ar abre sem a janela, marcada desconhecida (T-004).
+/// 1M para `gpt-…[1m]`; catálogo fora do ar abre sem a janela, marcada desconhecida.
 #[test]
 fn the_engine_window_comes_from_the_provider_catalog() {
     let runtime = test_runtime();
@@ -875,7 +875,7 @@ fn the_engine_window_comes_from_the_provider_catalog() {
     assert_eq!(open("fora", "k3"), Ok((None, true)), "provedor fora: abre, janela desconhecida");
 }
 
-/// T-004: a janela desconhecida é lida de novo a cada reabertura e só sai de desconhecida quando o
+/// A janela desconhecida é lida de novo a cada reabertura e só sai de desconhecida quando o
 /// catálogo responde.
 #[test]
 fn an_unknown_engine_window_is_read_again_on_reopen() {
@@ -890,7 +890,7 @@ fn an_unknown_engine_window_is_read_again_on_reopen() {
     }
 }
 
-/// T-004 no Claude sem terminal: a subida relê a janela que ficou desconhecida na criação e a grava no
+/// No Claude sem terminal: a subida relê a janela que ficou desconhecida na criação e a grava no
 /// sidecar, para a sessão de motor não subir sem `--context` para sempre.
 #[test]
 fn a_headless_launch_reads_the_unknown_engine_window_and_records_it() {
@@ -919,7 +919,7 @@ fn an_inherited_default_codex_account_still_moves_to_the_connected_one() {
     assert_eq!(resolved.warnings, ["A conta Codex padrão não está conectada; a sessão usa a conta trabalho."]);
 }
 
-/// D-001 para o Codex: a criadora Codex passa a conta Codex dela.
+/// Para o Codex: a criadora Codex passa a conta Codex dela.
 #[test]
 fn a_codex_creator_passes_its_codex_account_to_a_codex_session() {
     let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_inherit_from_codex_creator").unwrap();
@@ -931,7 +931,7 @@ fn a_codex_creator_passes_its_codex_account_to_a_codex_session() {
 }
 
 /// `names.sanitize_session_name`, executado (`python3 -c 'from app.names import …'`): NFKD e o que
-/// sobra fora do ASCII some (S-54).
+/// sobra fora do ASCII some.
 #[test]
 fn session_names_fold_like_python() {
     let python = [("Łódź-ńś ž", "odz-ns-z"), ("Área de trabalho", "Area-de-trabalho"), ("São Paulo/ação", "Sao-Paulo-acao"),
@@ -941,7 +941,7 @@ fn session_names_fold_like_python() {
     }
 }
 
-/// S-52: nome omitido sai da pasta pela regra do `uniqueSessionName` (`packages/core/src/api.ts`):
+/// Nome omitido sai da pasta pela regra do `uniqueSessionName` (`packages/core/src/api.ts`):
 /// sanitizada, `sessao` se vazia, `-2`/`-3` contra as sessões que existem.
 #[test]
 fn an_omitted_name_comes_from_the_folder_like_the_screens() {
@@ -986,7 +986,7 @@ fn a_name_being_opened_counts_as_taken() {
     assert_eq!(resolve_fixture(&fixture).map(|r| r.spec.name).ok().as_deref(), Some("abrindo-agora-2"));
 }
 
-/// S-53: o nome tem teto (o tmux e a reabertura do Rust recusam acima disso).
+/// O nome tem teto (o tmux e a reabertura do Rust recusam acima disso).
 #[test]
 fn names_longer_than_the_terminal_accepts_are_refused() {
     let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_claude_terminal_default").unwrap();
@@ -1039,7 +1039,7 @@ fn launched_pane(argv: &[String]) -> (Vec<(String, String)>, Vec<String>) {
 }
 
 /// Os Claude com terminal que o Python lançou: o pane do `claude::pane` sobre o spec do
-/// `resolve_open()` dá o mesmo `-e` e o mesmo comando, menos o que o S-63 tira e a chave da sessão
+/// `resolve_open()` dá o mesmo `-e` e o mesmo comando, menos as variáveis não herdadas que ele tira e a chave da sessão
 /// (matriz, item 2). O `-c` vem do `new-session` (a worktree troca a pasta na abertura).
 #[test]
 fn the_claude_pane_is_the_one_python_launched() {
@@ -1083,7 +1083,7 @@ fn the_claude_pane_is_the_one_python_launched() {
 }
 
 /// Pi, omp e Kimi que o Python lançou: o pane do `agents::pane` sobre o spec dá o mesmo `-e` e o
-/// mesmo comando, menos o S-63 e a chave. S-58/S-73: o `env CP_PI_SESSION=… OMP_PROFILE=…` do
+/// mesmo comando, menos as variáveis não herdadas e a chave. O `env CP_PI_SESSION=… OMP_PROFILE=…` do
 /// comando do omp vira `-e`, e o Pi ganha o `CP_PI_SESSION` que não tinha.
 #[test]
 fn the_pi_omp_and_kimi_panes_are_the_ones_python_launched() {
@@ -1237,7 +1237,7 @@ fn the_folder_is_pretrusted_and_a_foreign_default_model_is_dropped() {
     assert_eq!(std::fs::read_to_string(home.path().join(".claude/settings.json")).unwrap(), r#"{"model": "opus[1m]"}"#);
 }
 
-/// CRI-111: o que a criação mudou sozinha fica também no log do servidor, como no Python: a conta
+/// O que a criação mudou sozinha fica também no log do servidor, como no Python: a conta
 /// trocada pela cota, o modelo estrangeiro tirado do `settings.json` e o aviso da reconciliação.
 #[test]
 fn what_the_creation_changed_by_itself_is_in_the_log() {
@@ -1278,7 +1278,7 @@ fn the_jev_auxiliary_model_falls_back_to_the_browser_one() {
     assert_eq!(claude::jev_pairs(false, &runtime), [("HANGAR_JEV".to_owned(), "off".to_owned())]);
 }
 
-/// S-40: o prompt inicial do Claude com terminal é entregue (o Python o perdia calado): vai como o
+/// O prompt inicial do Claude com terminal é entregue (o Python o perdia calado): vai como o
 /// prompt posicional do `claude`, depois das opções, e com `--` quando começa com `-`.
 #[test]
 fn the_initial_prompt_is_the_first_message_of_the_claude_terminal() {
@@ -1295,7 +1295,7 @@ fn the_initial_prompt_is_the_first_message_of_the_claude_terminal() {
     }
 }
 
-/// S-45: pasta pedida com `~` é normalizada na entrada; o pane, a pré-confiança e o transcript usam o
+/// Pasta pedida com `~` é normalizada na entrada; o pane, a pré-confiança e o transcript usam o
 /// caminho absoluto (o Python registrava o texto cru: chave da confiança e pasta do transcript com `~`).
 #[test]
 fn a_tilde_folder_is_absolute_everywhere_in_the_launch() {
@@ -1745,7 +1745,7 @@ fn run_contract_with(name: &str, patch: impl FnOnce(&mut Value), before: impl Fn
     (raw, dir, root)
 }
 
-/// S-40 em Pi, omp e Kimi: o prompt inicial entra na fila durável da sessão (a do `PromptQueue`, que
+/// Em Pi, omp e Kimi: o prompt inicial entra na fila durável da sessão (a do `PromptQueue`, que
 /// entrega quando o agente fica pronto), carimbado antes da conversa existir, como o bastão fazia.
 /// Pane que não nasce não deixa a entrada para trás.
 #[cfg(target_os = "linux")]
@@ -1770,7 +1770,7 @@ fn the_initial_prompt_of_pi_omp_and_kimi_waits_in_the_durable_queue() {
     assert!(!root.join("home/.claude/.hangar-queue/p1.jsonl").exists(), "pane que não nasceu deixou a fila");
 }
 
-/// RET-078: a ponte de skills roda antes de abrir Pi e Kimi, como no Python; o omp não a usa.
+/// A ponte de skills roda antes de abrir Pi e Kimi, como no Python; o omp não a usa.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_skill_bridge_runs_for_pi_and_kimi_only() {
@@ -1832,7 +1832,7 @@ fn an_uncertain_terminal_keeps_the_worktree() {
     assert!(String::from_utf8_lossy(&branches.stdout).contains("feat/y"), "a branch criada fica");
 }
 
-/// CRI-004: o só leitura é conferido antes de qualquer efeito; recusado, a worktree nem chega a nascer.
+/// O só leitura é conferido antes de qualquer efeito; recusado, a worktree nem chega a nascer.
 #[cfg(target_os = "linux")]
 #[test]
 fn read_only_is_refused_before_the_worktree() {
@@ -1899,7 +1899,7 @@ fn live_sessions_without_a_record_get_their_spec_from_the_sidecar() {
     assert_eq!((spec.provider, spec.surface), (AgentProvider::Codex, Surface::Headless));
     assert_eq!(spec.account, Account::Codex { account_id: "default".into() });
     assert_eq!(spec.permission_mode, Some(PermissionMode::ApproveForMe));
-    // S-05: modo que o Hangar não conhece fica ausente; quem reabre recusa em vez de abrir em Full Access.
+    // Modo que o Hangar não conhece fica ausente; quem reabre recusa em vez de abrir em Full Access.
     let home = sidecar_home("create_inherit_from_codex_creator", "codex-sessions", "mae-codex", |m| m["permission_mode"] = json!("Tudo"));
     assert_eq!(record::from_sidecars(home.path(), "mae-codex").unwrap().unwrap().permission_mode, None);
     // CDX-9: sidecar Codex sem `key` não dá spec.
@@ -1926,7 +1926,7 @@ fn a_live_codex_session_keeps_the_mode_its_terminal_last_wrote() {
     assert_eq!(record::live(home.path(), "mae-codex").unwrap().unwrap().permission_mode, Some(PermissionMode::AskForApproval), "valor inválido não vence");
 }
 
-/// S-02: a sessão nasceu em plano e a CLI saiu dele sozinha; o Rust gravou o modo novo no sidecar. Quem
+/// A sessão nasceu em plano e a CLI saiu dele sozinha; o Rust gravou o modo novo no sidecar. Quem
 /// relança usa o observado, nunca o da criação; o que só o registro tem (as escolhas de plugins) fica.
 #[test]
 fn a_live_claude_headless_relaunches_in_the_mode_the_cli_moved_to() {
@@ -1976,7 +1976,7 @@ fn local_facts(home: &std::path::Path, runtime: &tokio::runtime::Runtime) -> fac
             std::sync::Arc::new(crate::list::procs::SystemProcs::default()))
 }
 
-/// CRI-010: instalado é o que o shell de login acha (quem roda o CLI é o pane, pelo `$SHELL`), com
+/// Instalado é o que o shell de login acha (quem roda o CLI é o pane, pelo `$SHELL`), com
 /// permissão de execução; o resultado vale 60 s.
 #[cfg(unix)]
 #[test]
@@ -2115,7 +2115,7 @@ fn run_resume_patched(name: &str, patch: impl FnOnce(&mut Value), before: impl F
 /// pasta, com `-2` se ocupado), o transcript e o `claude --resume` com os plugins são os do Python; a
 /// conversa aberta noutra sessão e os pedidos inválidos são recusados com o código dele. Diferenças
 /// nomeadas: o modo de permissão vai explícito também no `--resume` (matriz, item 17), e com terminal
-/// só quando o padrão do servidor é com terminal (matriz, itens 21 e 24; S-08).
+/// só quando o padrão do servidor é com terminal (matriz, itens 21 e 24).
 #[cfg(target_os = "linux")]
 #[test]
 fn an_archived_conversation_resumes_like_python() {
@@ -2157,7 +2157,7 @@ fn an_archived_conversation_resumes_like_python() {
 }
 
 /// Retomar pelo id (o `hangar-send --resume` e a tool `new_session`): `-` no lugar do projeto acha a pasta
-/// da conversa, e `headless` no corpo escolhe com ou sem terminal acima do padrão do servidor (D-012).
+/// da conversa, e `headless` no corpo escolhe com ou sem terminal acima do padrão do servidor.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_conversation_resumes_by_id_alone_with_the_surface_asked() {
@@ -2187,9 +2187,9 @@ fn an_archived_conversation_follows_the_headless_default() {
     assert!(raw["runtime_requests"].as_array().unwrap().iter().any(|r| r["op"] == "claude_headless.acordar"));
 }
 
-/// Pi, omp, Kimi e Codex retomam do Arquivo com o verbo de cada um (RET-062 a RET-065): a conversa vem
+/// Pi, omp, Kimi e Codex retomam do Arquivo com o verbo de cada um: a conversa vem
 /// do armazenamento do agente e a pasta do cabeçalho dela. O rollout que veio de uma transferência
-/// Claude→Codex é recusado (a transferência fica no Python, T-008).
+/// Claude→Codex é recusado (a transferência fica no Python).
 #[cfg(target_os = "linux")]
 #[test]
 fn pi_omp_kimi_and_codex_resume_from_the_archive_with_their_own_verb() {

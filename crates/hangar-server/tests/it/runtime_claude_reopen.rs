@@ -131,7 +131,7 @@ async fn a_parked_headless_session_goes_to_a_terminal_resuming_the_same_conversa
     fx.finish();
 }
 
-/// D-006 depois do reboot: a sessão sem terminal fica estacionada (sidecar sem cano), nada sobe na subida, e
+/// Depois do reboot: a sessão sem terminal fica estacionada (sidecar sem cano), nada sobe na subida, e
 /// a primeira escrita a sobe pelo sidecar, sem terminal. A montagem não tem o cano de verdade que cria o
 /// `claude` filho: a subida chega até esperar por ele (`relaunch_agent_identity`), o que prova o caminho.
 #[tokio::test]
@@ -316,8 +316,8 @@ async fn the_account_route_moves_a_terminal_conversation_to_the_new_account_and_
 }
 
 /// `/resume` numa sessão aberta sem id (o pane roda `claude` sem o registro nativo, ninguém prova a
-/// conversa): pelo caminho das outras reaberturas (S-22), a vida nova é montada antes, a antiga sai inteira
-/// antes de a nova subir (S-17) e a nova é conferida na conversa pedida; o spec grava a conversa.
+/// conversa): pelo caminho das outras reaberturas, a vida nova é montada antes, a antiga sai inteira
+/// antes de a nova subir e a nova é conferida na conversa pedida; o spec grava a conversa.
 #[tokio::test]
 async fn a_session_opened_without_an_id_resumes_the_chosen_conversation() {
     const OTHER:&str = "22222222-2222-4222-8222-222222222222";
@@ -346,7 +346,7 @@ async fn a_session_opened_without_an_id_resumes_the_chosen_conversation() {
     fx.finish();
 }
 
-/// CRA-005/RET-001: a porta retida pela troca de conversa (a transferência Claude→Codex) recusa a
+/// A porta retida pela troca de conversa (a transferência Claude→Codex) recusa a
 /// reabertura na hora com o código da transferência, antes de qualquer efeito; nunca espera nem passa por cima.
 #[tokio::test]
 async fn a_port_held_by_the_transfer_refuses_the_reopen_with_the_transfer_code() {
@@ -364,7 +364,7 @@ async fn a_port_held_by_the_transfer_refuses_the_reopen_with_the_transfer_code()
     registry.ingress().release("s1");
 }
 
-/// RET-001: o registro de uma transferência em curso também recusa a retomada, como o `_transfer_guard`.
+/// O registro de uma transferência em curso também recusa a retomada, como o `_transfer_guard`.
 #[tokio::test]
 async fn an_open_transfer_record_refuses_the_resume() {
     let fx = fixture();
@@ -399,7 +399,7 @@ async fn to_terminal(fx:&Fixture,extra:Value) -> (Result<(),(String,bool)>,Vec<S
 
 fn command(args:&[String]) -> String { args.last().cloned().unwrap_or_default() }
 
-/// CRA-015/TMX-073/RET-015: o motor que sumiu do `engines.json` volta na conta Anthropic, sem o modelo,
+/// O motor que sumiu do `engines.json` volta na conta Anthropic, sem o modelo,
 /// o esforço, a janela e o Fast dele: reaplicá-los numa conta Anthropic criaria uma sessão inviável.
 #[tokio::test]
 async fn an_engine_gone_from_the_catalog_reopens_on_the_anthropic_account_without_its_choices() {
@@ -412,7 +412,7 @@ async fn an_engine_gone_from_the_catalog_reopens_on_the_anthropic_account_withou
     assert_eq!((spec["account"]["kind"].as_str(),spec["service_tier"].is_null()),(Some("default"),true));
 }
 
-/// CRA-015/RET-015: com a conta ChatGPT fixa, o motor que sumiu recusa antes de encerrar.
+/// Com a conta ChatGPT fixa, o motor que sumiu recusa antes de encerrar.
 #[tokio::test]
 async fn a_fixed_account_engine_gone_from_the_catalog_refuses_before_anything_stops() {
     let fx = fixture();
@@ -421,7 +421,7 @@ async fn a_fixed_account_engine_gone_from_the_catalog_refuses_before_anything_st
     assert!(args.is_empty() && fx.sidecar_path("s1").exists(),"nada mudou");
 }
 
-/// RET-019: sem motor, o id de motor herdado de um `/model` não vira `--model` na conta Anthropic.
+/// Sem motor, o id de motor herdado de um `/model` não vira `--model` na conta Anthropic.
 #[tokio::test]
 async fn a_foreign_model_without_an_engine_reopens_on_the_account_default() {
     let fx = fixture();
@@ -430,7 +430,7 @@ async fn a_foreign_model_without_an_engine_reopens_on_the_account_default() {
     assert!(!command(&args).contains("--model"),"{}",command(&args));
 }
 
-/// RET-020: o modelo malformado é recusado antes de encerrar, pela mesma regra da criação.
+/// O modelo malformado é recusado antes de encerrar, pela mesma regra da criação.
 #[tokio::test]
 async fn a_malformed_model_refuses_before_anything_stops() {
     let fx = fixture();
@@ -443,7 +443,7 @@ fn engines(fx:&Fixture,base:&str) {
     std::fs::write(fx.home.join(".claude/engines.json"),json!({"e":{"base_url":base,"model":"gpt-5.4","api_key":"x"}}).to_string()).unwrap();
 }
 
-/// CRA-016/TMX-075/RET-021: o Fast vai ao terminal só onde há suporte: `priority` sem ele recusa antes
+/// O Fast vai ao terminal só onde há suporte: `priority` sem ele recusa antes
 /// de encerrar, `default` sem ele some do comando.
 #[tokio::test]
 async fn the_fast_tier_needs_support_before_the_terminal_reopens() {
@@ -459,7 +459,7 @@ async fn the_fast_tier_needs_support_before_the_terminal_reopens() {
     assert!(command(&args).contains("hangar-engine") && !command(&args).contains("--service-tier"),"{}",command(&args));
 }
 
-/// CRA-027/TMX-075: com Fast, o `CLAUDE_CODE_EXTRA_BODY` inválido nas escolhas do projeto recusa antes de
+/// Com Fast, o `CLAUDE_CODE_EXTRA_BODY` inválido nas escolhas do projeto recusa antes de
 /// encerrar (o pré-voo do `engines.service_tier_settings`); válido, o tier vai ao comando.
 #[tokio::test]
 async fn an_invalid_engine_body_refuses_the_fast_reopen_before_anything_stops() {
@@ -482,7 +482,7 @@ async fn an_invalid_engine_body_refuses_the_fast_reopen_before_anything_stops() 
     assert!(command(&args).contains("--service-tier priority"),"{}",command(&args));
 }
 
-/// CRA-035: a vida nova que sobe noutra conta (o `wait_for_claude` do Python conferia `CLAUDE_CONFIG_DIR`,
+/// A vida nova que sobe noutra conta (o `wait_for_claude` do Python conferia `CLAUDE_CONFIG_DIR`,
 /// motor, conta fixa e Fast) não é dada como reaberta, mesmo na conversa e no modo pedidos.
 #[tokio::test]
 async fn a_new_life_with_another_identity_is_not_a_reopen() {
@@ -493,7 +493,7 @@ async fn a_new_life_with_another_identity_is_not_a_reopen() {
     fx.finish();
 }
 
-/// CRA-056: o Fast da sessão de motor confere o modelo em uso (a linha de status do terminal), não o
+/// O Fast da sessão de motor confere o modelo em uso (a linha de status do terminal), não o
 /// gravado: o `/model` trocado para um que não aceita Fast recusa.
 #[tokio::test]
 async fn fast_checks_the_model_in_use_not_the_recorded_one() {
@@ -520,7 +520,7 @@ async fn fast_checks_the_model_in_use_not_the_recorded_one() {
     fx.finish();
 }
 
-/// CRA-020: no plano sem a base guardada (memória ou sidecar), a base é a do transcript e, sem ela, a do
+/// No plano sem a base guardada (memória ou sidecar), a base é a do transcript e, sem ela, a do
 /// modo da conta; base bypass leva a licença de voltar ao bypass ao sair do plano.
 #[tokio::test]
 async fn a_plan_without_a_remembered_base_takes_it_from_the_transcript_then_the_account() {
@@ -543,7 +543,7 @@ async fn a_plan_without_a_remembered_base_takes_it_from_the_transcript_then_the_
     }
 }
 
-/// RET-025: retomar OUTRA conversa leva as escolhas de plugins e skills guardadas dela, não as do processo
+/// Retomar OUTRA conversa leva as escolhas de plugins e skills guardadas dela, não as do processo
 /// que roda agora.
 #[tokio::test]
 async fn resuming_another_conversation_brings_its_stored_choices() {
@@ -571,7 +571,7 @@ async fn resuming_another_conversation_brings_its_stored_choices() {
     fx.finish();
 }
 
-/// CRA-049: o `claude` antigo que não sai no prazo (ignora o SIGTERM) é morto à força, conferido pela
+/// O `claude` antigo que não sai no prazo (ignora o SIGTERM) é morto à força, conferido pela
 /// identidade, e a reabertura segue; nunca dois Claude na mesma conversa.
 #[tokio::test]
 async fn an_old_claude_that_ignores_the_stop_is_killed_and_the_reopen_goes_on() {
@@ -602,7 +602,7 @@ async fn an_old_claude_that_ignores_the_stop_is_killed_and_the_reopen_goes_on() 
     fx.finish();
 }
 
-/// CRA-047: a sessão só leitura estacionada cuja troca de conta não traz o terminal protegido fica parada
+/// A sessão só leitura estacionada cuja troca de conta não traz o terminal protegido fica parada
 /// (o arquivo dela continua lá), com `erro_troca_conta_parada`; nunca sem nada nem sem terminal.
 #[tokio::test]
 async fn a_parked_read_only_session_whose_terminal_does_not_come_back_stays_parked() {
@@ -625,7 +625,7 @@ async fn a_parked_read_only_session_whose_terminal_does_not_come_back_stays_park
     assert_eq!((meta["read_only"].as_bool(),meta["session_id"].as_str()),(Some(true),Some(SID)));
 }
 
-/// CRA-010 (S-20): a mensagem entregue ao processo antigo e que nunca chegou ao transcript volta à fila
+/// A mensagem entregue ao processo antigo e que nunca chegou ao transcript volta à fila
 /// como linha nova (a vida nova a responde) e a antiga é confirmada; a que já está no transcript só é
 /// confirmada, nunca reenviada.
 #[tokio::test]

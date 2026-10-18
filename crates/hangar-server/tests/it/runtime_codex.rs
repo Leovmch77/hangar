@@ -1250,7 +1250,7 @@ fn refused_effort_is_a_problem_not_a_failure() {
     assert!(effects.iter().any(|e|matches!(e,Effect::WakeQueue)));
 }
 
-/// S-77: processo novo que devolve outro Fast que o escolhido não sobe; a recusa aparece com o motivo.
+/// Processo novo que devolve outro Fast que o escolhido não sobe; a recusa aparece com o motivo.
 #[test]
 fn a_fresh_process_that_drops_the_chosen_fast_does_not_come_up() {
     for (method,meta) in [("thread/resume",json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","service_tier":"priority"})),
@@ -1264,7 +1264,7 @@ fn a_fresh_process_that_drops_the_chosen_fast_does_not_come_up() {
     }
 }
 
-/// S-77: o esforço depois de abrir leva o modelo escolhido junto (o `thread/settings/update` do Python).
+/// O esforço depois de abrir leva o modelo escolhido junto (o `thread/settings/update` do Python).
 #[test]
 fn the_effort_after_opening_carries_the_chosen_model() {
     let (mut engine,sent) = bootstrapped(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","effort":"high","model":"gpt-chosen"}));

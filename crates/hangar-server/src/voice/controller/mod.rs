@@ -72,7 +72,7 @@ enum Forwarded {
     Reply(CallId),
     Switch(CallId, Key),
     /// `reopened`: conversa fechada que voltou (`reopen_conversation`), não sessão nova. `notice`: os avisos do servidor, já
-    /// em frase, que vão no fim de toda resposta (D-003).
+    /// em frase, que vão no fim de toda resposta.
     Opened { call: CallId, name: String, sent: Option<Result<Delivery, String>>, reopened: bool, notice: String },
     /// O Jev agiu: a confirmação falada e a nota ao organizador só saem quando o aparelho confirma.
     JevSwitch { turn: String, key: Key, machine: String },
