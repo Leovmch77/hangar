@@ -279,7 +279,7 @@ pub(crate) async fn read_only_envelope<'a>(env: &BTreeMap<String, String>, home:
 }
 
 /// O corpo de `CreatedSessionInfo` da sessão que acabou de nascer.
-fn created_body(spec: &SessionSpec, jsonl: Option<&str>, warnings: Vec<String>, route: Option<&claude::EngineRoute>, codex_home: Option<&str>) -> Value {
+fn created_body(spec: &SessionSpec, jsonl: Option<&str>, warnings: Vec<String>, route: Option<&claude::EngineRoute>, codex_home: Option<&str>, provider_source: Option<&str>) -> Value {
     let engine = match &spec.account { Account::Engine { name, .. } => Value::from(name.clone()), _ => Value::Null };
     let headless = spec.surface == super::Surface::Headless;
     // O Codex sem terminal é rastreado desde o sidecar; o com terminal só depois de a TUI abrir a thread.
@@ -308,6 +308,7 @@ fn created_body(spec: &SessionSpec, jsonl: Option<&str>, warnings: Vec<String>, 
         "loop_status": null, "loop_iter": null, "loop_max": null, "plan_name": null, "plan_task": null,
         "plan_task_total": null, "plan_done": null, "plan_total": null, "plan_complete": null, "plan_tasks": null,
         "plan_hidden": null, "config_dir": spec.account.config_dir(), "account_source": spec.account_source.wire(),
+        "provider_source": provider_source,
     });
     let mut body = head;
     body.as_object_mut().unwrap().extend(rest.as_object().unwrap().clone());
@@ -346,7 +347,7 @@ pub fn opens_here(spec: &SessionSpec) -> bool {
 
 /// Abre a sessão do spec resolvido: com terminal de todo provedor, ou o Claude e o Codex sem terminal.
 pub async fn open_session(host: &dyn OpenHost, resolved: Resolved, caller: &OpenCaller) -> Result<Opened, OpenError> {
-    let Resolved { mut spec, mut warnings, initial_prompt, remember_provider, previous_non_plan, resume, restore } = resolved;
+    let Resolved { mut spec, mut warnings, provider_source, initial_prompt, remember_provider, previous_non_plan, resume, restore } = resolved;
     let _claim = NameClaim::take(host.home(), &spec.name)?;
     let runtime =crate::runtime::codex_launch::runtime_config(&crate::accounts::environment::AccountEnvironment::from_map(host.env().clone()));
     let codex_home = match &spec.account {
@@ -394,7 +395,7 @@ pub async fn open_session(host: &dyn OpenHost, resolved: Resolved, caller: &Open
         Ok((jsonl, warnings, route)) => {
             // O Codex sem terminal já subiu dentro da abertura (`warm_codex`).
             if spec.surface == Surface::Headless && spec.provider == AgentProvider::Claude { host.wake(&spec.name); }
-            Ok(Opened { body: created_body(&spec, jsonl.as_deref(), warnings, route.as_ref(), codex_home.as_deref()), undo, key: spec.key.clone() })
+            Ok(Opened { body: created_body(&spec, jsonl.as_deref(), warnings, route.as_ref(), codex_home.as_deref(), provider_source), undo, key: spec.key.clone() })
         }
         // Incerta, a sessão pode estar de pé na worktree: desfazer apagaria a pasta debaixo dela.
         Err(error) => {

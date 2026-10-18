@@ -102,6 +102,10 @@ pub enum OpenCaller {
 pub struct Resolved {
     pub spec: SessionSpec,
     pub warnings: Vec<String>,
+    /// De onde veio o agente omitido no pedido: `inherited` (a criadora), `remembered` (o último do app) ou
+    /// `default`; `None` = pedido explícito ou decidido por opção exclusiva.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_source: Option<&'static str>,
     pub initial_prompt: Option<String>,
     pub remember_provider: bool,
     /// Claude sem terminal que nasce no plano: o modo da conta, para onde "Implementar o plano" volta.
@@ -133,14 +137,27 @@ fn conflict(msg: impl Into<String>) -> OpenError { OpenError::new(409, "erro_cri
 pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &dyn OpenFacts) -> Result<Resolved, OpenError> {
     let guest = matches!(caller, OpenCaller::Guest { .. });
     let mut warnings = Vec::new();
-    // Provedor omitido: opção exclusiva de um provedor decide; senão o padrão do servidor.
-    let provider = match &request.provider {
-        Some(name) => AgentProvider::parse(name)
-            .ok_or_else(|| OpenError::new(400, "erro_provider_sessao_invalido", "provider invalido"))?,
-        None if request.config_dir.is_some() || truthy(&request.engine) || request.subagent_model.is_some() => AgentProvider::Claude,
-        None if request.codex_account.is_some() => AgentProvider::Codex,
-        None if truthy(&request.omp_profile) => AgentProvider::Omp,
-        None => choose_provider(&facts.providers()?),
+    // D-001: o omitido vem da criadora; `inherit: false` deixa tudo no padrão da conta. O convidado
+    // nunca herda conta nem modo de uma sessão do dono, e nem fica sabendo dela.
+    let creator = request.creator.as_deref().filter(|_| request.inherit != Some(false) && !guest);
+    let creator_info = match creator { Some(name) => facts.creator(name)?, None => None };
+    // Provedor omitido: opção exclusiva de um provedor decide; senão o da criadora (o par quer o mesmo
+    // agente), e só sem criadora o padrão do servidor.
+    let (provider, provider_source) = match &request.provider {
+        Some(name) => (AgentProvider::parse(name)
+            .ok_or_else(|| OpenError::new(400, "erro_provider_sessao_invalido", "provider invalido"))?, None),
+        None if request.config_dir.is_some() || truthy(&request.engine) || request.subagent_model.is_some() => (AgentProvider::Claude, None),
+        None if request.codex_account.is_some() => (AgentProvider::Codex, None),
+        None if truthy(&request.omp_profile) => (AgentProvider::Omp, None),
+        None => match &creator_info {
+            Some(info) => (info.provider, Some("inherited")),
+            None => {
+                let catalog = facts.providers()?;
+                let chosen = choose_provider(&catalog);
+                let remembered = catalog.remembered.as_deref().and_then(AgentProvider::parse) == Some(chosen);
+                (chosen, Some(if remembered { "remembered" } else { "default" }))
+            }
+        },
     };
     let explicit_account = request.config_dir.is_some();
     let mut config_dir = request.config_dir.clone();
@@ -151,10 +168,8 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
     let mut inherited_codex_mode = None;
     let mut source = if explicit_account { AccountSource::Explicit } else { AccountSource::Default };
 
-    // D-001: o omitido vem da criadora; `inherit: false` deixa tudo no padrão da conta. O convidado
-    // nunca herda conta nem modo de uma sessão do dono, e nem fica sabendo dela.
-    if let Some(creator) = request.creator.as_deref().filter(|_| request.inherit != Some(false) && !guest) {
-        match facts.creator(creator)? {
+    if let Some(creator) = creator {
+        match creator_info.as_ref() {
             None => warnings.push(format!("sessão criadora '{creator}' não encontrada; nada foi herdado")),
             Some(info) => {
                 // Perfil do omp já define a conta; a criadora Codex não tem conta Claude.
@@ -178,7 +193,7 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
                 if permission.is_none() && provider == AgentProvider::Claude
                     && matches!(info.provider, AgentProvider::Claude | AgentProvider::Codex)
                 {
-                    match creator_mode(&info) {
+                    match creator_mode(info) {
                         Some(mode) => permission = Some(mode.name().to_owned()),
                         None => warnings.push(format!("não consegui ler o modo de permissão de '{creator}'; vale o padrão da conta")),
                     }
@@ -186,7 +201,7 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
                 if permission.is_none() && provider == AgentProvider::Codex
                     && matches!(info.provider, AgentProvider::Claude | AgentProvider::Codex)
                 {
-                    inherited_codex_mode = creator_codex_mode(&info);
+                    inherited_codex_mode = creator_codex_mode(info);
                     if inherited_codex_mode.is_none() {
                         warnings.push(format!("não consegui ler o modo de permissão de '{creator}'; vale o padrão da conta"));
                     }
@@ -277,7 +292,7 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
     let previous_non_plan = (spec.surface == Surface::Headless && spec.permission_mode == Some(PermissionMode::Plan))
         .then(|| account_mode(spec.account.config_dir(), facts).unwrap_or(PermissionMode::BypassPermissions));
     // Só a abertura do dono muda o provedor lembrado.
-    Ok(Resolved { spec, warnings, initial_prompt: request.initial_prompt.clone(), remember_provider: request.remember_provider && !guest,
+    Ok(Resolved { spec, warnings, provider_source, initial_prompt: request.initial_prompt.clone(), remember_provider: request.remember_provider && !guest,
         previous_non_plan, resume: None, restore: false })
 }
 

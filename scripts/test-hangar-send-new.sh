@@ -42,7 +42,7 @@ class H(http.server.BaseHTTPRequestHandler):
         corpo = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         open(destino, "wb").write(corpo)
         self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
-        self.wfile.write(b'{"avisos":["aviso-teste"]}')
+        self.wfile.write(b'{"avisos":["aviso-teste"],"provider":"claude","provider_source":"inherited"}')
     def log_message(self, *a): pass
 http.server.HTTPServer(("127.0.0.1", porta), H).serve_forever()
 PY
@@ -79,6 +79,8 @@ resultado=$(bash "$TMP/scripts/hangar-send" --new lembrar /tmp --provider codex 
 checa "--remember-provider no corpo" 'true' "$(campo remember_provider 2>/dev/null)"
 [[ "$resultado" == *"aviso-teste"* ]]
 checa "aviso da criação aparece" '0' "$?"
+[[ "$resultado" == *"agente herdado: claude"* ]]
+checa "o agente herdado aparece na criação" '0' "$?"
 
 # 3. Codex também aceita o modo sem terminal.
 rm -f "$TMP/corpo.json"

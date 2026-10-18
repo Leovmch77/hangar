@@ -592,6 +592,25 @@ fn launch_refusals_and_fixed_refusals_resolve() {
     assert_eq!(resolve_fixture(&fixture).unwrap().initial_prompt.as_deref(), Some("olá"));
 }
 
+/// Provedor omitido: a sessão criada por outra herda o agente dela, mesmo com o app lembrando outro; sem
+/// criadora vale o lembrado, e o pedido explícito vence. A resposta diz de onde o agente veio.
+#[test]
+fn an_omitted_provider_comes_from_the_creator_before_the_remembered_one() {
+    let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_inherit_from_headless_creator").unwrap();
+    fixture["scenario"]["state"]["files"]["<ROOT>/home/.claude/runtime-config.json"] = json!({"last_session_provider": "codex"});
+    let body = &mut fixture["scenario"]["steps"][0]["json"];
+    body.as_object_mut().unwrap().remove("provider");
+    let inherited = resolve_fixture(&fixture).unwrap();
+    assert_eq!((inherited.spec.provider, inherited.provider_source), (AgentProvider::Claude, Some("inherited")));
+    let mut alone = fixture.clone();
+    alone["scenario"]["steps"][0]["json"].as_object_mut().unwrap().retain(|k, _| k != "creator");
+    let remembered = resolve_fixture(&alone).unwrap();
+    assert_eq!((remembered.spec.provider, remembered.provider_source), (AgentProvider::Codex, Some("remembered")));
+    let mut explicit = fixture.clone();
+    explicit["scenario"]["steps"][0]["json"]["provider"] = json!("claude");
+    assert_eq!(resolve_fixture(&explicit).unwrap().provider_source, None, "pedido explícito não tem origem a dizer");
+}
+
 /// D-001 `inherit: false`: o mesmo que pedir sem criadora (fixture irmã com o corpo sem `creator`).
 #[test]
 fn inherit_false_resolves_like_no_creator() {

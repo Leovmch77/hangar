@@ -40,7 +40,8 @@
 #                                  (a pasta vem dela, sem cwd). Combina com --provider, --conta,
 #                                  --model, --engine, --engine-account e --headless/--terminal.
 #                                  --provider <claude|codex|pi|omp|kimi> escolhe o AGENTE da sessão
-#                                  nova (padrão do servidor). Ex: --provider kimi abre o Kimi Code.
+#                                  nova. Omitido, vem desta sessão (a criadora); chamado de fora de
+#                                  uma sessão, o último que o app lembrou. Ex: --provider kimi abre o Kimi Code.
 #                                  --remember-provider grava o provedor desta criação como padrão.
 #                                  Sem o flag, abrir auxiliares não muda a preferência do app.
 #                                  --read-only bloqueia escrita no código e metadados Git (Linux/bwrap).
@@ -434,7 +435,8 @@ if [[ "$1" == "--new" ]]; then
     # Anthropic. Serve pra parear com uma sessão rodando noutro modelo — o par continua no mesmo
     # ~/.claude (skills, hooks, contrato compartilhado), só o motor difere. Aceita o flag em
     # qualquer ordem: `--new nome --engine kimi` sem cwd é o uso mais comum.
-    # --provider: qual AGENTE roda na sessão nova. Omitido, usa o padrão do servidor. Mesma forma do
+    # --provider: qual AGENTE roda na sessão nova. Omitido, o backend usa o da criadora (ou, sem ela, o
+    # padrão lembrado do servidor). Mesma forma do
     # --engine: repassa cru pro backend, que recusa com 400 o que não conhece — não duplica aqui a
     # lista de providers válidos.
     # --conta: a sessão nova nasce em OUTRA CONTA Anthropic (config dir ~/.claude-<nome>), que é o
@@ -711,6 +713,10 @@ result = json.load(sys.stdin)
 for warning in result.get("avisos", []):
     print("aviso: " + warning, file=sys.stderr)
 partes = []
+if result.get("provider_source") == "inherited":
+    partes.append("agente herdado: " + (result.get("provider") or "?"))
+elif result.get("provider_source") in ("remembered", "default"):
+    partes.append("agente padrão do servidor: " + (result.get("provider") or "?"))
 if result.get("headless") and not sys.argv[1]:
     partes.append("sem terminal")
 if result.get("account_source") == "inherited":

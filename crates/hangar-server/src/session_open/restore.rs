@@ -346,7 +346,7 @@ pub fn resolved_for(home: &Path, server_projects: &Path, key: &str, entry: &Entr
     if spec.provider == AgentProvider::Claude && !super::claude::transcript(&spec, &conversation, server_projects).is_file() {
         return Err("restore_transcript_missing".into());
     }
-    Ok(super::Resolved { spec, warnings: Vec::new(), initial_prompt: None, remember_provider: false, previous_non_plan: None,
+    Ok(super::Resolved { spec, warnings: Vec::new(), provider_source: None, initial_prompt: None, remember_provider: false, previous_non_plan: None,
         resume: Some(conversation), restore: true })
 }
 
