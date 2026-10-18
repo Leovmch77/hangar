@@ -104,7 +104,7 @@ const names = () => useSessions.getState().rows.map((row) => row.name).sort();
 const live = () => streams.filter((stream) => !stream.closed);
 const creationPaths = new Set(['/api/claude-configs', '/api/cotas', '/api/providers', '/api/engines', '/api/model-options', '/api/codex-contas', '/api/fs/roots', '/api/fs/scan', '/api/archive-por-cwd', '/api/worktrees']);
 const creationCalls = () => fetchMock.mock.calls.map(([url]) => new URL(url).pathname).filter((path) => creationPaths.has(path)).sort();
-const button = (label: string) => [...container.querySelectorAll<HTMLButtonElement>('button')]
+const button = (label: string) => [...container.querySelectorAll<HTMLButtonElement>('button, div[aria-label]')]
   .find((node) => node.getAttribute('aria-label') === label || node.textContent === label);
 const click = async (label: string) => {
   expect(button(label), label).toBeTruthy();

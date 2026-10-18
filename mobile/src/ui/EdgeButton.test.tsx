@@ -12,13 +12,33 @@ vi.mock('react-native-gesture-handler', async (original) => {
 
 import { EdgeButton } from './EdgeButton';
 
-it('ativa ao encostar e o arrasto da gaveta não interrompe; toque e rótulo chegam ao botão nativo', async () => {
-  const onPress = vi.fn();
+async function render(onPress: () => void) {
   const container = document.createElement('div');
   await act(async () => createRoot(container).render(
     createElement(EdgeButton, { onPress, accessibilityLabel: 'Voltar', children: 'ícone' }),
   ));
-  expect(native.props).toMatchObject({ shouldActivateOnStart: true, disallowInterruption: true, accessible: true, accessibilityRole: 'button' });
-  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Voltar"]')!.click());
+  return container;
+}
+
+it('ativa ao encostar e o arrasto da gaveta não interrompe', async () => {
+  await render(() => {});
+  expect(native.props).toMatchObject({ shouldActivateOnStart: true, disallowInterruption: true });
+});
+
+it('toque que termina fora do botão não dispara a ação', async () => {
+  const onPress = vi.fn();
+  await render(onPress);
+  const press = native.props.onPress as (pointerInside: boolean) => void;
+  act(() => press(false));
+  expect(onPress).not.toHaveBeenCalled();
+  act(() => press(true));
   expect(onPress).toHaveBeenCalledTimes(1);
+});
+
+it('o leitor de tela encontra o botão no filho, como o gesture-handler exige', async () => {
+  const container = await render(() => {});
+  expect(native.props.accessibilityLabel).toBeUndefined();
+  const target = container.querySelector('[aria-label="Voltar"]');
+  expect(target?.getAttribute('role')).toBe('button');
+  expect(target?.tagName).not.toBe('BUTTON');
 });
