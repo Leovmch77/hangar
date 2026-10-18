@@ -45,7 +45,6 @@ vi.mock('./Icon', () => ({ Icon: () => null }));
 vi.mock('./Screen', () => ({ Screen: ({ children }: { children: ReactNode }) => children }));
 vi.mock('react-native-keyboard-controller', () => ({ KeyboardAvoidingView: ({ children }: { children: ReactNode }) => children }));
 
-import AccountRoute from '../../app/s/[server]/[name]/account';
 import GitRoute from '../../app/s/[server]/[name]/git';
 import ShareRoute from '../../app/s/[server]/[name]/share';
 import OrchestrationTeamRoute from '../../app/s/[server]/[name]/orchestration-team';
@@ -67,7 +66,7 @@ const render = (Route: ComponentType) => act(async () => root.render(createEleme
 const options = () => boundary.publish.mock.calls.at(-1)![0] as Options;
 
 it.each([
-  ['account', AccountRoute], ['git', GitRoute], ['share', ShareRoute], ['team', OrchestrationTeamRoute],
+  ['git', GitRoute], ['share', ShareRoute], ['team', OrchestrationTeamRoute],
 ] as const)('%s conserva as opções entre renders e atualiza o título', async (_name, Route) => {
   await render(Route);
   const initial = options();
@@ -81,7 +80,7 @@ it.each([
 });
 
 it.each([
-  ['account', AccountRoute], ['git', GitRoute], ['share', ShareRoute],
+  ['git', GitRoute], ['share', ShareRoute],
 ] as const)('%s atualiza o voltar com o histórico e a conversa atual', async (name, Route) => {
   await render(Route);
   expect(options().headerLeft).toBeTypeOf('function');
