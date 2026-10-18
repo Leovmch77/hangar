@@ -112,10 +112,12 @@ impl Hangar {
                     let (_, task) = super::quotes::split_refs(&caption);
                     task.to_owned()
                 }).unwrap_or_default();
+            // Em um turno longo, o pedido pode estar fora da página carregada, mas as falas do agente continuam válidas.
+            let recent_start = latest.map_or(0, |index| index + 1);
             let recent = self.chat.ask.as_ref().filter(|ask| ask.payload.is_async)
                 .map(|ask| ask.payload.questions.iter().map(|q| q.question.as_str()).collect::<Vec<_>>().join("\n"))
-                .or_else(|| latest.and_then(|index| self.chat.events[index + 1..].iter().rev()
-                    .find(|e| e.kind == "assistant_msg" && !e.body().trim().is_empty()).map(|e| e.body())))
+                .or_else(|| self.chat.events[recent_start..].iter().rev()
+                    .find(|e| e.kind == "assistant_msg" && !e.body().trim().is_empty()).map(|e| e.body()))
                 .unwrap_or_default();
             let task = crate::delivery::timing_context(&task, &recent);
             let task = if message.chars().count() > 2000 { String::new() } else { task };
