@@ -29,6 +29,17 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 describe('aparencia', () => {
   beforeEach(() => { mem.clear(); vi.resetModules(); });
 
+  it('restaura a opção Terminal gravada nas chamadas de ferramenta', async () => {
+    const { useAparencia } = await import('./aparencia');
+    useAparencia.getState().setFerramentas('terminal');
+    expect(mem.get('aparencia.ferramentas')).toBe('terminal');
+    vi.resetModules();
+    const { useAparencia: restored } = await import('./aparencia');
+    expect(restored.getState().ferramentas).toBe('terminal');
+    restored.getState().setFerramentas('classic');
+    expect(mem.get('aparencia.ferramentas')).toBe('classic');
+  });
+
   it('tema padrão é system', async () => {
     const { useAparencia } = await import('./aparencia');
     expect(useAparencia.getState().tema).toBe('system');

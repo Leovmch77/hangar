@@ -1,5 +1,5 @@
 import { View } from 'react-native';
-import { StyleSheet } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Icon } from '../../ui/Icon';
 import type { Ferramentas, Leitura } from '../../stores/aparencia';
 import { useSettingsColors } from './colors';
@@ -40,9 +40,23 @@ export function ReadingArt({ leitura }: { leitura: Leitura }) {
 
 /** Chamadas de ferramenta: linhas com marca (Clássico), pílulas (Chips) ou tronco (Árvore). */
 export function ToolsArt({ look }: { look: Ferramentas }) {
+  const { theme } = useUnistyles();
   const c = useSettingsColors();
   const tom = c.faint;
   const bar = (w: `${number}%`) => <View style={[styles.bar, { width: w, backgroundColor: tom, opacity: 0.6 }]} />;
+  if (look === 'terminal') {
+    return (
+      <View style={[styles.pad, styles.col5]}>
+        <View style={styles.classicRow}>
+          <View style={[styles.dot, { backgroundColor: theme.tokens.status.success }]} />
+          <View style={styles.flex}>{bar('50%')}</View>
+        </View>
+        {[theme.tokens.status.error, theme.tokens.status.success].map((color) => (
+          <View key={color} style={[styles.diff, { backgroundColor: color, opacity: 0.45 }]} />
+        ))}
+      </View>
+    );
+  }
   if (look === 'chips') {
     return (
       <View style={[styles.pad, styles.wrap]}>
@@ -93,5 +107,7 @@ const styles = StyleSheet.create({
   branch: { marginLeft: 3, paddingLeft: 6, borderLeftWidth: 1 },
   classicRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
   mark: { width: 7, height: 7, borderRadius: 2 },
+  dot: { width: 6, height: 6, borderRadius: 3 },
+  diff: { marginLeft: 11, height: 5, width: '70%', borderRadius: 2 },
   flex: { flex: 1 },
 });
