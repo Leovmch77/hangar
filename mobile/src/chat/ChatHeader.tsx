@@ -6,6 +6,7 @@ import { cwdParts, rotuloEstado, type State, type ThemeTokens } from '@hangar/co
 import * as m from '../paraglide/messages';
 import { Icon } from '../ui/Icon';
 import { SessionAvatar } from '../features/sessions/SessionAvatar';
+import { WorkingMark } from '../ui/WorkingMark';
 import { LiveVoiceChatButton } from '../features/voice/LiveVoiceChatButton';
 import { superficie } from '../theme/superficie';
 import { useSessions } from '../stores/sessions';
@@ -84,7 +85,10 @@ export function ChatHeader({
           accessibilityLabel={[name, state ? rotuloEstado(state) : '', limited ? m.sessao_limite() : '', serverLabel, cwd].filter(Boolean).join(', ')}
           accessibilityHint={m.sessao_trocar_de()}
         >
-          <SessionAvatar session={{ provider, engine, limited, state }} size={30} />
+          {/* Trabalhando, a marca do Hangar girando diz mais que o logo; parada, o agente aparece. */}
+          {state === 'working'
+            ? <View style={styles.marca} testID="chat-working-mark"><WorkingMark size={24} color={corEstado} /></View>
+            : <SessionAvatar session={{ provider, engine, limited, state }} size={30} />}
           <View style={styles.textos}>
             <Text style={[styles.name, { color: theme.tokens.text.primary }]} numberOfLines={1}>
               {name}
@@ -145,6 +149,7 @@ const styles = StyleSheet.create((theme) => ({
     paddingBottom: theme.base.space[1],
   },
   chipsHome: { paddingLeft: 130 },
+  marca: { width: 30, height: 30, alignItems: 'center', justifyContent: 'center' },
   titulo: {
     flex: 1,
     flexShrink: 1,

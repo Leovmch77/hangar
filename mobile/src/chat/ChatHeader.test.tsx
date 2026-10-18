@@ -101,7 +101,6 @@ it.each(['gpt-6-1-sol', 'GPT-6', 'openai', 'codex'])('motor Claude %s mostra Ope
 });
 
 it.each([
-  { state: 'working', limited: false, dot: true, badge: false },
   { state: 'awaiting_input', limited: false, dot: false, badge: false, warning: true },
   { state: 'idle', limited: false, dot: false, badge: true, icon: 'checkmark' },
   { state: 'idle', limited: true, dot: false, badge: true, warning: true, icon: 'hourglass' },
@@ -132,20 +131,15 @@ it('sem estado ao vivo não anuncia pronta nem usa o estado da lista', () => {
   expect(title()?.getAttribute('aria-label')).not.toContain(rotuloEstado('idle'));
 });
 
-it('avatar herda a pausa fora de foco e só anima sem Reduzir Movimento', () => {
+it('trabalhando mostra a marca do Hangar girando no lugar do avatar; parada volta o agente', () => {
   store.rows = [{ ...session, provider: 'claude' }];
-  animation.reduced = false;
   render(undefined, { state: 'working' });
-  expect(animation.repeat).toHaveBeenCalledTimes(2);
-  render(undefined, { state: 'working' }, true);
-  expect(animation.cancel).toHaveBeenCalledTimes(2);
-  animation.repeat.mockClear();
-  render(undefined, { state: 'working' });
-  expect(animation.repeat).toHaveBeenCalledTimes(2);
-  animation.repeat.mockClear();
-  animation.reduced = true;
-  render(undefined, { state: 'working' });
-  expect(animation.repeat).not.toHaveBeenCalled();
+  expect(host.querySelector('[data-testid="chat-working-mark"]')).not.toBeNull();
+  expect(avatar()).toBeNull();
+  expect(title()?.getAttribute('aria-label')).toContain(rotuloEstado('working'));
+  render(undefined, { state: 'idle' });
+  expect(host.querySelector('[data-testid="chat-working-mark"]')).toBeNull();
+  expect(avatar()).not.toBeNull();
 });
 
 it('tocar no avatar mantém a ação do título para trocar de sessão', () => {
