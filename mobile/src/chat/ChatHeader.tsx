@@ -5,9 +5,8 @@ import { useLocalSearchParams } from 'expo-router';
 import { cwdParts, rotuloEstado, type State, type ThemeTokens } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { Icon } from '../ui/Icon';
-import { HangarMark } from '../ui/HangarMark';
+import { SessionAvatar } from '../features/sessions/SessionAvatar';
 import { LiveVoiceChatButton } from '../features/voice/LiveVoiceChatButton';
-import { WorkingMark } from '../ui/WorkingMark';
 import { superficie } from '../theme/superficie';
 import { useSessions } from '../stores/sessions';
 import { useServers } from '../stores/servers';
@@ -19,10 +18,7 @@ const PILL: Record<State, keyof ThemeTokens['pill']> = {
   dead: 'dead',
 };
 
-// Cabeçalho do chat no layout do nativo: ‹ · marca na cor do estado · nome e "pasta @ servidor" ·
-// pílula de estado · ⋯. A cor fica só na marca e no ponto da pílula, que é onde ela diz algo; o resto
-// é texto. O anel de contexto mora no composer e o terminal no ⋯. O loop desce para uma linha
-// própria: na mesma linha espremia o nome da sessão até as reticências.
+// O loop ocupa outra linha para não espremer o nome da sessão.
 export function ChatHeader({
   name,
   state,
@@ -48,6 +44,9 @@ export function ChatHeader({
   // Campos soltos: a linha inteira muda de identidade a cada publicação da lista.
   const rowServerLabel = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name)?.serverLabel);
   const cwd = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name)?.cwd);
+  const provider = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name)?.provider);
+  const engine = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name)?.engine);
+  const limited = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name)?.limited);
   const serverLabel = useServers((s) => s.servers.find((x) => x.id === serverId)?.label) ?? rowServerLabel ?? '';
   const pasta = cwd ? cwdParts(cwd).base : '';
   const destino = pasta && serverLabel ? `${pasta} @ ${serverLabel}` : pasta || serverLabel;
@@ -82,10 +81,10 @@ export function ChatHeader({
           style={({ pressed }) => [styles.titulo, pressed && styles.tocado]}
           accessibilityRole="button"
           // Nome, estado e destino completos para o leitor de tela; a ação vai na dica.
-          accessibilityLabel={[name, state ? rotuloEstado(state) : '', serverLabel, cwd].filter(Boolean).join(', ')}
+          accessibilityLabel={[name, state ? rotuloEstado(state) : '', limited ? m.sessao_limite() : '', serverLabel, cwd].filter(Boolean).join(', ')}
           accessibilityHint={m.sessao_trocar_de()}
         >
-          {state === 'working' ? <WorkingMark size={18} color={corEstado} /> : <HangarMark size={18} color={corEstado} />}
+          <SessionAvatar session={{ provider, engine, limited, state }} size={30} />
           <View style={styles.textos}>
             <Text style={[styles.name, { color: theme.tokens.text.primary }]} numberOfLines={1}>
               {name}
@@ -141,11 +140,11 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.base.space[2],
-    paddingLeft: 78, // coluna do nome: recuo + ‹ + marca + vãos
+    paddingLeft: 90, // coluna do nome: recuo + ‹ + avatar + vãos
     paddingRight: theme.base.space[2],
     paddingBottom: theme.base.space[1],
   },
-  chipsHome: { paddingLeft: 118 },
+  chipsHome: { paddingLeft: 130 },
   titulo: {
     flex: 1,
     flexShrink: 1,

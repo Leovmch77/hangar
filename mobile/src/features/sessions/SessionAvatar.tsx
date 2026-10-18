@@ -8,7 +8,9 @@ import { HangarMark } from '../../ui/HangarMark';
 import { Icon } from '../../ui/Icon';
 import { WorkingMarkPaused } from '../../ui/WorkingMark';
 
-export function SessionAvatar({ session }: { session: AggSession }) {
+type AvatarSession = Pick<AggSession, 'provider' | 'engine' | 'limited'> & { state: AggSession['state'] | null };
+
+export function SessionAvatar({ session, size = 36 }: { session: AvatarSession; size?: number }) {
   const { theme } = useUnistyles();
   const { state, limited, provider, engine } = session;
   const working = state === 'working';
@@ -40,15 +42,15 @@ export function SessionAvatar({ session }: { session: AggSession }) {
   }));
   const orbit = useAnimatedStyle(() => ({ transform: [{ rotate: `${reduced ? 0 : turn.value}deg` }] }));
   return (
-    <View testID="session-avatar" style={styles.avatar} pointerEvents="none"
+    <View testID="session-avatar" style={[styles.avatar, { width: size, height: size }]} pointerEvents="none"
       accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-      {working ? <Animated.View style={[styles.glow, { backgroundColor: accent, boxShadow: `0px 0px 10px ${accent}` }, glow]} /> : null}
-      <View testID="session-avatar-ring" style={[styles.ring, { borderColor: warning ? theme.tokens.status.warning : working && reduced ? accent : theme.tokens.border.default }]} />
+      {working ? <Animated.View style={[styles.glow, { borderRadius: size / 2, backgroundColor: accent, boxShadow: `0px 0px 10px ${accent}` }, glow]} /> : null}
+      <View testID="session-avatar-ring" style={[styles.ring, { borderRadius: size / 2, borderColor: warning ? theme.tokens.status.warning : working && reduced ? accent : theme.tokens.border.default }]} />
       {working ? <Animated.View style={[styles.orbit, orbit]}>
-        <View testID="session-avatar-dot" style={[styles.dot, { backgroundColor: accent }]} />
+        <View testID="session-avatar-dot" style={[styles.dot, { left: (size - 5) / 2, backgroundColor: accent }]} />
       </Animated.View> : null}
-      {known ? <ProviderGlyph provider={glyph} size={20} inline color={glyph === 'codex' ? '#ffffff' : undefined} />
-        : <HangarMark size={20} color={theme.tokens.text.secondary} />}
+      {known ? <ProviderGlyph provider={glyph} size={size * 20 / 36} inline color={glyph === 'codex' ? '#ffffff' : undefined} />
+        : <HangarMark size={size * 20 / 36} color={theme.tokens.text.secondary} />}
       {ready ? <View testID="session-avatar-badge" style={[styles.badge, { backgroundColor: limited ? theme.tokens.status.warning : theme.tokens.status.success }]}>
         <Icon name={limited ? 'Hourglass' : 'Check'} size={10} color={theme.tokens.bg.base} />
       </View> : null}
