@@ -37,6 +37,7 @@ vi.mock('react-native-svg', async (original) => ({
   Path: (props: { d: string }) => createElement('path', props),
 }));
 vi.mock('../../paraglide/messages', () => ({
+  criar_modo_exec_headless: () => 'Sem terminal',
   ask_perguntas: () => 'ask_perguntas',
   conta_padrao: () => 'conta_padrao',
   sessao_conta: (p: { n: string }) => `conta ${p.n}`,
@@ -89,6 +90,25 @@ async function render(session: AggSession, extra: Record<string, unknown> = {}) 
 
 describe('SessionRow', () => {
   afterEach(() => { Platform.OS = 'android'; });
+
+  it.each([false, true])('sinal de sessão sem terminal acompanha o nome e o rótulo acessível (compact=%s)', async (compact) => {
+    for (const headless of [true, false, undefined]) {
+      const { container, root } = await render({ ...base, name: 'api', headless }, { compact });
+      try {
+        const name = Array.from(container.querySelectorAll('span')).find(el => el.textContent === 'api');
+        const signal = container.querySelector('[role="image"][aria-label="Sem terminal"]');
+        const label = container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label');
+        if (headless) {
+          expect(signal).not.toBeNull();
+          expect(name?.nextElementSibling).toBe(signal);
+          expect(label).toContain('Sem terminal');
+        } else {
+          expect(signal).toBeNull();
+          expect(label).not.toContain('Sem terminal');
+        }
+      } finally { act(() => root.unmount()); }
+    }
+  });
 
   it.each([false, true])('última resposta aparece abaixo do nome em uma linha discreta (compact=%s)', async (compact) => {
     const reply = 'Voz do Hangar: como funciona hoje e o que dá para fazer';
@@ -168,7 +188,7 @@ describe('SessionRow', () => {
     }
   });
 
-  it.each(['gpt', 'local-gpt', 'gpt-6-1-sol', 'GPT-6', 'openai', 'codex'])('motor %s usa OpenAI branco no avatar e preserva a engrenagem', async (engine) => {
+  it.each(['gpt', 'local-gpt', 'gpt-6-1-sol', 'GPT-6', 'openai', 'codex'])('motor %s usa OpenAI na cor do texto no avatar e preserva a engrenagem', async (engine) => {
     Platform.OS = 'ios';
     const { container, root } = await render({ ...base, name: 'api', provider: 'claude', engine });
     try {
@@ -176,7 +196,7 @@ describe('SessionRow', () => {
       expect(name?.previousElementSibling).toBeNull();
       const logo = container.querySelector('[data-testid="session-avatar"] svg');
       expect(logo?.querySelector('path')?.getAttribute('d')).toMatch(/^M22.2819/);
-      expect(logo?.getAttribute('fill')).toBe('#ffffff');
+      expect(logo?.getAttribute('fill')).toBe('#000');
       expect(container.querySelector('[data-symbol="gearshape"]')?.parentElement?.textContent).toBe(engine);
       const label = container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label');
       expect(label).toContain('Claude');

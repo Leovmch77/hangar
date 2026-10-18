@@ -10,7 +10,7 @@ const nav = vi.hoisted(() => ({ push: vi.fn(), order: [] as string[] }));
 const state = vi.hoisted(() => ({
   rows: [
     { serverId: 'casa', name: 'antiga', state: 'idle', last_activity: 1 },
-    { serverId: 'casa', name: 'mobile-menu', state: 'working', last_activity: 9 },
+    { serverId: 'casa', name: 'mobile-menu', state: 'working', last_activity: 9, headless: true },
     { serverId: 'casa', name: 'pm19016', state: 'awaiting_input', last_activity: 5 },
     { serverId: 'casa', name: 'encerrada', state: 'dead', last_activity: 10 },
   ],
@@ -62,6 +62,15 @@ it('recentes: mais novas primeiro, sem encerradas', () => {
   expect(startsWith('pm19016,')!.getAttribute('aria-label')).toBe(`pm19016, ${rotuloEstado('awaiting_input')}`);
   act(() => startsWith('pm19016,')!.click());
   expect(nav.push).toHaveBeenLastCalledWith('/s/casa/pm19016');
+});
+
+it('recentes mostram o sinal e anunciam sessão sem terminal', () => {
+  const headless = startsWith('mobile-menu,')!;
+  const signal = headless.querySelector(`[role="image"][aria-label="${m.criar_modo_exec_headless()}"]`);
+  expect(signal).not.toBeNull();
+  expect(headless.getAttribute('aria-label')).toContain(m.criar_modo_exec_headless());
+  expect(signal?.previousElementSibling?.textContent).toBe('mobile-menu');
+  expect(startsWith('pm19016,')!.querySelector('[role="image"]')).toBeNull();
 });
 
 it('Início só fecha a gaveta; Servidores abre a folha de servidores', () => {

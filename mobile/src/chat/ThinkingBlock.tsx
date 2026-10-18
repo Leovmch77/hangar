@@ -10,7 +10,7 @@ import { Icon } from '../ui/Icon';
 // Um raciocínio como linha do trecho dobrado: "Raciocínio  <primeira frase>", e o toque abre o texto
 // inteiro embaixo, em markdown (o resumo do raciocínio traz **título**). Vive dentro do fio do
 // trecho, então não tem caixa própria.
-export const ThinkingBlock = memo(function ThinkingBlock({ ev }: { ev: ChatEvent }) {
+export const ThinkingBlock = memo(function ThinkingBlock({ ev, terminal = false }: { ev: ChatEvent; terminal?: boolean }) {
   const { theme } = useUnistyles();
   const [aberto, setAberto] = useState(false);
   const texto = ev.text ?? '';
@@ -18,6 +18,10 @@ export const ThinkingBlock = memo(function ThinkingBlock({ ev }: { ev: ChatEvent
     const base = mkMarkdownStyle(theme);
     return { ...base, paragraph: { ...base.paragraph, color: theme.tokens.text.secondary, fontSize: theme.base.text.sm } };
   }, [theme]);
+  if (terminal) return texto.trim() ? <View style={styles.terminal}>
+    <Icon name="Brain" size={14} color={theme.tokens.text.muted} />
+    <View style={{ flex: 1, minWidth: 0 }}><EnrichedMarkdownText markdown={texto} markdownStyle={md} flavor="github" /></View>
+  </View> : null;
   return (
     <View>
       <Pressable
@@ -45,6 +49,7 @@ export const ThinkingBlock = memo(function ThinkingBlock({ ev }: { ev: ChatEvent
 });
 
 const styles = StyleSheet.create((theme) => ({
+  terminal: { flexDirection: 'row', alignItems: 'flex-start', gap: theme.base.space[2], paddingLeft: theme.base.space[3] },
   line: {
     flexDirection: 'row',
     alignItems: 'center',

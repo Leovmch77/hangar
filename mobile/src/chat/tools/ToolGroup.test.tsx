@@ -2,10 +2,17 @@
 import { act, createElement, type ComponentProps } from 'react';
 import { createRoot } from 'react-dom/client';
 import { expect, it, vi } from 'vitest';
+import { Pressable } from 'react-native';
 import type { ChatEvent } from '@hangar/core';
 import { projectConversation, type ProjectionInput } from '../conversationProjection';
 import { ToolGroup } from './ToolGroup';
+import { ToolCard } from './ToolCard';
 import * as m from '../../paraglide/messages';
+
+vi.mock('react-native', async (original) => {
+  const native = await original<typeof import('react-native')>();
+  return { ...native, Pressable: vi.fn(native.Pressable) };
+});
 
 vi.mock('react-native-enriched-markdown', () => ({ EnrichedMarkdownText: () => null }));
 vi.mock('expo-file-system', () => ({}));
@@ -23,6 +30,111 @@ vi.mock('expo-blur', () => ({}));
 vi.mock('@lodev09/react-native-true-sheet', () => ({ TrueSheet: () => null }));
 vi.mock('react-native-mmkv', () => ({ createMMKV: () => ({ getString: () => undefined, getNumber: () => undefined, getBoolean: () => undefined, set: () => {}, remove: () => {} }) }));
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+it('Terminal mantém Update e o diff numerado à vista sem abrir detalhe', () => {
+  const use: ChatEvent = { id: 'edit', kind: 'tool_use', tool_use_id: 'edit', tool_name: 'Edit',
+    tool_input: { file_path: '/src/app.ts', old_string: 'const old = 1;', new_string: 'const next = 2;' } };
+  const result: ChatEvent = { id: 'done', kind: 'tool_result', tool_use_id: 'edit', result: 'ok',
+    patch: [{ old_start: 42, new_start: 42, lines: ['-const old = 1;', '+const next = 2;'] }] };
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  const onAbrir = vi.fn();
+  try {
+    act(() => root.render(createElement(ToolGroup, { parts: [use], resultOf: () => result, onAbrir, look: 'terminal' })));
+    expect(container.textContent).toContain('Update');
+    expect(container.textContent).toContain('(app.ts)');
+    expect(container.textContent).toContain('⎿');
+    expect(container.textContent).toContain('42 - const old = 1;');
+    expect(container.textContent).toContain('42 + const next = 2;');
+    expect(container.querySelector('button')).toBeNull();
+    expect(onAbrir).not.toHaveBeenCalled();
+  } finally {
+    act(() => root.unmount());
+  }
+});
+
+it('Terminal dobra leituras mas mantém edição e falha visíveis, abrindo a saída na conversa', () => {
+  const read = (id: string): ChatEvent => ({ id, kind: 'tool_use', tool_use_id: id, tool_name: 'Read', tool_input: { file_path: '/src/same.ts' } });
+  const parts: ChatEvent[] = [read('read-1'), read('read-2'),
+    { id: 'edit', kind: 'tool_use', tool_use_id: 'edit', tool_name: 'Edit', tool_input: { file_path: '/src/app.ts', old_string: 'a', new_string: 'b' } },
+  ];
+  const resultOf = (tool: ChatEvent): ChatEvent => ({ id: `r-${tool.id}`, kind: 'tool_result', tool_use_id: tool.id,
+    result: tool.id === 'read-1' ? 'permission-denied\nmore-error-details' : 'ok', is_error: tool.id === 'read-1' });
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  const onAbrir = vi.fn(), onExpand = vi.fn();
+  try {
+    act(() => root.render(createElement(ToolGroup, { parts, resultOf, onAbrir, onExpand, look: 'terminal' })));
+    expect(container.textContent?.toLowerCase()).toContain(m.term_dobra_leu_1().toLowerCase());
+    expect(container.textContent).toContain('permission-denied');
+    expect(container.textContent).toContain('Update(app.ts)');
+    expect(container.textContent).not.toContain('Read(same.ts)');
+    act(() => container.querySelector('button')!.click());
+    expect(container.textContent).toContain('Read(same.ts)');
+    const head = [...container.querySelectorAll('button')].find((b) => b.getAttribute('aria-label')?.startsWith('Read:'))!;
+    act(() => head.click());
+    expect(container.textContent).toContain('more-error-details');
+    expect(onExpand).toHaveBeenCalledTimes(2);
+    expect(onAbrir).not.toHaveBeenCalled();
+    act(() => head.click());
+    expect(container.textContent).not.toContain('more-error-details');
+    expect(container.textContent).toContain('Read(same.ts)');
+  } finally { act(() => root.unmount()); }
+});
+
+it('Terminal recolhe pelo corpo sem tomar o toque longo usado para selecionar', () => {
+  const use: ChatEvent = { id: 'shell', kind: 'tool_use', tool_name: 'Bash', tool_input: { command: 'pwd' } };
+  const result: ChatEvent = { id: 'output', kind: 'tool_result', result: '/repo\nsecond-output-line' };
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  try {
+    act(() => root.render(createElement(ToolCard, { use, result, look: 'terminal', onPress: vi.fn() })));
+    act(() => container.querySelector('button')!.click());
+    vi.mocked(Pressable).mockClear();
+    // Recolhe pelo cabeçalho e abre de novo para capturar os controles montados.
+    act(() => container.querySelector('button')!.click());
+    act(() => container.querySelector('button')!.click());
+    const body = vi.mocked(Pressable).mock.calls.map(([props]) => props).find((props) => props.accessible === false && props.onLongPress);
+    expect(body).toBeDefined();
+    act(() => { body!.onPressIn?.({} as never); body!.onLongPress?.({} as never); body!.onPress?.({} as never); });
+    expect(container.textContent).toContain('second-output-line');
+    act(() => { body!.onPressIn?.({} as never); body!.onPress?.({} as never); });
+    expect(container.textContent).not.toContain('second-output-line');
+  } finally { act(() => root.unmount()); }
+});
+
+it('Terminal corta Write em dez linhas, limita a expansão e permite ver o restante separado', () => {
+  const use: ChatEvent = { id: 'write', kind: 'tool_use', tool_name: 'Write', tool_input: { file_path: '/repo/large.ts',
+    content: Array.from({ length: 450 }, (_, i) => `line-${i + 1}`).join('\n') } };
+  const result: ChatEvent = { id: 'written', kind: 'tool_result', result: 'ok' };
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  const onPress = vi.fn(), onExpand = vi.fn();
+  try {
+    act(() => root.render(createElement(ToolCard, { use, result, look: 'terminal', onPress, onExpand })));
+    expect(container.textContent).toContain('10 + line-10');
+    expect(container.textContent).not.toContain('11 + line-11');
+    act(() => container.querySelector('button')!.click());
+    expect(container.textContent).toContain('400 + line-400');
+    expect(container.textContent).not.toContain('401 + line-401');
+    expect(container.textContent).toContain(m.native_side_diff_truncated());
+    const detail = [...container.querySelectorAll('button')].find((b) => b.textContent === m.tool_ver_separado())!;
+    act(() => detail.click());
+    expect(onPress).toHaveBeenCalledExactlyOnceWith(use);
+    expect(onExpand).toHaveBeenCalledTimes(1);
+  } finally { act(() => root.unmount()); }
+});
+
+it('Terminal mantém expostas as ferramentas dentro de um pensamento', () => {
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  const parts: ChatEvent[] = [{ id: 'think', kind: 'thinking', text: 'why' },
+    { id: 'search', kind: 'tool_use', tool_name: 'WebSearch', tool_input: { query: 'native-appearance' } }];
+  try {
+    act(() => root.render(createElement(ToolGroup, { parts, resultOf: (): ChatEvent => ({ id: 'done', kind: 'tool_result', result: 'ok' }), onAbrir: vi.fn(), look: 'terminal' })));
+    expect(container.textContent).toContain('WebSearch(native-appearance)');
+  } finally { act(() => root.unmount()); }
+});
 
 it('avisa antes de expandir o grupo real, mas não ao recolher', () => {
   const parts: ChatEvent[] = [

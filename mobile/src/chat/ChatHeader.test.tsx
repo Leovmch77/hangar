@@ -76,7 +76,7 @@ it('sem destino de Início, não ocupa espaço no cabeçalho', () => {
 
 it.each([
   { provider: 'claude', path: 'm4.7144', color: '#d97757' },
-  { provider: 'codex', path: 'M22.2819', color: '#ffffff' },
+  { provider: 'codex', path: 'M22.2819', color: '#000' },
   { provider: 'kimi', path: 'M21.765' },
   { provider: 'pi', letter: 'π' },
   { provider: 'omp', letter: 'Ω' },
@@ -97,7 +97,7 @@ it.each(['gpt-6-1-sol', 'GPT-6', 'openai', 'codex'])('motor Claude %s mostra Ope
   store.rows = [{ ...session, provider: 'claude', engine }];
   render();
   expect(avatar()?.querySelector('path')?.getAttribute('d')).toMatch(/^M22.2819/);
-  expect(avatar()?.querySelector('svg')?.getAttribute('fill')).toBe('#ffffff');
+  expect(avatar()?.querySelector('svg')?.getAttribute('fill')).toBe('#000');
 });
 
 it.each([

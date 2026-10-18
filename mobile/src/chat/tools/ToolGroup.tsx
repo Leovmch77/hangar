@@ -4,6 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import type { ChatEvent } from '@hangar/core';
 import { Icon } from '../../ui/Icon';
 import { ToolCard } from './ToolCard';
+import { TerminalToolGroup } from './TerminalToolGroup';
 import { ThinkingBlock } from '../ThinkingBlock';
 import { appendFoldSummary, failedLabel, summaryTitle, type FoldSummary } from './fold';
 import type { Ferramentas } from '../../stores/aparencia';
@@ -26,6 +27,7 @@ export const ToolGroup = memo(function ToolGroup({
   onAbrir,
   onExpand,
   look = 'tree',
+  pluginServers,
 }: {
   parts: ChatEvent[];
   summary?: FoldSummary;
@@ -33,6 +35,7 @@ export const ToolGroup = memo(function ToolGroup({
   onAbrir: (use: ChatEvent) => void;
   onExpand?: () => void;
   look?: Ferramentas;
+  pluginServers?: readonly string[];
 }) {
   const { theme } = useUnistyles();
   const folded = summary ?? appendFoldSummary(undefined, parts, resultOf);
@@ -43,6 +46,8 @@ export const ToolGroup = memo(function ToolGroup({
   const aberto = (chips && calls <= CHIPS_ABERTO_ATE) !== virado;
   const [tudo, setTudo] = useState(false);
   const falhas = failedLabel(folded.failures);
+
+  if (look === 'terminal') return <TerminalToolGroup parts={parts} resultOf={resultOf} onExpand={onExpand} onOpen={onAbrir} pluginServers={pluginServers} />;
 
   const linha = (p: ChatEvent) =>
     p.kind === 'thinking'

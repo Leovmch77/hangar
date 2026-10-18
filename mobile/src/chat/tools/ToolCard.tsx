@@ -5,6 +5,7 @@ import { nomeFerramenta, summarizeToolInput, summarizeToolResult, toolPhase, too
 import { callTarget } from './fold';
 import type { Ferramentas } from '../../stores/aparencia';
 import { Icon } from '../../ui/Icon';
+import { TerminalTool } from './TerminalTool';
 import * as m from '../../paraglide/messages';
 
 // Uma chamada como linha, no desenho escolhido em Aparência › Chamadas de ferramenta:
@@ -20,6 +21,7 @@ export const ToolCard = memo(function ToolCard({
   onPress,
   look = 'tree',
   escrevendo = false,
+  onExpand,
 }: {
   use: ChatEvent;
   result?: ChatEvent | null;
@@ -27,6 +29,7 @@ export const ToolCard = memo(function ToolCard({
   look?: Ferramentas;
   /** Pedido da chamada ainda sendo escrito pelo modelo (SSE `ferramenta`): não roda ainda. */
   escrevendo?: boolean;
+  onExpand?: () => void;
 }) {
   const { theme } = useUnistyles();
   const fase = toolPhase(result ?? null);
@@ -37,6 +40,8 @@ export const ToolCard = memo(function ToolCard({
   const cor = falhou ? theme.tokens.status.warning : theme.tokens.text.muted;
   const erro = falhou ? summarizeToolResult(result, use.tool_name) : '';
   const rodando = escrevendo ? m.tool_fase_escrevendo() : m.estado_em_execucao();
+
+  if (look === 'terminal') return <TerminalTool use={use} result={result} escrevendo={escrevendo} onExpand={onExpand} onOpen={onPress} />;
 
   if (look === 'chips') {
     const desfecho = escrevendo ? m.tool_fase_escrevendo() : vivo ? m.native_chip_running() : summarizeToolResult(result, use.tool_name);

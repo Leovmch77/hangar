@@ -11,6 +11,7 @@ import { useSessions } from '../../stores/sessions';
 import { useServers } from '../../stores/servers';
 import { useLiveVoice } from '../voice/liveVoiceStore';
 import { accountQuotaLine, recentSessions } from './drawerMenu';
+import { HeadlessSignal } from './HeadlessSignal';
 
 const RECENT = 5;
 const NO_ROWS: AggSession[] = [];
@@ -81,12 +82,13 @@ function RecentRow({ session, onPress }: { session: AggSession; onPress: () => v
   const { theme } = useUnistyles();
   const waiting = session.state === 'awaiting_input';
   return (
-    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={`${session.name}, ${rotuloEstado(session.state)}`}
+    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={`${session.name}${session.headless === true ? `, ${m.criar_modo_exec_headless()}` : ''}, ${rotuloEstado(session.state)}`}
       style={({ pressed }) => [styles.item, pressed && styles.pressed]}>
       {session.state === 'working'
         ? <WorkingMark size={20} color={theme.tokens.accent.base} />
         : <Icon name="MessageCircle" size={20} color={theme.tokens.text.secondary} />}
       <Text style={styles.itemText} numberOfLines={1}>{session.name}</Text>
+      {session.headless === true ? <HeadlessSignal /> : null}
       {waiting ? <View style={[styles.dot, { backgroundColor: theme.tokens.status.warning }]} /> : null}
     </Pressable>
   );
