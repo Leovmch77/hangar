@@ -17,6 +17,8 @@ import { LoopStatus } from '../../../../src/features/loop/LoopStatus';
 import { cleanErr, isForm, isPolling } from '../../../../src/features/loop/loopSheet';
 import * as m from '../../../../src/paraglide/messages';
 
+const screenOptions = { headerShown: false, headerTransparent: true, sheetAllowedDetents: [0.76], contentStyle: { backgroundColor: 'transparent' } };
+
 export default function LoopSheet() {
   const { theme } = useUnistyles();
   const router = useRouter();
@@ -192,7 +194,7 @@ export default function LoopSheet() {
 
   return (
     <>
-      <Stack.Screen options={{ headerShown: false, headerTransparent: true, sheetAllowedDetents: [0.76], contentStyle: { backgroundColor: 'transparent' } }} />
+      <Stack.Screen options={screenOptions} />
       <KeyboardAvoidingView behavior="padding" automaticOffset style={[styles.root, { backgroundColor: theme.tokens.bg.base }]}>
         {routeMissing ? (
           <View style={styles.missing}>

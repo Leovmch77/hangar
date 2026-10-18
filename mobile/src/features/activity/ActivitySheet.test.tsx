@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement, useEffect, type ComponentType, type ReactNode } from 'react';
+import { act, createContext, createElement, useCallback, useContext, useEffect, useLayoutEffect, useState, type ComponentType, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChatEvent, Server, StateEvent, SubagentRun, WorkflowAgentDetail, WorkflowDetail, WorkflowSummary } from '@hangar/core';
@@ -22,11 +22,22 @@ vi.mock('expo-router', () => ({
   useFocusEffect: (effect: () => void | (() => void)) => useEffect(() => route.focused ? effect() : undefined, [effect, route.focused]),
   Stack: { Screen: ({ options }: { options: { headerShown?: boolean; title?: string; headerLeft?: () => ReactNode; headerRight?: () => ReactNode } }) => {
     screenOptions.push(options);
+    const setOptions = useContext(NavigationFeedback);
+    // Screen do Expo publica as opções por referência em um efeito de layout.
+    useLayoutEffect(() => { setOptions?.(options); }, [options, setOptions]);
     return platform.OS === 'android' || options.headerShown === false ? null : createElement('header', { 'data-shown': String(options.headerShown) },
       options.headerLeft?.(), createElement('h1', null, options.title), options.headerRight?.());
   } },
 }));
 vi.mock('expo-router/react-navigation', () => ({ useHeaderHeight: () => 64 }));
+vi.mock('react-native-unistyles', async (original) => {
+  const unistyles = await original<typeof import('react-native-unistyles')>();
+  return { ...unistyles, useUnistyles: () => {
+    const { theme, rt } = unistyles.useUnistyles();
+    // O hook nativo cria outro proxy em cada render, mesmo sem mudança no tema.
+    return { theme: new Proxy(theme, {}), rt };
+  } };
+});
 vi.mock('../../stores/servers', () => ({ useServers: Object.assign(
   (select: (state: typeof stores) => unknown) => select(stores), { getState: () => stores },
 ) }));
@@ -95,11 +106,18 @@ const events: ChatEvent[] = [
   { id: 'launch', kind: 'tool_use', tool_use_id: 'launch', tool_name: 'Agent', tool_input: { description: 'Conferir atividade', prompt: 'Conferir atividade', subagent_type: 'Explore' } },
 ];
 const roots = new Set<Root>();
-async function mount() {
+const NavigationFeedback = createContext<((options: object) => void) | null>(null);
+function Navigator() {
+  const [options, setOptions] = useState<object>({});
+  const publish = useCallback((next: object) => setOptions(current => ({ ...current, ...next })), []);
+  return createElement(NavigationFeedback.Provider, { value: publish },
+    createElement('div', { 'data-options-ready': Object.keys(options).length > 0 }, createElement(ActivitySheet)));
+}
+async function mount(navigator = false) {
   const el = document.createElement('div');
   const root = createRoot(el);
   roots.add(root);
-  const render = () => act(async () => root.render(createElement(ActivitySheet)));
+  const render = () => act(async () => root.render(createElement(navigator ? Navigator : ActivitySheet)));
   await render();
   return { el, render, unmount: async () => { await act(async () => root.unmount()); roots.delete(root); } };
 }
@@ -691,7 +709,7 @@ describe('ActivitySheet real', () => {
     expect(route.back).toHaveBeenCalledTimes(1);
   });
 
-  it('iOS mantém as mesmas opções do cabeçalho enquanto nada do cabeçalho muda', async () => {
+  it('iOS mantém as opções do cabeçalho quando o proxy do tema muda sem mudar as cores', async () => {
     vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
     await mount();
     const before = screenOptions.at(-1);
@@ -699,6 +717,44 @@ describe('ActivitySheet real', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
     expect(screenOptions.length).toBeGreaterThan(0);
     expect(screenOptions.every((options) => options === before)).toBe(true);
+  });
+
+  it('iOS converge quando setOptions redesenha a rota com outro proxy do tema', async () => {
+    const { el } = await mount(true);
+    expect(el.querySelector('[data-options-ready="true"]')).not.toBeNull();
+    expectHeader(el, m.ctx_atividade());
+    await click(el, workflow.name);
+    expectHeader(el, detail.name);
+    await click(el, m.comum_voltar());
+    await click(el, 'Conferir atividade');
+    expectHeader(el, 'Conferir atividade');
+  });
+
+  it('iOS atualiza as cores dos indicadores do cabeçalho quando o tema muda', async () => {
+    const { useUnistyles } = await import('react-native-unistyles');
+    const { theme } = useUnistyles();
+    const previous = { secondary: theme.tokens.text.secondary, accent: theme.tokens.accent.base, success: theme.tokens.status.success };
+    const { el, render } = await mount(true);
+    const badgeColor = () => el.querySelector<HTMLElement>('header > span')?.style.color;
+    try {
+      theme.tokens.text.secondary = '#123456';
+      await render();
+      expect(badgeColor()).toBe('#123456');
+      await click(el, workflow.name);
+      theme.tokens.accent.base = '#234567';
+      await render();
+      expect(badgeColor()).toBe('#234567');
+      await click(el, m.comum_voltar());
+      api.getWorkflow.mockResolvedValue({ ...detail, status: 'completed' });
+      await click(el, workflow.name);
+      theme.tokens.status.success = '#345678';
+      await render();
+      expect(badgeColor()).toBe('#345678');
+    } finally {
+      theme.tokens.text.secondary = previous.secondary;
+      theme.tokens.accent.base = previous.accent;
+      theme.tokens.status.success = previous.success;
+    }
   });
 
   it('iOS não registra hardwareBackPress e preserva a navegação nativa', async () => {

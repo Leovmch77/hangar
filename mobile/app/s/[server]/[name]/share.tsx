@@ -1,3 +1,4 @@
+import { useCallback, useMemo } from 'react';
 import { ActivityIndicator, Platform, Text, View } from 'react-native';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useHeaderHeight } from 'expo-router/react-navigation';
@@ -23,23 +24,24 @@ export default function ShareRoute() {
   const ready = useServers((state) => state.ready);
   const server = useServers((state) => state.servers.find((item) => item.id === serverId) ?? null);
   const unavailable = !server || server.removed || !name;
-  const close = () => {
-    if (router.canGoBack()) router.back();
-    else router.replace('/');
-  };
-
   const header = useGlassHeader();
   const headerHeight = useHeaderHeight();
   const top = { paddingTop: headerHeight };
   const canGoBack = router.canGoBack();
+  const close = useCallback(() => {
+    if (canGoBack) router.back();
+    else router.replace('/');
+  }, [router, canGoBack]);
+  const title = m.compartilhar_titulo({ nome: name });
+  const headerOptions = useMemo(() => ({
+    ...header,
+    title,
+    headerLeft: canGoBack ? undefined : () => <HeaderBack onPress={close} />,
+  }), [header, title, canGoBack, close]);
 
   return (
     <Screen edges={EDGES}>
-      <Stack.Screen options={{
-        ...header,
-        title: m.compartilhar_titulo({ nome: name }),
-        headerLeft: canGoBack ? undefined : () => <HeaderBack onPress={close} />,
-      }} />
+      <Stack.Screen options={headerOptions} />
       {!ready ? (
         <View style={[styles.state, top]}>
           <ActivityIndicator color={theme.tokens.text.muted} />

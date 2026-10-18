@@ -6,8 +6,13 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { configureLocale, localeAtual, mergeReports, zeroUso, type ComboRow, type CostReport, type Server, type UsoFiltros } from '@hangar/core';
 const net = vi.hoisted(() => ({ costs: vi.fn(), usage: vi.fn(), push: vi.fn(), back: vi.fn(), screen: vi.fn(), canGoBack: false, focused: true }));
 vi.mock('@hangar/core', async (original) => ({ ...await original<typeof import('@hangar/core')>(), fetchCostsForServer: net.costs, fetchUsoForServer: net.usage }));
+vi.mock('react-native-unistyles', async (original) => {
+  const module = await original<typeof import('react-native-unistyles')>();
+  return { ...module, useUnistyles: () => { const value = module.useUnistyles(); return { ...value, theme: new Proxy(value.theme, {}) }; } };
+});
+const router = { push: net.push, back: net.back, canGoBack: () => net.canGoBack };
 vi.mock('expo-router', () => ({
-  useRouter: () => ({ push: net.push, back: net.back, canGoBack: () => net.canGoBack }),
+  useRouter: () => router,
   useIsFocused: () => net.focused,
   Stack: { Screen: ({ options }: { options: { title: string; headerLeft?: () => ReactNode } }) => {
     net.screen(options);
@@ -62,6 +67,13 @@ beforeEach(() => {
   node = document.createElement('div'); root = createRoot(node);
 });
 afterEach(async () => { await act(async () => root.unmount()); configureLocale({ getLocale: () => previousLocale }); overwriteGetLocale(() => previousMessageLocale); });
+
+it.each([CostsScreen, StatsScreen])('preserva opções do cabeçalho ao redesenhar relatório sem alteração', async (Screen) => {
+  await act(async () => root.render(React.createElement(Screen)));
+  const initial = net.screen.mock.calls.at(-1)![0];
+  await act(async () => root.render(React.createElement(Screen)));
+  expect(net.screen.mock.calls.at(-1)![0]).toBe(initial);
+});
 
 it.each([false, true])('relatórios configuram cabeçalho nativo e voltar alternativo somente sem histórico: %s', async (canGoBack) => {
   net.canGoBack = canGoBack;

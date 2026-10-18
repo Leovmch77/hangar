@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { useIsFocused, useRouter } from 'expo-router';
 import { agruparPorPlugin, mergeUso, zeroUso, type Server, type UsoBucket, type UsoFiltros } from '@hangar/core';
@@ -71,6 +71,7 @@ function UsageDetail({ servers, period, filters, selection, presenceAvailable, a
 
 export function StatsScreen() {
   const router = useRouter();
+  const back = useCallback(() => router.back(), [router]);
   const active = useIsFocused();
   const { period, own, selected } = useReportSelection();
   const [filters, setFilters] = useState<UsoFiltros>({});
@@ -149,7 +150,7 @@ export function StatsScreen() {
     {(['input', 'output', 'cache_write', 'cache_read'] as const).map((type, index) => <Copy key={type}>{`${[m.custos_input_sem_cache(), m.custos_output_total(), m.custos_tipo_cache_escrito(), m.custos_tipo_cache_lido()][index]}: ${number(item[type])} · ${dollars(item[`cost_${type}`])}`}</Copy>)}
   </>;
 
-  return <ReportFrame title={m.uso_painel_titulo()} back={() => router.back()} sibling={m.uso_ir_custos()} onSibling={() => router.back()}>
+  return <ReportFrame title={m.uso_painel_titulo()} back={back} sibling={m.uso_ir_custos()} onSibling={back}>
     <ReportControls own={own} refresh={load.refresh} />
     <ReportStatus {...load} selected={selected.length} />
     {!presenceAvailable && <Copy>{m.mobile_usage_presence_unavailable({ machines: presenceMissing.map((part) => part.label).join(', ') })}</Copy>}
