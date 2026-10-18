@@ -100,11 +100,11 @@ export function SessionChips({ serverId, names, onBeforeOpen }: { serverId: stri
 }
 
 const styles = StyleSheet.create((theme) => ({
-  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[3] },
   chip: {
-    flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 32, maxWidth: '100%',
-    paddingHorizontal: 10, borderRadius: theme.base.radius.full, borderWidth: 1,
+    flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5], minHeight: 32, maxWidth: '100%',
+    paddingHorizontal: theme.base.space[2], borderRadius: theme.base.radius.full, borderWidth: 1,
   },
-  chipName: { fontSize: theme.base.text.xs, fontWeight: '600', flexShrink: 1 },
+  chipName: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.semibold, flexShrink: 1 },
   chipState: { fontSize: theme.base.text.xxs },
 }));

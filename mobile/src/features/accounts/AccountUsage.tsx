@@ -38,11 +38,11 @@ export function AccountUsage({ credential }: { credential: Credencial }) {
 }
 
 const styles = StyleSheet.create(theme => ({
-  block: { gap: 8 },
-  window: { gap: 4 },
+  block: { gap: theme.base.space[2] },
+  window: { gap: theme.base.space[1] },
   label: { fontSize: theme.base.text.xs, color: theme.tokens.text.primary },
   muted: { fontSize: theme.base.text.xxs, color: theme.tokens.text.muted },
   warning: { fontSize: theme.base.text.xxs, color: theme.tokens.status.warning },
-  track: { height: 4, borderRadius: 2, overflow: 'hidden', backgroundColor: theme.tokens.bg.hover },
-  fill: { height: 4, borderRadius: 2, backgroundColor: theme.tokens.accent.base },
+  track: { height: 4, borderRadius: theme.base.radius.full, overflow: 'hidden', backgroundColor: theme.tokens.bg.hover },
+  fill: { height: 4, borderRadius: theme.base.radius.full, backgroundColor: theme.tokens.accent.base },
 }));

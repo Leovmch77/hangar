@@ -131,11 +131,11 @@ const styles = StyleSheet.create((theme) => ({
   scroll: {
     padding: theme.base.space[4],
     gap: theme.base.space[3],
-    paddingBottom: 40,
+    paddingBottom: theme.base.space[10],
   },
   title: {
     fontSize: theme.base.text.lg,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   statusRow: {
     minHeight: 28,
@@ -146,11 +146,11 @@ const styles = StyleSheet.create((theme) => ({
   dot: {
     width: 8,
     height: 8,
-    borderRadius: 4,
+    borderRadius: theme.base.radius.full,
   },
   statusLabel: {
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   iter: {
     marginLeft: 'auto',
@@ -182,9 +182,9 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.base.space[3],
   },
   primaryText: {
-    color: '#fff',
+    color: theme.ink.onAccent,
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
     textAlign: 'center',
   },
   ghost: {
@@ -198,7 +198,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   ghostText: {
     fontSize: theme.base.text.sm,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
     textAlign: 'center',
   },
   disabled: {

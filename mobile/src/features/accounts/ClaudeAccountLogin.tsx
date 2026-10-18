@@ -226,7 +226,7 @@ export function ClaudeAccountLogin({ server, label, onComplete, onClose }: Claud
 }
 const styles = StyleSheet.create(theme => ({
   root: { padding: theme.base.space[4], gap: theme.base.space[3] },
-  title: { color: theme.tokens.text.primary, fontSize: theme.base.text.lg, fontWeight: '600' },
+  title: { color: theme.tokens.text.primary, fontSize: theme.base.text.lg, fontWeight: theme.base.weight.semibold },
   text: { color: theme.tokens.text.primary },
   error: { color: theme.tokens.status.error },
   actions: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[2], marginTop: theme.base.space[2] },

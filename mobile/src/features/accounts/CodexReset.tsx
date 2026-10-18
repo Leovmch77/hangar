@@ -122,8 +122,8 @@ export function ResetFeedback({ server, credentialIds, onDefinitive }: {
 }
 
 const styles = StyleSheet.create(theme => ({
-  block: { gap: 8, marginTop: 8 },
+  block: { gap: theme.base.space[2], marginTop: theme.base.space[2] },
   text: { fontSize: theme.base.text.xs, color: theme.tokens.text.secondary },
   error: { fontSize: theme.base.text.xs, color: theme.tokens.status.error },
-  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[2] },
 }));

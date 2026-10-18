@@ -220,11 +220,11 @@ const styles = StyleSheet.create((theme) => ({
   scroll: {
     padding: theme.base.space[4],
     gap: theme.base.space[3],
-    paddingBottom: 40,
+    paddingBottom: theme.base.space[10],
   },
   title: {
     fontSize: theme.base.text.lg,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   field: {
     gap: theme.base.space[2],
@@ -243,7 +243,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   label: {
     fontSize: theme.base.text.sm,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
   },
   smallAction: {
     minHeight: 32,
@@ -257,7 +257,7 @@ const styles = StyleSheet.create((theme) => ({
     minHeight: 32,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
+    gap: theme.base.space[1],
     paddingHorizontal: theme.base.space[3],
     borderRadius: theme.base.radius.full,
     borderWidth: 1,
@@ -265,7 +265,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   refineText: {
     fontSize: theme.base.text.xs,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
   },
   input: {
     minHeight: 44,
@@ -321,7 +321,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   toggleText: {
     fontSize: theme.base.text.sm,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
   },
   error: {
     fontSize: theme.base.text.sm,
@@ -333,9 +333,9 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: 'center',
   },
   primaryText: {
-    color: '#fff',
+    color: theme.ink.onAccent,
     fontSize: theme.base.text.base,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   disabled: {
     opacity: 0.5,
@@ -373,7 +373,7 @@ const styles = StyleSheet.create((theme) => ({
   guideHeadText: {
     flex: 1,
     fontSize: theme.base.text.sm,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
   },
   guideBody: {
     paddingBottom: theme.base.space[2],
