@@ -2,7 +2,7 @@
 // `parseFilePaths` de `format.ts` de propósito: aquele alimenta o chat (só mídia/html/pdf viram
 // preview) e não pode ganhar extensão de código sem mudar o que a bolha desenha.
 import type { ChatEvent } from './types';
-import { fileKind } from './format';
+import { codeCitation } from './format';
 
 // Lista FECHADA no RELATIVO: regex aberta ("qualquer extensão") casa `repo.git` em URL e some com
 // `config.py` solto em prosa — os dois lados errados.
@@ -100,7 +100,7 @@ function codeRef(code: string): { path: string; line: number | null } | null {
 function linkProse(text: string): string {
   let s = text;
   for (const ref of parseCodeReferences(text).reverse()) {
-    if (fileKind(ref.path)) continue;
+    if (!codeCitation(ref.path, ref.line)) continue;
     s = `${s.slice(0, ref.start)}[${s.slice(ref.start, ref.end)}](${fileLinkUrl(ref.path, ref.line)})${s.slice(ref.end)}`;
   }
   return s;
@@ -115,7 +115,7 @@ function linkLine(line: string): string {
   for (const mt of line.matchAll(PROTEGIDO)) {
     out += linkProse(line.slice(last, mt.index));
     const ref = mt[1] !== undefined ? codeRef(mt[1]) : null;
-    out += ref && !fileKind(ref.path) ? `[${mt[0]}](${fileLinkUrl(ref.path, ref.line)})` : mt[0];
+    out += ref && codeCitation(ref.path, ref.line) ? `[${mt[0]}](${fileLinkUrl(ref.path, ref.line)})` : mt[0];
     last = mt.index + mt[0].length;
   }
   return out + linkProse(line.slice(last));

@@ -2,7 +2,7 @@
   import { useSessionServer } from '../lib/sessionServer';
   import { computeEditDiff, extractEdits, extractEditPaths, diffFromPatch, diffFromEdits, extractFilePath, pseudoCaminhoPorConteudo, htmlPageFromResult, type ChatEvent } from '@hangar/core';
   import * as m from '../paraglide/messages';
-  import { parseFilePaths, summarizeToolInput, summarizeToolResult, toolPhase, toolVerbo } from '@hangar/core';
+  import { isTextData, parseFilePaths, summarizeToolInput, summarizeToolResult, toolPhase, toolVerbo } from '@hangar/core';
   import { getBashOutput, getToolProgress, nomeFerramenta, separarComando, terminalFileTool, terminalToolName, type EtapaFerramenta } from '@hangar/core';
   import { copyText } from '../lib/clipboard';
   import { pollSequential } from '../lib/pollSequential';
@@ -67,7 +67,9 @@
   // conhecida, entao codigo/.md nao vira anexo). Reusa a mesma trava + componente do chat.
   const fileRefs = $derived(
     (event.tool_name ?? '').toLowerCase() === 'read'
+      // csv/txt lidos são texto: o cartão da ferramenta já mostra o conteúdo.
       ? parseFilePaths(String((event.tool_input as Record<string, unknown> | null)?.['file_path'] ?? (event.tool_input as Record<string, unknown> | null)?.['path'] ?? ''))
+        .filter((r) => !isTextData(r.path))
       : []
   );
 

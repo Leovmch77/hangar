@@ -2659,7 +2659,8 @@ mod tests {
         registry.bind_lifecycle();
         let hubs=crate::side::Hubs::default();registry.bind_hubs(hubs.downgrade());
         registry.open_claude_headless("cl-rebind",false).await.expect("é dela").expect("abriu");
-        let binding=tokio::time::timeout(Duration::from_secs(5),async {
+        // Teto só contra travamento: no Windows do CI, com a bateria em paralelo, a troca passou de 5 s.
+        let binding=tokio::time::timeout(Duration::from_secs(60),async {
             loop {
                 if let Ok(binding)=registry.interaction_binding_readonly("cl-rebind").await && binding.conversation=="b" {break binding;}
                 tokio::time::sleep(Duration::from_millis(20)).await;
