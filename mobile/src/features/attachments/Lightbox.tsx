@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StatusBar, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Image } from 'expo-image';
@@ -58,13 +58,17 @@ export function Lightbox({ visible, uri, headers, filename, onClose, kind = 'ima
   };
 
   const [saving, setSaving] = useState(false);
+  const savingNow = useRef(false);
   const save = () => {
+    // O `disabled` só vale depois do próximo render: dois toques rápidos abriam duas folhas.
+    if (savingNow.current) return;
+    savingNow.current = true;
     haptic.selection();
     setSaving(true);
     saveImage(uri, headers, filename)
       .then((gravou) => { if (gravou) toast.ok(m.file_card_saved()); })
       .catch((e: unknown) => toast.erro(e instanceof Error ? e.message : String(e)))
-      .finally(() => setSaving(false));
+      .finally(() => { savingNow.current = false; setSaving(false); });
   };
 
   const pinch = Gesture.Pinch()

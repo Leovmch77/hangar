@@ -1135,6 +1135,8 @@ describe('codeCitation', () => {
   it('csv/txt com número de linha é referência a código, não anexo', () => {
     expect(codeCitation('/tmp/log.txt', 12)).toBe(true);
     expect(parseFilePaths('veja /tmp/log.txt:12 e /tmp/dados.csv').map((r) => r.path)).toEqual(['/tmp/dados.csv']);
+    const t = 'Gerei /tmp/a.csv; a linha ruim é /tmp/a.csv:12';
+    expect(hideAttachmentPaths(t, parseFilePaths(t))).toBe('Gerei a.csv; a linha ruim é /tmp/a.csv:12');
   });
 });
 

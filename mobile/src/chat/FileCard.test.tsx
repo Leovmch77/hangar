@@ -63,8 +63,8 @@ describe('FileCard', () => {
     expect(c.textContent).not.toContain('retry');
   });
 
-  it('cancelar a folha do sistema não marca como baixado', async () => {
-    deliver.mockResolvedValue('cancelled');
+  it.each(['cancelled', 'shared'])('folha do sistema (%s) não marca como baixado', async (r) => {
+    deliver.mockResolvedValue(r);
     const c = await mount();
     await press(c);
     expect(c.textContent).not.toContain('saved');

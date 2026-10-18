@@ -31,7 +31,7 @@ export const FileCard = memo(function FileCard({ uri, headers, name }: {
   const { theme } = useUnistyles();
   const [status, setStatus] = useState<Status>('idle');
   const alive = useRef(true);
-  useEffect(() => () => { alive.current = false; }, []);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const ios = Platform.OS === 'ios';
   const run = useCallback(async () => {
     haptic.selection();
@@ -39,7 +39,7 @@ export const FileCard = memo(function FileCard({ uri, headers, name }: {
     try {
       const r = await deliverFile(uri, headers, name);
       if (!alive.current) return;
-      setStatus(r === 'cancelled' ? 'idle' : r);
+      setStatus(r === 'cancelled' || r === 'shared' ? 'idle' : r);
       if (r === 'empty' || r === 'no-app') haptic.error();
       else if (r === 'done') haptic.success();
     } catch (e) {

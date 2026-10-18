@@ -81,12 +81,13 @@ export function mimeType(name: string): string {
 // Documento citado: o iOS entrega pela folha do sistema (Salvar em Arquivos, Abrir em…); o Android não
 // compartilha arquivo pelo Share do RN, então abre direto no app que lê o tipo. 'empty' = o servidor
 // mandou 0 bytes e não há o que entregar.
-export async function deliverFile(uri: string, headers: Record<string, string> | undefined, name: string): Promise<'done' | 'empty' | 'cancelled' | 'no-app'> {
+// iOS: a folha não diz para onde o arquivo foi (Copiar, Mail, Salvar em Arquivos), então volta 'shared'.
+export async function deliverFile(uri: string, headers: Record<string, string> | undefined, name: string): Promise<'done' | 'shared' | 'empty' | 'cancelled' | 'no-app'> {
   const f = await localCopy(uri, headers, name);
   if (f.size === 0) return 'empty';
   if (Platform.OS === 'ios') {
     const r = await Share.share({ url: f.uri });
-    return r.action === Share.dismissedAction ? 'cancelled' : 'done';
+    return r.action === Share.dismissedAction ? 'cancelled' : 'shared';
   }
   try {
     await startActivityAsync('android.intent.action.VIEW', { data: f.contentUri, type: mimeType(name), flags: FLAG_GRANT_READ_URI_PERMISSION });

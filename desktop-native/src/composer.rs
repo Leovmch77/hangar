@@ -219,7 +219,13 @@ fn hidden_at(line: &str, at: usize, hidden: &[String]) -> Option<(usize, String)
     hidden.iter().find_map(|path| {
         let after = body.strip_prefix(path.as_str())?;
         let mut next = after.chars();
-        let ends = match next.next() { None => true, Some('.') => !next.next().is_some_and(word), Some(c) => !(word(c) || c == '-') };
+        let ends = match next.next() {
+            None => true,
+            Some('.') => !next.next().is_some_and(word),
+            // `caminho:12` é referência a código: fica como está.
+            Some(':') => !next.next().is_some_and(|c| c.is_ascii_digit()),
+            Some(c) => !(word(c) || c == '-'),
+        };
         if !ends || (tick && !after.starts_with('`')) { return None; }
         let name = basename(path);
         Some(if tick { (path.len() + 2, format!("`{name}`")) } else { (path.len(), name.to_owned()) })
@@ -733,6 +739,8 @@ mod tests {
         let bare = hide("abre `dados.csv` e `/tmp/rel.csv`");
         assert!(bare.starts_with("abre [dados.csv](hangar-file:") && bare.ends_with(" e `rel.csv`"), "{bare}");
         assert_eq!(cited_paths("veja /tmp/log.txt:12 e /tmp/dados.csv"), vec!["/tmp/dados.csv"]);
+        let both = hide("Gerei /tmp/a.csv; a linha ruim é /tmp/a.csv:12");
+        assert!(both.starts_with("Gerei a.csv; a linha ruim é [a.csv:12](hangar-file:"), "{both}");
         assert!(hide("veja logs/app.txt:12").starts_with("veja [app.txt:12](hangar-file:"), "{}", hide("veja logs/app.txt:12"));
     }
 

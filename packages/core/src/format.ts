@@ -451,7 +451,7 @@ export function hideAttachmentPaths(text: string, refs: FileRef[]): string {
     .map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
   // Código inline é uma unidade: só some quando é exatamente o caminho (um comando fica intacto).
   const re = new RegExp(
-    `!?\\[([^\\]\\n]*)\\]\\(<?(?:${alt})>?\\)|\`([^\`\\n]*)\`|(?<![\\w.~/-])(${alt})(?![\\w-]|\\.\\w)`, 'g');
+    `!?\\[([^\\]\\n]*)\\]\\(<?(?:${alt})>?\\)|\`([^\`\\n]*)\`|(?<![\\w.~/-])(${alt})(?![\\w-]|\\.\\w|:\\d)`, 'g');
   const isPath = new Set(paths);
   const swap = (blank: boolean) => (whole: string, label?: string, code?: string, path?: string) =>
     label !== undefined ? (blank ? '' : label)

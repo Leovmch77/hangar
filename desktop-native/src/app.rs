@@ -1590,12 +1590,9 @@ impl Hangar {
             }
             Payload::Saved(key, source, open, result) => {
                 let (card, note) = match result {
-                    Ok((path, empty)) if open => {
-                        cx.open_with_system(&path);
-                        (empty.then_some(FileCard::Empty), None)
-                    }
-                    Ok((path, empty)) => (Some(if empty { FileCard::Empty } else { FileCard::Saved }),
-                        Some((tr("saved").replace("{path}", &path.display().to_string()), false))),
+                    Ok((_, true)) => (Some(FileCard::Empty), None),
+                    Ok((path, _)) if open => { cx.open_with_system(&path); (None, None) }
+                    Ok((path, _)) => (Some(FileCard::Saved), Some((tr("saved").replace("{path}", &path.display().to_string()), false))),
                     // O card já diz "não encontrado"; a frase do servidor vinha sem tradução.
                     Err((_, true)) => (Some(FileCard::Missing), None),
                     Err((error, false)) => (Some(FileCard::Failed(error.clone())), Some((error, true))),
@@ -2918,10 +2915,11 @@ impl Hangar {
                 let result = async {
                     let bytes = uploads.fetch(&api, &key.name, &source).await
                         .map_err(|error| (format!("{safe}: {}", Self::fetch_failure(&error)), error.status == Some(404)))?;
+                    // Vazio não vira arquivo no disco: o card avisa e não há o que abrir.
+                    if bytes.is_empty() { return Ok((PathBuf::new(), true)); }
                     let path = match target { Some(path) => path, None => private_copy(&safe).map_err(|_| (tr("save_failed"), false))? };
-                    let empty = bytes.is_empty();
                     // Até 100 MiB: a escrita não pode ocupar uma das duas threads do runtime.
-                    tokio::task::spawn_blocking(move || std::fs::write(&path, bytes).map(|()| (path, empty))).await
+                    tokio::task::spawn_blocking(move || std::fs::write(&path, bytes).map(|()| (path, false))).await
                         .ok().and_then(Result::ok).ok_or_else(|| (tr("save_failed"), false))
                 }.await;
                 let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Saved(key, source, open, result) }).await;
