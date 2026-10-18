@@ -490,62 +490,71 @@ _STREAM_HEADERS = ("content-type", "x-filename", "range", "if-range", "if-none-m
 
 async def forward_stream(request, *, guest: bool):
     """Anexo, transcrição ou mídia da sessão que entrou por uma porta do Python, já autenticado:
-    segue ao Rust em fluxo nos dois sentidos (até 100 MiB) e o transporte fecha quando o cliente sai."""
+    segue ao Rust em fluxo nos dois sentidos (até 100 MiB) e o transporte fecha quando o cliente sai.
+    Tudo no loop, sem thread do executor padrão: uploads simultâneos não podem esgotá-lo."""
     import asyncio
-    import http.client
+    import h11
     from starlette.responses import JSONResponse, StreamingResponse
     config = _preparation_transport
     if config is None:
         return JSONResponse({"detail": {"code": "account_bridge_unavailable"}}, status_code=503)
-    connection = http.client.HTTPConnection(config[0], timeout=480)
+    host, _, port = config[0].rpartition(":")
     query = request.url.query
-    headers = {"x-hangar-internal": config[1], "x-hangar-path": request.url.path}
+    headers = [("host", config[0]), ("x-hangar-internal", config[1]), ("x-hangar-path", request.url.path)]
     if guest:
-        headers["x-hangar-forwarded-guest"] = "1"
-    for key in _STREAM_HEADERS:
-        if key in request.headers:
-            headers[key] = request.headers[key]
+        headers.append(("x-hangar-forwarded-guest", "1"))
+    headers += [(key, request.headers[key]) for key in _STREAM_HEADERS if key in request.headers]
     body = request.method == "POST"
-    chunked = body and "content-length" not in request.headers
     if body:
-        headers.update({"transfer-encoding": "chunked"} if chunked else {"content-length": request.headers["content-length"]})
+        length = request.headers.get("content-length")
+        headers.append(("content-length", length) if length is not None else ("transfer-encoding", "chunked"))
+    conn = h11.Connection(h11.CLIENT)
+    writer = None
 
-    def open_headers():
-        connection.putrequest(request.method, "/__hangar_server/forwarded" + (f"?{query}" if query else ""))
-        for key, value in headers.items():
-            connection.putheader(key, value)
-        connection.endheaders()
+    async def receive():
+        while (event := conn.next_event()) is h11.NEED_DATA:
+            conn.receive_data(await asyncio.wait_for(reader.read(64 * 1024), 480))
+        return event
 
     try:
-        await asyncio.to_thread(open_headers)
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, int(port)), 10)
+        target = "/__hangar_server/forwarded" + (f"?{query}" if query else "")
+        writer.write(conn.send(h11.Request(method=request.method, target=target, headers=headers)))
         if body:
             async for chunk in request.stream():
                 if chunk:
-                    await asyncio.to_thread(connection.send, f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n" if chunked else chunk)
-            if chunked:
-                await asyncio.to_thread(connection.send, b"0\r\n\r\n")
-        response = await asyncio.to_thread(connection.getresponse)
-    except (OSError, http.client.HTTPException) as error:
-        connection.close()
+                    writer.write(conn.send(h11.Data(data=chunk)))
+                    await writer.drain()
+        writer.write(conn.send(h11.EndOfMessage()))
+        await writer.drain()
+        response = await receive()
+        while isinstance(response, h11.InformationalResponse):
+            response = await receive()
+        if not isinstance(response, h11.Response):
+            raise h11.RemoteProtocolError("conexão fechada sem resposta")
+    except (OSError, TimeoutError, h11.ProtocolError) as error:
+        if writer is not None:
+            writer.close()
         from app import diag
         # Só a classe: a mensagem pode trazer trecho do pedido.
         diag.registrar("rust.forward_failed", "aviso", codigo="account_bridge_unavailable",
                        detalhe=request.url.path, causa=type(error).__name__)
         return JSONResponse({"detail": {"code": "account_bridge_unavailable"}}, status_code=503)
     except BaseException:
-        connection.close()
+        if writer is not None:
+            writer.close()
         raise
 
     async def chunks():
         try:
-            while chunk := await asyncio.to_thread(response.read, 64 * 1024):
-                yield chunk
+            while isinstance(event := await receive(), h11.Data):
+                yield bytes(event.data)
         finally:
-            response.close()
-            connection.close()
+            writer.close()
 
-    kept = {key: value for key, value in response.getheaders() if key.lower() not in _HOP_BY_HOP}
-    return StreamingResponse(chunks(), status_code=response.status, headers=kept)
+    kept = {key.decode(): value.decode("latin-1") for key, value in response.headers
+            if key.decode().lower() not in _HOP_BY_HOP}
+    return StreamingResponse(chunks(), status_code=response.status_code, headers=kept)
 
 
 preparation_jobs = PreparationJobs()

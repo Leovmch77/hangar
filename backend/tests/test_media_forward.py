@@ -84,6 +84,20 @@ def test_every_media_route_goes_to_rust_with_query_and_reply_intact(rust, method
     assert seen["body"] == (AUDIO if method == "POST" else b"")
 
 
+def test_stream_never_borrows_the_default_thread_pool(rust, monkeypatch):
+    """Um upload grande não pode prender uma thread do executor padrão por pedaço: com vários ao
+    mesmo tempo, o pool de 8 threads fica sem vaga e o backend inteiro espera."""
+    import asyncio
+
+    def proibido(*args, **kwargs):
+        raise AssertionError("o repasse usou asyncio.to_thread")
+
+    monkeypatch.setattr(asyncio, "to_thread", proibido)
+    response = TestClient(app).post("/api/sessions/s/upload?audio_only=1", headers=AUTH, content=AUDIO)
+    assert (response.status_code, response.content) == (206, b"png")
+    assert _Rust.seen[0]["body"] == AUDIO
+
+
 def test_head_of_an_upload_also_goes_to_rust(rust):
     response = TestClient(app).head("/api/sessions/s/uploads/1-abc.png", headers=AUTH)
     assert response.status_code == 206
