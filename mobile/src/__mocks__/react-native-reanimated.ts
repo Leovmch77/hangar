@@ -17,7 +17,7 @@ export const withDelay = (_ms: number, v: any) => v;
 export const withSequence = (...vs: any[]) => vs[vs.length - 1];
 export const interpolate = (_v: number, _i: number[], out: number[]) => out[0];
 export const interpolateColor = (_v: number, _i: number[], out: string[]) => out[0];
-export const Easing: any = new Proxy({}, { get: () => (...a: any[]) => a[0] ?? passa });
+export const Easing: any = new Proxy({}, { get: (_target, key) => key === 'bezierFn' ? () => passa : (...a: any[]) => a[0] ?? passa });
 export const FadeIn: any = { duration: () => FadeIn, delay: () => FadeIn };
 export type SharedValue<T = any> = { value: T };
 
