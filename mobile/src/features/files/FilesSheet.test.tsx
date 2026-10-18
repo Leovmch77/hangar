@@ -234,4 +234,19 @@ describe('FilesSheet — deep-link', () => {
     expect(mocks.api.abrir).not.toHaveBeenCalled();
     root.unmount();
   });
+
+  it('fechar a rota desmonta o visualizador e libera a retenção do arquivo', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      mocks.setReady(true);
+      root.render(React.createElement(FilesSheet));
+    });
+    expect(container.textContent).toContain('viewer');
+    await act(async () => root.unmount());
+    expect(container.childElementCount).toBe(0);
+    expect(mocks.api.release).toHaveBeenCalledOnce();
+    container.remove();
+  });
 });

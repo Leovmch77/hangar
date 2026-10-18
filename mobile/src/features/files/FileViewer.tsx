@@ -1,12 +1,17 @@
-import { useEffect, useState } from 'react';
-import { ActivityIndicator, Platform, Pressable, Text, View, ScrollView } from 'react-native';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, FlatList, Linking, Platform, Pressable, Text, View, ScrollView } from 'react-native';
+import type { ListRenderItemInfo } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { WebView } from 'react-native-webview';
+import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
+import type { TextSelectionMenuConfig } from 'react-native-enriched-markdown';
 import type { FileContent, PathDiff, Server } from '@hangar/core';
 import { fileKind, fileUrlNative, fileAuthHeader, mensagemDeErro } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 import { EditDiff } from '../../chat/tools/EditDiff';
 import { PdfReader } from '../attachments/DocumentViewer';
+import { mkMarkdownStyle } from '../../chat/AssistantBubble';
+import { toast } from '../../ui/Toast';
 
 interface Props {
   path: string;
@@ -21,9 +26,29 @@ interface Props {
   server?: Server;
 }
 
-export function FileViewer({ path, conteudo, diff, loading, erro, escopo, onEscopo, onEditar, name, server }: Props) {
+export function FileViewer(props: Props) {
+  return <FileViewerContent key={`${props.server?.id ?? ''}::${props.name}::${props.path}`} {...props} />;
+}
+
+function openMarkdownLink({ url }: { url: string }) {
+  if (!/^(https?|mailto):/i.test(url)) return;
+  Linking.openURL(url).catch((error: unknown) => toast.erro(error instanceof Error ? error.message : String(error)));
+}
+
+function FileViewerContent({ path, conteudo, diff, loading, erro, escopo, onEscopo, onEditar, name, server }: Props) {
   const { theme } = useUnistyles();
-  const [verArquivo, setVerArquivo] = useState(false);
+  const isMarkdown = /\.(md|markdown)$/i.test(path);
+  const [verArquivo, setVerArquivo] = useState(isMarkdown);
+  const [showSource, setShowSource] = useState(false);
+  const markdownStyle = useMemo(() => mkMarkdownStyle(theme), [theme]);
+  const selectionMenu = useMemo<TextSelectionMenuConfig>(() => ({
+    copy: { label: m.selection_copy() },
+    copyAsMarkdown: { label: m.selection_copy_markdown() },
+    copyImageUrl: {
+      label: m.selection_copy_image_url(),
+      pluralLabels: { other: m.selection_copy_image_urls({ count: '{count}' }) },
+    },
+  }), []);
   const [webErro, setWebErro] = useState<string | null>(null);
   const [webCarregando, setWebCarregando] = useState(true);
 
@@ -125,7 +150,6 @@ export function FileViewer({ path, conteudo, diff, loading, erro, escopo, onEsco
     );
   }
 
-  const linhas = doArquivo ? (doArquivo.text === '' ? [] : doArquivo.text.replace(/\n$/, '').split('\n')) : [];
   const caiu = diffDoArquivo !== null && diffDoArquivo.escopo_usado !== diffDoArquivo.escopo_pedido;
   const motivoVisivel =
     caiu && diffDoArquivo?.motivo ? (mensagemDeErro(diffDoArquivo.motivo) ?? diffDoArquivo.motivo) : null;
@@ -192,6 +216,27 @@ export function FileViewer({ path, conteudo, diff, loading, erro, escopo, onEsco
       {arquivoTruncated ? <Text style={[styles.aviso, { color: theme.tokens.status.warning }]}>{m.arq_arquivo_cortado()}</Text> : null}
       {diffTruncated && temDiff && !verArquivo ? <Text style={[styles.aviso, { color: theme.tokens.status.warning }]}>{m.arq_diff_cortado()}</Text> : null}
 
+      {isMarkdown && doArquivo && (!temDiff || verArquivo) ? (
+        <View style={styles.segRow}>
+          <View style={[styles.seg, { borderColor: theme.tokens.border.subtle }]}>
+            {([
+              { source: false, label: m.mobile_file_page() },
+              { source: true, label: m.native_file_source() },
+            ]).map(option => (
+              <Pressable
+                key={option.label}
+                onPress={() => setShowSource(option.source)}
+                accessibilityRole="button"
+                accessibilityState={{ selected: showSource === option.source }}
+                style={[styles.modeBtn, showSource === option.source ? { backgroundColor: theme.tokens.accent.dim } : null]}
+              >
+                <Text style={{ color: theme.tokens.text.primary, fontSize: theme.base.text.xs }}>{option.label}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+      ) : null}
+
       {/* conteúdo */}
       {temDiff && !verArquivo && diffDoArquivo ? (
         <ScrollView style={styles.scroll}>
@@ -203,23 +248,49 @@ export function FileViewer({ path, conteudo, diff, loading, erro, escopo, onEsco
             </Text>
           ) : null}
         </ScrollView>
-      ) : doArquivo ? (
-        <ScrollView style={styles.scroll}>
-          <View style={styles.codeView}>
-            {linhas.map((linha, i) => (
-              <View key={i} style={styles.lineRow}>
-                <Text style={[styles.lineNo, { color: theme.tokens.text.muted }]}>{i + 1}</Text>
-                <Text style={[styles.lineTxt, { color: theme.tokens.text.primary }]} selectable>
-                  {linha || ' '}
-                </Text>
-              </View>
-            ))}
-          </View>
+      ) : doArquivo && isMarkdown && !showSource ? (
+        <ScrollView style={styles.scroll} contentContainerStyle={styles.markdown}>
+          {doArquivo.text.trim() ? (
+            <EnrichedMarkdownText
+              markdown={doArquivo.text}
+              markdownStyle={markdownStyle}
+              flavor="github"
+              onLinkPress={openMarkdownLink}
+              selectionMenuConfig={selectionMenu}
+            />
+          ) : <Text style={[styles.aviso, { color: theme.tokens.text.muted }]}>{m.native_file_empty()}</Text>}
         </ScrollView>
+      ) : doArquivo ? (
+        <FileSource text={doArquivo.text} />
       ) : null}
     </View>
   );
 }
+
+const lineKey = (_line: string, index: number) => String(index);
+
+const FileSource = memo(function FileSource({ text }: { text: string }) {
+  const { theme } = useUnistyles();
+  const lines = useMemo(() => text === '' ? [] : text.replace(/\n$/, '').split('\n'), [text]);
+  const renderLine = useCallback(({ item, index }: ListRenderItemInfo<string>) => (
+    <View style={styles.lineRow}>
+      <Text style={[styles.lineNo, { color: theme.tokens.text.muted }]}>{index + 1}</Text>
+      <Text style={[styles.lineTxt, { color: theme.tokens.text.primary }]} selectable>{item || ' '}</Text>
+    </View>
+  ), [theme]);
+  return (
+    <FlatList
+      style={styles.scroll}
+      contentContainerStyle={styles.codeView}
+      data={lines}
+      renderItem={renderLine}
+      keyExtractor={lineKey}
+      initialNumToRender={24}
+      maxToRenderPerBatch={24}
+      windowSize={5}
+    />
+  );
+});
 
 const styles = StyleSheet.create((theme) => ({
   root: {
@@ -270,6 +341,15 @@ const styles = StyleSheet.create((theme) => ({
   segBtn: {
     paddingHorizontal: 10,
     paddingVertical: 6,
+  },
+  modeBtn: {
+    minHeight: 44,
+    minWidth: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  markdown: {
+    padding: theme.base.space[3],
   },
   escopoBtn: {
     paddingHorizontal: 6,
