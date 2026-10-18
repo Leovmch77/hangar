@@ -67,13 +67,13 @@ export const RecordingWave = memo(function RecordingWave({ rms, onCancel }: { rm
 });
 
 const styles = StyleSheet.create((theme) => ({
-  row: { gap: 4 },
-  header: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
-  label: { fontSize: theme.base.text.sm, fontWeight: '600', color: theme.tokens.text.primary },
+  row: { gap: theme.base.space[1] },
+  header: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], flexWrap: 'wrap' },
+  label: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold, color: theme.tokens.text.primary },
   time: { fontSize: theme.base.text.sm, fontFamily: theme.base.fontMono, color: theme.tokens.text.primary, fontVariant: ['tabular-nums'] },
   wave: { width: '100%', minWidth: 0, height: HEIGHT, flexDirection: 'row', alignItems: 'center', gap: GAP, overflow: 'hidden' },
   bar: { width: BAR, borderRadius: BAR, backgroundColor: theme.tokens.accent.base },
-  cancel: { minWidth: 44, minHeight: 44, marginLeft: 'auto', paddingHorizontal: 8, borderRadius: 6, justifyContent: 'center' },
+  cancel: { minWidth: 44, minHeight: 44, marginLeft: 'auto', paddingHorizontal: theme.base.space[2], borderRadius: theme.base.radius.sm, justifyContent: 'center' },
   pressed: { backgroundColor: theme.tokens.border.subtle },
   cancelTxt: { fontSize: theme.base.text.sm, color: theme.tokens.text.primary },
 }));
