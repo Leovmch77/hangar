@@ -5905,6 +5905,7 @@
   "native_about_test_channel": "Test channel: {branch}",
   "native_about_following_channel": "Next update follows: {branch}",
   "native_app_update_channel_missing": "The test channel branch {branch} has no published native app yet; the current app stays.",
+  "native_app_update_download_failed": "The app download was interrupted ({reason}). Nothing was replaced; try again.",
   "native_app_update_swap_failed": "Couldn't replace the app: {reason}. Nothing was replaced.",
   "native_app_update_rolled_back": "The new version didn't open. The previous one is back in place.",
   "native_app_update_rollback_failed": "The new version didn't open and the previous one wasn't restored ({reason}). It's kept next to it, with .old at the end of the name.",
