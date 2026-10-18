@@ -136,8 +136,14 @@ fn py_str(v: &Value, marker: &str) -> String {
         _ => py_repr(v, marker),
     }
 }
-fn when(v: &Value, fixed: Option<FixedOffset>) -> Option<i64> {
-    let text = py_str(v, MARK);
+fn when(v: &Value, fixed: Option<FixedOffset>, marker: &str) -> Option<i64> {
+    let mut text = py_str(v, marker);
+    let prefix = format!("{marker}surrogate:");
+    while let Some(at) = text.find(&prefix) {
+        // fromisoformat aceita qualquer caractere único como separador de data e hora.
+        let end = at + prefix.len() + 5;
+        text.replace_range(at..end, "\u{fffd}");
+    }
     let text = if text.get(4..6) == Some("-W") || text.get(4..5) == Some("W") {
         let separated = text.get(4..5) == Some("-");
         let week_at = if separated { 6 } else { 5 };
@@ -500,6 +506,7 @@ fn on_stack<T: Send + 'static>(
     let depth = sources
         .shadow
         .iter()
+        .skip(sources.shadow.len().saturating_sub(300))
         .chain(sources.events.iter())
         .map(|line| nesting(line))
         .max()
@@ -589,7 +596,8 @@ fn feed_core(
         row: Value,
         used: bool,
     }
-    static LINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^- (\S+) · (.*)$").unwrap());
+    static LINE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^- ([^\s\x1c-\x1f]+) · (.*)$").unwrap());
     let (mut items, mut skipped, mut shadows) = (Vec::new(), 0, Vec::new());
     let Sources {
         journal,
@@ -599,10 +607,12 @@ fn feed_core(
     // O marcador nunca coincide com texto legítimo, inclusive strings com escapes Unicode.
     let baseline = journal
         .iter()
+        .skip(journal.len().saturating_sub(300))
         .cloned()
         .chain(
             shadow
                 .iter()
+                .skip(shadow.len().saturating_sub(300))
                 .chain(events.iter())
                 .map(|line| load(line, "").map(|v| v.to_string()).unwrap_or_default()),
         )
@@ -625,7 +635,7 @@ fn feed_core(
             skipped += 1;
             continue;
         };
-        let Some(when) = when(&json!(&c[1]), fixed) else {
+        let Some(when) = when(&json!(&c[1]), fixed, &marker) else {
             skipped += 1;
             continue;
         };
@@ -645,7 +655,7 @@ fn feed_core(
             skipped += 1;
             continue;
         };
-        let Some((when, text)) = when(&row["ts"], fixed).zip(row["text"].as_str()) else {
+        let Some((when, text)) = when(&row["ts"], fixed, &marker).zip(row["text"].as_str()) else {
             skipped += 1;
             continue;
         };
@@ -689,7 +699,7 @@ fn feed_core(
             skipped += 1;
             continue;
         }
-        let Some(when) = when(&row["ts"], fixed) else {
+        let Some(when) = when(&row["ts"], fixed, &marker) else {
             skipped += 1;
             continue;
         };

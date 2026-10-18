@@ -93,6 +93,9 @@ case('serde-raw-key-remains-object', events=row(tipo='entrega', resultado={'$ser
 case('serde-raw-key-raw-output', line('notify → arbiter: x'), row(text='x', mode={'$serde_json::private::RawValue':'123'}))
 case('task-text-integer-limit4300', line('aviso: T'+'9'*4300))
 case('python-bug-task-integer-limit4301', line('aviso: T'+'9'*4301))
+case('python-bug-surrogate-timestamp-output', events='{"ts":"2026-09-25\\ud80013:00:00Z","tipo":"entrega"}\n')
+case('shadow-surrogate-timestamp', line('notify → arbiter: x'), '{"ts":"2026-09-25\\ud80013:00:00Z","text":"x","p":0.7}\n')
+case('journal-python-whitespace-class', line('aviso: x','2026-09-25\x1f13:00:00Z'))
 case('python-bug-type-list', events=row(tipo=[]))
 case('python-bug-num-overflow', journal=line('notify → arbiter: x'), shadow=row(text='x', p=10**400))
 # Bytes inválidos precisam atravessar a leitura com replacement, não a escrita Unicode do fixture.
