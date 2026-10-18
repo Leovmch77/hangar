@@ -233,7 +233,8 @@ enum Payload {
     Recent(SessionKey, Result<Vec<UploadFile>, Failure>),
     // Miniatura já decodificada fora da thread da janela; `None` = bytes que não são imagem legível.
     Media(SessionKey, Source, Result<Option<Arc<RenderImage>>, Failure>),
-    Saved(SessionKey, bool, Result<PathBuf, String>),
+    /// Resultado de Abrir/Salvar: o arquivo gravado e se veio vazio, ou a falha e se ele não existe no servidor.
+    Saved(SessionKey, Source, bool, Result<(PathBuf, bool), (String, bool)>),
     ConnectionNotSaved(String),
     // Rede local aprendida para a máquina deste endereço salvo.
     Lan(String, api::route::Lan),
@@ -413,6 +414,10 @@ impl SystemNotifications {
 #[derive(Default)]
 struct CiteCheck { owner: Option<SessionKey>, scanned: HashSet<String>, checked: HashSet<String>, dead: HashSet<String> }
 
+/// Cartão de um arquivo citado depois de Abrir ou Baixar: baixando, baixado, vazio, inexistente ou a falha.
+#[derive(Clone)]
+enum FileCard { Busy, Saved, Empty, Missing, Failed(String) }
+
 /// Texto preparado de uma linha: a mensagem pronta para o `TextView`, as linhas do resultado de uma chamada ou o
 /// detalhe aberto (entrada/saída) de uma chamada.
 #[derive(Clone)]
@@ -506,6 +511,7 @@ pub struct Hangar {
     drafts: HashMap<SessionKey, String>,
     flight: InFlight,
     action_feedback: HashMap<SessionKey, (String, bool)>,
+    file_cards: HashMap<(SessionKey, Source), FileCard>,
     /// Painel "Na fila": edição em curso, recolhido e arrasto.
     queue: queue::QueueUi,
     /// Terminais de atalho vivos da máquina ativa (evento `shortcut_terminals`); as outras máquinas guardam no `RemoteList`.
@@ -972,7 +978,7 @@ impl Hangar {
             history_installed: false, pending_chat: Vec::new(),
             history_limit: 400, has_older: false, etag: None, error: None, list_error: None,
             delivery: DeliveryTracker::default(), stopping: HashSet::new(), stop_feedback: HashMap::new(), drafts: HashMap::new(),
-            flight: InFlight::default(), action_feedback: HashMap::new(), queue: Default::default(), live_terms: Vec::new(), question_open: None, question_card: None,
+            flight: InFlight::default(), action_feedback: HashMap::new(), file_cards: HashMap::new(), queue: Default::default(), live_terms: Vec::new(), question_open: None, question_card: None,
             hangar_open: false, hangar_focus: cx.focus_handle(), hangar_error: None, live_clock: None, ask_form: AskForm::default(), ask_drafts: HashMap::new(), plans_dismissed: HashSet::new(), answered_tools: HashSet::new(), answering: HashMap::new(), ask_scroll: Default::default(), plan_scroll: Default::default(), plan_view: None,
             plan_review: Default::default(),
             list_state, rail_hover: None, follow: Default::default(), row_ids: Vec::new(), row_signatures: Vec::new(), conversation: Default::default(), row_assets: Vec::new(), expanded: HashSet::new(), kept_expanded: HashMap::new(), orq_days: HashSet::new(),
@@ -1582,11 +1588,22 @@ impl Hangar {
                 cx.notify();
                 return;
             }
-            Payload::Saved(key, open, result) => {
+            Payload::Saved(key, source, open, result) => {
+                let card = match &result {
+                    Ok((_, true)) => Some(FileCard::Empty),
+                    Ok(_) if open => None,
+                    Ok(_) => Some(FileCard::Saved),
+                    Err((_, true)) => Some(FileCard::Missing),
+                    Err((error, false)) => Some(FileCard::Failed(error.clone())),
+                };
+                match card {
+                    Some(card) => { self.file_cards.insert((key.clone(), source), card); }
+                    None => { self.file_cards.remove(&(key.clone(), source)); }
+                }
                 let note = match result {
-                    Ok(path) if open => { cx.open_with_system(&path); None }
-                    Ok(path) => Some((tr("saved").replace("{path}", &path.display().to_string()), false)),
-                    Err(error) => Some((error, true)),
+                    Ok((path, _)) if open => { cx.open_with_system(&path); None }
+                    Ok((path, _)) => Some((tr("saved").replace("{path}", &path.display().to_string()), false)),
+                    Err((error, _)) => Some((error, true)),
                 };
                 if let Some(note) = note { self.action_feedback.insert(key, note); }
                 cx.notify();
@@ -2896,24 +2913,30 @@ impl Hangar {
             return;
         }
         let (connection, tx, runtime, uploads) = (self.connection, self.tx.clone(), self.runtime.clone(), self.uploads_for(&key));
+        let card = (key.clone(), source.clone());
         let write = move |target: Option<PathBuf>| {
             runtime.spawn(async move {
                 let result = async {
-                    let bytes = uploads.fetch(&api, &key.name, &source).await.map_err(|error| format!("{safe}: {}", Self::fetch_failure(&error)))?;
-                    let path = match target { Some(path) => path, None => private_copy(&safe).map_err(|_| tr("save_failed"))? };
+                    let bytes = uploads.fetch(&api, &key.name, &source).await
+                        .map_err(|error| (format!("{safe}: {}", Self::fetch_failure(&error)), error.status == Some(404)))?;
+                    let path = match target { Some(path) => path, None => private_copy(&safe).map_err(|_| (tr("save_failed"), false))? };
+                    let empty = bytes.is_empty();
                     // Até 100 MiB: a escrita não pode ocupar uma das duas threads do runtime.
-                    tokio::task::spawn_blocking(move || std::fs::write(&path, bytes).map(|()| path)).await
-                        .ok().and_then(Result::ok).ok_or_else(|| tr("save_failed"))
+                    tokio::task::spawn_blocking(move || std::fs::write(&path, bytes).map(|()| (path, empty))).await
+                        .ok().and_then(Result::ok).ok_or_else(|| (tr("save_failed"), false))
                 }.await;
-                let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Saved(key, open, result) }).await;
+                let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Saved(key, source, open, result) }).await;
             });
         };
-        if open { write(None); return; }
+        if open { self.file_cards.insert(card, FileCard::Busy); write(None); cx.notify(); return; }
         let prompt = cx.prompt_for_new_path(&downloads_folder(), Some(&composer::safe_name(&name)));
         let fail_key = self.selected_key();
         cx.spawn(async move |this, cx| {
             match prompt.await {
-                Ok(Ok(Some(path))) => write(Some(path)),
+                Ok(Ok(Some(path))) => {
+                    let _ = this.update(cx, |this, cx| { this.file_cards.insert(card, FileCard::Busy); cx.notify(); });
+                    write(Some(path))
+                }
                 Ok(Ok(None)) => {}
                 // O diálogo do sistema falhou: dizer, não parecer que Salvar não fez nada.
                 _ => { let _ = this.update(cx, |this, cx| {
@@ -4221,8 +4244,15 @@ impl Hangar {
                     }, cx);
                 }, cx)
             });
-            let (save_source, save_name) = (source, name.clone());
+            let (save_source, save_name) = (source.clone(), name.clone());
             let openable = composer::openable(&composer::safe_name(&name));
+            if !image && player.is_none() {
+                let state = key.as_ref().and_then(|key| self.file_cards.get(&(key.clone(), source))).cloned();
+                list = list.child(file_card(row, n, &name, state, openable,
+                    cx.listener(move |this, _, _, cx| this.keep_file(open_source.clone(), open_name.clone(), true, cx)),
+                    cx.listener(move |this, _, _, cx| this.keep_file(save_source.clone(), save_name.clone(), false, cx))));
+                continue;
+            }
             list = list.child(div().flex().flex_col().gap_1()
                 .when_some(preview, |el, preview| el.child(preview))
                 .when_some(player, |el, player| el.child(player))
@@ -5217,6 +5247,37 @@ pub(super) fn tool_file_refs(call: &ChatEvent) -> Vec<(Source, String, bool)> {
     paths.into_iter().flat_map(composer::cited_paths).map(cited_ref).collect()
 }
 
+/// Cartão de um arquivo que não tem prévia (pdf, planilha, zip, texto): ícone, nome, extensão ou o estado do último
+/// Abrir/Baixar, e os dois botões. Enquanto baixa, os botões param; na falha, Baixar vira Tentar de novo.
+fn file_card(row: &str, n: usize, name: &str, state: Option<FileCard>, openable: bool,
+    open: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, save: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
+    let web = activity::web;
+    let busy = matches!(state, Some(FileCard::Busy));
+    let failed = matches!(state, Some(FileCard::Missing | FileCard::Failed(_)));
+    let ext = name.rsplit_once('.').map(|(_, ext)| ext.to_uppercase()).unwrap_or_default();
+    let (detail, color, role) = match &state {
+        None => (ext, theme::faint(), None),
+        Some(FileCard::Busy) => (web("file_card_downloading"), theme::muted(), Some(Role::Status)),
+        Some(FileCard::Saved) => (web("file_card_saved"), theme::success_text(), Some(Role::Status)),
+        Some(FileCard::Empty) => (web("file_card_empty"), theme::warning_text(), Some(Role::Status)),
+        Some(FileCard::Missing) => (web("file_card_missing"), theme::warning_text(), Some(Role::Alert)),
+        Some(FileCard::Failed(error)) => (format!("{} · {error}", web("file_card_failed")), theme::warning_text(), Some(Role::Alert)),
+    };
+    let save_label = web(if failed { "file_card_retry" } else { "file_card_download" });
+    div().id(SharedString::from(format!("file-card-{row}-{n}"))).self_start().max_w(px(420.)).flex().items_center().gap_3()
+        .px_3().py_2().rounded_lg().border_1().border_color(theme::border())
+        .child(crate::fileicons::citation_icon(name).size_6())
+        .child(div().flex_1().min_w_0().flex().flex_col()
+            .child(div().truncate().text_sm().text_color(theme::text()).child(name.to_owned()))
+            .child(div().id(SharedString::from(format!("file-card-state-{row}-{n}"))).truncate().text_xs().text_color(color)
+                .when_some(role, |el, role| el.role(role)).child(detail)))
+        .when(openable, |el| el.child(Button::new(SharedString::from(format!("open-{row}-{n}"))).ghost().xsmall()
+            .label(web("file_card_open")).disabled(busy).on_click(open)))
+        .child(Button::new(SharedString::from(format!("save-{row}-{n}"))).outline().xsmall().icon(IconName::Download)
+            .label(save_label).disabled(busy).on_click(save))
+        .into_any_element()
+}
+
 /// Caminho citado como anexo: o nome que aparece embaixo e se ele abre como imagem.
 fn cited_ref(path: String) -> (Source, String, bool) {
     let name = composer::basename(&path).to_owned();
@@ -6033,7 +6094,9 @@ fn prepare_message(event: &ChatEvent, dead: &HashSet<String>) -> Prepared {
     // Recado de outra sessão também é escrito por agente: cita arquivo do mesmo jeito que a resposta.
     let cites = event.kind == "assistant_msg" || peer_of(event).is_some();
     let mut map = source_map::SourceMap { source_len: body.len(), ..Default::default() };
-    let source = if cites { composer::citation_markdown_mapped(&body, &|p| dead.contains(p), &mut map.cite) } else { body.clone() };
+    // Caminho que vira anexo embaixo (só na resposta, a única com anexo citado) não aparece de novo no texto.
+    let hidden = if event.kind == "assistant_msg" { composer::attachment_paths(&body) } else { Vec::new() };
+    let source = if cites { composer::citation_markdown_mapped(&body, &|p| dead.contains(p), &hidden, &mut map.cite) } else { body.clone() };
     let markdown = safe_markdown_mapped(&source, &mut map.safe);
     // Mensagem do usuário com citação ou elemento: os blocos saem formatados, nunca crus.
     let refs = (event.kind == "user_msg" && peer_of(event).is_none()).then(|| quotes::ref_message(&body)).flatten().map(std::rc::Rc::new);

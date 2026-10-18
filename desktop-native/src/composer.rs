@@ -120,9 +120,10 @@ pub fn parse_marked(text: &str) -> Option<Marked> {
     Some(Marked { caption, files, image_marks })
 }
 
-const EXTS: [&str; 36] = ["png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "mp4", "mov", "webm", "mkv", "m4v", "avi",
+const EXTS: [&str; 45] = ["png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "mp4", "mov", "webm", "mkv", "m4v", "avi",
     "mp3", "wav", "m4a", "ogg", "flac", "aac", "html", "htm", "pdf", "tiff", "tif", "json",
-    "doc", "docx", "odt", "rtf", "xls", "xlsx", "ods", "ppt", "pptx", "odp"];
+    "doc", "docx", "odt", "rtf", "xls", "xlsx", "ods", "ppt", "pptx", "odp",
+    "csv", "tsv", "txt", "zip", "tar", "gz", "tgz", "7z", "rar"];
 
 fn ends_path(text: &str, end: usize) -> bool {
     let rest = &text[end..];
@@ -138,6 +139,8 @@ fn close_path(text: &str, start: usize, spaces: bool) -> Option<usize> {
     for (i, ch) in text[start..].char_indices() {
         let at = start + i;
         if ch == '\n' || ch == '`' || (!spaces && ch.is_whitespace()) { return None; }
+        // Espaço seguido de `/` abre outro caminho: "/tmp/app.ts e /tmp/a.png" são dois, não um.
+        if ch.is_whitespace() && { let next = &text[at + ch.len_utf8()..]; next.starts_with('/') || next.starts_with("~/") } { return None; }
         if ch != '.' || at == start { continue; }
         let tail = &text[at + 1..];
         for ext in EXTS {
@@ -174,6 +177,56 @@ pub fn cited_paths(text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Caminhos citados que a bolha já mostra como anexo embaixo e por isso saem do texto. O `.json` fica de fora: ele
+/// vira chip de citação, que já mostra só o nome.
+pub fn attachment_paths(text: &str) -> Vec<String> {
+    cited_paths(text).into_iter().filter(|path| extension(path) != "json").collect()
+}
+
+/// Trecho de `line` em `at` que cita um anexo escondido (`hideAttachmentPaths` do core): link (ou imagem) de
+/// markdown, caminho entre crases ou solto. Devolve quanto ele ocupa e o que fica no lugar: o rótulo do link ou o nome.
+fn hidden_at(line: &str, at: usize, hidden: &[String]) -> Option<(usize, String)> {
+    let rest = &line[at..];
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let bang = usize::from(rest.starts_with("!["));
+    if rest[bang..].starts_with('[') {
+        let inner = &rest[bang + 1..];
+        let close = inner.find(['[', ']', '\n']).filter(|i| inner[*i..].starts_with(']'))?;
+        let target = inner[close..].strip_prefix("](")?;
+        for path in hidden {
+            for (open, shut) in [("<", ">)"), ("", ")")] {
+                if target.strip_prefix(open).and_then(|t| t.strip_prefix(path.as_str())).is_some_and(|t| t.starts_with(shut)) {
+                    return Some((bang + 1 + close + 2 + open.len() + path.len() + shut.len(), inner[..close].to_owned()));
+                }
+            }
+        }
+        return None;
+    }
+    let tick = rest.starts_with('`');
+    let body = &rest[usize::from(tick)..];
+    if !tick && line[..at].chars().next_back().is_some_and(|c| word(c) || ".~/-".contains(c)) { return None; }
+    hidden.iter().find_map(|path| {
+        let after = body.strip_prefix(path.as_str())?;
+        let mut next = after.chars();
+        let ends = match next.next() { None => true, Some('.') => !next.next().is_some_and(word), Some(c) => !(word(c) || c == '-') };
+        if !ends || (tick && !after.starts_with('`')) { return None; }
+        let name = basename(path);
+        Some(if tick { (path.len() + 2, format!("`{name}`")) } else { (path.len(), name.to_owned()) })
+    })
+}
+
+/// A linha só tem anexos escondidos (e pontuação, marcador de lista): ela some inteira.
+fn only_hidden(line: &str, hidden: &[String]) -> bool {
+    let (mut at, mut found) = (0, false);
+    while at < line.len() {
+        if let Some((used, _)) = hidden_at(line, at, hidden) { found = true; at += used; continue; }
+        let ch = line[at..].chars().next().unwrap();
+        if ch.is_alphanumeric() { return false; }
+        at += ch.len_utf8();
+    }
+    found
 }
 
 const CODE_EXTS: &str = "svelte|tsx|ts|jsx|js|mjs|cjs|py|pas|dfm|cs|dart|md|json|yaml|yml|toml|scss|css|html|sql|sh|fish|ps1|env|lock|txt|csv|xml|ini|cfg|conf";
@@ -319,17 +372,23 @@ pub fn citation_paths(markdown: &str) -> Vec<String> {
 
 /// Como `citation_markdown`, mas o caminho que `dead` diz que não abre fica como texto: chip que não abre não se clica.
 pub fn citation_markdown_with(source: &str, dead: &dyn Fn(&str) -> bool) -> String {
-    citation_markdown_mapped(source, dead, &mut crate::source_map::Edits::default())
+    citation_markdown_mapped(source, dead, &[], &mut crate::source_map::Edits::default())
 }
 
-/// Como `citation_markdown_with`, anotando em `edits` cada trecho trocado por um chip.
-pub fn citation_markdown_mapped(source: &str, dead: &dyn Fn(&str) -> bool, edits: &mut crate::source_map::Edits) -> String {
+/// Como `citation_markdown_with`, anotando em `edits` cada trecho trocado por um chip. Os caminhos de `hidden` já
+/// aparecem como anexo: a linha que só os tinha some e, no meio da frase, fica o nome do arquivo.
+pub fn citation_markdown_mapped(source: &str, dead: &dyn Fn(&str) -> bool, hidden: &[String], edits: &mut crate::source_map::Edits) -> String {
+    let mut hidden = hidden.to_vec();
+    hidden.sort_by_key(|path| std::cmp::Reverse(path.len()));
     let mut output = String::with_capacity(source.len());
     let mut fence = None;
     let mut line_start = 0;
+    let mut squeeze = false;
     for line in source.split_inclusive('\n') {
         let line_at = line_start;
         line_start += line.len();
+        if squeeze && line.trim().is_empty() { edits.push(line_at..line_start, output.len()..output.len()); continue; }
+        squeeze = false;
         let trimmed = line.trim_start();
         let marker = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'));
         if let Some(marker) = marker {
@@ -344,9 +403,22 @@ pub fn citation_markdown_mapped(source: &str, dead: &dyn Fn(&str) -> bool, edits
             }
         }
         if fence.is_some() || line.starts_with("    ") || line.starts_with('\t') { output.push_str(line); continue; }
+        if !hidden.is_empty() && only_hidden(line, &hidden) {
+            let last = output.strip_suffix('\n').unwrap_or(&output);
+            squeeze = output.is_empty() || last.rsplit('\n').next().is_none_or(|l| l.trim().is_empty());
+            edits.push(line_at..line_start, output.len()..output.len());
+            continue;
+        }
         let refs = code_references(line);
         let mut at = 0;
         while at < line.len() {
+            if let Some((used, text)) = hidden_at(line, at, &hidden) {
+                let out_from = output.len();
+                output.push_str(&text);
+                edits.push(line_at + at..line_at + at + used, out_from..output.len());
+                at += used;
+                continue;
+            }
             let rest = &line[at..];
             let code = rest.starts_with('`').then(|| {
                 let run = rest.bytes().take_while(|b| *b == b'`').count();
@@ -617,6 +689,36 @@ mod tests {
         let code = "[fonte](src/main.rs) `/tmp/config.py:12`";
         assert!(cited_paths(code).is_empty());
         assert_eq!(citation_markdown(code).matches("hangar-file:").count(), 2);
+    }
+
+    #[test]
+    fn spaced_absolute_path_stops_before_the_next_one() {
+        assert_eq!(cited_paths("Ver /tmp/app.ts e /tmp/a.png"), vec!["/tmp/a.png"]);
+        assert_eq!(cited_paths("/a/06 x.png /b/07.png"), vec!["/a/06 x.png", "/b/07.png"]);
+    }
+
+    #[test]
+    fn downloads_become_attachments_not_code_chips() {
+        let text = "/tmp/pacote.zip /tmp/dados.csv /tmp/notas.txt /tmp/LEIA.md /tmp/app.ts";
+        assert_eq!(cited_paths(text), vec!["/tmp/pacote.zip", "/tmp/dados.csv", "/tmp/notas.txt"]);
+        let chips = citation_markdown(text);
+        assert_eq!(citation_paths(&chips), vec!["/tmp/LEIA.md", "/tmp/app.ts"]);
+    }
+
+    // Os mesmos casos do `hideAttachmentPaths` do core.
+    #[test]
+    fn attachment_paths_leave_the_text() {
+        let hide = |t: &str| citation_markdown_mapped(t, &|_| false, &attachment_paths(t), &mut crate::source_map::Edits::default());
+        assert_eq!(hide("Prints prontos.\n\n/home/j/pdf/06-viewer.png /home/j/pdf/07-leitor.png\n\nConfere?"), "Prints prontos.\n\nConfere?");
+        assert_eq!(hide("Salvei em /tmp/print.png. Veja."), "Salvei em print.png. Veja.");
+        assert_eq!(hide("Gerei `docs/rel.pdf` agora"), "Gerei `rel.pdf` agora");
+        assert_eq!(hide("O [relatório](</tmp/Relatório final.docx>) saiu"), "O relatório saiu");
+        assert_eq!(hide("Arquivos:\n- /tmp/a.png\n- `/tmp/b.zip`\nFim"), "Arquivos:\nFim");
+        let fenced = hide("```\n/tmp/a.png\n```\nVer /tmp/app.ts e /tmp/a.png");
+        assert!(fenced.starts_with("```\n/tmp/a.png\n```\nVer [app.ts](hangar-file:") && fenced.ends_with(" e a.png"), "{fenced}");
+        // O mais longo segue o caminho dele: aqui, chip de citação.
+        assert!(hide("Ver /tmp/a.png e /tmp/a.png.bak").starts_with("Ver a.png e [a.png.bak](hangar-file:?path=%2Ftmp%2Fa.png.bak"));
+        assert_eq!(hide("Veja ![a](/tmp/a.png) aqui"), "Veja a aqui");
     }
 
     #[test]
