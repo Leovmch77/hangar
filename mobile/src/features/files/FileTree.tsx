@@ -99,8 +99,8 @@ const styles = StyleSheet.create((theme) => ({
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
-    paddingVertical: 4,
+    gap: theme.base.space[1],
+    paddingVertical: theme.base.space[1],
     paddingRight: theme.base.space[3],
     minHeight: 44,
   },
@@ -131,7 +131,7 @@ const styles = StyleSheet.create((theme) => ({
     width: 14,
     textAlign: 'center',
     fontSize: theme.base.text.xxs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
     fontFamily: theme.base.fontMono,
   },
   filtroBtn: {
@@ -140,6 +140,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   filtroTxt: {
     fontSize: theme.base.text.xs,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
   },
 }));

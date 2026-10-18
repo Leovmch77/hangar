@@ -67,7 +67,7 @@ export function FileEditor({ path, initialText, onSalvar, onDescartar }: Props) 
           style={[styles.btnPrim, !sujo || salvando ? { opacity: 0.5 } : null]}
           accessibilityRole="button"
         >
-          <Text style={[styles.btnPrimTxt, { color: '#fff' }]}>{salvando ? m.arq_salvando() : m.arq_salvar()}</Text>
+          <Text style={[styles.btnPrimTxt, { color: theme.ink.onAccent }]}>{salvando ? m.arq_salvando() : m.arq_salvar()}</Text>
         </Pressable>
       </View>
       {salvo ? <Text style={[styles.salvo, { color: theme.tokens.status.success }]}>✓ {m.arq_salvo()}</Text> : null}
@@ -100,41 +100,41 @@ const styles = StyleSheet.create((theme) => ({
   path: {
     flex: 1,
     fontSize: theme.base.text.xs,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
   },
   naoSalvo: {
     fontSize: theme.base.text.xxs,
   },
   btn: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
+    paddingHorizontal: theme.base.space[3],
+    paddingVertical: theme.base.space[1.5],
+    borderRadius: theme.base.radius.sm,
     borderWidth: 1,
     borderColor: theme.tokens.border.subtle,
   },
   btnTxt: {
     fontSize: theme.base.text.xs,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
   },
   btnPrim: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
+    paddingHorizontal: theme.base.space[3],
+    paddingVertical: theme.base.space[1.5],
+    borderRadius: theme.base.radius.sm,
     backgroundColor: theme.tokens.accent.base,
   },
   btnPrimTxt: {
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   salvo: {
     fontSize: theme.base.text.xs,
     paddingHorizontal: theme.base.space[3],
-    paddingVertical: 4,
+    paddingVertical: theme.base.space[1],
   },
   erro: {
     fontSize: theme.base.text.xs,
     paddingHorizontal: theme.base.space[3],
-    paddingVertical: 4,
+    paddingVertical: theme.base.space[1],
   },
   editor: {
     flex: 1,

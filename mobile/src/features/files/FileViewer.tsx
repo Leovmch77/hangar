@@ -308,51 +308,51 @@ const styles = StyleSheet.create((theme) => ({
   path: {
     flex: 1,
     fontSize: theme.base.text.xs,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
   },
   editBtn: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 8,
+    paddingHorizontal: theme.base.space[2],
+    paddingVertical: theme.base.space[1.5],
+    borderRadius: theme.base.radius.sm,
     backgroundColor: theme.tokens.accent.dim,
   },
   editTxt: {
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   segRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: theme.base.space[2],
     paddingHorizontal: theme.base.space[3],
-    paddingVertical: 6,
+    paddingVertical: theme.base.space[1.5],
   },
   metaRow: {
     flexDirection: 'row',
     paddingHorizontal: theme.base.space[3],
-    paddingVertical: 4,
+    paddingVertical: theme.base.space[1],
   },
   seg: {
     flexDirection: 'row',
     borderWidth: 1,
-    borderRadius: 8,
+    borderRadius: theme.base.radius.sm,
     overflow: 'hidden',
   },
   segBtn: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: theme.base.space[2],
+    paddingVertical: theme.base.space[1.5],
   },
   modeBtn: {
     minHeight: 44,
     minWidth: 44,
     justifyContent: 'center',
-    paddingHorizontal: 12,
+    paddingHorizontal: theme.base.space[3],
   },
   markdown: {
     padding: theme.base.space[3],
   },
   escopoBtn: {
-    paddingHorizontal: 6,
+    paddingHorizontal: theme.base.space[1.5],
   },
   escopoTxt: {
     fontSize: theme.base.text.xxs,
@@ -364,7 +364,7 @@ const styles = StyleSheet.create((theme) => ({
   aviso: {
     fontSize: theme.base.text.xs,
     paddingHorizontal: theme.base.space[3],
-    paddingVertical: 4,
+    paddingVertical: theme.base.space[1],
   },
   erro: {
     fontSize: theme.base.text.xs,
@@ -379,7 +379,7 @@ const styles = StyleSheet.create((theme) => ({
   webLoading: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: theme.base.space[2],
     padding: theme.base.space[3],
   },
   codeView: {
@@ -387,7 +387,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   lineRow: {
     flexDirection: 'row',
-    gap: 8,
+    gap: theme.base.space[2],
   },
   lineNo: {
     width: 32,

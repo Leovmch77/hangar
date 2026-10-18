@@ -115,13 +115,13 @@ const styles = StyleSheet.create((theme) => ({
   campo: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: theme.base.space[1.5],
     borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
+    borderRadius: theme.base.radius.sm,
+    paddingHorizontal: theme.base.space[2],
+    paddingVertical: theme.base.space[1.5],
     marginHorizontal: theme.base.space[3],
-    marginBottom: 6,
+    marginBottom: theme.base.space[1.5],
   },
   input: {
     flex: 1,
@@ -130,21 +130,21 @@ const styles = StyleSheet.create((theme) => ({
   },
   seg: {
     flexDirection: 'row',
-    gap: 6,
+    gap: theme.base.space[1.5],
     marginHorizontal: theme.base.space[3],
-    marginBottom: 8,
+    marginBottom: theme.base.space[2],
   },
   segBtn: {
     flex: 1,
-    paddingVertical: 8,
-    borderRadius: 8,
+    paddingVertical: theme.base.space[2],
+    borderRadius: theme.base.radius.sm,
     alignItems: 'center',
     borderWidth: 1,
     borderColor: theme.tokens.border.subtle,
   },
   segTxt: {
     fontSize: theme.base.text.xs,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
   },
   resultArea: {
     flex: 1,
@@ -152,18 +152,18 @@ const styles = StyleSheet.create((theme) => ({
   aviso: {
     fontSize: theme.base.text.xs,
     paddingHorizontal: theme.base.space[3],
-    paddingVertical: 4,
+    paddingVertical: theme.base.space[1],
   },
   hit: {
     paddingHorizontal: theme.base.space[3],
-    paddingVertical: 8,
+    paddingVertical: theme.base.space[2],
     borderBottomWidth: 1,
     borderBottomColor: theme.tokens.border.subtle,
     minHeight: 44,
   },
   hitNome: {
     fontSize: theme.base.text.sm,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
   },
   hitPath: {
     fontSize: theme.base.text.xxs,
