@@ -3,6 +3,7 @@ import { ActivityIndicator, Text, View } from 'react-native';
 import { Pressable } from 'react-native-gesture-handler';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Icon } from '../../ui/Icon';
+import { VoiceBars } from './VoiceBars';
 import type { LiveVoiceView } from './LiveVoiceSheet';
 import * as m from '../../paraglide/messages';
 
@@ -29,7 +30,8 @@ export function LiveVoiceButton({ phase, muted, error, visible, onPress }: LiveV
       style={[styles.button, live && styles.live]}
     >
       {phase === 'connecting' ? <ActivityIndicator size="small" color={theme.tokens.accent.base} />
-        : <Icon name={live && muted ? 'MicOff' : 'AudioLines'} size={22} color={live ? theme.tokens.accent.base : undefined} />}
+        : live && !muted ? <VoiceBars mode={{ kind: 'wave', fast: true }} color={theme.tokens.accent.base} count={4} height={18} />
+        : <Icon name={live ? 'MicOff' : 'AudioLines'} size={22} color={live ? theme.tokens.accent.base : undefined} />}
       {error ? <View style={styles.errorDot} accessibilityElementsHidden /> : null}
       {error ? <Text style={styles.errorText}>{m.native_live_voice_error_short()}</Text> : null}
     </Pressable>

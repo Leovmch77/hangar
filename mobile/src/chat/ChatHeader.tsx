@@ -8,7 +8,6 @@ import { EdgeButton } from '../ui/EdgeButton';
 import { SessionAvatar } from '../features/sessions/SessionAvatar';
 import { WorkingMark } from '../ui/WorkingMark';
 import { LiveVoiceChatButton } from '../features/voice/LiveVoiceChatButton';
-import { superficie } from '../theme/superficie';
 import { useSessions } from '../stores/sessions';
 import { useServers } from '../stores/servers';
 
@@ -52,6 +51,8 @@ export function ChatHeader({
   const pasta = cwd ? cwdParts(cwd).base : '';
   const destino = pasta && serverLabel ? `${pasta} @ ${serverLabel}` : pasta || serverLabel;
   const corEstado = (state && theme.tokens.pill?.[PILL[state]]?.fg) || theme.tokens.text.muted;
+  // Trabalhando, a marca girando já diz; pronta é o normal. Só o que pede atenção vira palavra, na linha de baixo.
+  const aviso = state === 'awaiting_input' || state === 'dead' ? rotuloEstado(state) : '';
   return (
     <View style={styles.wrap}>
       <View style={styles.bar}>
@@ -74,28 +75,24 @@ export function ChatHeader({
           {/* Trabalhando, a marca do Hangar girando diz mais que o logo; parada, o agente aparece. */}
           {state === 'working'
             ? <View style={styles.marca} testID="chat-working-mark"><WorkingMark size={24} color={corEstado} /></View>
-            : <SessionAvatar session={{ provider, engine, limited, state }} size={30} />}
+            : <View style={state === 'dead' && styles.apagado}><SessionAvatar session={{ provider, engine, limited, state }} size={30} /></View>}
           <View style={styles.textos}>
             <Text style={[styles.name, { color: theme.tokens.text.primary }]} numberOfLines={1}>
               {name}
             </Text>
-            {destino ? (
+            {destino || aviso ? (
               <Text style={[styles.destino, { color: theme.tokens.text.muted }]} numberOfLines={1}>
+                {aviso ? (
+                  <Text testID="chat-state-word" style={[styles.aviso, state === 'awaiting_input' && { color: theme.tokens.status.warning }]}>
+                    {aviso}
+                  </Text>
+                ) : null}
+                {aviso && destino ? ' · ' : ''}
                 {destino}
               </Text>
             ) : null}
           </View>
         </Pressable>
-        {/* "Pronta" é o estado normal e não diz nada: a marca já mostra. Trabalhando, aguardando ou
-            encerrada ganham a pílula. */}
-        {state && state !== 'idle' ? (
-          <View style={[styles.pill, { backgroundColor: superficie(theme, 0.8) }]}>
-            <View style={[styles.ponto, { backgroundColor: corEstado }]} />
-            <Text style={[styles.pillTxt, { color: theme.tokens.text.primary }]} numberOfLines={1}>
-              {rotuloEstado(state)}
-            </Text>
-          </View>
-        ) : null}
         {serverId ? <LiveVoiceChatButton serverId={serverId} name={name} /> : null}
         <Pressable
           onPress={onMore}
@@ -168,22 +165,11 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.base.text.base,
     fontWeight: theme.base.weight.semibold,
   },
-  pill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.base.space[1],
-    paddingHorizontal: theme.base.space[2],
-    paddingVertical: theme.base.space[0.5],
-    borderRadius: theme.base.radius.full,
-    flexShrink: 0,
+  aviso: {
+    fontWeight: theme.base.weight.medium,
   },
-  ponto: {
-    width: 6,
-    height: 6,
-    borderRadius: theme.base.radius.full,
-  },
-  pillTxt: {
-    fontSize: theme.base.text.xxs,
+  apagado: {
+    opacity: 0.5,
   },
   more: {
     width: 44,

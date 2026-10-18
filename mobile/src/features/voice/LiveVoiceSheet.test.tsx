@@ -369,9 +369,12 @@ describe('LiveVoiceSheet', () => {
     expect(button(m.live_voice_mode_direct())).toBeUndefined();
     expect(button(m.live_voice_mode_plan())).toBeUndefined();
     expect(container.textContent).toContain(m.codex_voice_listening());
-    for (const text of ['draft-fixture', 'backstage-fixture', 'effective-model', '25%']) expect(container.textContent).toContain(text);
+    expect(container.textContent).toContain('draft-fixture');
     for (const text of ['action-fixture', 'progress-fixture', 'thought-fixture', 'future-mode', 'future-activity'])
       expect(container.textContent).not.toContain(text);
+    await click(m.native_live_voice_settings_memory());
+    for (const text of ['backstage-fixture', 'effective-model', '25%']) expect(container.textContent).toContain(text);
+    await click(m.native_live_voice_settings_memory());
     expect(button(m.live_voice_mute()).disabled).toBe(false);
     expect(button(m.live_voice_stop()).disabled).toBe(false);
     await click(m.live_voice_mute());
@@ -392,10 +395,11 @@ describe('LiveVoiceSheet', () => {
     view.state = message.state;
     await render();
     expect(container.textContent).toContain(m.live_voice_status_working());
-    expect(container.textContent).toContain('backstage-fixture');
     expect(container.textContent).toContain('action-fixture');
-    expect(container.textContent).not.toContain('future-backstage');
     expect(container.textContent).not.toContain('future-action');
+    await click(m.native_live_voice_settings_memory());
+    expect(container.textContent).toContain('backstage-fixture');
+    expect(container.textContent).not.toContain('future-backstage');
   });
 
   it('entrega plano ao renderizador Markdown e mostra pedido, atividade, seguidas e escolhas efetivas', async () => {
@@ -409,11 +413,67 @@ describe('LiveVoiceSheet', () => {
     expect(native.markdown).toHaveBeenCalledWith(expect.objectContaining({ markdown, flavor: 'github' }));
     expect(container.querySelector('[data-renderer="native-markdown"]')).not.toBeNull();
     expect(container.textContent).not.toContain(markdown);
-    for (const data of ['held-request', 'tool-action', 'step-progress', 'thought-tail', 'state-error-detail',
-      'heard-fixture', 'peer-fixture::session-fixture', 'effective-model', 'effective-effort', '25%']) {
+    for (const data of ['held-request', 'tool-action', 'step-progress', 'thought-tail', 'state-error-detail']) {
       expect(container.textContent).toContain(data);
     }
-    expect(container.textContent).not.toContain('model-a');
+    // Modelo, cota e bastidores ficam em Detalhes; a tela da chamada só mostra o estado.
+    for (const data of ['heard-fixture', 'peer-fixture::session-fixture', 'effective-model', '25%']) expect(container.textContent).not.toContain(data);
+    await click(m.native_live_voice_settings_memory());
+    for (const data of ['heard-fixture', 'peer-fixture::session-fixture', 'effective-model', 'effective-effort', '25%']) {
+      expect(container.textContent).toContain(data);
+    }
+  });
+
+  it('tela da chamada mostra estado e controles; Detalhes mostra só o que a conta informou', async () => {
+    view.phase = 'live';
+    view.state = { ...liveState(), effective: { model: 'model-only', effort: null, tier: null },
+      limits: { five_hour: null, seven_day: { used_percent: 19, resets_at: null } } };
+    await render();
+    for (const label of [m.live_voice_mute(), m.native_live_voice_settings_memory(), m.live_voice_stop()]) expect(button(label)).toBeDefined();
+    for (const text of ['model-only', m.ctx_limite_7d(), m.native_live_voice_effective()]) expect(container.textContent).not.toContain(text);
+    await click(m.native_live_voice_settings_memory());
+    expect(button(m.live_voice_stop())).toBeUndefined();
+    const section = (title: string) => [...container.querySelectorAll('[role="header"]')]
+      .find(el => el.textContent === title)?.parentElement?.textContent ?? '';
+    const inUse = section(m.native_live_voice_effective());
+    expect(inUse).toContain('model-only');
+    expect(inUse).not.toContain(m.live_voice_effort());
+    expect(inUse).not.toContain(m.live_voice_tier());
+    expect(section(m.native_live_voice_limits())).toContain(`${m.ctx_limite_7d()}19%`);
+    expect(container.textContent).not.toContain(m.ctx_limite_5h());
+    await click(m.native_live_voice_settings_memory());
+    expect(button(m.live_voice_stop())).toBeDefined();
+  });
+
+  it('queda da chamada aparece também em Detalhes, com nova tentativa', async () => {
+    view.phase = 'live';
+    view.state = liveState();
+    await render();
+    await click(m.native_live_voice_settings_memory());
+    view.phase = 'closed';
+    view.error = { code: 'connection_lost' };
+    await render();
+    expect(container.textContent).toContain(m.live_voice_error_connection_lost());
+    await click(m.sync_retry());
+    expect(callbacks.onRetry).toHaveBeenCalledOnce();
+  });
+
+  it('nova tentativa fica fora do grupo lido de uma vez pelo VoiceOver', async () => {
+    view.settings = { ...view.settings, reply: null, error: 'settings-error' };
+    await render();
+    const retry = button(m.sync_retry());
+    expect(retry).toBeDefined();
+    const group = [...container.querySelectorAll('div[aria-label]')].find(el => el.getAttribute('aria-label') === m.live_voice_error_failed());
+    expect(group).toBeDefined();
+    expect(group!.contains(retry)).toBe(false);
+  });
+
+  it('antes de ligar mostra que está pronta, o botão de iniciar e o caminho para os ajustes', async () => {
+    await render();
+    expect(container.textContent).toContain(m.native_live_voice_ready());
+    expect(button(m.live_voice_start())).toBeDefined();
+    expect(button(m.live_voice_mute())).toBeUndefined();
+    expect(button(m.native_live_voice_settings_memory()).getAttribute('aria-expanded')).toBe('false');
   });
 
   it('mostra tempo somente ao vivo e retoma o início original ao reabrir a folha', async () => {
@@ -542,7 +602,11 @@ describe('LiveVoiceButton', () => {
     await act(async () => root.render(createElement(LiveVoiceButton, { ...props, phase: 'live', muted: true })));
     expect(container.querySelector('button')!.getAttribute('aria-label')).toContain(m.codex_voice_muted());
     expect(container.textContent).not.toContain('0.6');
+    expect(container.querySelector('[testid="voice-bars"]')).toBeNull();
+    await act(async () => root.render(createElement(LiveVoiceButton, { ...props, phase: 'live', muted: false })));
+    expect(container.querySelector('[testid="voice-bars"]')).not.toBeNull();
     await act(async () => root.render(createElement(LiveVoiceButton, { ...props, phase: 'closed', error: true })));
+    expect(container.querySelector('[testid="voice-bars"]')).toBeNull();
     expect(container.textContent).toContain(m.native_live_voice_error_short());
     expect(container.querySelector('button')!.getAttribute('aria-label')).toContain(m.live_voice_error_failed());
   });

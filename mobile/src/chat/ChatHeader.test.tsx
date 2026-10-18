@@ -142,6 +142,29 @@ it('trabalhando mostra a marca do Hangar girando no lugar do avatar; parada volt
   expect(avatar()).not.toBeNull();
 });
 
+it.each([
+  { state: 'working', word: false },
+  { state: 'idle', word: false },
+  { state: 'awaiting_input', word: true, warning: true },
+  { state: 'dead', word: true },
+] as const)('estado $state: sem pílula; só aguardando e encerrada viram palavra antes do destino', ({ state, word, ...expected }) => {
+  store.rows = [{ ...session, provider: 'claude', cwd: '/home/u/hangar-voz' }];
+  render(undefined, { state });
+  const marker = host.querySelector<HTMLElement>('[testid="chat-state-word"]');
+  expect(!!marker).toBe(word);
+  // O texto visível do cabeçalho é nome + linha de baixo; nenhum rótulo solto ao lado.
+  const visible = host.textContent ?? '';
+  if (word) expect(visible).toContain(`${rotuloEstado(state)} · hangar-voz @ casa`);
+  else expect(visible).not.toContain(rotuloEstado(state));
+  if ('warning' in expected) {
+    const { theme } = useUnistyles();
+    const probe = document.createElement('div');
+    probe.style.color = theme.tokens.status.warning;
+    expect(marker?.style.color).toBe(probe.style.color);
+  }
+  expect(title()?.getAttribute('aria-label')).toContain(rotuloEstado(state));
+});
+
 it('tocar no avatar mantém a ação do título para trocar de sessão', () => {
   const onTitlePress = vi.fn();
   render(undefined, { onTitlePress });
