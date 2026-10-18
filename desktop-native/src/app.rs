@@ -5263,7 +5263,8 @@ fn file_card(row: &str, n: usize, name: &str, state: Option<FileCard>, openable:
         Some(FileCard::Failed(error)) => (format!("{} · {error}", web("file_card_failed")), theme::warning_text(), Some(Role::Alert)),
     };
     let save_label = web(if failed { "file_card_retry" } else { "file_card_download" });
-    div().id(SharedString::from(format!("file-card-{row}-{n}"))).self_start().max_w(px(420.)).flex().items_center().gap_3()
+    // Largura do pai, com teto: na bolha do usuário o nome trunca em vez de empurrar o botão para fora.
+    div().id(SharedString::from(format!("file-card-{row}-{n}"))).w_full().max_w(px(420.)).flex().items_center().gap_3()
         .px_3().py_2().rounded_lg().border_1().border_color(theme::border())
         .child(crate::fileicons::citation_icon(name).size_6())
         .child(div().flex_1().min_w_0().flex().flex_col()
