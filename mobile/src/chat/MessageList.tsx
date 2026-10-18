@@ -367,7 +367,7 @@ export function MessageList({
           {ferramentaEv ? <ToolCard use={ferramentaEv} result={null} onPress={abrirDetalhe} look={look} onExpand={preserveExpansion ? pauseForToolGroup : undefined} escrevendo /> : null}
           {visiblePreview ? <PreviewBubble text={visiblePreview} md={previewMd} full={previewFull} streaming={working} /> : null}
           {working && !pensamento && !ferramenta ? <WorkingLine label={stateEvent?.label} since={desde} /> : null}
-          {agentesRodando.length ? <AgentesRodando agentes={agentesRodando} inicio={inicioDoAgente} onAbrir={onAbrirAgentes} /> : null}
+          {agentesRodando.length ? <AgentesRodando agentes={agentesRodando} inicio={inicioDoAgente} onAbrir={onAbrirAgentes} serverId={serverId} sessionName={sessionName} events={events} eventsRevision={eventsRevision} /> : null}
           {/* O eco que o painel da fila já mostra some: a mesma mensagem não aparece duas vezes. */}
           {pending.filter((p) => !(queuePanel && echoInQueuePanel(p.text, queuePanel))).map((p) => (
             <View key={p.id} style={[styles.pending, p.solid && styles.pendingSolid]}>

@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement, useContext, useState, type ReactNode } from 'react';
+import { act, createElement, useContext, useEffect, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { configureApi, estilosDitado, fetchSessionsForServer, implementCodexPlan, interrupt, loadLiveVoiceSettings, recarregarSessao, setPermissionMode, _limparEsfriamentoParaTestes, _resetRotasForTests, type FirstConversationAttempt, type MotivoFim, type QueuePanel, type SessionInfo } from '@hangar/core';
@@ -73,6 +73,7 @@ const voiceInput = vi.hoisted(() => ({ recording: false, simulateRecorder: false
   onFim: null as null | ((file: File, reason: MotivoFim, uri: string) => Promise<void>),
   finishRecording: null as null | ((reason: MotivoFim) => void), onStopError: null as null | ((e: Error) => void) }));
 vi.mock('expo-router', () => ({
+  useFocusEffect: (effect: () => void | (() => void)) => useEffect(() => focusNavigation.focused ? effect() : undefined, [effect, focusNavigation.focused]),
   useIsFocused: () => focusNavigation.focused,
   useNavigation: () => nativeNavigation,
   useRouter: () => ({ push: routerPush, back: navigation.back, replace: navigation.replace, dismissTo: navigation.dismissTo, canGoBack: () => navigation.canGoBack }),

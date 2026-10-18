@@ -4,7 +4,7 @@ import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-rou
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { formatElapsed, getSubagents, getWorkflow, getWorkflowAgent, getWorkflows } from '@hangar/core';
-import type { SubagentRun, WorkflowDetail, WorkflowAgentDetail, WorkflowSummary } from '@hangar/core';
+import type { AgentRun, SubagentRun, WorkflowDetail, WorkflowAgentDetail, WorkflowSummary } from '@hangar/core';
 import { chatStore } from '../../../../src/stores/chat';
 import { useServers } from '../../../../src/stores/servers';
 import { useActivity } from '../../../../src/features/activity/useActivity';
@@ -13,6 +13,7 @@ import { TaskRows } from '../../../../src/features/activity/TaskRows';
 import { WorkflowList } from '../../../../src/features/activity/WorkflowList';
 import { WorkflowDetailView } from '../../../../src/features/activity/WorkflowDetailView';
 import { AgentDetailView } from '../../../../src/features/activity/AgentDetailView';
+import { agentIdentities, agentModel, matchAgentSubagent } from '../../../../src/features/activity/agentModel';
 import { SubagentLive, subagentProblemText, subagentStatus } from '../../../../src/features/activity/SubagentLive';
 import * as m from '../../../../src/paraglide/messages';
 import { superficie } from '../../../../src/theme/superficie';
@@ -159,22 +160,11 @@ export default function ActivitySheet() {
     return () => clearInterval(timer);
   }, [level, refreshSubs]));
 
-  // helpers de matching (casamento por prompt, como no frontend)
-  const norm = (t: string) => t.replace(/\s+/g, ' ').trim().toLowerCase();
-  const matchSub = useCallback(
-    (prompt?: string): SubagentRun | null => {
-      if (!prompt) return null;
-      const full = norm(prompt);
-      const exact = subs.find((s) => s.prompt && norm(s.prompt) === full);
-      if (exact) return exact;
-      const head = full.slice(0, 400);
-      return subs.find((s) => s.prompt && norm(s.prompt).startsWith(head)) ?? null;
-    },
-    [subs],
-  );
+  const agentIds = useMemo(() => agentIdentities(events), [events, eventsRevision]);
+  const matchSub = useCallback((agent: AgentRun) => matchAgentSubagent(subs, agent, agentIds), [subs, agentIds]);
 
   function parentRunning(agentId: string): boolean | null {
-    const parent = activity.agents.find((a) => matchSub(a.prompt)?.agentId === agentId);
+    const parent = activity.agents.find((a) => matchSub(a)?.agentId === agentId);
     return parent ? parent.running : null;
   }
 
@@ -185,10 +175,10 @@ export default function ActivitySheet() {
   }));
   const runningAgents = activity.agents.filter((a) => {
     if (a.kind !== 'agent' || !a.running) return false;
-    const sub = matchSub(a.prompt);
+    const sub = matchSub(a);
     return !sub || subRows.find((row) => row.run.agentId === sub.agentId)?.status === 'running';
   });
-  const shown = new Set(runningAgents.map((a) => matchSub(a.prompt)?.agentId));
+  const shown = new Set(runningAgents.map((a) => matchSub(a)?.agentId));
   const runningSubs = subRows.filter((row) => row.status === 'running' && !shown.has(row.run.agentId));
   const uncertainSubs = subRows.filter((row) => row.status === 'silent' || row.status === 'unknown');
   const finishedSubs = subRows.filter((row) => row.status === 'finished' || row.status === 'failed');
@@ -223,6 +213,7 @@ export default function ActivitySheet() {
             <Text style={[styles.agentDesc, { color: theme.tokens.text.primary }]} numberOfLines={1}>{tituloDoSub(run)}</Text>
             {run.agentType ? <Text style={[styles.tag, { color: theme.tokens.text.secondary, backgroundColor: superficie(theme, 0.8) }]}>{run.agentType}</Text> : null}
           </View>
+          {run.model ? <Text style={[styles.model, { color: theme.tokens.text.muted }]} numberOfLines={1}>{run.model}</Text> : null}
           <Text style={[styles.agentNow, { color: theme.tokens.text.muted }]} numberOfLines={1}>
             {ended ? `${endedLabel} · ` : ''}
             {status === 'silent' ? `${m.atividade_sem_noticia({ t: formatElapsed(agora - at / 1000) })} · ` : ''}
@@ -283,11 +274,9 @@ export default function ActivitySheet() {
     setLevel('subagent');
   }
 
-  function openSubagent(prompt: string | undefined, title: string) {
-    const match = matchSub(prompt);
-    if (!match) return;
+  function openSubagent(sub: SubagentRun, title: string) {
     setSubTitle(title);
-    setSubAgentId(match.agentId);
+    setSubAgentId(sub.agentId);
     setLevel('subagent');
   }
 
@@ -380,14 +369,15 @@ export default function ActivitySheet() {
               <View style={styles.section}>
                 <Text style={[styles.label, { color: theme.tokens.text.muted }]}>{m.atividade_grupo_rodando({ n: runningCount })}</Text>
                 {runningAgents.map((a) => {
-                  const sub = matchSub(a.prompt);
+                  const sub = matchSub(a);
+                  const model = agentModel(a, sub);
                   const isButton = !!sub;
                   const Row = isButton ? Pressable : View;
                   return (
                     // @ts-ignore — Pressable/View condicionais
                     <Row
                       key={a.id}
-                      onPress={isButton ? () => openSubagent(a.prompt, a.description) : undefined}
+                      onPress={sub ? () => openSubagent(sub, a.description) : undefined}
                       style={[styles.agentRow, isButton && styles.agentOpenable]}
                       accessibilityRole={isButton ? 'button' : undefined}
                     >
@@ -398,8 +388,8 @@ export default function ActivitySheet() {
                             {a.description}
                           </Text>
                           {a.subagentType ? <Text style={[styles.tag, { color: theme.tokens.text.secondary, backgroundColor: superficie(theme, 0.8) }]}>{a.subagentType}</Text> : null}
-                          {a.model ? <Text style={[styles.tag, styles.tagMuted, { color: theme.tokens.text.muted }]}>{a.model}</Text> : null}
                         </View>
+                        {model ? <Text style={[styles.model, { color: theme.tokens.text.muted }]} numberOfLines={1}>{model}</Text> : null}
                         {sub ? (
                           <Text style={[styles.agentNow, { color: theme.tokens.text.muted }]} numberOfLines={1}>
                             {sub.ilegivel ? m.atividade_sub_ilegivel() : sub.problema ? '' : m.atividade_chamadas({ n: sub.toolCalls })}
@@ -551,6 +541,7 @@ const styles = StyleSheet.create((theme) => ({
   agentDesc: { fontSize: theme.base.text.sm, minWidth: 0, flexShrink: 1 },
   tag: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xxxs, paddingHorizontal: theme.base.space[1.5], paddingVertical: 1, borderRadius: theme.base.radius.full, overflow: 'hidden' },
   tagMuted: {},
+  model: { ...theme.type.caption, fontFamily: theme.base.fontMono },
   agentNow: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xxxs },
   shellCmd: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs },
   concluido: { opacity: 0.6 },
