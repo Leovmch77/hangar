@@ -102,13 +102,13 @@ export function InvitePanel({ initialLink = '', initialError = '', onAccepted }:
 
 const styles = StyleSheet.create((theme) => ({
   inner: { gap: theme.base.space[3] },
-  title: { color: theme.tokens.text.primary, fontSize: theme.base.text.lg, fontWeight: '600' },
+  title: { color: theme.tokens.text.primary, fontSize: theme.base.text.lg, fontWeight: theme.base.weight.semibold },
   hint: { color: theme.tokens.text.secondary, fontSize: theme.base.text.sm, lineHeight: 20 },
-  label: { color: theme.tokens.text.secondary, fontSize: theme.base.text.sm, fontWeight: '500' },
+  label: { color: theme.tokens.text.secondary, fontSize: theme.base.text.sm, fontWeight: theme.base.weight.medium },
   input: { minHeight: 48, borderWidth: 1, borderColor: theme.tokens.border.default, borderRadius: theme.base.radius.md, backgroundColor: superficie(theme, 0.8), color: theme.tokens.text.primary, paddingHorizontal: theme.base.space[3], fontSize: theme.base.text.sm },
   error: { color: theme.tokens.status.error, fontSize: theme.base.text.sm, lineHeight: 20 },
   button: { minHeight: 48, flexDirection: 'row', gap: theme.base.space[2], alignItems: 'center', justifyContent: 'center', borderRadius: theme.base.radius.md, backgroundColor: theme.tokens.accent.base, paddingHorizontal: theme.base.space[4] },
-  buttonText: { color: theme.tokens.text.inverse, fontSize: theme.base.text.base, fontWeight: '600' },
+  buttonText: { color: theme.tokens.text.inverse, fontSize: theme.base.text.base, fontWeight: theme.base.weight.semibold },
   disabled: { opacity: 0.5 },
   retry: { minHeight: 44, alignItems: 'center', justifyContent: 'center' },
 }));

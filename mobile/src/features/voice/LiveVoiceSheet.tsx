@@ -368,8 +368,8 @@ const styles = StyleSheet.create((theme) => ({
   wrap: { padding: theme.base.space[4], gap: theme.base.space[3] },
   header: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
   heading: { flex: 1, gap: theme.base.space[1] },
-  title: { fontSize: theme.base.text.lg, fontWeight: '600', color: theme.tokens.text.primary },
-  label: { fontSize: theme.base.text.sm, fontWeight: '600', color: theme.tokens.text.secondary },
+  title: { fontSize: theme.base.text.lg, fontWeight: theme.base.weight.semibold, color: theme.tokens.text.primary },
+  label: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold, color: theme.tokens.text.secondary },
   text: { fontSize: theme.base.text.sm, color: theme.tokens.text.primary, lineHeight: 23 },
   detail: { fontSize: theme.base.text.xs, color: theme.tokens.text.muted },
   status: { flex: 1, fontSize: theme.base.text.sm, color: theme.tokens.accent.base },
@@ -394,6 +394,6 @@ const styles = StyleSheet.create((theme) => ({
   field: { minHeight: 48, flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between',
     columnGap: theme.base.space[3], rowGap: theme.base.space[2], paddingVertical: theme.base.space[2] },
   level: { flex: 1, gap: theme.base.space[1] },
-  track: { height: 4, borderRadius: 2, backgroundColor: theme.tokens.border.subtle, overflow: 'hidden' },
+  track: { height: 4, borderRadius: theme.base.radius.full, backgroundColor: theme.tokens.border.subtle, overflow: 'hidden' },
   fill: { height: 4, backgroundColor: theme.tokens.accent.base },
 }));

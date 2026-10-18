@@ -255,7 +255,7 @@ const styles = StyleSheet.create(theme => ({
   row: { paddingHorizontal: theme.base.space[4], paddingVertical: theme.base.space[2], flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
   rowBody: { flex: 1, gap: theme.base.space[1] },
   text: { color: theme.tokens.text.primary, fontSize: theme.base.text.sm },
-  heading: { fontWeight: '600', fontSize: theme.base.text.base, color: theme.tokens.text.primary },
+  heading: { fontWeight: theme.base.weight.semibold, fontSize: theme.base.text.base, color: theme.tokens.text.primary },
   note: { color: theme.tokens.text.muted, fontSize: theme.base.text.xs },
   warning: { color: theme.tokens.status.warning, fontSize: theme.base.text.sm },
   action: { color: theme.tokens.accent.base },

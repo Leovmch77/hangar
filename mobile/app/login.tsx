@@ -223,9 +223,9 @@ const styles = StyleSheet.create((theme, rt) => ({
     paddingHorizontal: theme.base.space[4],
   },
   errorBox: {
-    backgroundColor: 'rgba(255,69,58,0.08)',
+    backgroundColor: theme.tokens.status.error + '14',
     borderWidth: 1,
-    borderColor: 'rgba(255,69,58,0.2)',
+    borderColor: theme.tokens.status.error + '33',
     borderRadius: theme.base.radius.sm,
     padding: theme.base.space[3],
   },
@@ -245,7 +245,7 @@ const styles = StyleSheet.create((theme, rt) => ({
     backgroundColor: theme.tokens.bg.hover,
   },
   connectText: {
-    color: '#fff',
+    color: theme.ink.onAccent,
     fontSize: theme.base.text.base,
     fontWeight: theme.base.weight.semibold,
   },

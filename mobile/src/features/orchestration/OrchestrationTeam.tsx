@@ -535,7 +535,7 @@ const styles = StyleSheet.create(theme => ({
   row: { minHeight: 44, padding: theme.base.space[4], gap: theme.base.space[2] },
   action: { minHeight: 44, justifyContent: 'center', paddingHorizontal: theme.base.space[3] },
   actionText: { fontSize: theme.base.text.sm, color: theme.tokens.accent.base },
-  title: { fontSize: theme.base.text.base, color: theme.tokens.text.primary, fontWeight: '600' },
+  title: { fontSize: theme.base.text.base, color: theme.tokens.text.primary, fontWeight: theme.base.weight.semibold },
   note: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted },
   error: { fontSize: theme.base.text.sm, color: theme.tokens.status.warning },
   choice: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingVertical: theme.base.space[2] },

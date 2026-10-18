@@ -75,7 +75,7 @@ const styles = StyleSheet.create((theme) => ({
     minWidth: 96,
     maxWidth: 140,
     flexGrow: 1,
-    gap: 2,
+    gap: theme.base.space[0.5],
   },
   tile: {
     aspectRatio: 1,

@@ -23,7 +23,7 @@ export function ConnectionDot({ label, loaded, error }: { label: string; loaded:
   const c = useSettingsColors();
   const status = error ? error === 'offline' ? m.mobile_machines_offline() : error : loaded ? m.mobile_machines_connected() : '';
   return <View accessible accessibilityLabel={status ? `${label}, ${status}` : label}
-    style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: error ? theme.tokens.status.error : loaded ? theme.tokens.status.success : c.faint }} />;
+    style={{ width: 8, height: 8, borderRadius: theme.base.radius.full, backgroundColor: error ? theme.tokens.status.error : loaded ? theme.tokens.status.success : c.faint }} />;
 }
 
 export function Field({ label, ...props }: TextInputProps & { label: string }) {
@@ -78,9 +78,9 @@ export function useMachineAction() {
   return { busy, error, message, run };
 }
 export const styles = StyleSheet.create((theme) => ({
-  sheet: { padding: 16, gap: 16 },
-  field: { gap: 8, paddingVertical: 8 },
-  input: { minHeight: 44, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderRadius: 8, fontSize: theme.base.text.sm },
-  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingVertical: 8 },
-  content: { padding: 16, gap: 12 },
+  sheet: { padding: theme.base.space[4], gap: theme.base.space[4] },
+  field: { gap: theme.base.space[2], paddingVertical: theme.base.space[2] },
+  input: { minHeight: 44, paddingHorizontal: theme.base.space[3], paddingVertical: theme.base.space[2], borderWidth: 1, borderRadius: theme.base.radius.sm, fontSize: theme.base.text.sm },
+  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[2], paddingVertical: theme.base.space[2] },
+  content: { padding: theme.base.space[4], gap: theme.base.space[3] },
 }));

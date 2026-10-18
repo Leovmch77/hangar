@@ -99,7 +99,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   title: {
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
     textAlign: 'center',
   },
   center: {
@@ -124,13 +124,13 @@ const styles = StyleSheet.create((theme) => ({
   },
   retryText: {
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   list: {
     maxHeight: 320,
   },
   listContent: {
-    gap: 2,
+    gap: theme.base.space[0.5],
   },
   row: {
     minHeight: 44,
@@ -142,18 +142,18 @@ const styles = StyleSheet.create((theme) => ({
   },
   rowText: {
     flex: 1,
-    gap: 2,
+    gap: theme.base.space[0.5],
   },
   label: {
     fontSize: theme.base.text.sm,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
   },
   hint: {
     fontSize: theme.base.text.xs,
   },
   tick: {
     fontSize: theme.base.text.sm,
-    fontWeight: '700',
+    fontWeight: theme.base.weight.bold,
   },
   closeBtn: {
     marginTop: theme.base.space[1],

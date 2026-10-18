@@ -66,7 +66,7 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: 'center',
   },
   btnText: {
-    color: '#fff',
+    color: theme.ink.onAccent,
     fontSize: theme.base.text.base,
     fontWeight: theme.base.weight.semibold,
   },
@@ -86,10 +86,10 @@ const styles = StyleSheet.create((theme) => ({
     right: 16,
     width: 44,
     height: 44,
-    borderRadius: 22,
+    borderRadius: theme.base.radius.full,
     backgroundColor: 'rgba(0,0,0,0.5)',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  closeText: { color: '#fff', fontSize: theme.base.text.lg, fontWeight: '600' },
+  closeText: { color: '#fff', fontSize: theme.base.text.lg, fontWeight: theme.base.weight.semibold },
 }));

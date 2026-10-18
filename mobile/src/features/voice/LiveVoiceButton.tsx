@@ -37,9 +37,9 @@ export function LiveVoiceButton({ phase, muted, error, visible, onPress }: LiveV
 }
 
 const styles = StyleSheet.create((theme) => ({
-  button: { minWidth: 44, minHeight: 44, paddingHorizontal: 8, borderRadius: theme.base.radius.full,
-    alignItems: 'center', justifyContent: 'center', gap: 2 },
+  button: { minWidth: 44, minHeight: 44, paddingHorizontal: theme.base.space[2], borderRadius: theme.base.radius.full,
+    alignItems: 'center', justifyContent: 'center', gap: theme.base.space[0.5] },
   live: { backgroundColor: theme.tokens.accent.dim },
-  errorDot: { position: 'absolute', top: 5, right: 5, width: 7, height: 7, borderRadius: 4, backgroundColor: theme.tokens.status.error },
+  errorDot: { position: 'absolute', top: 5, right: 5, width: 7, height: 7, borderRadius: theme.base.radius.full, backgroundColor: theme.tokens.status.error },
   errorText: { fontSize: theme.base.text.xxs, color: theme.tokens.status.error },
 }));

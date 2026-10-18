@@ -85,7 +85,7 @@ const styles = StyleSheet.create(theme => ({
   refresh: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingVertical: theme.base.space[2] },
   action: { fontSize: theme.base.text.sm, color: theme.tokens.accent.base },
   run: { padding: theme.base.space[4], gap: theme.base.space[2] },
-  title: { fontSize: theme.base.text.base, fontWeight: '600', color: theme.tokens.text.primary },
+  title: { fontSize: theme.base.text.base, fontWeight: theme.base.weight.semibold, color: theme.tokens.text.primary },
   note: { fontSize: theme.base.text.xs, color: theme.tokens.text.muted },
   empty: { padding: theme.base.space[4], fontSize: theme.base.text.sm, color: theme.tokens.text.muted },
   error: { fontSize: theme.base.text.sm, color: theme.tokens.status.warning },

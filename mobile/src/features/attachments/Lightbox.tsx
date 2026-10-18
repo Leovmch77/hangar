@@ -220,7 +220,7 @@ const styles = StyleSheet.create((theme) => ({
   roundBtn: {
     width: 40,
     height: 40,
-    borderRadius: 20,
+    borderRadius: theme.base.radius.full,
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',

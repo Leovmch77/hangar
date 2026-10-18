@@ -63,7 +63,7 @@ export function OrqDocument({ serverId, name, path, onClose }: { serverId: strin
 const styles = StyleSheet.create(theme => ({
   root: { flex: 1 },
   header: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[3], padding: theme.base.space[4] },
-  title: { flex: 1, fontSize: theme.base.text.sm, fontWeight: '600', color: theme.tokens.text.primary },
+  title: { flex: 1, fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold, color: theme.tokens.text.primary },
   content: { padding: theme.base.space[4], gap: theme.base.space[3] },
   note: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted },
   error: { fontSize: theme.base.text.sm, color: theme.tokens.status.warning },

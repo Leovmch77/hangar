@@ -376,7 +376,7 @@ const styles = StyleSheet.create((theme) => ({
   sendPrimary: {},
   sendText: {
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   keysBar: {
     flexDirection: 'column',
@@ -387,7 +387,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   keysHint: {
     fontSize: theme.base.text.xxs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
     textTransform: 'uppercase',
   },
   keysRow: {
@@ -410,6 +410,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   keyText: {
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
 }));

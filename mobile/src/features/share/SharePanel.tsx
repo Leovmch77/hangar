@@ -217,7 +217,7 @@ export function SharePanel({ server, name }: { server: Server; name: string }) {
 const styles = StyleSheet.create((theme) => ({
   inner: { padding: theme.base.space[4], gap: theme.base.space[3], paddingBottom: theme.base.space[6] },
   block: { gap: theme.base.space[2] },
-  heading: { fontSize: theme.base.text.base, fontWeight: '600' },
+  heading: { fontSize: theme.base.text.base, fontWeight: theme.base.weight.semibold },
   text: { fontSize: theme.base.text.sm, lineHeight: 20, flexShrink: 1 },
   warning: { fontSize: theme.base.text.sm, lineHeight: 20, padding: theme.base.space[3], borderRadius: theme.base.radius.md },
   code: { fontSize: theme.base.text.sm, fontFamily: theme.base.fontMono, padding: theme.base.space[3], borderRadius: theme.base.radius.md },
@@ -225,5 +225,5 @@ const styles = StyleSheet.create((theme) => ({
   waiting: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
   actions: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[2] },
   button: { minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: theme.base.radius.full, paddingHorizontal: theme.base.space[4] },
-  buttonText: { fontSize: theme.base.text.base, fontWeight: '600' },
+  buttonText: { fontSize: theme.base.text.base, fontWeight: theme.base.weight.semibold },
 }));
