@@ -57,7 +57,9 @@ export const FileCard = memo(function FileCard({ uri, headers, name }: {
   const ext = name.includes('.') ? name.split('.').pop()!.toUpperCase() : '';
   const statusLine = statusText[status]?.();
   const erro = status === 'missing' || status === 'failed' || status === 'empty';
-  const label = erro ? m.file_card_retry() : ios ? m.file_card_download() : m.file_card_open();
+  // Arquivo vazio não melhora tentando de novo.
+  const retry = status === 'missing' || status === 'failed';
+  const label = retry ? m.file_card_retry() : ios ? m.file_card_download() : m.file_card_open();
   return (
     <View style={[styles.card, { backgroundColor: superficie(theme), borderColor: theme.tokens.border.subtle }]}>
       <View style={[styles.iconBox, { backgroundColor: theme.tokens.accent.dim }]}>
@@ -84,7 +86,7 @@ export const FileCard = memo(function FileCard({ uri, headers, name }: {
       >
         {status === 'loading'
           ? <ActivityIndicator size="small" color={theme.tokens.text.secondary} />
-          : <Icon name={erro ? 'RotateCw' : ios ? 'Download' : 'ExternalLink'} size={16} color={theme.tokens.text.secondary} />}
+          : <Icon name={retry ? 'RotateCw' : ios ? 'Download' : 'ExternalLink'} size={16} color={theme.tokens.text.secondary} />}
         <Text style={[styles.actionText, { color: theme.tokens.text.primary }]}>{label}</Text>
       </Pressable>
     </View>

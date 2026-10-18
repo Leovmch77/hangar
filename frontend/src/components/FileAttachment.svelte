@@ -53,7 +53,7 @@
   }
   function cardAction(r: FileRef): string {
     const s = saving[r.path];
-    return s === 'failed' || s === 'missing' || s === 'empty' ? m.file_card_retry() : m.file_card_download();
+    return s === 'failed' || s === 'missing' ? m.file_card_retry() : m.file_card_download();
   }
   const ext = (name: string) => name.split('.').pop()!.toUpperCase();
   function docIcon(name: string): string {

@@ -79,6 +79,7 @@ describe('documentos citados', () => {
     await tick();
     target.querySelector<HTMLButtonElement>('.file-card button')!.click();
     await vi.waitFor(() => expect(target.querySelector('.file-card')!.textContent).toContain(m.file_card_empty()));
+    expect(target.querySelector('.file-card button')!.textContent).toContain(m.file_card_download());
   });
 
   it('PDF mantém a prévia e permite baixar tanto no cartão quanto no visor', async () => {

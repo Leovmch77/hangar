@@ -54,12 +54,12 @@ describe('FileCard', () => {
     expect(c.querySelector('button')!.getAttribute('aria-label')).toBe('open rel.docx');
   });
 
-  it('arquivo vazio avisa e oferece tentar de novo', async () => {
+  it('arquivo vazio avisa sem oferecer tentar de novo', async () => {
     deliver.mockResolvedValue('empty');
     const c = await mount();
     await press(c);
     expect(c.textContent).toContain('empty');
-    expect(c.textContent).toContain('retry');
+    expect(c.textContent).not.toContain('retry');
   });
 
   it('404 vira "não encontrado"; outra falha vira "não deu para baixar"', async () => {

@@ -1603,7 +1603,9 @@ impl Hangar {
                 let note = match result {
                     Ok((path, _)) if open => { cx.open_with_system(&path); None }
                     Ok((path, _)) => Some((tr("saved").replace("{path}", &path.display().to_string()), false)),
-                    Err((error, _)) => Some((error, true)),
+                    // O card já diz "não encontrado"; a frase do servidor vinha sem tradução.
+                    Err((_, true)) => None,
+                    Err((error, false)) => Some((error, true)),
                 };
                 if let Some(note) = note { self.action_feedback.insert(key, note); }
                 cx.notify();
