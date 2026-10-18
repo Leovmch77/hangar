@@ -115,7 +115,7 @@ it.each([
   const { theme } = useUnistyles();
   const ring = avatar()?.querySelector<HTMLElement>('[data-testid="session-avatar-ring"]');
   const probe = document.createElement('div');
-  probe.style.borderColor = 'warning' in expected ? theme.tokens.status.warning : state === 'working' ? theme.tokens.accent.base : theme.tokens.border.default;
+  probe.style.borderColor = 'warning' in expected ? theme.tokens.status.warning : theme.tokens.border.default;
   expect(ring?.style.borderColor).toBe(probe.style.borderColor);
   if ('icon' in expected) expect(avatar()?.querySelector(`[data-symbol="${expected.icon}"]`)).not.toBeNull();
   expect(title()?.getAttribute('aria-label')).toContain(rotuloEstado(state));
