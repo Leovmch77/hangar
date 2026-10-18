@@ -9,8 +9,12 @@ import * as m from '../../paraglide/messages';
 import { OrchestrationHistory } from './OrchestrationHistory';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-const navigation = vi.hoisted(() => ({ focused: true, params: {} as { server?: string }, push: vi.fn(), back: vi.fn() }));
-vi.mock('expo-router', () => ({ useIsFocused: () => navigation.focused, useRouter: () => navigation, useLocalSearchParams: () => navigation.params, Stack: { Screen: () => null } }));
+const navigation = vi.hoisted(() => ({ focused: true, params: {} as { server?: string }, push: vi.fn(), back: vi.fn(), screen: vi.fn() }));
+vi.mock('expo-router', () => ({ useIsFocused: () => navigation.focused, useRouter: () => navigation, useLocalSearchParams: () => navigation.params, Stack: { Screen: ({ options }: { options: object }) => { navigation.screen(options); return null; } } }));
+vi.mock('react-native-unistyles', async (original) => {
+  const module = await original<typeof import('react-native-unistyles')>();
+  return { ...module, useUnistyles: () => { const value = module.useUnistyles(); return { ...value, theme: new Proxy(value.theme, {}) }; } };
+});
 vi.mock('expo-secure-store', () => ({ setItemAsync: vi.fn().mockResolvedValue(undefined), getItemAsync: vi.fn().mockResolvedValue(null) }));
 vi.mock('../../ui/Screen', () => ({ Screen: ({ children }: { children: ReactNode }) => createElement('main', null, children) }));
 vi.mock('../../ui/Sheet', () => ({ Sheet: ({ children }: { children: ReactNode }) => createElement('section', null, children) }));
@@ -37,6 +41,14 @@ beforeEach(() => {
   fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
 });
 afterEach(async () => { await act(async () => root.unmount()); _limparEsfriamentoParaTestes(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+it('preserva opções da tela ao redesenhar o histórico sem alteração', async () => {
+  fetcher.mockResolvedValue(reply({ execucoes: [], fichas: [] }));
+  await render();
+  const initial = navigation.screen.mock.calls.at(-1)![0];
+  await render();
+  expect(navigation.screen.mock.calls.at(-1)![0]).toBe(initial);
+});
 
 it('histórico lista captura máquina, preserva toda execução e trata loading vazio erro e retry', async () => {
   const pending = deferred<Response>(); fetcher.mockReturnValueOnce(pending.promise);

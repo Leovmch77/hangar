@@ -62,7 +62,7 @@ import Index from '../../../app/index';
 import { useAparencia } from '../../stores/aparencia';
 let root: Root;
 let container: HTMLDivElement;
-const click = (label: string) => container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!.click();
+const click = (label: string) => container.querySelector<HTMLElement>(`button[aria-label="${label}"], [role="button"][aria-label="${label}"]`)!.click();
 const mode = () => container.querySelector('[data-mode]')?.getAttribute('data-mode');
 beforeEach(() => {
   vi.clearAllMocks();

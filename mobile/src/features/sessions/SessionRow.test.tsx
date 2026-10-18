@@ -37,6 +37,7 @@ vi.mock('react-native-svg', async (original) => ({
   Path: (props: { d: string }) => createElement('path', props),
 }));
 vi.mock('../../paraglide/messages', () => ({
+  criar_modo_exec_headless: () => 'Sem terminal',
   ask_perguntas: () => 'ask_perguntas',
   conta_padrao: () => 'conta_padrao',
   sessao_conta: (p: { n: string }) => `conta ${p.n}`,
@@ -90,6 +91,79 @@ async function render(session: AggSession, extra: Record<string, unknown> = {}) 
 describe('SessionRow', () => {
   afterEach(() => { Platform.OS = 'android'; });
 
+  it.each([false, true])('sinal de sessão sem terminal acompanha o nome e o rótulo acessível (compact=%s)', async (compact) => {
+    for (const headless of [true, false, undefined]) {
+      const { container, root } = await render({ ...base, name: 'api', headless }, { compact });
+      try {
+        const name = Array.from(container.querySelectorAll('span')).find(el => el.textContent === 'api');
+        const signal = container.querySelector('[role="image"][aria-label="Sem terminal"]');
+        const label = container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label');
+        if (headless) {
+          expect(signal).not.toBeNull();
+          expect(name?.nextElementSibling).toBe(signal);
+          expect(label).toContain('Sem terminal');
+        } else {
+          expect(signal).toBeNull();
+          expect(label).not.toContain('Sem terminal');
+        }
+      } finally { act(() => root.unmount()); }
+    }
+  });
+
+  it.each([false, true])('última resposta aparece abaixo do nome em uma linha discreta (compact=%s)', async (compact) => {
+    const reply = 'Voz do Hangar: como funciona hoje e o que dá para fazer';
+    const { container, root } = await render(
+      { ...base, name: 'voz-pesquisa', last_reply: reply, cwd: '/hangar', branch: 'main', conta: 'claude:/home/user/.claude' },
+      { compact },
+    );
+    try {
+      const name = Array.from(container.querySelectorAll('span')).find(el => el.textContent === 'voz-pesquisa');
+      const subtitle = name?.parentElement?.nextElementSibling as HTMLElement | null;
+      expect(subtitle?.textContent).toBe(`◆ ${reply}`);
+      expect(subtitle?.getAttribute('data-number-of-lines')).toBe('1');
+      expect(subtitle?.style.color).toBe(useUnistyles().theme.tokens.text.muted);
+      expect(subtitle?.style.fontStyle).not.toBe('italic');
+      expect(container.querySelector('button[aria-label^="voz-pesquisa,"]')?.getAttribute('aria-label')).toContain(reply);
+      expect(container.querySelector('[data-testid="session-avatar"]')).not.toBeNull();
+      expect(container.textContent).toContain('hangar · main');
+      expect(container.querySelector('[aria-label="conta conta_padrao"]')).not.toBeNull();
+    } finally { act(() => root.unmount()); }
+  });
+
+  it.each([
+    { state: 'working', question: undefined, label: '2 agentes · local_bash: conferindo o servidor', expected: '2 agentes · local_bash: conferindo o servidor', italic: true },
+    { state: 'idle', question: 'Qual conta usar?', label: undefined, expected: 'Qual conta usar?', italic: false },
+    { state: 'awaiting_input', question: 'Pode continuar?', label: undefined, expected: 'Pode continuar?', italic: false },
+  ] as const)('subtítulo preserva pergunta e atividade antes da resposta ($state, $expected)', async ({ state, question, label, expected, italic }) => {
+    const { container, root } = await render({ ...base, name: 'api', state, question, label, last_reply: 'Resposta anterior' });
+    try {
+      const subtitle = Array.from(container.querySelectorAll('span')).find(el => el.textContent === expected);
+      expect(subtitle).toBeDefined();
+      expect(subtitle?.getAttribute('data-number-of-lines')).toBe('1');
+      expect(subtitle?.style.color).toBe(question ? useUnistyles().theme.tokens.pill.input.fg : useUnistyles().theme.tokens.text.secondary);
+      expect(subtitle?.style.fontStyle === 'italic').toBe(italic);
+      expect(container.textContent).not.toContain('Resposta anterior');
+      expect(container.textContent).not.toContain('◆');
+    } finally { act(() => root.unmount()); }
+  });
+
+  it.each(['working', 'awaiting_input', 'dead'] as const)('não mostra resposta antiga no estado %s sem atividade ou pergunta', async (state) => {
+    const { container, root } = await render({ ...base, name: 'api', state, last_reply: 'Resposta anterior' });
+    try {
+      expect(container.textContent).not.toContain('Resposta anterior');
+      expect(container.textContent).not.toContain('◆');
+    } finally { act(() => root.unmount()); }
+  });
+
+  it.each([undefined, null, ''])('sessão parada sem última resposta (%s) não ganha subtítulo vazio', async (last_reply) => {
+    const { container, root } = await render({ ...base, name: 'api', last_reply });
+    try {
+      const name = Array.from(container.querySelectorAll('span')).find(el => el.textContent === 'api');
+      expect(name?.parentElement?.nextElementSibling).toBeNull();
+      expect(container.textContent).not.toContain('◆');
+    } finally { act(() => root.unmount()); }
+  });
+
   it.each([
     { provider: 'claude', label: 'Claude', path: 'm4.7144' },
     { provider: 'codex', label: 'Codex', path: 'M22.2819' },
@@ -114,7 +188,7 @@ describe('SessionRow', () => {
     }
   });
 
-  it.each(['gpt', 'local-gpt', 'gpt-6-1-sol', 'GPT-6', 'openai', 'codex'])('motor %s usa OpenAI branco no avatar e preserva a engrenagem', async (engine) => {
+  it.each(['gpt', 'local-gpt', 'gpt-6-1-sol', 'GPT-6', 'openai', 'codex'])('motor %s usa OpenAI na cor do texto no avatar e preserva a engrenagem', async (engine) => {
     Platform.OS = 'ios';
     const { container, root } = await render({ ...base, name: 'api', provider: 'claude', engine });
     try {
@@ -122,7 +196,7 @@ describe('SessionRow', () => {
       expect(name?.previousElementSibling).toBeNull();
       const logo = container.querySelector('[data-testid="session-avatar"] svg');
       expect(logo?.querySelector('path')?.getAttribute('d')).toMatch(/^M22.2819/);
-      expect(logo?.getAttribute('fill')).toBe('#ffffff');
+      expect(logo?.getAttribute('fill')).toBe('#000');
       expect(container.querySelector('[data-symbol="gearshape"]')?.parentElement?.textContent).toBe(engine);
       const label = container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label');
       expect(label).toContain('Claude');

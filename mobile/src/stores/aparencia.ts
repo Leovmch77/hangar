@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { AccessibilityInfo } from 'react-native';
+import { AccessibilityInfo, Appearance } from 'react-native';
 import { UnistylesRuntime } from 'react-native-unistyles';
 import {
   PENSAMENTO_TOOLS,
@@ -20,7 +20,7 @@ export type Idioma = 'system' | 'pt' | 'en';
 /** Leitura do Rust: o que segura o texto da conversa sobre o fundo. */
 export type Leitura = 'auto' | 'none' | 'text' | 'sheet';
 /** Como a chamada de ferramenta aparece na conversa (ToolLook do Rust). */
-export type Ferramentas = 'classic' | 'chips' | 'tree';
+export type Ferramentas = 'classic' | 'chips' | 'tree' | 'terminal';
 export type DestaquePergunta = 'accent' | 'amber';
 /** Gaveta da tela inicial: sessões agrupadas ou conversas (vivas e fechadas) por recência. */
 export type Organizar = 'sessions' | 'conversations';
@@ -30,7 +30,7 @@ const FUNDOS: Fundo[] = ['flat', 'texture', 'aurora', 'image'];
 const IDIOMAS: Idioma[] = ['system', 'pt', 'en'];
 const PALETAS: Paleta[] = ['classic', 'neutral'];
 const LEITURAS: Leitura[] = ['auto', 'none', 'text', 'sheet'];
-const FERRAMENTAS: Ferramentas[] = ['classic', 'chips', 'tree'];
+const FERRAMENTAS: Ferramentas[] = ['classic', 'chips', 'tree', 'terminal'];
 const DESTAQUES: DestaquePergunta[] = ['accent', 'amber'];
 const AGRUPAR: GroupBy[] = ['none', 'server', 'project'];
 const ORGANIZAR: Organizar[] = ['sessions', 'conversations'];
@@ -102,9 +102,11 @@ function lerAgrupar(): GroupBy {
 }
 
 // Unistyles: `adaptiveThemes` segue o SO; fixar tema exige desligar o adaptativo antes de setTheme.
+// O nativo (vidro do iOS 26, teclado, menus) lê o esquema da janela, não o do Unistyles: sem fixar
+// a janela, app claro com iPhone escuro pintava o composer de vidro escuro.
 function aplicar(t: Tema) {
-  if (t === 'system') UnistylesRuntime.setAdaptiveThemes(true);
-  else { UnistylesRuntime.setAdaptiveThemes(false); UnistylesRuntime.setTheme(t); }
+  if (t === 'system') { Appearance.setColorScheme('unspecified'); UnistylesRuntime.setAdaptiveThemes(true); }
+  else { Appearance.setColorScheme(t); UnistylesRuntime.setAdaptiveThemes(false); UnistylesRuntime.setTheme(t); }
 }
 
 function lerFundo(): Fundo {

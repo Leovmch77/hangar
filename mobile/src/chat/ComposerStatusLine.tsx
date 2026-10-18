@@ -158,7 +158,7 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     flexWrap: 'nowrap',
     alignItems: 'center',
-    gap: 4,
+    gap: theme.base.space[1],
     minWidth: 0,
     minHeight: 44,
   },
@@ -173,7 +173,7 @@ const styles = StyleSheet.create((theme) => ({
     flexWrap: 'nowrap',
     alignItems: 'center',
     minWidth: 0,
-    gap: 4,
+    gap: theme.base.space[1],
   },
   measuring: {
     position: 'absolute',
@@ -187,7 +187,7 @@ const styles = StyleSheet.create((theme) => ({
     flexShrink: 0,
     alignItems: 'center',
     minWidth: 44,
-    gap: 4,
+    gap: theme.base.space[1],
   },
   shrinkText: {
     minWidth: 0,
@@ -200,6 +200,6 @@ const styles = StyleSheet.create((theme) => ({
   dot: {
     width: 6,
     height: 6,
-    borderRadius: 3,
+    borderRadius: theme.base.radius.full,
   },
 }));

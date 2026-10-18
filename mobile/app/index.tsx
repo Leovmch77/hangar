@@ -8,6 +8,7 @@ import type { DrawerLayoutMethods } from 'react-native-gesture-handler/Reanimate
 import { Screen } from '../src/ui/Screen';
 import { WorkingMarkPaused } from '../src/ui/WorkingMark';
 import { Icon } from '../src/ui/Icon';
+import { EdgeButton } from '../src/ui/EdgeButton';
 import { SessionsDrawer } from '../src/features/sessions/SessionsDrawer';
 import { SessionList } from '../src/features/sessions/SessionList';
 import { ServerSheet } from '../src/features/sessions/ServerSheet';
@@ -64,7 +65,6 @@ export default function Index() {
     onPanResponderRelease: (_event, gesture) => { if (gesture.dy > 40) showSessions(); },
   }), [mode, showSessions]);
 
-  // Pressable do gesture-handler recebe o toque mesmo na faixa de arrasto da gaveta no Android.
   const topButton = (icon: 'Server' | 'Settings' | 'ChartNoAxesCombined', label: string, onPress: () => void) => (
     <Pressable onPress={onPress} style={styles.icon} accessibilityRole="button" accessibilityLabel={label} hitSlop={4}>
       <Icon name={icon} size={20} color={theme.tokens.text.secondary} />
@@ -75,14 +75,14 @@ export default function Index() {
   return (
     <WorkingMarkPaused.Provider value={!focused}>
     <Screen edges={[]}>
-      <SessionsDrawer ref={drawer} onClose={closeDrawer} onOpenServers={() => setServersOpen(true)}>
+      <SessionsDrawer ref={drawer} openOnBack={mode === 'sessions'} onClose={closeDrawer} onOpenServers={() => setServersOpen(true)}>
         <View style={styles.bar} {...swipe.panHandlers}>
-          <Pressable onPress={mode === 'newConversation' ? showSessions : openDrawer} style={styles.sessions}
-            accessibilityRole="button" accessibilityLabel={m.native_sessions()} accessibilityValue={{ text: String(count) }}>
+          <EdgeButton onPress={mode === 'newConversation' ? showSessions : openDrawer} style={styles.sessions}
+            accessibilityLabel={m.native_sessions()} accessibilityValue={{ text: String(count) }}>
             <Icon name={mode === 'newConversation' ? 'ChevronLeft' : 'PanelLeft'} size={22} color={theme.tokens.text.primary} />
             <Text style={styles.sessionsLabel}>{m.native_sessions()}</Text>
             <View style={styles.badge}><Text style={styles.count}>{count}</Text></View>
-          </Pressable>
+          </EdgeButton>
           <View style={styles.spacer} />
           {activeId ? <LiveVoiceChatButton serverId={activeId} /> : null}
           {topButton('ChartNoAxesCombined', m.nav_custos(), () => router.push('/costs' as never))}
@@ -104,8 +104,8 @@ const styles = StyleSheet.create((theme) => ({
   bar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: theme.base.space[1] },
   spacer: { flex: 1 },
   icon: { width: BAR, height: BAR, alignItems: 'center', justifyContent: 'center' },
-  sessions: { minHeight: BAR, minWidth: BAR, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 8, flexShrink: 1 },
-  sessionsLabel: { fontSize: theme.base.text.base, fontWeight: '600', color: theme.tokens.text.primary, flexShrink: 1 },
-  badge: { minWidth: 22, minHeight: 22, borderRadius: 11, paddingHorizontal: 6, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.tokens.bg.hover },
-  count: { fontSize: theme.base.text.xs, fontWeight: '600', color: theme.tokens.text.primary, fontVariant: ['tabular-nums'] },
+  sessions: { minHeight: BAR, minWidth: BAR, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[2], flexShrink: 1 },
+  sessionsLabel: { fontSize: theme.base.text.base, fontWeight: theme.base.weight.semibold, color: theme.tokens.text.primary, flexShrink: 1 },
+  badge: { minWidth: 22, minHeight: 22, borderRadius: theme.base.radius.full, paddingHorizontal: theme.base.space[1.5], alignItems: 'center', justifyContent: 'center', backgroundColor: theme.tokens.bg.hover },
+  count: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.semibold, color: theme.tokens.text.primary, fontVariant: ['tabular-nums'] },
 }));

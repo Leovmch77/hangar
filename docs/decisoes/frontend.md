@@ -50,6 +50,22 @@ que não pode voltar; abaixo, o porquê de cada uma.
   (`mobile/src/ui/glassHeader.tsx`, uso em `mobile/app/s/[server]/[name]/share.tsx:31`). O voltar
   mostra só o chevron: as telas de origem não têm título de navegação e o rótulo seria o nome da
   rota.
+- **Exceção: cabeçalho local no formSheet (18/10/2026).** No iPhone, a folha de troca da conta
+  abriu só com o título e deixou de responder, exigindo encerrar o app, mesmo após a correção das
+  opções instáveis de navegação (`dcfe61afa`). A conta combinava `formSheet`, cabeçalho nativo
+  transparente e `ScrollView` com ajuste automático. Na [issue 3660 do react-native-screens](https://github.com/software-mansion/react-native-screens/issues/3660),
+  o mantenedor `t0maboro` explicou em 20/03/2026 que o cabeçalho nativo nessa folha não é
+  recomendado: a correção nativa do tamanho da rolagem diverge da medida do Yoga e quebra os
+  toques. O código da versão instalada (4.26.2) ainda aplica essa correção de tamanho.
+  A folha da conta conserva sua apresentação e ganha título local não colapsável, botão Fechar,
+  rolagem com `flex: 1` e espaço inferior da área segura, sem ajuste automático sob cabeçalho.
+  O fundo vai no `contentStyle` da pilha: o invólucro fica só com layout, para ser removido da
+  hierarquia nativa e expor cabeçalho e rolagem como os dois filhos esperados pela biblioteca.
+  O cabeçalho nativo fica desligado desde a configuração da pilha. Testes de componente cobrem
+  essa configuração, renderizações repetidas com Proxy de tema novo, carregamento, erro, lista
+  e fechamento com e sem histórico. Eles não executam UIKit: não houve reprodução nem
+  conferência desta correção no iPhone ou emulador, e a ligação entre essa limitação nativa e o
+  travamento relatado permanece uma hipótese. As outras folhas não foram alteradas.
 - **Escala de texto.** Eram ~230 `fontSize` numéricos, três deles abaixo de 11 pt. Todos foram para
   `theme.base.text.*` pelo mais próximo, empate para baixo (14 → 13, 16 → 15), para nenhum layout
   crescer; a trava é `mobile/src/theme/fontScaleGuard.test.ts`.

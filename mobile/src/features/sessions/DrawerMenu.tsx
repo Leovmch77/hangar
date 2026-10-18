@@ -11,6 +11,7 @@ import { useSessions } from '../../stores/sessions';
 import { useServers } from '../../stores/servers';
 import { useLiveVoice } from '../voice/liveVoiceStore';
 import { accountQuotaLine, recentSessions } from './drawerMenu';
+import { HeadlessSignal } from './HeadlessSignal';
 
 const RECENT = 5;
 const NO_ROWS: AggSession[] = [];
@@ -81,12 +82,13 @@ function RecentRow({ session, onPress }: { session: AggSession; onPress: () => v
   const { theme } = useUnistyles();
   const waiting = session.state === 'awaiting_input';
   return (
-    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={`${session.name}, ${rotuloEstado(session.state)}`}
+    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={`${session.name}${session.headless === true ? `, ${m.criar_modo_exec_headless()}` : ''}, ${rotuloEstado(session.state)}`}
       style={({ pressed }) => [styles.item, pressed && styles.pressed]}>
       {session.state === 'working'
         ? <WorkingMark size={20} color={theme.tokens.accent.base} />
         : <Icon name="MessageCircle" size={20} color={theme.tokens.text.secondary} />}
       <Text style={styles.itemText} numberOfLines={1}>{session.name}</Text>
+      {session.headless === true ? <HeadlessSignal /> : null}
       {waiting ? <View style={[styles.dot, { backgroundColor: theme.tokens.status.warning }]} /> : null}
     </Pressable>
   );
@@ -113,18 +115,18 @@ function useAccountQuota(server: Parameters<typeof listClaudeConfigsForServer>[0
 
 const styles = StyleSheet.create((theme) => ({
   root: { flex: 1 },
-  head: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingLeft: 20, paddingRight: 14, paddingVertical: 10 },
-  brand: { flex: 1, fontSize: theme.base.text.xl, fontWeight: '700', color: theme.tokens.text.primary },
-  circle: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.tokens.bg.hover },
-  item: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 20 },
+  head: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingLeft: theme.base.space[5], paddingRight: theme.base.space[3], paddingVertical: theme.base.space[2] },
+  brand: { flex: 1, fontSize: theme.base.text.xl, fontWeight: theme.base.weight.bold, color: theme.tokens.text.primary },
+  circle: { width: 44, height: 44, borderRadius: theme.base.radius.full, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.tokens.bg.hover },
+  item: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[3], paddingHorizontal: theme.base.space[5] },
   pressed: { backgroundColor: theme.tokens.bg.hover },
   itemText: { flexShrink: 1, fontSize: theme.base.text.base, color: theme.tokens.text.primary },
   hint: { flex: 1, textAlign: 'right', fontSize: theme.base.text.xs, color: theme.tokens.text.muted },
-  section: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted, paddingHorizontal: 20, paddingTop: 18, paddingBottom: 4 },
+  section: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted, paddingHorizontal: theme.base.space[5], paddingTop: theme.base.space[4], paddingBottom: theme.base.space[1] },
   more: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted },
-  dot: { width: 8, height: 8, borderRadius: 4, marginLeft: 'auto' },
+  dot: { width: 8, height: 8, borderRadius: theme.base.radius.full, marginLeft: 'auto' },
   bottom: { position: 'absolute', left: 16, right: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  pill: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 18, borderRadius: 22, backgroundColor: theme.tokens.text.primary, boxShadow: '0px 6px 20px rgba(0,0,0,0.35)' },
+  pill: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[4], borderRadius: theme.base.radius.full, backgroundColor: theme.tokens.text.primary, boxShadow: '0px 6px 20px rgba(0,0,0,0.35)' },
   pillPressed: { opacity: 0.85 },
-  pillText: { fontSize: theme.base.text.base, fontWeight: '600', color: theme.tokens.bg.base },
+  pillText: { fontSize: theme.base.text.base, fontWeight: theme.base.weight.semibold, color: theme.tokens.bg.base },
 }));

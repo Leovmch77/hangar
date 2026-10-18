@@ -58,6 +58,10 @@ pub struct AppState {
     pub fx: Arc<crate::costs::fx::Fx>,
     pub reports: Arc<crate::costs::ReportCache>,
     pub origins_home: std::path::PathBuf,
+    /// `~/.hangar`: etapas de ferramenta e cofre de anexos; o teste troca por uma pasta temporária.
+    pub hangar_dir: std::path::PathBuf,
+    /// Relógio e sufixo dos nomes do cofre de anexos; o teste de contrato fixa os da referência.
+    pub upload_naming: crate::uploads::store::Naming,
     pub origins: std::sync::Mutex<indexmap::IndexMap<std::path::PathBuf, crate::costs::origins::Origins>>,
     pub list: Arc<crate::list::bridge::ListBridge>,
     /// Produtor único da lista do dono; liga com a primeira lista aberta.
@@ -158,6 +162,8 @@ impl AppState {
             workspace_meta_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             costs, fx, reports: Arc::new(crate::costs::ReportCache::default()),
             origins_home: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()),
+            hangar_dir: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()).join(".hangar"),
+            upload_naming: Default::default(),
             origins: std::sync::Mutex::new(indexmap::IndexMap::new()),
             list, state,
             hub: Arc::default(),
@@ -428,6 +434,10 @@ where H: axum::handler::Handler<T, Arc<AppState>>, T: 'static {
         .route("/api/sessions/{name}/codex-permissions", get(crate::session_write::codex::permissions).fallback(fallback.clone()))
         // Mesmo caminho: o axum junta o POST à rota de cima (um repasse só, o dela).
         .route("/api/sessions/{name}/codex-permissions", axum::routing::post(crate::session_write::codex::set_permission))
+        .route("/api/sessions/{name}/transcribe", axum::routing::post(crate::uploads::transcribe::route).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/bash-output", axum::routing::post(crate::session_media::bash_output_route).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/tool-progress/{id}", get(crate::session_media::tool_progress).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/transcript-image/{uuid}/{idx}", get(crate::session_media::transcript_image).fallback(fallback.clone()))
         .route("/api/sessions/{name}/cost", get(crate::costs_routes::session_cost).fallback(fallback))
 }
 
@@ -446,7 +456,6 @@ fn terminal_router_with(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> 
         .route("/__hangar_server/forwarded", axum::routing::any(crate::forwarded::private))
         .route("/__hangar_server/list", axum::routing::post(crate::list::bridge::private))
         .route("/__hangar_server/accounts", axum::routing::post(crate::accounts::http::private))
-        .route("/__hangar_server/uploads/{name}", axum::routing::any(crate::uploads::http::private))
         .route("/__hangar_server/quotas", axum::routing::post(crate::accounts::quotas::private))
         .route("/__hangar_server/accounts/claude", axum::routing::post(crate::accounts::http::private_claude))
         .route("/__hangar_server/accounts/public", axum::routing::any(crate::accounts::http::private_public))

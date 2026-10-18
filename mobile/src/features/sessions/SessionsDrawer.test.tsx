@@ -125,6 +125,34 @@ it.each(['home', 'chat'] as const)('Back fecha só a gaveta de %s; o segundo Bac
   expect(nativeBack.exitApp).toHaveBeenCalledTimes(screen === 'home' ? 1 : 0);
 });
 
+it('com openOnBack, o Back abre a gaveta fechada e, com ela aberta, segue a navegação normal', async () => {
+  const ref = createRef<DrawerLayoutMethods>();
+  const root = createRoot(document.createElement('div'));
+  roots.add(root);
+  await act(async () => root.render(createElement(SessionsDrawer, { ref, openOnBack: true, onClose: () => {}, onOpenServers: () => {}, children: 'tela' })));
+
+  await act(async () => { nativeBack.press(); });
+  expect(drawer.openDrawer).toHaveBeenCalledTimes(1);
+  expect(nativeBack.exitApp).not.toHaveBeenCalled();
+
+  await act(async () => { nativeBack.press(); });
+  expect(drawer.closeDrawer).not.toHaveBeenCalled();
+  expect(nativeBack.exitApp).toHaveBeenCalledTimes(1);
+});
+
+it('openOnBack não intercepta o Back fora de foco nem no iOS', async () => {
+  const root = createRoot(document.createElement('div'));
+  roots.add(root);
+  const render = () => act(async () => root.render(createElement(SessionsDrawer, { openOnBack: true, onClose: () => {}, onOpenServers: () => {}, children: 'tela' })));
+  route.focused = false;
+  await render();
+  expect(nativeBack.listeners.size).toBe(0);
+  route.focused = true;
+  platform.OS = 'ios';
+  await render();
+  expect(nativeBack.listeners.size).toBe(0);
+});
+
 it('Back respeita foco e limpa a interceptação ao perder foco e desmontar', async () => {
   const container = document.createElement('div');
   const root = createRoot(container);
@@ -214,9 +242,10 @@ it('vidro só com a gaveta aberta; a lista nasce na primeira abertura e fica, co
   act(() => root.unmount());
 });
 
-it('a faixa de arrasto começa depois da borda reservada ao voltar do iOS', () => {
+it('a faixa de arrasto começa depois da borda reservada ao voltar do iOS e tem a largura padrão do Android', () => {
   // hitSlop do gesture-handler: left negativo desloca a origem para dentro, width fixa a faixa.
-  expect(drawerEdgeSlop(20)).toEqual({ left: -20, width: 32 });
+  // 20 dp é a faixa do DrawerLayout do Android; mais larga, ela cobre o começo do conteúdo (16 dp).
+  expect(drawerEdgeSlop(20)).toEqual({ left: -20, width: 20 });
 });
 
 it('abre com arrasto longo ou rápido, não com toque de leve', () => {

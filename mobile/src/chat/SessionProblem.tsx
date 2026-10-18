@@ -108,7 +108,7 @@ const styles = StyleSheet.create((theme) => ({
   toggleText: {
     color: theme.tokens.accent.base,
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   detail: {
     color: theme.tokens.text.secondary,

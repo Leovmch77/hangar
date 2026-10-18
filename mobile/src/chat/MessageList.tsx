@@ -39,7 +39,7 @@ interface Props {
   preview: string;
   previewMd?: boolean; // prévia do agente = markdown (default true = comportamento antigo)
   previewFull?: boolean;
-  session?: Pick<SessionInfo, 'provider' | 'headless'> | null;
+  session?: Pick<SessionInfo, 'provider' | 'headless' | 'plugin_tool_servers'> | null;
   olderFailed: '' | 'failed' | 'unjoinable';
   onLoadOlder: () => void;
   pending?: PendingMsg[];
@@ -102,13 +102,14 @@ export function MessageList({
   const detail = useRef<ToolDetailHandle>(null);
   const pref = useAparencia((s) => s.pensamentoTools);
   const look = useAparencia((s) => s.ferramentas);
+  const preserveExpansion = preserveToolGroupPosition || look === 'terminal';
   const tarefasLigadas = useAparencia((s) => s.tarefas);
   const folha = useAparencia((s) => (s.leitura === 'sheet' ? s.solidezFolha : null));
   const { theme } = useUnistyles();
   const { width } = useWindowDimensions();
   const previous = useRef<ConversationProjection | null>(null);
   const projection = projectConversation(previous.current, {
-    events, eventsRevision, pref, merge: look === 'tree', tasksEnabled: tarefasLigadas,
+    events, eventsRevision, pref, merge: look === 'tree', terminal: look === 'terminal', tasksEnabled: tarefasLigadas,
     pagesEnabled: !!sessionName, running: new Set(agentesRodando.map((a) => a.id)), queuePanel,
   });
   // Render descartado ou repetido não publica o seu cache nem modifica o snapshot anterior.
@@ -141,8 +142,8 @@ export function MessageList({
   useEffect(() => { dataRef.current = data; }, [data]);
   // Medidas lidas na hora do toque, por referência: como dependência, cada mudança de altura do
   // campo de mensagem recriava o `goToQuote` e, com ele, o `renderItem` de todas as linhas.
-  const layoutRef = useRef({ quoteGap: theme.base.space[3], bottomInset });
-  useEffect(() => { layoutRef.current = { quoteGap: theme.base.space[3], bottomInset }; }, [theme.base.space, bottomInset]);
+  const layoutRef = useRef({ quoteGap: theme.base.space[3], bottomInset, animated: look !== 'terminal' });
+  useEffect(() => { layoutRef.current = { quoteGap: theme.base.space[3], bottomInset, animated: look !== 'terminal' }; }, [theme.base.space, bottomInset, look]);
   const goToQuote = useCallback((ref: QuoteRef) => {
     const rows = dataRef.current;
     const { quoteGap } = layoutRef.current;
@@ -170,7 +171,7 @@ export function MessageList({
         const top = st.scroll + quoteGap;
         const target = top + size * (at.start / source.length) - visible * 0.25;
         const offset = Math.min(Math.max(target, st.scroll), top + size - visible);
-        if (offset > st.scroll + 1) void list.scrollToOffset({ offset, animated: true });
+        if (offset > st.scroll + 1) void list.scrollToOffset({ offset, animated: layoutRef.current.animated });
       }, 80);
     });
   }, []);
@@ -185,7 +186,7 @@ export function MessageList({
   const renderItem = useCallback(({ item }: { item: MessageRow }) => {
     switch (item.type) {
       case 'fold':
-        return <ToolGroup parts={item.parts} summary={item.summary} resultOf={item.resultOf!} onAbrir={abrirDetalhe} onExpand={preserveToolGroupPosition ? pauseForToolGroup : undefined} look={look} />;
+        return <ToolGroup parts={item.parts} summary={item.summary} resultOf={item.resultOf!} onAbrir={abrirDetalhe} onExpand={preserveExpansion ? pauseForToolGroup : undefined} look={look} pluginServers={session?.plugin_tool_servers ?? undefined} />;
       case 'tasks':
         return <TaskList tasks={item.tasks} />;
       case 'page':
@@ -222,7 +223,7 @@ export function MessageList({
         return nunca;
       }
     }
-  }, [abrirDetalhe, sessionName, serverId, look, working, session?.provider, session?.headless, stateEvent?.problema, goToQuote, canQuote, preserveToolGroupPosition, pauseForToolGroup]);
+  }, [abrirDetalhe, sessionName, serverId, look, working, session?.provider, session?.headless, session?.plugin_tool_servers, stateEvent?.problema, goToQuote, canQuote, preserveExpansion, pauseForToolGroup]);
 
   // "Ir pro fim" (como o web): aparece com mais de uma tela entre o que se vê e o fim. Mensagem que
   // chega nesse meio-tempo muda o botão pra aviso, senão a conversa anda sem a pessoa saber.
@@ -308,8 +309,8 @@ export function MessageList({
   const irProFim = useCallback(() => {
     if (toolGroupPausedRef.current) resumeFollowing();
     setLongeDoFim(false);
-    void lista.current?.scrollToEnd({ animated: true });
-  }, [resumeFollowing]);
+    void lista.current?.scrollToEnd({ animated: look !== 'terminal' });
+  }, [resumeFollowing, look]);
 
   // Largura da coluna (Aparência › Texto da conversa): abaixo de 100% a conversa estreita no meio.
   const recuo = ((width - 2 * theme.base.space[4]) * (1 - theme.conversa.coluna)) / 2;
@@ -327,7 +328,7 @@ export function MessageList({
     <LegendList
       ref={lista}
       onScroll={onScroll}
-      onContentSizeChange={preserveToolGroupPosition ? onContentSizeChange : undefined}
+      onContentSizeChange={preserveExpansion ? onContentSizeChange : undefined}
       scrollEventThrottle={100}
       nestedScrollEnabled={nestedScrollEnabled}
       data={data}
@@ -363,7 +364,7 @@ export function MessageList({
         <View style={styles.footer}>
           {/* Mesma ordem do fim da conversa na PWA: o trabalho em voo, depois o que a pessoa mandou. */}
           {pensamento ? <PensamentoVivo texto={pensamento} /> : null}
-          {ferramentaEv ? <ToolCard use={ferramentaEv} result={null} onPress={abrirDetalhe} look={look} escrevendo /> : null}
+          {ferramentaEv ? <ToolCard use={ferramentaEv} result={null} onPress={abrirDetalhe} look={look} onExpand={preserveExpansion ? pauseForToolGroup : undefined} escrevendo /> : null}
           {visiblePreview ? <PreviewBubble text={visiblePreview} md={previewMd} full={previewFull} streaming={working} /> : null}
           {working && !pensamento && !ferramenta ? <WorkingLine label={stateEvent?.label} since={desde} /> : null}
           {agentesRodando.length ? <AgentesRodando agentes={agentesRodando} inicio={inicioDoAgente} onAbrir={onAbrirAgentes} /> : null}
@@ -397,12 +398,12 @@ export function MessageList({
 
 const styles = StyleSheet.create((theme) => ({
   area: { flex: 1 },
-  folha: { position: 'absolute', top: theme.base.space[2], bottom: 0, borderRadius: 16 },
+  folha: { position: 'absolute', top: theme.base.space[2], bottom: 0, borderRadius: theme.base.radius.lg },
   // Resposta sem bolha ocupa a largura: a margem lateral é o que separa o texto da borda da tela.
   content: {
     paddingHorizontal: theme.base.space[4],
     paddingVertical: theme.base.space[3],
-    gap: theme.base.space[3],
+    gap: theme.base.space[2],
   },
   footer: {
     gap: theme.base.space[3],
@@ -432,7 +433,7 @@ const styles = StyleSheet.create((theme) => ({
     right: theme.base.space[4],
     width: 40,
     height: 40,
-    borderRadius: 20,
+    borderRadius: theme.base.radius.full,
     borderWidth: 1,
     borderColor: theme.tokens.border.default,
     backgroundColor: superficie(theme, 0.9),
@@ -445,7 +446,7 @@ const styles = StyleSheet.create((theme) => ({
     right: -2,
     width: 10,
     height: 10,
-    borderRadius: 5,
+    borderRadius: theme.base.radius.full,
     borderWidth: 2,
   },
 }));

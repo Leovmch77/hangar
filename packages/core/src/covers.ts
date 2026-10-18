@@ -32,7 +32,7 @@ const PREFIXO = 1;
 // conta depois do ultimo bloco `<hangar-ref>` (dentro dele e texto citado), como no parseImageMessage.
 export function attachmentCaption(text: string): string {
   const tail = contextRefsEnd(text);
-  const i = text.slice(tail).search(/(?:\s*—\s*)?📎\s*(?:imagem|arquivo):/u);
+  const i = text.slice(tail).search(/(?:\s*—\s*)?📎\s*(?:imagem|arquivo|image|file):/u);
   return (i >= 0 ? text.slice(0, tail + i) : text).trim();
 }
 

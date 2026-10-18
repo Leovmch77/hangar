@@ -4,6 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import type { ChatEvent } from '@hangar/core';
 import { Icon } from '../../ui/Icon';
 import { ToolCard } from './ToolCard';
+import { TerminalToolGroup } from './TerminalToolGroup';
 import { ThinkingBlock } from '../ThinkingBlock';
 import { appendFoldSummary, failedLabel, summaryTitle, type FoldSummary } from './fold';
 import type { Ferramentas } from '../../stores/aparencia';
@@ -26,6 +27,7 @@ export const ToolGroup = memo(function ToolGroup({
   onAbrir,
   onExpand,
   look = 'tree',
+  pluginServers,
 }: {
   parts: ChatEvent[];
   summary?: FoldSummary;
@@ -33,6 +35,7 @@ export const ToolGroup = memo(function ToolGroup({
   onAbrir: (use: ChatEvent) => void;
   onExpand?: () => void;
   look?: Ferramentas;
+  pluginServers?: readonly string[];
 }) {
   const { theme } = useUnistyles();
   const folded = summary ?? appendFoldSummary(undefined, parts, resultOf);
@@ -43,6 +46,8 @@ export const ToolGroup = memo(function ToolGroup({
   const aberto = (chips && calls <= CHIPS_ABERTO_ATE) !== virado;
   const [tudo, setTudo] = useState(false);
   const falhas = failedLabel(folded.failures);
+
+  if (look === 'terminal') return <TerminalToolGroup parts={parts} resultOf={resultOf} onExpand={onExpand} onOpen={onAbrir} pluginServers={pluginServers} />;
 
   const linha = (p: ChatEvent) =>
     p.kind === 'thinking'
@@ -70,6 +75,7 @@ export const ToolGroup = memo(function ToolGroup({
           if (!aberto) onExpand?.();
           setVirado((v) => !v);
         }}
+        hitSlop={6}
         style={({ pressed }) => [styles.head, pressed && { backgroundColor: theme.tokens.bg.hover }]}
         accessibilityRole="button"
         accessibilityLabel={[titulo + chamadas, falhas].filter(Boolean).join(', ')}
@@ -100,22 +106,22 @@ export const ToolGroup = memo(function ToolGroup({
 });
 
 const styles = StyleSheet.create((theme) => ({
-  wrap: { gap: 2 },
+  wrap: { gap: theme.base.space[0.5] },
   head: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    minHeight: 40,
+    gap: theme.base.space[1.5],
+    minHeight: 32,
     paddingHorizontal: theme.base.space[1],
     borderRadius: theme.base.radius.sm,
   },
-  titulo: { flex: 1, minWidth: 0, fontSize: theme.base.text.sm },
+  titulo: { flex: 1, minWidth: 0, ...theme.type.meta },
   vivas: { paddingLeft: theme.base.space[1] },
   // Fio à esquerda em vez de caixa: o trabalho é aparte da conversa, não um cartão — superfície
   // própria aqui viraria retângulo chapado por cima do papel de parede.
-  fio: { marginLeft: 10, paddingLeft: theme.base.space[2], borderLeftWidth: 1 },
+  fio: { marginLeft: theme.base.space[2], paddingLeft: theme.base.space[2], borderLeftWidth: 1 },
   // Os Chips são a exceção pedida: tabela só com borda, sem fundo, para seguir o papel de parede.
-  tabela: { borderWidth: 1, borderRadius: 10, overflow: 'hidden' },
+  tabela: { borderWidth: 1, borderRadius: theme.base.radius.sm, overflow: 'hidden' },
   mais: { minHeight: 44, justifyContent: 'center', paddingHorizontal: theme.base.space[1] },
-  maisTxt: { fontSize: theme.base.text.xs, fontWeight: '600' },
+  maisTxt: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.semibold },
 }));

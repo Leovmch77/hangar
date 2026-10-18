@@ -25,7 +25,7 @@ const HANDOFF_GRACE_S: f64 = 15.0 * 60.0;
 const QUEUE_ORDER: u64 = 1_000_000_000;
 
 // pqueue.py:285, 294, 298
-static ATTACH: LazyLock<Regex> = LazyLock::new(|| py_re(r"(?s)(?:\s*—\s*)?📎\s*(?:imagem|arquivo):.*$"));
+static ATTACH: LazyLock<Regex> = LazyLock::new(|| py_re(r"(?s)(?:\s*—\s*)?📎\s*(?:imagem|arquivo|image|file):.*$"));
 static IMG_PREFIX: LazyLock<Regex> = LazyLock::new(|| py_re(r"\A(?:\[Image #\d+\])+\s*"));
 static IMG_SOURCE: LazyLock<Regex> = LazyLock::new(|| py_re(r"\[Image: source: ([^\]]+)\]"));
 // pqueue.py `_COMMAND_NAME`/`_COMMAND_ARGS`
@@ -58,6 +58,9 @@ pub struct InternalInfo {
     pub headless: bool,
     #[serde(default)]
     pub lifecycle_id: Option<String>,
+    /// Pasta da sessão na lista; o cofre de anexos é chaveado por ela.
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -298,17 +301,19 @@ pub(crate) fn chaves_de_commit(text: &str) -> Vec<String> {
         out.push(v.to_string());
         out.extend(v.split('\n').map(strip).filter(|ln| !ln.is_empty()).map(str::to_string));
     }
-    // `/comando args` digitado vira `<command-name>/comando</command-name>` + `<command-args>` no
-    // transcript. Só a mensagem que É o comando conta (citar a tag não conta), e ela entra inteira.
-    if t.starts_with("<command-name>") || t.starts_with("<command-message>") {
-        if let Some(c) = COMMAND_NAME.captures(t) {
-            let args = COMMAND_ARGS.captures(t).map(|a| strip(&a[1]).to_string()).unwrap_or_default();
-            let comando = strip(&format!("{} {args}", strip(&c[1]))).to_string();
-            if !comando.is_empty() { out.push(comando); }
-        }
-    }
+    out.extend(typed_command(t));
     out.extend(peer_bodies(t).into_iter().map(str::to_string));
     out
+}
+
+/// `/comando args` digitado vira `<command-name>/comando</command-name>` + `<command-args>` no
+/// transcript. Só a mensagem que É o comando conta (citar a tag não conta), e ela volta inteira.
+pub(crate) fn typed_command(text: &str) -> Option<String> {
+    let t = strip(text);
+    if !t.starts_with("<command-name>") && !t.starts_with("<command-message>") { return None; }
+    let c = COMMAND_NAME.captures(t)?;
+    let args = COMMAND_ARGS.captures(t).map(|a| strip(&a[1]).to_string()).unwrap_or_default();
+    Some(strip(&format!("{} {args}", strip(&c[1])))).filter(|s| s.starts_with('/')).map(str::to_string)
 }
 
 /// `PromptQueue.load` (pqueue.py:875): `splitlines` do Python, linha que não é objeto JSON pula.
@@ -458,6 +463,12 @@ pub fn history_etag(req: &HistoryRequest) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn english_attachment_marker_leaves_the_caption() {
+        assert_eq!(super::strip_attach("look — 📎 image: /a.png 📎 file: /b.txt"), "look");
+        assert_eq!(super::strip_attach("olha — 📎 arquivo: /b.txt"), "olha");
+    }
+
     use super::{chaves_de_commit, merged_history, merged_history_capped, queue_panel_entries, transcript_start_ts, HistoryRequest, Provider, TAIL_WINDOW};
 
     #[test]

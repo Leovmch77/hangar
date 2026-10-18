@@ -64,6 +64,7 @@ vi.mock('expo-image-picker', () => ({}));
 vi.mock('expo-document-picker', () => ({}));
 vi.mock('expo-clipboard', () => ({}));
 vi.mock('expo-audio', () => ({ AudioModule: {}, RecordingPresets: {} }));
+vi.mock('expo-updates', () => ({ runtimeVersion: 'native-2' }));
 vi.mock('react-native-keyboard-controller', async () => ({
   KeyboardAvoidingView: (await import('react-native')).View,
   useReanimatedKeyboardAnimation: () => ({ height: { value: 0 }, progress: { value: 0 } }),
@@ -104,7 +105,7 @@ const names = () => useSessions.getState().rows.map((row) => row.name).sort();
 const live = () => streams.filter((stream) => !stream.closed);
 const creationPaths = new Set(['/api/claude-configs', '/api/cotas', '/api/providers', '/api/engines', '/api/model-options', '/api/codex-contas', '/api/fs/roots', '/api/fs/scan', '/api/archive-por-cwd', '/api/worktrees']);
 const creationCalls = () => fetchMock.mock.calls.map(([url]) => new URL(url).pathname).filter((path) => creationPaths.has(path)).sort();
-const button = (label: string) => [...container.querySelectorAll<HTMLButtonElement>('button')]
+const button = (label: string) => [...container.querySelectorAll<HTMLButtonElement>('button, div[aria-label]')]
   .find((node) => node.getAttribute('aria-label') === label || node.textContent === label);
 const click = async (label: string) => {
   expect(button(label), label).toBeTruthy();

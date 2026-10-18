@@ -98,7 +98,7 @@ pub fn area_of(path: &str) -> usize {
 /// GET registradas lá, mais os `matches` de Git/arquivos e de worktrees que o `pass_any` consulta.
 pub fn rust_route(method: &Method, path: &str) -> bool {
     if crate::orq_conductor::matches(method, path) { return true; }
-    if crate::uploads::http::matches(method, path) { return true; }
+    if crate::session_media::is_media(method, path) { return true; }
     if crate::accounts::http::matches(method, path) { return true; }
     if *method == Method::GET {
         if matches!(path, "/api/sessions" | "/api/sessions/events" | "/api/sessions/creation-progress" | "/api/costs" | "/api/cotacao" | "/api/uso" | "/api/migration/status" | "/api/presence"
@@ -410,6 +410,8 @@ mod tests {
         assert!(post("/api/sessions/a/permission-mode")
             && get("/api/sessions/a/permission-modes") && rust_route(&Method::DELETE, "/api/sessions/a") && post("/api/broadcast"));
         assert!(post("/api/sessions/a/subagents/x1/message") && !post("/api/sessions/a/subagents//message") && !get("/api/sessions/a/subagents/x1/message"));
+        assert!(post("/api/sessions/a/transcribe") && post("/api/sessions/a/bash-output") && get("/api/sessions/a/tool-progress/toolu_x")
+            && get("/api/sessions/a/transcript-image/u/0") && !get("/api/sessions/a/bash-output"));
         assert!(["whoami", "pull", "ask", "ask-fim", "filled", "submitted", "state", "suggest", "rate", "agent", "agent-sent"].iter().all(|e| post(&format!("/api/plugin/{e}"))));
         assert!(!rust_route(&Method::DELETE, "/api/sessions") && !post("/api/plugin/outra"));
         assert!(get("/api/sessions/a/plan") && get("/api/sessions/a/plans") && get("/api/sessions/a/plan-preview")

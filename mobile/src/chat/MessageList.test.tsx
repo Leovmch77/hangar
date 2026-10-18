@@ -29,7 +29,8 @@ const servers = vi.hoisted(() => ({ servers: [
   { id: 'b', label: 'b', baseUrl: 'http://10.0.0.2:8765', token: 'token-b' },
 ] }));
 vi.mock('../stores/servers', () => ({ useServers: { getState: () => servers } }));
-vi.mock('../stores/aparencia', () => ({ useAparencia: (select: (s: unknown) => unknown) => select({ pensamentoTools: 'busca' }) }));
+const appearance = vi.hoisted(() => ({ ferramentas: undefined as string | undefined }));
+vi.mock('../stores/aparencia', () => ({ useAparencia: (select: (s: unknown) => unknown) => select({ pensamentoTools: 'busca', ferramentas: appearance.ferramentas }) }));
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
 // Só a casca visual é substituída; lista, notas, ação, store e API da fila são os reais.
 vi.mock('./UserBubble', () => ({ UserBubble: ({ text }: { text: string }) => createElement('span', { 'data-user': true }, text) }));
@@ -94,6 +95,7 @@ function mount(node: ReactNode) {
 const discardButtons = (container: HTMLElement) => [...container.querySelectorAll<HTMLButtonElement>('[aria-label^="native_queue_discard_message:"]')];
 
 beforeEach(() => {
+  appearance.ferramentas = undefined;
   list.render.mockClear();
   list.data.mockClear();
   list.alignment.mockClear();
@@ -115,6 +117,45 @@ afterEach(() => {
 const groupEvents = (count = 2): ChatEvent[] => Array.from({ length: count }, (_, i) => ({ id: `thought-${i}`, kind: 'thinking', text: `thought-${i}-text` }));
 const latestList = () => list.props.mock.lastCall![0];
 const expandGroup = (container: HTMLElement) => act(() => container.querySelector<HTMLButtonElement>('[data-row] button')!.click());
+
+it('Terminal vai ao fim sem animação e pausa o acompanhamento ao expandir', () => {
+  appearance.ferramentas = 'terminal';
+  const events: ChatEvent[] = [
+    { id: 'read', kind: 'tool_use', tool_use_id: 'read', tool_name: 'Read', tool_input: { file_path: '/src/a.ts' } },
+    { id: 'result', kind: 'tool_result', tool_use_id: 'read', result: 'ok' },
+  ];
+  const { container } = mount(createElement(MessageList, props(events)));
+  act(() => latestList().onScroll({ nativeEvent: {
+    contentOffset: { y: 0 }, contentSize: { height: 3000 }, layoutMeasurement: { height: 500 },
+  } } as NativeSyntheticEvent<NativeScrollEvent>));
+  const bottom = [...container.querySelectorAll('button')].find((button) => button.getAttribute('aria-label') === m.msg_ir_ultima())!;
+  act(() => bottom.click());
+  expect(list.scrollToEnd).toHaveBeenLastCalledWith({ animated: false });
+  expandGroup(container);
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  expect(latestList().onContentSizeChange).toBeTypeOf('function');
+});
+
+it('Terminal junta a sequência desde a primeira chamada e preserva a saída aberta no append', () => {
+  appearance.ferramentas = 'terminal';
+  const read = (id: string): ChatEvent => ({ id, kind: 'tool_use', tool_use_id: id, tool_name: 'Read', tool_input: { file_path: `/src/${id}.ts` } });
+  const done = (id: string): ChatEvent => ({ id: `r-${id}`, kind: 'tool_result', tool_use_id: id, result: 'ok\nexpanded-read-output' });
+  const extra = { eventsRevision: 0, session: { ...session, plugin_tool_servers: null } };
+  const events = [read('one'), done('one')];
+  const { container, root } = mount(createElement(MessageList, props(events, extra)));
+  const row = container.querySelector('[data-row]');
+  expandGroup(container);
+  const head = [...container.querySelectorAll('button')].find((button) => button.getAttribute('aria-label')?.startsWith('Read:'))!;
+  act(() => head.click());
+  expect(container.textContent).toContain('expanded-read-output');
+  const next = [...events, read('two'), done('two')];
+  act(() => root.render(createElement(MessageList, props(next, extra))));
+  expect(container.querySelectorAll('[data-row]')).toHaveLength(1);
+  expect(container.querySelector('[data-row]')).toBe(row);
+  act(() => root.render(createElement(MessageList, props([...next, read('three')], extra))));
+  expect(container.querySelector('[data-row]')).toBe(row);
+  expect(container.textContent).toContain('expanded-read-output');
+});
 
 it('expansão manual pausa todos os gatilhos e resiste a clone, append e callbacks agendados', () => {
   vi.useFakeTimers();

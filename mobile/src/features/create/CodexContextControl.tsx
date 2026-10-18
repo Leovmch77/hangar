@@ -107,7 +107,7 @@ export function CodexContextControl({ control }: { control: ReturnType<typeof us
 
 const styles = StyleSheet.create((theme) => ({
   root: { gap: theme.base.space[2] },
-  row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', minHeight: 44, gap: 12 },
+  row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', minHeight: 44, gap: theme.base.space[3] },
   label: { color: theme.tokens.text.primary, flexShrink: 1 },
   hint: { color: theme.tokens.text.secondary, fontSize: theme.base.text.xs },
   error: { color: theme.tokens.status.error, fontSize: theme.base.text.xs },

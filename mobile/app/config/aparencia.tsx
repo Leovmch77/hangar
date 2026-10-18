@@ -127,6 +127,7 @@ export default function Aparencia() {
     { v: 'classic', label: m.native_settings_tool_calls_classic() },
     { v: 'chips', label: m.native_settings_tool_calls_chips() },
     { v: 'tree', label: m.native_settings_tool_calls_tree() },
+    { v: 'terminal', label: m.native_settings_tool_calls_terminal(), aria: m.config_aparencia_terminal_aria() },
   ];
   const TAREFAS: ReadonlyArray<Option<'off' | 'on'>> = [
     { v: 'off', label: m.native_settings_task_list_hide() },
@@ -473,9 +474,9 @@ export default function Aparencia() {
 }
 
 const styles = StyleSheet.create((theme) => ({
-  tiles: { paddingHorizontal: 16, paddingBottom: 16 },
-  imageLine: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
-  thumb: { width: 48, height: 32, borderRadius: 4 },
+  tiles: { paddingHorizontal: theme.base.space[4], paddingBottom: theme.base.space[4] },
+  imageLine: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: theme.base.space[2] },
+  thumb: { width: 48, height: 32, borderRadius: theme.base.radius.xs },
   value: { fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
-  sublabel: { fontSize: theme.base.text.xs, fontWeight: '500', paddingTop: 4, paddingBottom: 8 },
+  sublabel: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.medium, paddingTop: theme.base.space[1], paddingBottom: theme.base.space[2] },
 }));

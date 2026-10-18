@@ -11,7 +11,7 @@ import * as m from '../paraglide/messages';
 import { chatStore, filaCount as filaCountOf, submitConversationDraft, isSubmitting } from '../stores/chat';
 import { abandonUnknownAttempt, attachInsert, confirmFirstInput, firstInputMessage, readFirstInput, sendFirstInput, useNewConversation, withAttach } from '../stores/newConversation';
 import { useSessions } from '../stores/sessions';
-import { clearDraft, clearRecoverableDraft, readDraft, readRecoverableDraft, resolveDraftTranscript, reusableUploadPath, withoutUpload, writeDraft, writeRecoverableDraft, clearDictation, readDictation, writeDictation, recoverDictation, applyReadyDictation, associateDictationTranscript, type ConversationDraft, type DraftAttachment, type DictationDraft } from '../stores/drafts';
+import { clearDraft, clearRecoverableDraft, readDraft, readRecoverableDraft, resolveDraftTranscript, removeDraftRecording, reusableUploadPath, withoutUpload, writeDraft, writeRecoverableDraft, clearDictation, readDictation, writeDictation, recoverDictation, applyReadyDictation, associateDictationTranscript, type ConversationDraft, type DraftAttachment, type DictationDraft } from '../stores/drafts';
 import { useServers } from '../stores/servers';
 import { removeDraftAttachment, retainDraftAttachment } from './draftAttachments';
 import { useNavigation, useRouter } from 'expo-router';
@@ -73,6 +73,8 @@ function composeForSend(typed: string, refs: readonly DraftContextRef[], attachm
 const toDraftAttachments = (list: readonly PendingAttach[]): DraftAttachment[] => list.map(({ size: _size, ...a }) => a);
 const mergeAttachments = (a: readonly DraftAttachment[], b: readonly DraftAttachment[]) =>
   [...a, ...b.filter((x) => !a.some((y) => y.uri === x.uri))];
+const mergeRecordings = (a: ConversationDraft['recordings'] = [], b: ConversationDraft['recordings'] = []) =>
+  [...a, ...b.filter((recording) => !a.some((existing) => existing.id === recording.id))];
 
 // O campo é só um `/nome` sendo digitado (nem argumento nem outro texto): é ele que o comando
 // escolhido substitui por inteiro. Espaço no fim não conta: a lista abre com o cursor antes dele.
@@ -116,7 +118,8 @@ const joinDrafts = (before: string, after: string) => (before.trim() && after.tr
 function keepRecoverable(serverId: string, name: string, old: ConversationDraft): ConversationDraft {
   const pending = readRecoverableDraft(serverId, name);
   if (pending && pending.transcript === old.transcript && pending.revision === old.revision) return pending;
-  const value = pending ? { ...old, text: joinDrafts(pending.text, old.text), attachments: mergeAttachments(pending.attachments, old.attachments) } : old;
+  const value = pending ? { ...old, text: joinDrafts(pending.text, old.text), attachments: mergeAttachments(pending.attachments, old.attachments),
+    recordings: mergeRecordings(pending.recordings, old.recordings) } : old;
   writeRecoverableDraft(serverId, name, value);
   return value;
 }
@@ -228,6 +231,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
   const [recoverable, setRecoverable] = useState(boot.recoverable);
   const [dictation, setDictation] = useState(boot.dictation);
   const [submission, setSubmission] = useState(boot.draft?.submission ?? null);
+  const [recordings, setRecordings] = useState(boot.draft?.recordings ?? []);
   const [pendingAttachments, setPendingAttachmentsState] = useState<PendingAttach[]>(boot.draft?.attachments ?? []);
   // Colar ou escolher vários chega em paralelo: cada um acrescenta à lista mais nova, nunca à do render.
   const attachmentsRef = useRef(pendingAttachments);
@@ -244,7 +248,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
   }, [text]);
 
   // Só texto novo avança a revisão: é ela que decide se o ACK pode limpar o campo.
-  const persistDraft = useCallback((patch: { text?: string; attachments?: readonly PendingAttach[] }): boolean => {
+  const persistDraft = useCallback((patch: { text?: string; attachments?: readonly PendingAttach[]; recordings?: ConversationDraft['recordings'] }): boolean => {
     if (blockedRef.current) return false;
     // Em edição o campo tem o texto da fila, não o rascunho: o guardado continua o de antes da edição.
     if (patch.text !== undefined && patch.attachments === undefined && chat.use.getState().queueEdit) return true;
@@ -265,9 +269,10 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
       transcript: base.transcript ?? transcriptRef.current,
       ...(patch.text !== undefined ? { text: patch.text, revision: base.revision + 1 } : {}),
       ...(patch.attachments !== undefined ? { attachments: toDraftAttachments(patch.attachments) } : {}),
+      ...(patch.recordings !== undefined ? { recordings: patch.recordings } : {}),
     };
     try {
-      if (!value.text && !value.attachments.length && !value.submission) clearDraft(origin.serverId, origin.name);
+      if (!value.text && !value.attachments.length && !value.recordings?.length && !value.submission) clearDraft(origin.serverId, origin.name);
       else writeDraft(origin.serverId, origin.name, value);
     } catch (e) {
       setDraftIssue(e instanceof Error ? e.message : m.draft_write_error());
@@ -276,6 +281,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
     if (patch.attachments !== undefined && voiceSendRef.current
       && JSON.stringify(value.attachments) !== JSON.stringify(voiceSendRef.current.draft.attachments)) cancelVoiceSend();
     draftRef.current = value;
+    if (patch.recordings !== undefined) setRecordings(patch.recordings);
     setSubmission(value.submission);
     setDraftIssue('');
     return true;
@@ -301,11 +307,13 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
       const latest = readDraft(origin.serverId, origin.name);
       if (!latest) {
         setPendingAttachments([]);
+        setRecordings([]);
         return;
       }
       if (latest.transcript && transcriptRef.current && latest.transcript !== transcriptRef.current) return;
       const unchanged = textRef.current === (draftRef.current?.text ?? '');
       draftRef.current = latest;
+      setRecordings(latest.recordings ?? []);
       setSubmission(latest.submission);
       setPendingAttachments(latest.attachments.map((a) => ({ ...a, size: attachmentsRef.current.find((c) => c.uri === a.uri)?.size })));
       if (unchanged) {
@@ -363,6 +371,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
         const latest = draftRef.current?.text === textRef.current ? old : { ...old, text: textRef.current };
         const kept = keepRecoverable(origin.serverId, origin.name, latest);
         draftRef.current = null;
+        setRecordings([]);
         setSubmission(null);
         setRecoverable(kept);
         setPendingAttachments([]);
@@ -384,7 +393,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
     // O upload antigo foi para a sessão que morreu: a recriada recebe o arquivo, nunca o caminho.
     const adopted = recoverable.attachments.length
       ? mergeAttachments(attachmentsRef.current, recoverable.attachments.map(withoutUpload)) : undefined;
-    if (!persistDraft({ text: next, ...(adopted ? { attachments: adopted } : {}) })) return;
+    if (!persistDraft({ text: next, ...(adopted ? { attachments: adopted } : {}),
+      recordings: mergeRecordings(draftRef.current?.recordings, recoverable.recordings) })) return;
     try {
       clearRecoverableDraft(origin.serverId, origin.name);
     } catch (e) {
@@ -420,6 +430,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
     blockedRef.current = false;
     setReadBlocked(false);
     draftRef.current = load.draft;
+    setRecordings(load.draft?.recordings ?? []);
     setSubmission(load.draft?.submission ?? null);
     setPendingAttachments(load.draft?.attachments ?? []);
     setRecoverable(load.recoverable);
@@ -823,6 +834,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
         setDictation(completed.dictation);
         if (completed.draft) {
           draftRef.current = completed.draft;
+          setRecordings(completed.draft.recordings ?? []);
           textRef.current = completed.draft.text;
           setText(completed.draft.text);
           setSelection({ start: completed.draft.text.length, end: completed.draft.text.length });
@@ -860,6 +872,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
     async (file: File, motivo: MotivoFim, uri: string, allowAuto = true) => {
       const target = recordingTargetRef.current;
       if (!target || transcribingRef.current) return;
+      const generation = activityGenerationRef.current;
       // Bloqueia outro início enquanto a cópia sai do cache para o diretório do app.
       transcribingRef.current = true;
       if (mountedRef.current) setTranscribing(true);
@@ -883,7 +896,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
         before: target.snapshot.text.trim(), motivo, estilo: target.estilo,
         status: 'pending', text: '', raw: '', issue: '',
       };
-      await runTranscription(voice, { file }, target.server, target.generation, allowAuto);
+      await runTranscription(voice, { file }, target.server, generation, allowAuto && generation === target.generation);
     },
     [runTranscription, cancelVoiceSend],
   );
@@ -897,6 +910,13 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
     },
   });
   stopRecordingRef.current = () => { if (gravando) void parar('escondeu'); };
+
+  const handleCancelRecording = useCallback(() => {
+    // A parada pedida por Enviar ainda deve guardar o áudio.
+    if (!voiceSendRef.current) recordingTargetRef.current = null;
+    cancelVoiceSend();
+    void parar('botao');
+  }, [cancelVoiceSend, parar]);
 
   const handleMicPress = useCallback(async () => {
     if (transcribingRef.current || micStartingRef.current) return;
@@ -1046,6 +1066,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
     setDictation(result.dictation);
     if (!result.draft) return;
     draftRef.current = result.draft;
+    setRecordings(result.draft.recordings ?? []);
     textRef.current = result.draft.text;
     setText(result.draft.text);
     setSelection({ start: result.draft.text.length, end: result.draft.text.length });
@@ -1068,6 +1089,11 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
   const handleDiscardDictation = useCallback(() => {
     if (!dictation || transcribingRef.current) return;
     try {
+      if (dictation.status === 'applied') {
+        const latest = removeDraftRecording(origin.serverId, origin.name, dictation.id);
+        draftRef.current = latest;
+        setRecordings(latest?.recordings ?? []);
+      }
       clearDictation(origin.serverId, origin.name);
       if (dictation.audio) dropCopy(dictation.audio.uri);
       setDictation(null);
@@ -1116,11 +1142,21 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
 
   const originServer = useServers((s) => s.servers.find((x) => x.id === origin.serverId));
   const dictationPlayer = dictation ? dictationAudio(originServer, origin.name, dictation.audio, dictation.serverPath) : null;
-  // Como no PC: versões e player só enquanto o texto ditado está intacto no campo.
+  // As versões acompanham o trecho intacto; os áudios continuam disponíveis após editar o texto.
   const barIntact = !!bar && (revising !== null || dictatedInField(bar, text));
-  // O aviso do ditado (limpeza do registro falhou) já traz o mesmo áudio: um player só.
-  const barPlayer = bar && barIntact && !gravando && !dictationPlayer ? dictationAudio(originServer, origin.name, null, bar.serverPath) : null;
   const barVersions = barIntact && !!bar?.raw && !organizationOff;
+  const dictationMessage = dictation ? dictation.status === 'applied' ? m.composer_ditado_aplicado()
+    : dictation.text ? m.composer_ditado_recuperavel({ text: dictation.text.slice(0, 80) })
+    : dictation.issue || m.composer_ditado_interrompido() : '';
+  const handleRemoveRecording = useCallback((id: string) => {
+    if (sendingRef.current || blockedRef.current) return;
+    try {
+      const latest = removeDraftRecording(origin.serverId, origin.name, id);
+      draftRef.current = latest;
+      setRecordings(latest?.recordings ?? []);
+      chat.use.setState((s) => ({ draftUpdate: s.draftUpdate + 1 }));
+    } catch (e) { setDraftIssue(e instanceof Error ? e.message : m.draft_write_error()); }
+  }, [origin, chat]);
   // Transcrição desta tela ou de uma montagem anterior da mesma conversa ainda no ar.
   const busyVoice = transcribing || dictation?.status === 'pending';
   const voiceActive = micStarting || gravando || busyVoice;
@@ -1570,12 +1606,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
             onPaste={handlePaste}
             recording={gravando}
             rms={rms}
-            onCancelRecording={() => {
-              // A parada pedida por Enviar ainda deve guardar o áudio.
-              if (!voiceSendRef.current) recordingTargetRef.current = null;
-              cancelVoiceSend();
-              void parar('botao');
-            }}
+            onCancelRecording={handleCancelRecording}
           />
 
         {/* Linha do app de PC: + e microfone sem moldura à esquerda; o chip da sessão e o Enviar
@@ -1628,7 +1659,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
             hint: filaCount > 0 ? m.composer_fila_contagem({ n: filaCount }) : undefined }}
         />
 
-        {bar && (barVersions || barPlayer) ? (
+        {bar && barVersions ? (
           <View style={styles.versionRow}>
             {barVersions ? (
               <>
@@ -1648,19 +1679,29 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
                 })}
               </>
             ) : null}
-            {barPlayer ? <AudioChip key={barPlayer.uri} uri={barPlayer.uri} headers={barPlayer.headers} name={barPlayer.name} /> : null}
+          </View>
+        ) : null}
+
+        {recordings.length > 0 && !editing ? (
+          <View style={styles.recordings}>
+            {recordings.filter((recording) => !dictationPlayer || recording.serverPath !== dictation?.serverPath).map((recording) => {
+              const player = dictationAudio(originServer, origin.name, null, recording.serverPath);
+              return player ? <AudioChip key={recording.id} {...player} disabled={sending || gravando || busyVoice}
+                onRemove={() => handleRemoveRecording(recording.id)} /> : null;
+            })}
           </View>
         ) : null}
 
         {/* Recuperar ditado, envio ou rascunho mexe no rascunho guardado: espera a edição da fila acabar. */}
         {dictation && !busyVoice && !editing ? (
-          <View style={styles.errorRow}>
-            <Text style={[styles.hint, styles.recoverText, { color: theme.tokens.text.muted }]} accessibilityLiveRegion="polite">
-              {dictation.status === 'applied' ? m.composer_ditado_aplicado()
-                : dictation.text ? m.composer_ditado_recuperavel({ text: dictation.text.slice(0, 80) })
-                : dictation.issue || m.composer_ditado_interrompido()}
+          <View style={styles.dictationRecovery}>
+            <Text style={[styles.dictationMessage, { color: theme.tokens.text.secondary }]}
+              accessibilityRole={dictation.status === 'failed' ? 'alert' : undefined}
+              accessibilityLiveRegion={dictation.status === 'failed' ? 'assertive' : 'polite'}>
+              {dictationMessage}
             </Text>
-            {dictationPlayer ? <AudioChip key={dictationPlayer.uri} uri={dictationPlayer.uri} headers={dictationPlayer.headers} name={dictationPlayer.name} /> : null}
+            <View style={styles.errorRow}>
+            {dictationPlayer ? <AudioChip key={dictationPlayer.uri} {...dictationPlayer} onRemove={handleDiscardDictation} /> : null}
             {dictation.status === 'applied' ? null : dictation.text ? (
               <Pressable onPress={handleRecoverDictation} style={[styles.undoBtn, { borderColor: theme.tokens.border.subtle }]} accessibilityRole="button">
                 <Text style={[styles.undoText, { color: theme.tokens.accent.base }]}>{m.composer_draft_recover()}</Text>
@@ -1673,6 +1714,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
             <Pressable onPress={handleDiscardDictation} style={[styles.undoBtn, { borderColor: theme.tokens.border.subtle }]} accessibilityRole="button">
               <Text style={[styles.undoText, { color: theme.tokens.text.secondary }]}>{m.composer_draft_discard()}</Text>
             </Pressable>
+            </View>
           </View>
         ) : null}
 
@@ -1692,7 +1734,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
           </View>
         ) : null}
 
-        {error ? (
+        {error && (!dictation || busyVoice || editing || error !== dictationMessage) ? (
           <View style={styles.errorRow}>
             <Text style={[styles.error, { color: theme.tokens.status.error }]} accessibilityRole="alert" accessibilityLiveRegion="assertive">{error}</Text>
             {failed ? (
@@ -1792,14 +1834,14 @@ const styles = StyleSheet.create((theme) => ({
     alignSelf: 'flex-start',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
+    gap: theme.base.space[1],
     height: 30,
-    borderRadius: 15,
-    paddingHorizontal: 10,
+    borderRadius: theme.base.radius.full,
+    paddingHorizontal: theme.base.space[2],
   },
   steerText: {
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   steerCount: {
     fontSize: theme.base.text.xs,
@@ -1808,16 +1850,16 @@ const styles = StyleSheet.create((theme) => ({
     alignSelf: 'flex-start',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
+    gap: theme.base.space[1],
     height: 30,
     maxWidth: 240,
-    borderRadius: 15,
-    paddingHorizontal: 10,
+    borderRadius: theme.base.radius.full,
+    paddingHorizontal: theme.base.space[2],
   },
   pairChipLabel: {
     flexShrink: 1,
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   iconBtnPressed: {
     backgroundColor: theme.tokens.bg.hover,
@@ -1835,19 +1877,19 @@ const styles = StyleSheet.create((theme) => ({
   stopMark: {
     width: 13,
     height: 13,
-    borderRadius: 3,
+    borderRadius: theme.base.radius.xs,
   },
   autoChip: {
     minWidth: 44,
     height: 30,
     justifyContent: 'center',
     alignSelf: 'flex-start',
-    borderRadius: 15,
-    paddingHorizontal: 10,
+    borderRadius: theme.base.radius.full,
+    paddingHorizontal: theme.base.space[2],
   },
   autoText: {
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   undoRow: {
     flexDirection: 'row',
@@ -1864,11 +1906,11 @@ const styles = StyleSheet.create((theme) => ({
     borderWidth: 1,
     borderRadius: theme.base.radius.full,
     paddingHorizontal: theme.base.space[2],
-    paddingVertical: 4,
+    paddingVertical: theme.base.space[1],
   },
   undoText: {
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   editCancel: {
     minHeight: 30,
@@ -1880,6 +1922,9 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.base.text.xs,
     paddingHorizontal: theme.base.space[1],
   },
+  recordings: { gap: theme.base.space[2], alignItems: 'flex-start' },
+  dictationRecovery: { gap: theme.base.space[2] },
+  dictationMessage: { fontSize: theme.base.text.sm, alignSelf: 'stretch' },
   errorRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1893,11 +1938,11 @@ const styles = StyleSheet.create((theme) => ({
     borderWidth: 1,
     borderRadius: theme.base.radius.full,
     paddingHorizontal: theme.base.space[2],
-    paddingVertical: 4,
+    paddingVertical: theme.base.space[1],
   },
   retryText: {
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   attachStrip: {
     gap: theme.base.space[2],
@@ -1913,8 +1958,8 @@ const styles = StyleSheet.create((theme) => ({
   },
   versionBtn: {
     minHeight: 30,
-    borderRadius: 15,
-    paddingHorizontal: 10,
+    borderRadius: theme.base.radius.full,
+    paddingHorizontal: theme.base.space[2],
     justifyContent: 'center',
   },
   hint: {

@@ -31,20 +31,10 @@ Range, ETag, conteúdo, erros e campos nulos permanecem na referência. O cenár
 `video-without-ffmpeg` exercita a ausência do decodificador sem skip. Transcrição
 paga, autenticação e transferência de sessão ficam fora do contrato do harness.
 
-A atualização é uma operação explícita, realizada somente no ambiente descartável
-autorizado. A partir de `backend/`, com um diretório de dados de teste configurado:
-
-```python
-import os
-from pathlib import Path
-from tests.uploads_contract import FIXTURE_NAMES, UploadReference
-
-reference = UploadReference(Path(os.environ["HANGAR_TEST_DATA_ROOT"]) / "goldens")
-for name in FIXTURE_NAMES:
-    reference.write_golden(name, approve=True)
-```
-
-O pytest só lê os arquivos; uma divergência nunca regrava a referência. A captura
+A referência está congelada: a captura Python (`tests/uploads_contract.py`) saiu junto com
+o cofre Python, e não há como regravá-la. Quem a lê é o Rust, em
+`crates/hangar-server/tests/it/uploads_contract.rs` (rotas) e `uploads_store.rs` (cofre); as
+diferenças aceitas do caminho Rust são exceções nomeadas lá. A captura
 `proxy-baseline.json` preserva o 503 real com 23 bytes entregues ao handler Python
 bloqueado, sem PIDs nem dados de ambiente. O detector rejeita tanto o erro quanto
 um sucesso que ainda repasse bytes; a implementação futura deve responder com

@@ -72,11 +72,11 @@ export function BastaoSheet({ serverId, name }: { serverId: string; name: string
 
 const styles = StyleSheet.create((theme) => ({
   container: { flex: 1, padding: theme.base.space[4], gap: theme.base.space[3] },
-  title: { fontSize: theme.base.text.lg, fontWeight: '600' },
+  title: { fontSize: theme.base.text.lg, fontWeight: theme.base.weight.semibold },
   center: { alignItems: 'center', gap: theme.base.space[2], paddingVertical: theme.base.space[4] },
   muted: { fontSize: theme.base.text.sm, textAlign: 'center' },
   err: { fontSize: theme.base.text.sm, textAlign: 'center' },
   retry: { minHeight: 44, justifyContent: 'center' },
-  retryTxt: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  retryTxt: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
   corpo: { paddingBottom: theme.base.space[4] },
 }));

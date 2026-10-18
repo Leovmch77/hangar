@@ -10,6 +10,7 @@ import { OrchestrationContent, OrchestrationHeader, OrchestrationStatus, orqWhen
 import * as m from '../../paraglide/messages';
 
 type HistoryRow = { run: OrqExecucao; key: string };
+const screenOptions = { headerShown: false };
 const titleOf = (run: OrqExecucao) => run.metadata?.title.trim() || run.plano.trim() || run.id;
 const keyOf = (item: HistoryRow) => item.key;
 const HistoryRun = memo(function HistoryRun({ run, onSelect }: { run: OrqExecucao; onSelect: (id: string) => void }) {
@@ -65,7 +66,7 @@ export function OrchestrationHistory() {
   const error = ready && serverId !== null && !server ? m.chat_servidor_removido() : server?.invite ? m.lista_acesso_recusado() : matches ? result.error : null;
   const runs = server && !server.invite && matches ? result.runs : null;
   return <Screen>
-    <Stack.Screen options={{ headerShown: false }} />
+    <Stack.Screen options={screenOptions} />
     <OrchestrationHeader title={m.orq_history_title()} serverLabel={server?.label ?? serverId ?? undefined} onClose={() => router.back()} />
     {selected ? <HistoryDetail key={selected} serverId={serverId ?? ''} runId={selected} onBack={() => setSelected(null)} /> : <>
     {server && !server.invite ? <View style={styles.controls}><Pressable onPress={refresh} accessibilityRole="button" accessibilityLabel={m.orq_history_refresh()} style={styles.refresh}>

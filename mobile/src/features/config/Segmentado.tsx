@@ -62,7 +62,7 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: theme.base.space[2],
-    borderRadius: theme.base.radius.xs,
+    borderRadius: theme.base.radius.sm,
   },
   txt: { fontSize: theme.base.text.sm, fontWeight: '600' },
 }));

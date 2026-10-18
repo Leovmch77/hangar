@@ -224,7 +224,7 @@ const styles = StyleSheet.create((theme) => ({
     padding: theme.base.space[3],
     gap: theme.base.space[3],
     borderWidth: 1,
-    borderRadius: 14,
+    borderRadius: theme.base.radius.md,
   },
   embedded: {
     gap: theme.base.space[2],
@@ -233,25 +233,25 @@ const styles = StyleSheet.create((theme) => ({
     alignSelf: 'flex-start',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
+    gap: theme.base.space[1],
     borderRadius: theme.base.radius.full,
     paddingHorizontal: theme.base.space[2],
-    paddingVertical: 4,
+    paddingVertical: theme.base.space[1],
   },
   permTxt: {
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   question: {
     fontSize: theme.base.text.base,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
     lineHeight: 22,
   },
   qCode: {
     fontFamily: theme.base.fontMono,
     fontSize: theme.base.text.xs,
-    paddingHorizontal: 4,
-    borderRadius: 4,
+    paddingHorizontal: theme.base.space[1],
+    borderRadius: theme.base.radius.xs,
   },
   list: {
     gap: theme.base.space[2],
@@ -280,7 +280,7 @@ const styles = StyleSheet.create((theme) => ({
   caixa: {
     width: 18,
     height: 18,
-    borderRadius: 4,
+    borderRadius: theme.base.radius.xs,
     borderWidth: 1.5,
     alignItems: 'center',
     justifyContent: 'center',
@@ -305,6 +305,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   sendTxt: {
     fontSize: theme.base.text.base,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
 }));

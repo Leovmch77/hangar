@@ -1,10 +1,10 @@
 import { Pressable, Text, View } from 'react-native';
-import { Pressable as EdgePressable } from 'react-native-gesture-handler';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useLocalSearchParams } from 'expo-router';
 import { cwdParts, rotuloEstado, type State, type ThemeTokens } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { Icon } from '../ui/Icon';
+import { EdgeButton } from '../ui/EdgeButton';
 import { SessionAvatar } from '../features/sessions/SessionAvatar';
 import { WorkingMark } from '../ui/WorkingMark';
 import { LiveVoiceChatButton } from '../features/voice/LiveVoiceChatButton';
@@ -55,27 +55,13 @@ export function ChatHeader({
   return (
     <View style={styles.wrap}>
       <View style={styles.bar}>
-        {/* Mora na faixa de arrasto da gaveta: no Android o gesto nativo dela engolia o toque de um
-            Pressable comum. O do gesture-handler entra na mesma disputa e o toque parado vence. */}
-        <EdgePressable
-          onPress={onBack}
-          hitSlop={8}
-          style={styles.back}
-          accessibilityRole="button"
-          accessibilityLabel={m.chat_voltar_sessoes()}
-        >
+        <EdgeButton onPress={onBack} hitSlop={8} style={styles.back} accessibilityLabel={m.chat_voltar_sessoes()}>
           <Icon name="ChevronLeft" size={22} color={theme.tokens.text.primary} />
-        </EdgePressable>
+        </EdgeButton>
         {onHome ? (
-          <EdgePressable
-            onPress={onHome}
-            hitSlop={8}
-            style={styles.back}
-            accessibilityRole="button"
-            accessibilityLabel={m.chat_ir_inicio()}
-          >
+          <EdgeButton onPress={onHome} hitSlop={8} style={styles.back} accessibilityLabel={m.chat_ir_inicio()}>
             <Icon name="House" size={19} color={theme.tokens.text.primary} />
-          </EdgePressable>
+          </EdgeButton>
         ) : null}
         <Pressable
           onPress={onTitlePress}
@@ -180,21 +166,21 @@ const styles = StyleSheet.create((theme) => ({
   },
   name: {
     fontSize: theme.base.text.base,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   pill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 9,
-    paddingVertical: 3,
+    gap: theme.base.space[1],
+    paddingHorizontal: theme.base.space[2],
+    paddingVertical: theme.base.space[0.5],
     borderRadius: theme.base.radius.full,
     flexShrink: 0,
   },
   ponto: {
     width: 6,
     height: 6,
-    borderRadius: 3,
+    borderRadius: theme.base.radius.full,
   },
   pillTxt: {
     fontSize: theme.base.text.xxs,

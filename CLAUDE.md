@@ -218,6 +218,10 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Lógica (API, formatação, parser, tipos) entra em `packages/core` e serve as duas. Tela é por
   interface, escrita duas vezes. O check completo, quando pedido, é `npm run check` **na raiz**,
   que cobre as três.
+- **Melhoria visual ou recurso que o usuário vê entra nos três clientes quando faz sentido nos
+  três: app Expo (`mobile/`), desktop nativo (`desktop-native/`) e PWA (`frontend/`, vista
+  celular).** O nativo costuma estar à frente e é a referência de comportamento. Quem implementa
+  num cliente leva aos outros no mesmo trabalho ou deixa a pendência dita no relato.
 - **Desktop evolui no Rust (`desktop-native/`); web (`frontend/`) evolui para PWA/mobile.**
   Mudanças desktop entram só no nativo. No Svelte entra apenas o que serve ao PWA/celular; a
   tela desktop web e o Electron ficam parados onde estão, sem recurso novo. Recursos usados no
@@ -327,7 +331,7 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   - Voltar e setas são `Icon` (`ChevronLeft`…), nunca caractere (‹ ▸).
   - Formulário em folha usa o `KeyboardAvoidingView` do `react-native-keyboard-controller` com `automaticOffset`.
   - Vibração só por `src/ui/haptics.ts` (iOS): seleção ao marcar, sucesso/erro no resultado; `toast.ok`/`toast.erro` já vibram.
-  - Tela simples usa o cabeçalho nativo da pilha (`useGlassHeader`); só o chat tem cabeçalho próprio.
+  - Tela simples usa o cabeçalho nativo da pilha (`useGlassHeader`); chat e rota em `formSheet` usam cabeçalho local.
   - Conteúdo sob cabeçalho transparente: ScrollView com `contentInsetAdjustmentBehavior="automatic"` no iOS; o resto recua por `useHeaderHeight`.
   - Tamanho de texto vem de `theme.base.text.*`, mínimo 11 pt; `fontScaleGuard.test.ts` barra número solto.
   - Ícone Lucide novo ganha SF Symbol em `src/ui/sfSymbols.ts` quando houver um de mesmo sentido.
@@ -573,8 +577,12 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   `?token=`, sem conferir Origin). Custos e uso têm índice próprio
   (`custos-rust.sqlite3`) no cache local; stats continuam no Python. Contas Claude/Codex e
   cotas são só do Rust: no modo `python` respondem `accounts_need_rust_server`, sem reserva
-  Python. Anexos de sessão pertencem ao Rust enquanto o supervisor estiver em `rust` ou
-  `pending`; nessa fase, falha da ponte não ativa um segundo escritor Python. O resto, convidado
+  Python. Anexos, o `/transcribe` da sessão, a saída ao vivo de ferramenta (`bash-output`,
+  `tool-progress`) e a imagem colada no terminal são só do Rust, com a sessão tirada da lista dele:
+  as portas do Python autenticam e repassam em fluxo por `/__hangar_server/forwarded`, e no modo
+  `python` respondem 503 `erro_midia_precisa_rust`. Só a imagem de conversa transferida
+  (`transfer:`) segue no Python. Evidência em
+  [accounts-uploads-rust.md](docs/decisoes/accounts-uploads-rust.md#anexos). O resto, convidado
   incluído, é repassado com `X-Forwarded-For`. A 8766 é do Rust e a 8768 fica no Python. Sem binário
   (`CP_RUST_SERVER_BIN`, `crates/target/release`, `~/.hangar/bin`), com `CP_RUST_SERVER=0`, com
   `protocol` da saúde diferente de `RUST_SERVER_PROTOCOL`, sem endereço privado válido ou com 3

@@ -60,6 +60,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   btnText: {
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
 }));

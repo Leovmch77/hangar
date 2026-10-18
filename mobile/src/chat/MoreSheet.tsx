@@ -119,7 +119,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   title: {
     fontSize: theme.base.text.base,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
     marginBottom: theme.base.space[2],
   },
   item: {
@@ -143,7 +143,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   label: {
     fontSize: theme.base.text.base,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   sub: {
     fontSize: theme.base.text.xs,

@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement, useEffect, type ComponentType, type ReactNode } from 'react';
+import { act, createContext, createElement, useCallback, useContext, useEffect, useLayoutEffect, useState, type ComponentType, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChatEvent, Server, StateEvent, SubagentRun, WorkflowAgentDetail, WorkflowDetail, WorkflowSummary } from '@hangar/core';
@@ -7,7 +7,7 @@ import type { PressableProps, ScrollViewProps, TextInputProps, ViewProps } from 
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const api = vi.hoisted(() => ({ getWorkflows: vi.fn(), getWorkflow: vi.fn(), getWorkflowAgent: vi.fn(), getSubagents: vi.fn(), getSubagent: vi.fn() }));
-const route = vi.hoisted(() => ({ params: { server: 'a', name: 'sess' }, back: vi.fn(), focused: true }));
+const route = vi.hoisted(() => ({ params: { server: 'a', name: 'sess' }, back: vi.fn(), replace: vi.fn(), canGoBack: true, focused: true }));
 const platform = vi.hoisted(() => ({ OS: 'ios' as 'ios' | 'android' }));
 const nativeBack = vi.hoisted(() => ({ listeners: new Set<() => boolean>() }));
 const screenOptions = vi.hoisted(() => [] as object[]);
@@ -18,15 +18,26 @@ const stores = vi.hoisted(() => ({ servers: [
 vi.mock('@hangar/core', async (original) => ({ ...await original<typeof import('@hangar/core')>(), ...api }));
 vi.mock('expo-router', () => ({
   useLocalSearchParams: () => route.params,
-  useRouter: () => ({ back: route.back }),
+  useRouter: () => ({ back: route.back, replace: route.replace, canGoBack: () => route.canGoBack }),
   useFocusEffect: (effect: () => void | (() => void)) => useEffect(() => route.focused ? effect() : undefined, [effect, route.focused]),
   Stack: { Screen: ({ options }: { options: { headerShown?: boolean; title?: string; headerLeft?: () => ReactNode; headerRight?: () => ReactNode } }) => {
     screenOptions.push(options);
+    const setOptions = useContext(NavigationFeedback);
+    // Screen do Expo publica as opções por referência em um efeito de layout.
+    useLayoutEffect(() => { setOptions?.(options); }, [options, setOptions]);
     return platform.OS === 'android' || options.headerShown === false ? null : createElement('header', { 'data-shown': String(options.headerShown) },
       options.headerLeft?.(), createElement('h1', null, options.title), options.headerRight?.());
   } },
 }));
 vi.mock('expo-router/react-navigation', () => ({ useHeaderHeight: () => 64 }));
+vi.mock('react-native-unistyles', async (original) => {
+  const unistyles = await original<typeof import('react-native-unistyles')>();
+  return { ...unistyles, useUnistyles: () => {
+    const { theme, rt } = unistyles.useUnistyles();
+    // O hook nativo cria outro proxy em cada render, mesmo sem mudança no tema.
+    return { theme: new Proxy(theme, {}), rt };
+  } };
+});
 vi.mock('../../stores/servers', () => ({ useServers: Object.assign(
   (select: (state: typeof stores) => unknown) => select(stores), { getState: () => stores },
 ) }));
@@ -37,9 +48,9 @@ vi.mock('react-native', async (original) => {
   const Pressable = native.Pressable as ComponentType<Record<string, unknown>>;
   const View = native.View as ComponentType<Record<string, unknown>>;
   return { ...native, Platform: { get OS() { return platform.OS; }, select: (values: { ios?: unknown; android?: unknown; default?: unknown }) => values[platform.OS] ?? values.default },
-    View: ({ style, accessibilityLiveRegion, accessible, ...props }: ViewProps) => {
+    View: ({ style, accessibilityLiveRegion, accessible, collapsable, ...props }: ViewProps) => {
       const flat = Object.assign({}, ...(Array.isArray(style) ? (style as unknown[]).flat(Infinity) : [style]).filter(Boolean));
-      return createElement(View, { ...props, style, 'data-padding-horizontal': flat.paddingHorizontal, 'data-accessible': accessible, 'aria-live': accessibilityLiveRegion === 'none' ? 'off' : accessibilityLiveRegion });
+      return createElement(View, { ...props, style, 'data-padding-horizontal': flat.paddingHorizontal, 'data-collapsable': collapsable, 'data-accessible': accessible, 'aria-live': accessibilityLiveRegion === 'none' ? 'off' : accessibilityLiveRegion });
     },
     TextInput: ({ onChangeText, editable, multiline: _, placeholderTextColor: __, ...props }: TextInputProps) =>
       createElement(native.TextInput as ComponentType<Record<string, unknown>>, { ...props, readOnly: editable === false,
@@ -95,11 +106,18 @@ const events: ChatEvent[] = [
   { id: 'launch', kind: 'tool_use', tool_use_id: 'launch', tool_name: 'Agent', tool_input: { description: 'Conferir atividade', prompt: 'Conferir atividade', subagent_type: 'Explore' } },
 ];
 const roots = new Set<Root>();
-async function mount() {
+const NavigationFeedback = createContext<((options: object) => void) | null>(null);
+function Navigator() {
+  const [options, setOptions] = useState<object>({});
+  const publish = useCallback((next: object) => setOptions(current => ({ ...current, ...next })), []);
+  return createElement(NavigationFeedback.Provider, { value: publish },
+    createElement('div', { 'data-options-ready': Object.keys(options).length > 0 }, createElement(ActivitySheet)));
+}
+async function mount(navigator = false) {
   const el = document.createElement('div');
   const root = createRoot(el);
   roots.add(root);
-  const render = () => act(async () => root.render(createElement(ActivitySheet)));
+  const render = () => act(async () => root.render(createElement(navigator ? Navigator : ActivitySheet)));
   await render();
   return { el, render, unmount: async () => { await act(async () => root.unmount()); roots.delete(root); } };
 }
@@ -123,21 +141,20 @@ function section(el: HTMLElement, label: string) {
   expect(heading, `seção ${label}`).toBeDefined();
   return heading!.parentElement!;
 }
-function expectHeader(el: HTMLElement, title: string) {
-  expect(el.querySelector('header')?.getAttribute('data-shown')).toBe('true');
-  expect(el.querySelector('header h1')?.textContent).toBe(title);
-  expect(el.querySelector('[data-edges] [role="header"]')).toBeNull();
+function sheetRoot(el: HTMLElement) {
+  return el.querySelector('[role="header"]')!.parentElement!.parentElement!;
 }
-function expectAndroidHeader(el: HTMLElement, title: string) {
+function expectHeader(el: HTMLElement, title: string) {
   expect(el.querySelector('header')).toBeNull();
   const heading = el.querySelector('[role="header"]');
   expect(heading?.textContent).toBe(title);
   const bar = heading!.parentElement!;
-  expect(bar.parentElement).toBe(el.querySelector('[data-edges]'));
+  expect(bar.getAttribute('data-collapsable')).toBe('false');
   expect(bar.closest('[data-scroll]')).toBeNull();
-  expect((el.querySelector('[data-edges]') as HTMLElement).style.paddingTop).toBe('0px');
+  expect(sheetRoot(el).style.paddingTop).toBe('');
   return bar;
 }
+const expectAndroidHeader = expectHeader;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -146,6 +163,7 @@ beforeEach(() => {
   overwriteGetLocale(() => 'pt');
   configureLocale({ getLocale: () => 'pt' });
   route.params = { server: 'a', name: 'sess' };
+  route.canGoBack = true;
   platform.OS = 'ios';
   route.focused = true;
   nativeBack.listeners.clear();
@@ -418,7 +436,7 @@ describe('ActivitySheet real', () => {
     const { el } = await mount();
     await act(async () => { workflows.resolve([workflow]); });
     expect(el.textContent).toContain(workflow.name);
-    expect(el.textContent).toContain(m.comum_carregando());
+    expect(el.textContent).not.toContain(m.comum_carregando());
     expect(el.textContent).not.toContain(m.atividade_vazio());
     await act(async () => {
       if (outcome === 'erro') subs.reject(Object.assign(new Error('503: runtime_unhealthy'), { status: 503 }));
@@ -428,6 +446,77 @@ describe('ActivitySheet real', () => {
     expect(el.textContent).not.toContain(m.comum_carregando());
     if (outcome === 'erro') expect(el.textContent).toContain(m.atividade_erro_subagentes());
     else expect(el.textContent).not.toContain(m.atividade_erro_subagentes());
+  });
+
+  it.each(['running', 'finished'] as const)('abre conversa e chamadas do subagente %s com workflows pendentes', async (state) => {
+    const pending = Promise.withResolvers<WorkflowSummary[]>();
+    api.getWorkflows.mockReturnValue(pending.promise);
+    const run: SubagentRun = { ...sub, state, toolCalls: 17, tools: [{ name: 'Read', count: 17 }], updatedAt: new Date().toISOString() };
+    api.getSubagents.mockResolvedValue([run]);
+    api.getSubagent.mockResolvedValue({ ...run, events: [{ id: 'reply', kind: 'assistant_msg', text: 'Resposta do subagente' }] });
+    const { el } = await mount(true);
+    expect(el.textContent).not.toContain(m.comum_carregando());
+    await click(el, 'Conferir atividade');
+    expectHeader(el, 'Conferir atividade');
+    expect(el.textContent).toContain('Resposta do subagente');
+    expect(el.textContent).toContain('Read ×17');
+    expect(api.getSubagent).toHaveBeenLastCalledWith('sess', 'sub-1', 200, stores.servers[0]);
+    await act(async () => { pending.resolve([]); });
+    expectHeader(el, 'Conferir atividade');
+    await click(el, m.comum_voltar());
+    expectHeader(el, m.ctx_atividade());
+  });
+
+  it.each([true, false])('fecha a folha com histórico=%s sem sair de outro destino', async (canGoBack) => {
+    route.canGoBack = canGoBack;
+    const { el } = await mount();
+    await click(el, m.native_close());
+    if (canGoBack) expect(route.back).toHaveBeenCalledOnce();
+    else expect(route.replace).toHaveBeenCalledWith('/s/a/sess');
+  });
+
+  it.each(['workflows', 'subagentes'])('encerra carga sem resposta de %s e permite tentar de novo, ignorando retorno atrasado', async (waiting) => {
+    vi.useFakeTimers();
+    stores.chat.events = [];
+    api.getWorkflows.mockResolvedValue([]);
+    api.getSubagents.mockResolvedValue([]);
+    const pending = Promise.withResolvers<WorkflowSummary[] | SubagentRun[]>();
+    const apiMethod = waiting === 'workflows' ? api.getWorkflows : api.getSubagents;
+    apiMethod.mockReturnValueOnce(pending.promise);
+    const { el } = await mount();
+    expect(el.textContent).toContain(m.comum_carregando());
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    expect(el.textContent).not.toContain(m.comum_carregando());
+    expect(el.querySelector('[role="alert"]')?.textContent).toContain(m.chat_historico_sem_resposta());
+    expect(el.textContent).not.toContain(m.atividade_vazio());
+    const calls = apiMethod.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(apiMethod).toHaveBeenCalledTimes(calls);
+    await click(el, m.sync_retry());
+    expect(el.textContent).toContain(m.atividade_vazio());
+    await act(async () => { pending.resolve(waiting === 'workflows' ? [{ ...workflow, name: 'Fluxo atrasado' }] : [{ ...sub, prompt: 'Subagente atrasado' }]); });
+    expect(el.querySelector('[role="alert"]')).toBeNull();
+    expect(el.textContent).not.toContain('Fluxo atrasado');
+    expect(el.textContent).not.toContain('Subagente atrasado');
+  });
+
+  it('retira carregamento do detalhe sem resposta e recupera a conversa por nova tentativa', async () => {
+    vi.useFakeTimers();
+    const pending = Promise.withResolvers<SubagentRun>();
+    api.getSubagent.mockReturnValueOnce(pending.promise);
+    const { el } = await mount();
+    await click(el, 'Conferir atividade');
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    expect(el.textContent).not.toContain(m.comum_carregando());
+    expect(el.querySelector('[role="alert"]')?.textContent).toContain(m.chat_historico_sem_resposta());
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(api.getSubagent).toHaveBeenCalledOnce();
+    api.getSubagent.mockResolvedValue({ ...sub, state: 'finished', events: [{ id: 'reply', kind: 'assistant_msg', text: 'Conversa recuperada' }] });
+    await click(el, m.sync_retry());
+    expect(el.textContent).toContain('Conversa recuperada');
+    await act(async () => { pending.resolve({ ...sub, lastText: 'Retorno antigo' }); });
+    expect(el.textContent).toContain('Conversa recuperada');
+    expect(el.textContent).not.toContain('Retorno antigo');
   });
 
   it('renova snapshot em 5s de 22 para 29 chamadas e concluído sem novo evento nem detalhe', async () => {
@@ -521,14 +610,14 @@ describe('ActivitySheet real', () => {
   it('acompanha revisão de eventos na mesma lista do store', async () => {
     stores.chat.events = [...events];
     const { el, render } = await mount();
-    expect(el.querySelector('header')?.textContent).toContain('1/2');
+    expect(expectHeader(el, m.ctx_atividade()).textContent).toContain('1/2');
     stores.chat.events[0] = { ...events[0]!, tool_input: { todos: [
       { content: 'Conferir cabeçalho', status: 'completed' },
       { content: 'Conferir retorno', status: 'completed' },
     ] } };
     stores.chat.eventsRevision += 1;
     await render();
-    expect(el.querySelector('header')?.textContent).toContain('2/2');
+    expect(expectHeader(el, m.ctx_atividade()).textContent).toContain('2/2');
   });
 
   it('renova subagentes quando o pai conclui sem apagar a lista durante atualização', async () => {
@@ -568,7 +657,7 @@ describe('ActivitySheet real', () => {
     const { el } = await mount();
     const listHeader = expectAndroidHeader(el, m.ctx_atividade());
     expect(listHeader.textContent).toContain('1/2');
-    expect(listHeader.querySelector('button')).toBeNull();
+    expect(button(listHeader, m.native_close())).toBeDefined();
     expect(el.querySelector('[data-scroll]')?.textContent).toContain(m.atividade_grupo_rodando({ n: 1 }));
     expect(el.querySelector('[data-scroll]')?.textContent).not.toContain(m.ctx_atividade());
     await click(el, workflow.name);
@@ -605,7 +694,7 @@ describe('ActivitySheet real', () => {
     expect(wrapper.getAttribute('data-padding-horizontal')).toBe('16');
     expect(wrapper.style.flexGrow).toBe('1');
     expect(Number.parseFloat(wrapper.style.minHeight)).toBe(0);
-    expect(wrapper.parentElement).toBe(el.querySelector('[data-edges]'));
+    expect(wrapper.parentElement).toBe(sheetRoot(el));
     expect(keyboard.style.flexGrow).toBe('1');
     expect(Number.parseFloat(keyboard.style.minHeight)).toBe(0);
     expect(keyboard.getAttribute('data-keyboard-behavior')).toBe('padding');
@@ -691,7 +780,7 @@ describe('ActivitySheet real', () => {
     expect(route.back).toHaveBeenCalledTimes(1);
   });
 
-  it('iOS mantém as mesmas opções do cabeçalho enquanto nada do cabeçalho muda', async () => {
+  it('iOS mantém as opções do cabeçalho quando o proxy do tema muda sem mudar as cores', async () => {
     vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
     await mount();
     const before = screenOptions.at(-1);
@@ -699,6 +788,44 @@ describe('ActivitySheet real', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
     expect(screenOptions.length).toBeGreaterThan(0);
     expect(screenOptions.every((options) => options === before)).toBe(true);
+  });
+
+  it('iOS converge quando setOptions redesenha a rota com outro proxy do tema', async () => {
+    const { el } = await mount(true);
+    expect(el.querySelector('[data-options-ready="true"]')).not.toBeNull();
+    expectHeader(el, m.ctx_atividade());
+    await click(el, workflow.name);
+    expectHeader(el, detail.name);
+    await click(el, m.comum_voltar());
+    await click(el, 'Conferir atividade');
+    expectHeader(el, 'Conferir atividade');
+  });
+
+  it('iOS atualiza as cores dos indicadores do cabeçalho quando o tema muda', async () => {
+    const { useUnistyles } = await import('react-native-unistyles');
+    const { theme } = useUnistyles();
+    const previous = { secondary: theme.tokens.text.secondary, accent: theme.tokens.accent.base, success: theme.tokens.status.success };
+    const { el, render } = await mount(true);
+    const badgeColor = () => el.querySelector<HTMLElement>('[role="header"] + span')?.style.color;
+    try {
+      theme.tokens.text.secondary = '#123456';
+      await render();
+      expect(badgeColor()).toBe('#123456');
+      await click(el, workflow.name);
+      theme.tokens.accent.base = '#234567';
+      await render();
+      expect(badgeColor()).toBe('#234567');
+      await click(el, m.comum_voltar());
+      api.getWorkflow.mockResolvedValue({ ...detail, status: 'completed' });
+      await click(el, workflow.name);
+      theme.tokens.status.success = '#345678';
+      await render();
+      expect(badgeColor()).toBe('#345678');
+    } finally {
+      theme.tokens.text.secondary = previous.secondary;
+      theme.tokens.accent.base = previous.accent;
+      theme.tokens.status.success = previous.success;
+    }
   });
 
   it('iOS não registra hardwareBackPress e preserva a navegação nativa', async () => {
@@ -720,28 +847,30 @@ describe('ActivitySheet real', () => {
     expect(api.getSubagents).not.toHaveBeenCalled();
   });
 
-  it('usa cabeçalho nativo sem disputar espaço com a lista e preserva recuos', async () => {
+  it('mantém cabeçalho local e rolagem medida pela folha sem recuo nativo', async () => {
     const { el, render } = await mount();
     expectHeader(el, m.ctx_atividade());
-    expect(el.querySelector('header')?.textContent).toContain('1/2');
-    expect(el.querySelector('[data-scroll]')?.getAttribute('data-inset')).toBe('automatic');
+    expect(expectHeader(el, m.ctx_atividade()).textContent).toContain('1/2');
+    expect(el.querySelector('[data-scroll]')?.getAttribute('data-inset')).toBe('never');
     expect(el.querySelector('[data-scroll]')?.textContent).toContain(m.atividade_grupo_rodando({ n: 1 }));
     expect([...el.querySelectorAll('button')].filter(node => node.textContent?.includes('Conferir atividade'))).toHaveLength(1);
     expect(el.querySelector('[data-scroll]')?.textContent).not.toContain(m.ctx_atividade());
-    expect(el.querySelector('[data-edges]')?.getAttribute('data-edges')).toBe('bottom,left,right');
+    expect(sheetRoot(el).style.backgroundColor).toBe('');
+    expect((el.querySelector('[data-scroll]') as HTMLElement).style.flexGrow).toBe('1');
+    expect((el.querySelector('[data-scroll]')?.firstElementChild as HTMLElement).style.paddingBottom).toBe('50px');
     route.params = { server: 'missing', name: 'sess' };
     await render();
     expectHeader(el, m.ctx_atividade());
     const error = [...el.querySelectorAll('span')].find((node) => node.textContent === m.compare_servidor_nao_encontrado());
-    expect(error?.closest('[style*="padding-top"]')?.getAttribute('style')).toContain('padding-top: 64px');
+    expect(error?.parentElement).toBe(sheetRoot(el));
   });
 
-  it('volta pelo cabeçalho nativo de agente para workflow e lista', async () => {
+  it('volta pelo cabeçalho local de agente para workflow e lista', async () => {
     const { el } = await mount();
     await click(el, workflow.name);
     expectHeader(el, detail.name);
-    expect(el.querySelector('header')?.textContent).toContain('running');
-    expect(el.querySelector('[data-scroll]')?.closest('[style*="padding-top"]')?.getAttribute('style')).toContain('padding-top: 64px');
+    expect(expectHeader(el, detail.name).textContent).toContain('running');
+    expect(sheetRoot(el).style.paddingTop).toBe('');
     const back = button(el, m.comum_voltar());
     expect(Number(back.getAttribute('data-hit-slop'))).toBeGreaterThanOrEqual(12);
     expect(back.querySelector('svg, [data-symbol]')).not.toBeNull();
@@ -752,8 +881,8 @@ describe('ActivitySheet real', () => {
     expectHeader(el, detail.name);
     await click(el, m.comum_voltar());
     expectHeader(el, m.ctx_atividade());
-    expect(el.querySelector('header')?.textContent).toContain('1/2');
-    expect(el.querySelector('header button')).toBeNull();
+    expect(expectHeader(el, m.ctx_atividade()).textContent).toContain('1/2');
+    expect(button(expectHeader(el, m.ctx_atividade()), m.native_close())).toBeDefined();
     expect(route.back).not.toHaveBeenCalled();
   });
 

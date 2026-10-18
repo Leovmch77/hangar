@@ -231,9 +231,10 @@ def test_codex_shutdown_does_not_abandon_owned_auth_reader(tmp_path, drain):
     closed = False
     try:
         reading = pool.submit(server.request, "GET", "/api/codex-contas")
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 60
         while not (account / "read-entered.json").exists():
             assert time.monotonic() < deadline, "O leitor não iniciou account/read."
+            time.sleep(0.05)
         for pid in json.loads((account / "reader-pids.json").read_text(encoding="utf-8")):
             process = psutil.Process(pid)
             owned.append((process, process.create_time()))
@@ -267,11 +268,11 @@ def test_codex_shutdown_does_not_abandon_owned_auth_reader(tmp_path, drain):
 
 
 def test_codex_lost_http_response_keeps_owned_auth_reader_until_cleanup(tmp_path):
-    import concurrent.futures
+    import http.client
     import psutil
-    import socket
+    import select
     import time
-    from urllib.request import Request
+    from urllib.parse import urlsplit
     from accounts_contract import RustCodex
     reference = PythonReference(tmp_path / "home")
     account = reference.root / ".codex"
@@ -283,27 +284,32 @@ def test_codex_lost_http_response_keeps_owned_auth_reader_until_cleanup(tmp_path
     server = RustCodex(reference)
     owned = []
     try:
-        def lose_response():
-            request = Request(server.base_url + "/api/codex-contas",
-                              headers={"Authorization": "Bearer " + server.token})
-            try:
-                with server.opener.open(request, timeout=0.4) as response:
-                    response.read()
-            except (TimeoutError, socket.timeout):
-                return "lost"
-            raise AssertionError("A resposta não ficou retida pela barreira nativa.")
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            lost = pool.submit(lose_response)
-            deadline = time.monotonic() + 10
-            while not (account / "read-entered.json").exists():
-                assert time.monotonic() < deadline, "O leitor não chegou à barreira."
-            for pid in json.loads((account / "reader-pids.json").read_text(encoding="utf-8")):
-                process = psutil.Process(pid)
-                owned.append((process, process.create_time()))
-            assert lost.result(timeout=5) == "lost"
+        # A resposta se perde por sinal, com o leitor já na barreira: um prazo curto no cliente vencia,
+        # sob carga, antes de o servidor ler o pedido, e a operação nem começava.
+        url = urlsplit(server.base_url)
+        connection = http.client.HTTPConnection(url.hostname, url.port, timeout=30)
+        connection.request("GET", "/api/codex-contas", headers={"Authorization": "Bearer " + server.token})
+        deadline = time.monotonic() + 60
+        while not (account / "read-entered.json").exists():
+            if time.monotonic() >= deadline:
+                # O servidor respondeu sem chegar ao leitor: a resposta diz por quê.
+                connection.sock.settimeout(2)
+                try:
+                    answer = connection.getresponse()
+                    detail = f"{answer.status} {answer.read()[:800]!r}"
+                except OSError as error:
+                    detail = repr(error)
+                raise AssertionError(f"O leitor não chegou à barreira: {detail}")
+            time.sleep(0.05)
+        for pid in json.loads((account / "reader-pids.json").read_text(encoding="utf-8")):
+            process = psutil.Process(pid)
+            owned.append((process, process.create_time()))
+        ready, _, _ = select.select([connection.sock], [], [], 0)
+        assert not ready, "A resposta não ficou retida pela barreira nativa."
+        connection.close()
         assert all(process.is_running() for process, _ in owned), "Perder a resposta abandonou a operação."
         (account / "release-read.json").write_text("true", encoding="utf-8")
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 60
         while True:
             live = []
             for process, born in owned:
@@ -315,9 +321,11 @@ def test_codex_lost_http_response_keeps_owned_auth_reader_until_cleanup(tmp_path
             if not live:
                 break
             assert time.monotonic() < deadline, "A operação não limpou sua árvore após a resposta perdida."
+            time.sleep(0.05)
         response = server.request("GET", "/api/codex-contas")
         assert response.status_code == 200
-        assert next(row for row in response.json() if row["id"] == "default")["auth"]["email"] == "fixture@example.test"
+        row = next(row for row in response.json() if row["id"] == "default")
+        assert row["auth"]["email"] == "fixture@example.test", row
         assert_rust_ownership(reference.calls())
     finally:
         (account / "release-read.json").write_text("true", encoding="utf-8")

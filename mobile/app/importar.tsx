@@ -12,6 +12,7 @@ import { useSettingsColors } from '../src/features/config/colors';
 import { Screen } from '../src/ui/Screen';
 import { toast } from '../src/ui/Toast';
 import * as m from '../src/paraglide/messages';
+import { SPACE } from '../src/theme/scale';
 
 export default function ImportMachinesRoute() {
   const params = useLocalSearchParams<{ '#': string | string[] }>();
@@ -94,6 +95,6 @@ function ImportMachines({ payload }: { payload: string }) {
 }
 
 const styles = StyleSheet.create({
-  content: { padding: 16, gap: 16 },
-  row: { padding: 16, gap: 6 },
+  content: { padding: SPACE[4], gap: SPACE[4] },
+  row: { padding: SPACE[4], gap: SPACE[1.5] },
 });

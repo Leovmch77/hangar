@@ -3,7 +3,7 @@
   import { renderMarkdown } from '../lib/markdown';
   import { intlLocale } from '../lib/locale';
   import * as m from '../paraglide/messages';
-  import { fileKind, parseFilePaths, parseCodePaths, parseMediaUrls, splitTodoBlock } from '@hangar/core';
+  import { codeCitation, hideAttachmentPaths, parseFilePaths, parseCodePaths, parseMediaUrls, splitTodoBlock } from '@hangar/core';
   import { copyText } from '../lib/clipboard';
   import { textoFalavelComCodigo } from '../lib/speakable';
   import { abrirComTexto } from '../lib/ttsSelection.svelte';
@@ -92,7 +92,6 @@
   const textoPrevia = $derived(preview ? tw.texto : textoPreviaBruto);
 
   const previewHtml = $derived(preview && md ? comCaret(renderMarkdown(textoPrevia, { fileLinks: !!sessionName })) : '');
-  const html = $derived(preview ? '' : renderMarkdown(text, { fileLinks: !!sessionName, commandActions: !!onRunCommand && !!sessionName }));
 
   function runCodeClick(event: MouseEvent) {
     if (!(event.target instanceof Element)) return;
@@ -107,11 +106,13 @@
   // Anexos por caminho citado na minha msg (img/video/html/pdf que eu "mandar").
   // Mídia/html/pdf fica de fora dos caminhos de código: com extensão aberta no absoluto o
   // `parseCodePaths` também casa `.png`, e o filtro abaixo apagava a miniatura.
-  const codePaths = $derived(new Set(parseCodePaths(text).filter((p) => !fileKind(p))));
+  const codePaths = $derived(new Set(parseCodePaths(text).filter((p) => codeCitation(p))));
   const fileRefs = $derived(!preview && sessionName
     ? parseFilePaths(text).filter((ref) => !codePaths.has(ref.path)) : []);
   // Midia remota (URL http) -> preview inline; nao depende do backend/sessionName.
   const mediaRefs = $derived(preview ? [] : parseMediaUrls(text));
+  // O caminho fica no transcript (autoriza o servidor a servir o arquivo); na tela, só o anexo.
+  const html = $derived(preview ? '' : renderMarkdown(hideAttachmentPaths(text, fileRefs), { fileLinks: !!sessionName, commandActions: !!onRunCommand && !!sessionName }));
 
   // Máscara do topo SÓ com transbordo real — mesmo padrão do .bc-body.masked (BoardCard:333). Ligada
   // sempre, ela apagava a 1ª linha de toda prévia curta, onde não há corte nenhum pra disfarçar.

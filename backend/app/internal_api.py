@@ -266,44 +266,6 @@ async def migration_status() -> dict:
     return await internal_thread(migration_status.facts)
 
 
-@router.get("/sessions/{name}/uploads-facts")
-async def upload_facts(name: str, filename: str = "", writing: bool = False):
-    """Fornece identidade e configuração; o cofre e a resposta HTTP pertencem ao Rust."""
-    import mimetypes
-    from app import api, uploads
-    if writing:
-        await api._transfer_check(name)
-        sessions = await asyncio.to_thread(api.registry.list)
-        info = next((item for item in sessions if item.name == name), None)
-    else:
-        info = await asyncio.to_thread(api._cached_info_sync, name)
-    if info is None:
-        raise HTTPException(404, detail=api.erro("erro_sessao_inexistente", "sessão não encontrada"))
-    if not info.cwd:
-        raise HTTPException(409 if writing else 404, detail=api.erro("erro_cwd_indisponivel", "cwd da sessão indisponível"))
-    return {"cwd": info.cwd, "session": api._id_upload(info),
-            "root": str(uploads._raiz()), "retention": api.runtime_config.get("upload_retention_days"),
-            "media": mimetypes.guess_type(filename)[0] or "application/octet-stream"}
-
-
-@router.post("/sessions/{name}/upload-transcript")
-async def upload_transcript(name: str, request: Request):
-    """A transcrição mantém o provedor configurado e não grava anexos."""
-    from app import api
-    body = await request.json()
-    if not isinstance(body, dict) or set(body) != {"audio"} or not isinstance(body["audio"], str):
-        raise HTTPException(400)
-    try:
-        import base64
-        data = base64.b64decode(body["audio"], validate=True)
-        if len(data) > 100 * 1024 * 1024:
-            raise HTTPException(413)
-        text = await asyncio.to_thread(api.transcribe, data, "audio.m4a")
-        return {"text": text.strip()}
-    except api.TranscribeError:
-        return {"text": ""}
-
-
 @router.get("/transcription/config")
 def transcription_config():
     """Configuração efetiva exclusiva da ponte privada; chaves nunca vão à resposta pública."""

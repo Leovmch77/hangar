@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Pressable, ScrollView, Share, Text, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -41,15 +41,17 @@ function Shell({ title, serverId, sessionName, actions, children }:
   const router = useRouter();
   const header = useGlassHeader();
   const headerHeight = useHeaderHeight();
-  const back = () => router.replace(`/s/${encodeURIComponent(serverId)}/${encodeURIComponent(sessionName)}` as never);
+  const back = useCallback(() => router.replace(`/s/${encodeURIComponent(serverId)}/${encodeURIComponent(sessionName)}` as never), [router, serverId, sessionName]);
+  const canGoBack = router.canGoBack();
+  const headerOptions = useMemo(() => ({
+    ...header,
+    title,
+    headerLeft: canGoBack ? undefined : () => <HeaderBack onPress={back} />,
+    headerRight: actions ? () => actions : undefined,
+  }), [header, title, canGoBack, back, actions]);
   return (
     <Screen edges={EDGES}>
-      <Stack.Screen options={{
-        ...header,
-        title,
-        headerLeft: router.canGoBack() ? undefined : () => <HeaderBack onPress={back} />,
-        headerRight: actions ? () => actions : undefined,
-      }} />
+      <Stack.Screen options={headerOptions} />
       <View style={[styles.flex, { paddingTop: headerHeight }]}>{children}</View>
     </Screen>
   );
@@ -71,11 +73,11 @@ function PageView({ page, serverId, sessionName }: { page: HtmlPageRef; serverId
     setSourceFailed(false);
     try { setSource(await loadSource()); } catch { setSourceFailed(true); } finally { fetching.current = false; }
   }, [loadSource]);
-  const toggleSource = () => {
+  const toggleSource = useCallback(() => {
     setShowingSource((v) => !v);
     if (!showingSource && source == null) void fetchSource();
-  };
-  const copy = async () => {
+  }, [showingSource, source, fetchSource]);
+  const copy = useCallback(async () => {
     if (source == null) return;
     try {
       await Clipboard.setStringAsync(source);
@@ -83,9 +85,9 @@ function PageView({ page, serverId, sessionName }: { page: HtmlPageRef; serverId
     } catch (e) {
       toast.erro(e instanceof Error ? e.message : String(e));
     }
-  };
+  }, [source]);
   // Cancelar resolve com `dismissedAction`; rejeição aqui é falha de verdade.
-  const share = async () => {
+  const share = useCallback(async () => {
     if (source == null) return;
     try {
       if (canShareFile) await shareTextFile(source, pageFileName(page.title));
@@ -93,25 +95,29 @@ function PageView({ page, serverId, sessionName }: { page: HtmlPageRef; serverId
     } catch (e) {
       toast.erro(e instanceof Error ? e.message : String(e));
     }
-  };
+  }, [source, page.title]);
   const c = theme.tokens.text.secondary;
-  const actions = state === 'ready' ? (
+  const accent = theme.tokens.accent.base;
+  const sourceActionLabel = showingSource ? m.page_view_page() : m.page_view_source();
+  const copyLabel = m.page_copy_source();
+  const shareLabel = m.page_share_file();
+  const actions = useMemo(() => state === 'ready' ? (
     <View style={styles.actions}>
       <Pressable onPress={toggleSource} hitSlop={8} style={styles.action} accessibilityRole="button" accessibilityState={{ selected: showingSource }}>
-        <Text style={[styles.actionText, { color: theme.tokens.accent.base }]}>{showingSource ? m.page_view_page() : m.page_view_source()}</Text>
+        <Text style={[styles.actionText, { color: accent }]}>{sourceActionLabel}</Text>
       </Pressable>
       {source != null && (
         <>
-          <Pressable onPress={() => void copy()} hitSlop={8} style={styles.icon} accessibilityRole="button" accessibilityLabel={m.page_copy_source()}>
+          <Pressable onPress={copy} hitSlop={8} style={styles.icon} accessibilityRole="button" accessibilityLabel={copyLabel}>
             <Icon name="Copy" size={18} color={c} />
           </Pressable>
-          <Pressable onPress={() => void share()} hitSlop={8} style={styles.icon} accessibilityRole="button" accessibilityLabel={m.page_share_file()}>
+          <Pressable onPress={share} hitSlop={8} style={styles.icon} accessibilityRole="button" accessibilityLabel={shareLabel}>
             <Icon name="Share" size={18} color={c} />
           </Pressable>
         </>
       )}
     </View>
-  ) : undefined;
+  ) : undefined, [state, toggleSource, showingSource, accent, sourceActionLabel, source, copy, copyLabel, c, share, shareLabel]);
 
   const onMessage = useCallback((e: WebViewMessageEvent) => {
     const msg = parseHostMessage(e.nativeEvent.data);

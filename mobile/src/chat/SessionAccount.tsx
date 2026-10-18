@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, Text, View } from 'react-native';
-import { useHeaderHeight } from 'expo-router/react-navigation';
+import { ActivityIndicator, Alert, Pressable, ScrollView, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { fetchSessionsForServer, formataErro, getCredentialsForServer, getEnginesForServer, listAccountTargets, setSessionAccount, setSessionEngineAccount, type Credencial, type Server } from '@hangar/core';
 import { chatStore } from '../stores/chat';
@@ -41,7 +41,7 @@ const sessionIdentity = (scope: string, session: AccountSession | null) => JSON.
 
 export function SessionAccount({ serverId, name }: { serverId: string; name: string }) {
   const { theme } = useUnistyles();
-  const headerHeight = useHeaderHeight();
+  const insets = useSafeAreaInsets();
   const ready = useServers(s => s.ready);
   const server = useServers(s => s.servers.find(x => x.id === serverId));
   const row = useSessions(s => s.rows.find(x => x.serverId === serverId && x.name === name));
@@ -199,7 +199,7 @@ export function SessionAccount({ serverId, name }: { serverId: string; name: str
       <Text style={styles.action}>{m.native_retry()}</Text>
     </Pressable>
   </View>;
-  return <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={[styles.content, Platform.OS !== 'ios' && { paddingTop: headerHeight }]}>
+  return <ScrollView style={styles.scroll} contentInsetAdjustmentBehavior="never" contentContainerStyle={[styles.content, { paddingBottom: theme.base.space[8] + insets.bottom }]}>
     {!ready ? loading : refused ? <Text accessibilityRole="alert" style={styles.error}>{m.chat_servidor_removido()}</Text> : <>
       <SessionAccountCard current label={activeTarget?.label || activeCredential?.apelido || activeCredential?.nome || label || m.native_invalid_response()}
         context={displayedSession?.engine ? label : null} credential={activeCredential} path={displayedSession?.conta?.replace(/^(claude|codex):/, '')} />
@@ -226,8 +226,9 @@ export function SessionAccount({ serverId, name }: { serverId: string; name: str
 }
 
 const styles = StyleSheet.create(theme => ({
+  scroll: { flex: 1 },
   grow: { flex: 1 },
-  explanation: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },
+  explanation: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingVertical: theme.base.space[2] },
   content: { padding: theme.base.space[4], paddingBottom: theme.base.space[8], gap: theme.base.space[3] },
   notice: { gap: theme.base.space[2] },
   caption: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted },

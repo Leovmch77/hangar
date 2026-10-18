@@ -230,35 +230,26 @@ pub async fn private(
             );
         }
     };
-    if request.mode == Some(OrganizationMode::None) {
-        return response(
-            json!({"ok":true,"result":OrganizationResult::original(request.raw, OrganizationMode::None)}),
-            200,
-        );
-    }
-    let config = match tokio::time::timeout_at(
-        organization_started + std::time::Duration::from_secs(120),
-        configuration(&state),
-    )
-    .await
-    {
-        Ok(Ok(config)) => config,
-        Err(_) => {
-            return response(
-                json!({"ok":true,"result":OrganizationResult::original(request.raw, request.mode.unwrap_or_default()).failed("dictation_organization_timeout",super::harness::detail("dictation_organization_timeout"))}),
-                200,
-            );
-        }
-        Ok(Err(())) => {
-            return response(
-                json!({"ok":true,"result":OrganizationResult::original(request.raw, request.mode.unwrap_or_default())
-            .failed("dictation_rust_unavailable","A configuração de organização está indisponível; foi mantida a transcrição original.")}),
-                200,
-            );
-        }
-    };
     response(
-        json!({"ok":true,"result":service::organize_started(&state,request,&config,organization_started).await}),
+        json!({"ok":true,"result":organize_request(&state, request, organization_started).await}),
         200,
     )
+}
+
+/// A organização de um pedido já lido; falha nunca vira erro, só o texto cru com o motivo.
+pub(crate) async fn organize_request(
+    state: &AppState,
+    request: OrganizationRequest,
+    started: tokio::time::Instant,
+) -> OrganizationResult {
+    if request.mode == Some(OrganizationMode::None) {
+        return OrganizationResult::original(request.raw, OrganizationMode::None);
+    }
+    match tokio::time::timeout_at(started + std::time::Duration::from_secs(120), configuration(state)).await {
+        Ok(Ok(config)) => service::organize_started(state, request, &config, started).await,
+        Err(_) => OrganizationResult::original(request.raw, request.mode.unwrap_or_default())
+            .failed("dictation_organization_timeout", super::harness::detail("dictation_organization_timeout")),
+        Ok(Err(())) => OrganizationResult::original(request.raw, request.mode.unwrap_or_default())
+            .failed("dictation_rust_unavailable", "A configuração de organização está indisponível; foi mantida a transcrição original."),
+    }
 }

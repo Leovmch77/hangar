@@ -637,7 +637,8 @@ mod tests {
         assert_eq!(observed.recv().await.as_deref(), Some("code"));
         let code_sent = tokio::time::Instant::now();
         let status_called = account.home.join("status-called");
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        // Teto só contra travamento: no Windows do CI o node da CLI falsa passou de 10 s para subir.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
         while !status_called.exists() {
             assert!(
                 !confirming.is_finished(),
@@ -658,7 +659,8 @@ mod tests {
         tokio::time::advance(Duration::from_secs(299).saturating_sub(code_sent.elapsed())).await;
         tokio::time::resume();
         drop(control);
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        // Teto só contra travamento: no Windows do CI o node da CLI falsa passou de 10 s para subir.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
         while observed.is_empty() && fs::read_to_string(&status_called).unwrap().lines().count() < 2
         {
             assert!(
@@ -772,7 +774,8 @@ mod tests {
         });
         assert_eq!(observed.recv().await.as_deref(), Some("code"));
         let status_called = account.home.join("status-called");
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        // Teto só contra travamento: no Windows do CI o node da CLI falsa passou de 10 s para subir.
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
         while !status_called.exists() {
             assert!(std::time::Instant::now() < deadline, "a CLI não foi lida");
             tokio::time::sleep(Duration::from_millis(10)).await;

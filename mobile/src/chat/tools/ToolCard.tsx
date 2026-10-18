@@ -5,6 +5,7 @@ import { nomeFerramenta, summarizeToolInput, summarizeToolResult, toolPhase, too
 import { callTarget } from './fold';
 import type { Ferramentas } from '../../stores/aparencia';
 import { Icon } from '../../ui/Icon';
+import { TerminalTool } from './TerminalTool';
 import * as m from '../../paraglide/messages';
 
 // Uma chamada como linha, no desenho escolhido em Aparência › Chamadas de ferramenta:
@@ -20,6 +21,7 @@ export const ToolCard = memo(function ToolCard({
   onPress,
   look = 'tree',
   escrevendo = false,
+  onExpand,
 }: {
   use: ChatEvent;
   result?: ChatEvent | null;
@@ -27,6 +29,7 @@ export const ToolCard = memo(function ToolCard({
   look?: Ferramentas;
   /** Pedido da chamada ainda sendo escrito pelo modelo (SSE `ferramenta`): não roda ainda. */
   escrevendo?: boolean;
+  onExpand?: () => void;
 }) {
   const { theme } = useUnistyles();
   const fase = toolPhase(result ?? null);
@@ -37,6 +40,8 @@ export const ToolCard = memo(function ToolCard({
   const cor = falhou ? theme.tokens.status.warning : theme.tokens.text.muted;
   const erro = falhou ? summarizeToolResult(result, use.tool_name) : '';
   const rodando = escrevendo ? m.tool_fase_escrevendo() : m.estado_em_execucao();
+
+  if (look === 'terminal') return <TerminalTool use={use} result={result} escrevendo={escrevendo} onExpand={onExpand} onOpen={onPress} />;
 
   if (look === 'chips') {
     const desfecho = escrevendo ? m.tool_fase_escrevendo() : vivo ? m.native_chip_running() : summarizeToolResult(result, use.tool_name);
@@ -102,8 +107,8 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.base.space[1],
     borderRadius: theme.base.radius.sm,
   },
-  verbo: { flexShrink: 0, maxWidth: '40%', fontSize: theme.base.text.xs, fontWeight: '500' },
-  vivo: { fontWeight: '600' },
+  verbo: { flexShrink: 0, maxWidth: '40%', fontSize: theme.base.text.xs, fontWeight: theme.base.weight.medium },
+  vivo: { fontWeight: theme.base.weight.semibold },
   alvo: { flexShrink: 1, minWidth: 0, fontSize: theme.base.text.xs, fontFamily: theme.base.fontMono },
   semMono: { fontFamily: undefined },
   fim: { flexShrink: 0, maxWidth: '45%', fontSize: theme.base.text.xs },
@@ -117,5 +122,5 @@ const styles = StyleSheet.create((theme) => ({
   },
   chipVerbo: { minWidth: 56, flexShrink: 0, fontSize: theme.base.text.xs },
   chipAlvo: { flex: 1 },
-  fimLinha: { flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 0, maxWidth: '45%' },
+  fimLinha: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], flexShrink: 0, maxWidth: '45%' },
 }));

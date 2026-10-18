@@ -8,6 +8,9 @@ import type { RecordingStatus } from 'expo-audio';
 import { configureDiag, type EventoDiag } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
+const environment = vi.hoisted(() => ({ os: 'android', version: 35, runtime: 'native-3' }));
+vi.mock('expo-updates', () => ({ get runtimeVersion() { return environment.runtime; } }));
+
 const recordDiagnostic = vi.fn<(event: EventoDiag, destination?: string) => void>();
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -45,6 +48,7 @@ vi.mock('expo-audio', () => ({
   AudioModule: { AudioRecorder: createRecorder },
   RecordingPresets: { HIGH_QUALITY: { extension: '.m4a', android: { outputFormat: 'mpeg4', audioEncoder: 'aac' } } },
   requestRecordingPermissionsAsync: requestPermission,
+  requestNotificationPermissionsAsync: vi.fn(async () => ({ granted: true })),
   setAudioModeAsync: setAudioMode,
 }));
 
@@ -52,6 +56,7 @@ vi.mock('react-native', async () => {
   const actual = (await vi.importActual<typeof import('../../__mocks__/react-native')>('../../__mocks__/react-native')) as Record<string, unknown>;
   return {
     ...actual,
+    Platform: { get OS() { return environment.os; }, get Version() { return environment.version; } },
     AppState: {
       addEventListener: vi.fn((_event: string, listener: (next: string) => void) => {
         appState.listener = listener;
@@ -62,14 +67,17 @@ vi.mock('react-native', async () => {
   };
 });
 
+import { requestNotificationPermissionsAsync } from 'expo-audio';
 import { useDitado } from './useDitado';
 import { useDitadoEstiloStore } from './ditadoEstiloStore';
 import { setLiveVoiceAudioActive, useVoiceAudioState } from '../voice/audioSession';
 import type { MotivoFim } from '@hangar/core';
 
 function mountHook(opts: { onFim: (f: File, m: MotivoFim, uri: string) => void; onErroParada?: (e: Error) => void }) {
+  let renders = 0;
   let hook: ReturnType<typeof useDitado> | null = null;
   function Comp(p: typeof opts) {
+    renders++;
     hook = useDitado(p);
     return null;
   }
@@ -77,6 +85,7 @@ function mountHook(opts: { onFim: (f: File, m: MotivoFim, uri: string) => void; 
   document.body.appendChild(container);
   const root = createRoot(container);
   return {
+    renderCount: () => renders,
     // monta e atualiza hook via render
     mount: async (props: typeof opts) => {
       await act(async () => {
@@ -103,6 +112,10 @@ beforeEach(() => {
   recordDiagnostic.mockClear();
   configureDiag({ registrar: recordDiagnostic, novoReq: () => '' });
   document.body.innerHTML = '';
+  environment.os = 'android';
+  environment.version = 35;
+  environment.runtime = 'native-3';
+  vi.mocked(requestNotificationPermissionsAsync).mockReset().mockResolvedValue({ granted: true } as never);
   appState.currentState = 'active';
   appState.listener = null;
   createRecorder.mockClear();
@@ -269,7 +282,7 @@ describe('useDitado — parar() propaga falha via onErroParada', () => {
     await act(async () => {
       await h.getHook().iniciar();
     });
-    // força UM re-render com NOVA inline arrow (nova identidade) — como o Composer faz a cada setRms/setText
+    // Atualizar o texto no Composer também pode trocar o callback inline.
     await h.mount({ onFim, onErroParada: (e) => onErro(e) });
     await act(async () => {
       await h.getHook().parar('botao');
@@ -420,7 +433,7 @@ describe('useDitado — interrupção e origem da gravação', () => {
     await h.unmount();
   });
 
-  it.each(['background', 'unmount'] as const)('finaliza áudio após %s antes de liberar o recorder', async (interruption) => {
+  it('desmontar aguarda a parada e leitura do áudio antes de liberar o recorder', async () => {
     const stop = deferred<void>();
     const delivered = deferred<void>();
     fakeRec.stop.mockReturnValue(stop.promise);
@@ -431,8 +444,7 @@ describe('useDitado — interrupção e origem da gravação', () => {
     const h = mountHook({ onFim });
     await h.mount({ onFim });
     await act(async () => { await h.getHook().iniciar(); });
-    if (interruption === 'unmount') await h.unmount();
-    else await act(async () => { changeAppState('inactive'); });
+    await h.unmount();
     expect(fakeRec.stop).toHaveBeenCalledTimes(1);
     expect(fakeRec.release).not.toHaveBeenCalled();
     expect(useVoiceAudioState.getState().dictations).toBe(1);
@@ -443,7 +455,7 @@ describe('useDitado — interrupção e origem da gravação', () => {
     });
     expect(onFim.mock.calls[0]).toEqual([expect.any(File), 'escondeu', 'file://fake.m4a']);
     expect(fakeRec.release).toHaveBeenCalledTimes(1);
-    if (interruption === 'background') await h.unmount();
+
   });
 
   it('não reinicia nem para duas vezes durante a parada e leitura do áudio', async () => {
@@ -600,6 +612,135 @@ describe('useDitado — interrupção e origem da gravação', () => {
   });
 });
 
+describe('useDitado — medidor e segundo plano', () => {
+  it('aplica ao teto nativo a configuração relida antes de abrir a captação', async () => {
+    const refresh = deferred<void>();
+    const old = useDitadoEstiloStore.getState();
+    useDitadoEstiloStore.setState({ ceilingMs: 60_000, refreshCeiling: () => refresh.promise });
+    const onFim = vi.fn();
+    const h = mountHook({ onFim });
+    try {
+      await h.mount({ onFim });
+      let starting!: Promise<void>;
+      await act(async () => { starting = h.getHook().iniciar(); });
+      expect(fakeRec.record).not.toHaveBeenCalled();
+      await act(async () => {
+        useDitadoEstiloStore.setState({ ceilingMs: 15_000 });
+        refresh.resolve();
+        await starting;
+      });
+      expect(fakeRec.record).toHaveBeenCalledExactlyOnceWith({ forDuration: 15 });
+    } finally {
+      refresh.resolve();
+      await h.unmount();
+      useDitadoEstiloStore.setState({ ceilingMs: old.ceilingMs, refreshCeiling: old.refreshCeiling });
+    }
+  });
+
+  it('Android antigo não tenta abrir o serviço que só existe no native-3', async () => {
+    environment.runtime = 'native-2';
+    const onFim = vi.fn();
+    const h = mountHook({ onFim });
+    await h.mount({ onFim });
+    await act(async () => { await h.getHook().iniciar(); });
+    expect(setAudioMode).toHaveBeenCalledWith(expect.objectContaining({ allowsBackgroundRecording: false }));
+    expect(requestNotificationPermissionsAsync).not.toHaveBeenCalled();
+    await act(async () => { changeAppState('background'); });
+    expect(onFim.mock.calls[0]?.[1]).toBe('escondeu');
+    await h.unmount();
+  });
+
+  it('iOS já tem áudio em segundo plano e não pede notificações', async () => {
+    environment.os = 'ios';
+    environment.runtime = 'native-2';
+    const onFim = vi.fn();
+    const h = mountHook({ onFim });
+    await h.mount({ onFim });
+    await act(async () => { await h.getHook().iniciar(); });
+    expect(setAudioMode).toHaveBeenCalledWith(expect.objectContaining({ allowsBackgroundRecording: true }));
+    expect(requestNotificationPermissionsAsync).not.toHaveBeenCalled();
+    await act(async () => { changeAppState('background'); });
+    expect(fakeRec.stop).not.toHaveBeenCalled();
+    await act(async () => { changeAppState('active'); await h.getHook().parar('botao'); });
+    await h.unmount();
+  });
+
+  it('notificação negada no Android não abre gravação e libera a sessão de áudio', async () => {
+    vi.mocked(requestNotificationPermissionsAsync).mockResolvedValueOnce({ granted: false } as never);
+    const onFim = vi.fn();
+    const h = mountHook({ onFim });
+    await h.mount({ onFim });
+    await act(async () => { await expect(h.getHook().iniciar()).rejects.toThrow(m.push_permissao_negada()); });
+    expect(createRecorder).not.toHaveBeenCalled();
+    expect(useVoiceAudioState.getState().dictations).toBe(0);
+    await h.unmount();
+  });
+
+  it('o gravador nativo recebe o teto mesmo sem timers JS em segundo plano', async () => {
+    const onFim = vi.fn();
+    const h = mountHook({ onFim });
+    const old = useDitadoEstiloStore.getState();
+    useDitadoEstiloStore.setState({ ceilingMs: 180_000, refreshCeiling: async () => {} });
+    try {
+      await h.mount({ onFim });
+      await act(async () => { await h.getHook().iniciar(); });
+      expect(fakeRec.record).toHaveBeenCalledWith({ forDuration: 180 });
+      await act(async () => { changeAppState('background'); });
+      // Evento de conclusão do nativo (teto ou botão na notificação), sem tick JS.
+      await act(async () => { emitRecordingStatus(); });
+      expect(h.getHook().gravando).toBe(false);
+      expect(onFim).toHaveBeenCalledTimes(1);
+      await h.unmount();
+    } finally {
+      useDitadoEstiloStore.setState({ ceilingMs: old.ceilingMs, refreshCeiling: old.refreshCeiling });
+    }
+  });
+
+  it('publica amostras sem redesenhar o Composer a cada nível', async () => {
+    const onFim = vi.fn();
+    const h = mountHook({ onFim });
+    await h.mount({ onFim });
+    await act(async () => { await h.getHook().iniciar(); });
+    const renders = h.renderCount();
+    for (const metering of [-20, -18, -25]) {
+      fakeRec.getStatus.mockReturnValue({ metering });
+      await act(async () => { vi.advanceTimersByTime(55); });
+    }
+    expect(h.renderCount()).toBe(renders);
+    expect(h.getHook().rms.value).toBeCloseTo(0.28117);
+    await act(async () => { await h.getHook().parar('botao'); });
+    await h.unmount();
+  });
+
+  it('continua gravando ao abrir Fotos e finaliza por botão ao voltar', async () => {
+    const onFim = vi.fn();
+    const h = mountHook({ onFim });
+    await h.mount({ onFim });
+    await act(async () => { await h.getHook().iniciar(); });
+    await act(async () => { changeAppState('inactive'); changeAppState('background'); });
+    expect(fakeRec.stop).not.toHaveBeenCalled();
+    expect(h.getHook().gravando).toBe(true);
+    fakeRec.getStatus.mockReturnValue({ isRecording: true, metering: -20 });
+    await act(async () => { changeAppState('active'); await h.getHook().parar('botao'); });
+    expect(onFim.mock.calls[0]?.[1]).toBe('botao');
+    await h.unmount();
+  });
+
+  it('ao voltar com captação pausada conserva o áudio e fecha a gravação', async () => {
+    const onFim = vi.fn();
+    const h = mountHook({ onFim });
+    await h.mount({ onFim });
+    await act(async () => { await h.getHook().iniciar(); });
+    await act(async () => { changeAppState('background'); });
+    fakeRec.getStatus.mockReturnValue({ isRecording: false, metering: -20 });
+    await act(async () => { changeAppState('active'); });
+    expect(h.getHook().gravando).toBe(false);
+    expect(onFim).toHaveBeenCalledTimes(1);
+    expect(onFim.mock.calls[0]?.[1]).toBe('escondeu');
+    await h.unmount();
+  });
+});
+
 describe('useDitado — VAD e teto', () => {
   it('encerra por silêncio depois de ouvir fala usando o RMS bruto', async () => {
     fakeRec.getStatus.mockReturnValue({ metering: -20 });
@@ -610,7 +751,7 @@ describe('useDitado — VAD e teto', () => {
       await h.getHook().iniciar();
       vi.advanceTimersByTime(600);
     });
-    expect(h.getHook().rms).toBeCloseTo(0.5);
+    expect(h.getHook().rms.value).toBeCloseTo(0.5);
     fakeRec.getStatus.mockReturnValue({ metering: -160 });
     await act(async () => { vi.advanceTimersByTime(2300); });
     expect(onFim.mock.calls[0]?.[1]).toBe('silencio');
@@ -630,7 +771,7 @@ describe('useDitado — VAD e teto', () => {
       await h.getHook().iniciar();
       vi.advanceTimersByTime(5000);
     });
-    expect(h.getHook().rms).toBe(0);
+    expect(h.getHook().rms.value).toBe(0);
     expect(fakeRec.stop).not.toHaveBeenCalled();
     await act(async () => { vi.advanceTimersByTime(175000); });
     expect(onFim.mock.calls[0]?.[1]).toBe('teto');

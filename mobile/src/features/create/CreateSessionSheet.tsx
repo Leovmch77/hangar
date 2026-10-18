@@ -737,7 +737,7 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
         accessibilityLabel={m.comum_nome()}
         autoCapitalize="none"
         autoCorrect={false}
-        placeholderTextColor="#8d8489"
+        placeholderTextColor={theme.tokens.text.muted}
       />
       <Text style={styles.hintSm}>{m.nova_conversa_nome_automatico()}</Text>
     </View>
@@ -1052,16 +1052,16 @@ const styles = StyleSheet.create((theme) => ({
   navbar: { minHeight: 48, flexDirection: 'row', alignItems: 'center', paddingHorizontal: theme.base.space[3] },
   navSide: { minWidth: 72, minHeight: 44, justifyContent: 'center' },
   navRight: { alignItems: 'flex-end' },
-  navTitle: { flex: 1, textAlign: 'center', fontSize: theme.base.text.base, fontWeight: '600', color: theme.tokens.text.primary },
+  navTitle: { flex: 1, textAlign: 'center', fontSize: theme.base.text.base, fontWeight: theme.base.weight.semibold, color: theme.tokens.text.primary },
   navAction: { fontSize: theme.base.text.base, color: theme.tokens.accent.base },
-  navStrong: { fontWeight: '600' },
+  navStrong: { fontWeight: theme.base.weight.semibold },
   folderScreen: { flex: 1, paddingHorizontal: theme.base.space[3], paddingBottom: theme.base.space[3] },
   formScroll: { gap: theme.base.space[3], paddingHorizontal: theme.base.space[3], paddingBottom: theme.base.space[8] },
   group: { backgroundColor: superficie(theme), borderRadius: theme.base.radius.lg, overflow: 'hidden' },
   sep: { height: StyleSheet.hairlineWidth, marginLeft: 42, backgroundColor: theme.tokens.border.default },
   pickerWrap: { minHeight: 380, flex: 1 },
-  more: { minHeight: 36, paddingHorizontal: 8, justifyContent: 'center' },
-  extras: { gap: 12, padding: 8 },
+  more: { minHeight: 36, paddingHorizontal: theme.base.space[2], justifyContent: 'center' },
+  extras: { gap: theme.base.space[3], padding: theme.base.space[2] },
   input: {
     flex: 1,
     height: 44,
@@ -1074,12 +1074,12 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.base.space[3],
   },
   pickedPath: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs, color: theme.tokens.text.muted },
-  rowCenter: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  rowCenter: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
   hint: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary },
   hintAlerta: { color: theme.tokens.status.warning },
-  hintSm: { fontSize: theme.base.text.xs, color: theme.tokens.text.muted, marginTop: 4 },
+  hintSm: { fontSize: theme.base.text.xs, color: theme.tokens.text.muted, marginTop: theme.base.space[1] },
   field: { gap: theme.base.space[2] },
-  label: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary, fontWeight: '500' },
+  label: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary, fontWeight: theme.base.weight.medium },
   selectBtn: {
     height: 44,
     backgroundColor: superficie(theme),
@@ -1092,7 +1092,7 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.base.space[3],
   },
   selectTxt: { color: theme.tokens.text.primary, fontSize: theme.base.text.sm, flex: 1 },
-  selectChevron: { marginLeft: 8 },
+  selectChevron: { marginLeft: theme.base.space[2] },
   error: { color: theme.tokens.status.error, fontSize: theme.base.text.sm },
   primaryDis: { opacity: 0.5 },
   ghostButton: { height: 44, borderWidth: 1, borderColor: theme.tokens.border.default, borderRadius: theme.base.radius.md, justifyContent: 'center', alignItems: 'center' },

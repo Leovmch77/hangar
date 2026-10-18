@@ -1,4 +1,4 @@
-export type SaveResult = 'saved' | 'cancelled' | 'tap-again';
+export type SaveResult = 'saved' | 'cancelled' | 'tap-again' | 'empty';
 
 // Arquivo já baixado à espera do segundo toque: o iOS só abre a folha de compartilhar dentro do
 // gesto do usuário, e um download demorado o deixa vencer.
@@ -15,12 +15,14 @@ function shouldShare(file: File): boolean {
   );
 }
 
-export async function saveFile(url: string, name: string): Promise<SaveResult> {
+// `refuseEmpty`: quem tem como avisar "arquivo vazio" recebe 'empty' em vez de salvar 0 bytes.
+export async function saveFile(url: string, name: string, { refuseEmpty = false } = {}): Promise<SaveResult> {
   let file = ready.get(url);
   if (!file) {
     const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    if (!resp.ok) throw Object.assign(new Error(`HTTP ${resp.status}`), { status: resp.status });
     const blob = await resp.blob();
+    if (refuseEmpty && !blob.size) return 'empty';
     file = new File([blob], name, { type: blob.type || 'application/octet-stream' });
   }
   if (shouldShare(file)) {

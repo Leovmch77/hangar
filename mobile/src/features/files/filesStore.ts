@@ -344,13 +344,11 @@ function criarFilesStore(serverId: string, sessao: string): FilesApi {
       if (refs === 0) return;
       refs--;
       if (refs > 0) return;
-      // não limpa Maps para preservar "pasta aberta continua aberta" (igual frontend retain)
-      // mas zera loading/erro? Mantém para reabrir sem flash; apenas interrompe contadores
       gArquivo++;
       gBusca++;
       gErro++;
-      // leitura em voo foi descartada acima: sem isto a próxima abertura da folha fica em "carregando"
-      if (getS().loading) setS({ loading: false, selecionado: null });
+      // O registro vive além da folha; só o estado das pastas precisa sobreviver.
+      setS({ conteudo: null, diff: null, selecionado: null, resultados: [], buscaCortada: false, loading: false, erro: null });
     },
     listar,
     abrir,

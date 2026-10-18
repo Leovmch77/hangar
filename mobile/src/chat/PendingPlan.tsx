@@ -76,7 +76,7 @@ export function PendingPlan({ plan, path, options, interactionId, question, onSe
 const styles = StyleSheet.create((theme) => ({
   wrap: {
     backgroundColor: superficie(theme, 0.8),
-    borderRadius: 14,
+    borderRadius: theme.base.radius.md,
     borderWidth: 1,
     overflow: 'hidden',
   },
@@ -94,7 +94,7 @@ const styles = StyleSheet.create((theme) => ({
   title: {
     color: theme.tokens.text.primary,
     fontSize: theme.base.text.base,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   muted: {
     color: theme.tokens.text.secondary,

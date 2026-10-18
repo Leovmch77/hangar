@@ -556,7 +556,7 @@ impl OpenFacts for LocalFacts {
     fn name_has_leftovers(&self, name: &str) -> Result<bool, OpenError> {
         let Some(path) = self.serverless.then(|| super::local::leftover(&self.env().claude_base, name)).flatten() else { return Ok(false) };
         // Ilegível conta como sobra, e o nome seguinte também não se leria: recusa em vez de procurar sem fim.
-        match path.try_exists() {
+        match super::local::probe(&path) {
             Ok(_) => Ok(true),
             Err(error) => Err(OpenError::new(409, "session_open_name_needs_server", format!(
                 "não deu para ler {} ({error}); com o servidor fora ninguém confere o nome — suba o servidor", path.display()))),

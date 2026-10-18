@@ -6,6 +6,7 @@ import * as Haptics from 'expo-haptics';
 import { cwdParts, isOrq, loopBadge, pairExternals, providerName, relativeTime, rotuloEstado, untrackedReason, worktreeLabel, type AggSession, type PairExternal } from '@hangar/core';
 import { Chip, type Tone } from '../../ui/Chip';
 import { SessionAvatar } from './SessionAvatar';
+import { HeadlessSignal } from './HeadlessSignal';
 import { Icon } from '../../ui/Icon';
 import { superficie } from '../../theme/superficie';
 import { useWorktreeStatus } from '../worktrees/worktreeStatus';
@@ -116,7 +117,8 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
   const cwd = cwdParts(s.cwd);
   const loop = loopBadge(s.loop_status, s.loop_iter, s.loop_max);
   const pendingQuestions = s.pending_questions ?? 0;
-  const sub = s.question ?? (s.state === 'working' ? s.label : null) ?? null;
+  const reply = s.state === 'idle' ? s.last_reply : null;
+  const sub = s.question ?? (s.state === 'working' ? s.label : reply) ?? null;
   const peers = s.pair_peers ?? [];
   // o rótulo do grupo (ex.: o ticket) diz mais que o nome do par; sem ele, o par ou o tamanho
   const pairLabel = peers.length ? (s.pair_task ?? (peers.length === 1 ? peers[0] : String(peers.length + 1))) : null;
@@ -184,7 +186,7 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
       // estado e a pergunta sumiriam do leitor de tela.
       // Máquina e projeto entram mesmo quando a tela os esconde (lista agrupada, pasta = nome):
       // é o que distingue duas conversas de mesmo nome no leitor de tela.
-      accessibilityLabel={`${s.name}${fora ? `, ${m.pair_from_owner({ dono: fora.owner })}${s.guest_kind === 'share' ? '' : `, ${m.pair_level_view()}`}` : ''}, ${rotuloEstado(s.state)}${s.limited ? `, ${s.limit_reset ? m.sessao_limite_volta({ n: s.limit_reset }) : m.sessao_limite()}` : ''}${pendingQuestions > 0 ? `, ${m.ask_perguntas()}: ${pendingQuestions}` : ''}${sub ? `, ${sub}` : ''}${providerLabel ? `, ${providerLabel}` : ''}${account ? `, ${m.sessao_conta({ n: account.name })}` : ''}, ${s.serverLabel}${s.cwd ? `, ${cwd.base}` : ''}${s.branch ? `, ${s.branch}` : ''}${gitAhead || gitBehind ? `, ${m.git_sync_titulo({ ahead: gitAhead, behind: gitBehind })}` : ''}${selected ? `, ${m.switcher_atual()}` : ''}`}
+      accessibilityLabel={`${s.name}${s.headless === true ? `, ${m.criar_modo_exec_headless()}` : ''}${fora ? `, ${m.pair_from_owner({ dono: fora.owner })}${s.guest_kind === 'share' ? '' : `, ${m.pair_level_view()}`}` : ''}, ${rotuloEstado(s.state)}${s.limited ? `, ${s.limit_reset ? m.sessao_limite_volta({ n: s.limit_reset }) : m.sessao_limite()}` : ''}${pendingQuestions > 0 ? `, ${m.ask_perguntas()}: ${pendingQuestions}` : ''}${sub ? `, ${sub}` : ''}${providerLabel ? `, ${providerLabel}` : ''}${account ? `, ${m.sessao_conta({ n: account.name })}` : ''}, ${s.serverLabel}${s.cwd ? `, ${cwd.base}` : ''}${s.branch ? `, ${s.branch}` : ''}${gitAhead || gitBehind ? `, ${m.git_sync_titulo({ ahead: gitAhead, behind: gitBehind })}` : ''}${selected ? `, ${m.switcher_atual()}` : ''}`}
       accessibilityActions={acoesA11y}
       onAccessibilityAction={({ nativeEvent }) => {
         acao(nativeEvent.actionName);
@@ -197,18 +199,20 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
       <View style={styles.col}>
         <View style={styles.linha}>
           <Text style={[styles.nome, { color: theme.tokens.text.primary }]} numberOfLines={1}>{s.name}</Text>
+          {s.headless === true ? <HeadlessSignal /> : null}
           {pendingQuestions > 0 ? <Chip tone="warning">{`? ${pendingQuestions}`}</Chip> : null}
           {orq ? <Chip>{m.orq_row_badge()}</Chip> : null}
           {untracked ? <Chip tone="warning">{m.sessao_sem_id()}</Chip> : null}
           {fora ? <Chip tone="accent" icon={s.guest_kind === 'share' ? 'Link' : 'Eye'}>{m.pair_from_owner({ dono: fora.owner })}</Chip> : null}
           <Text style={[styles.tempo, { color: muted }]} numberOfLines={1}>{relativeTime(s.last_activity)}</Text>
         </View>
-        {/* O que a sessão está fazendo: a pergunta (cor de input) ou a atividade (itálico). */}
         {sub ? (
           <Text
-            style={[styles.sub, s.question ? { color: theme.tokens.pill.input.fg } : { color: theme.tokens.text.secondary, fontStyle: 'italic' }]}
+            style={[styles.sub, s.question ? { color: theme.tokens.pill.input.fg }
+              : s.state === 'working' ? { color: theme.tokens.text.secondary, fontStyle: 'italic' } : { color: muted }]}
             numberOfLines={1}
           >
+            {reply && !s.question ? '◆ ' : ''}
             {sub}
           </Text>
         ) : null}
@@ -261,7 +265,7 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
             {onPair ? pendentes.map((p) => (
               <Pressable key={`${p.alias}::${p.session}`} onPress={() => onPair(s, { kind: 'release', pair: p })} hitSlop={8}
                 accessibilityRole="button" accessibilityLabel={m.pair_release({ dono: p.owner })} style={styles.release}>
-                <Text style={[styles.metaTxt, { color: theme.tokens.accent.base, fontWeight: '600' }]}>{m.pair_release({ dono: p.owner })}</Text>
+                <Text style={[styles.metaTxt, { color: theme.tokens.accent.base, fontWeight: theme.base.weight.semibold }]}>{m.pair_release({ dono: p.owner })}</Text>
               </Pressable>
             )) : null}
           </View>
@@ -287,34 +291,34 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
 });
 
 const styles = StyleSheet.create((theme) => ({
-  row: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, minHeight: 56, paddingVertical: 10, paddingHorizontal: 12 },
-  compact: { paddingVertical: 6, minHeight: 44 },
+  row: { flexDirection: 'row', alignItems: 'flex-start', gap: theme.base.space[3], minHeight: 56, paddingVertical: theme.base.space[2], paddingHorizontal: theme.base.space[3] },
+  compact: { paddingVertical: theme.base.space[1.5], minHeight: 44 },
   // O avatar acompanha o topo da linha para não saltar quando aparece uma pergunta.
   lead: { width: 36, alignItems: 'center', paddingTop: 1 },
-  col: { flex: 1, gap: 2, minWidth: 0 },
-  linha: { flexDirection: 'row', alignItems: 'center', gap: 6, minWidth: 0 },
-  nome: { fontSize: theme.base.text.base, lineHeight: 22, fontWeight: '600', flexShrink: 1 },
-  account: { flexDirection: 'row', alignItems: 'center', gap: 4, minWidth: 0, maxWidth: 96, flexShrink: 0, paddingLeft: 8 },
+  col: { flex: 1, gap: theme.base.space[0.5], minWidth: 0 },
+  linha: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5], minWidth: 0 },
+  nome: { fontSize: theme.base.text.base, lineHeight: 22, fontWeight: theme.base.weight.semibold, flexShrink: 1 },
+  account: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], minWidth: 0, maxWidth: 96, flexShrink: 0, paddingLeft: theme.base.space[2] },
   accountDot: { width: 5, height: 5, borderRadius: theme.base.radius.full, flexShrink: 0 },
-  accountText: { fontSize: theme.base.text.xxs, fontWeight: '500', minWidth: 0, flexShrink: 1 },
-  tempo: { marginLeft: 'auto', paddingLeft: 4, flexShrink: 0, fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
+  accountText: { fontSize: theme.base.text.xxs, fontWeight: theme.base.weight.medium, minWidth: 0, flexShrink: 1 },
+  tempo: { marginLeft: 'auto', paddingLeft: theme.base.space[1], flexShrink: 0, fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
   sub: { fontSize: theme.base.text.sm, lineHeight: 20 },
   metaRow: { flexDirection: 'row', alignItems: 'center', minWidth: 0 },
-  engine: { flexDirection: 'row', alignItems: 'center', gap: 4, minWidth: 0, flexShrink: 0 },
-  engineText: { fontWeight: '600', flexShrink: 0 },
+  engine: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], minWidth: 0, flexShrink: 0 },
+  engineText: { fontWeight: theme.base.weight.semibold, flexShrink: 0 },
   metaRest: { flexShrink: 1 },
   metaSeparator: { flexShrink: 0 },
   meta: { fontSize: theme.base.text.xs, lineHeight: 18 },
   metaTxt: { fontSize: theme.base.text.xs },
-  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 },
-  branchWt: { paddingLeft: 3 },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[1], marginTop: theme.base.space[1] },
+  branchWt: { paddingLeft: theme.base.space[0.5] },
   // O git pede ação (enviar, trazer): não encolhe, quem cede é o texto antes dele.
-  git: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0, paddingLeft: 8 },
+  git: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5], flexShrink: 0, paddingLeft: theme.base.space[2] },
   gitPar: { flexDirection: 'row', alignItems: 'center', gap: 1 },
-  gitSync: { fontWeight: '600', fontVariant: ['tabular-nums'] },
+  gitSync: { fontWeight: theme.base.weight.semibold, fontVariant: ['tabular-nums'] },
   // Recuada e com a faixa do grupo, como a linha de fora no app de PC.
-  fora: { marginLeft: 8 },
+  fora: { marginLeft: theme.base.space[2] },
   faixa: { position: 'absolute', left: 0, top: 6, bottom: 6, width: 2, borderRadius: 1 },
   release: { minHeight: 24, justifyContent: 'center' },
-  resume: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4, minHeight: 32, alignSelf: 'flex-start' },
+  resume: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], marginTop: theme.base.space[1], minHeight: 32, alignSelf: 'flex-start' },
 }));

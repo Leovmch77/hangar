@@ -33,6 +33,8 @@ vi.mock('react-native-webview', () => ({
   )),
 }));
 vi.mock('../../chat/tools/EditDiff', () => ({ EditDiff: () => null }));
+vi.mock('../../chat/AssistantBubble', () => ({ mkMarkdownStyle: () => ({}) }));
+vi.mock('react-native-enriched-markdown', () => ({ EnrichedMarkdownText: () => null }));
 const openPdf = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 vi.mock('../attachments/mediaCache', () => ({ canShareFile: false, shareFile: vi.fn(), openPdfFile: openPdf }));
 vi.mock('../../ui/Toast', () => ({ toast: { erro: vi.fn() } }));
@@ -43,6 +45,10 @@ vi.mock('../../paraglide/messages', () => ({
   comum_carregando: () => 'Carregando…',
   arq_pdf_sem_leitor: () => 'Este aparelho não tem leitor de PDF',
   native_pdf_open: () => 'native_pdf_open',
+  selection_copy: () => 'selection-copy',
+  selection_copy_markdown: () => 'selection-copy-markdown',
+  selection_copy_image_url: () => 'selection-copy-image-url',
+  selection_copy_image_urls: () => 'selection-copy-image-urls',
 }));
 
 import { FileViewer } from './FileViewer';

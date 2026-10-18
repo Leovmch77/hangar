@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, BackHandler, Platform, Pressable, ScrollView, Text, View } from 'react-native';
-import { Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
-import { useHeaderHeight } from 'expo-router/react-navigation';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { formatElapsed, getSubagents, getWorkflow, getWorkflowAgent, getWorkflows } from '@hangar/core';
 import type { SubagentRun, WorkflowDetail, WorkflowAgentDetail, WorkflowSummary } from '@hangar/core';
 import { chatStore } from '../../../../src/stores/chat';
 import { useServers } from '../../../../src/stores/servers';
 import { useActivity } from '../../../../src/features/activity/useActivity';
+import { ActivityTimeout, useActivityRequest } from '../../../../src/features/activity/useActivityRequest';
 import { TaskRows } from '../../../../src/features/activity/TaskRows';
 import { WorkflowList } from '../../../../src/features/activity/WorkflowList';
 import { WorkflowDetailView } from '../../../../src/features/activity/WorkflowDetailView';
@@ -16,15 +16,16 @@ import { AgentDetailView } from '../../../../src/features/activity/AgentDetailVi
 import { SubagentLive, subagentProblemText, subagentStatus } from '../../../../src/features/activity/SubagentLive';
 import * as m from '../../../../src/paraglide/messages';
 import { superficie } from '../../../../src/theme/superficie';
-import { HeaderBack, useGlassHeader } from '../../../../src/ui/glassHeader';
+import { HeaderBack } from '../../../../src/ui/glassHeader';
 import { Icon } from '../../../../src/ui/Icon';
 
 type Level = 'list' | 'workflow' | 'agent' | 'subagent';
 
 export default function ActivitySheet() {
   const { theme } = useUnistyles();
-  const header = useGlassHeader();
-  const headerHeight = useHeaderHeight();
+  const insets = useSafeAreaInsets();
+  const router = useRouter();
+  const readActivity = useActivityRequest();
   const params = useLocalSearchParams<{ server: string; name: string }>();
   const serverId = Array.isArray(params.server) ? params.server[0] : (params.server ?? '');
   const name = Array.isArray(params.name) ? params.name[0] : (params.name ?? '');
@@ -51,7 +52,7 @@ export default function ActivitySheet() {
   const currentList = list.key === listKey;
   const workflows = currentList ? list.workflows : [];
   const subs = currentList ? list.subs : [];
-  const listLoading = !currentList || list.workflowLoading || list.subLoading;
+  const listLoading = !currentList || ((list.workflowLoading || list.subLoading) && workflows.length === 0 && subs.length === 0);
   const workflowListError = currentList ? list.workflowError : '';
   const subError = currentList ? list.subError : '';
   const [olderOpen, setOlderOpen] = useState(false);
@@ -72,11 +73,14 @@ export default function ActivitySheet() {
   const genAgent = useRef(0);
   const genList = useRef(0);
   const genSubs = useRef(0);
+  const subsTimedOut = useRef(false);
 
   const subRequest = useRef<{ generation: number; rerun: boolean } | null>(null);
 
   const refreshSubs = useCallback(async (invalidate = true): Promise<void> => {
     if (!server) return;
+    if (!invalidate && subsTimedOut.current) return;
+    if (invalidate) subsTimedOut.current = false;
     const generation = genList.current;
     if (subRequest.current?.generation === generation) {
       if (invalidate) {
@@ -89,19 +93,20 @@ export default function ActivitySheet() {
     subRequest.current = request;
     const subGeneration = ++genSubs.current;
     try {
-      const subs = await getSubagents(name, server);
+      const subs = await readActivity(getSubagents(name, server));
       if (generation !== genList.current || subGeneration !== genSubs.current) return;
       setList((current) => ({ ...current, subs, subLoading: false, subError: '' }));
-    } catch {
+    } catch (error) {
       if (generation !== genList.current || subGeneration !== genSubs.current) return;
-      setList((current) => ({ ...current, subLoading: false, subError: m.atividade_erro_subagentes() }));
+      subsTimedOut.current = error instanceof ActivityTimeout;
+      setList((current) => ({ ...current, subLoading: false, subError: error instanceof ActivityTimeout ? error.message : m.atividade_erro_subagentes() }));
     } finally {
       if (subRequest.current === request) {
         subRequest.current = null;
         if (request.rerun && generation === genList.current) void refreshSubs();
       }
     }
-  }, [listKey, name, server]);
+  }, [listKey, name, server, readActivity]);
 
   const workflowRequest = useRef<number | null>(null);
   const fetchAll = useCallback(async () => {
@@ -112,19 +117,19 @@ export default function ActivitySheet() {
     if (workflowRequest.current === generation) return subRefresh;
     workflowRequest.current = generation;
     await Promise.all([
-      getWorkflows(name, server).then(
+      readActivity(getWorkflows(name, server)).then(
         (workflows) => {
           if (generation === genList.current) setList((current) => ({ ...current, workflows, workflowLoading: false, workflowError: '' }));
         },
-        () => {
-          if (generation === genList.current) setList((current) => ({ ...current, workflowLoading: false, workflowError: m.atividade_erro_run() }));
+        (error) => {
+          if (generation === genList.current) setList((current) => ({ ...current, workflowLoading: false, workflowError: error instanceof ActivityTimeout ? error.message : m.atividade_erro_run() }));
         },
       ).finally(() => {
         if (workflowRequest.current === generation) workflowRequest.current = null;
       }),
       subRefresh,
     ]);
-  }, [name, refreshSubs, server]);
+  }, [name, refreshSubs, server, readActivity]);
 
   useEffect(() => {
     genList.current += 1;
@@ -239,13 +244,13 @@ export default function ActivitySheet() {
     setWfLoading(true);
     setWfError('');
     try {
-      const d = await getWorkflow(name, rid, server);
+      const d = await readActivity(getWorkflow(name, rid, server));
       if (g !== genWf.current) return;
       setDetail(d);
-    } catch {
+    } catch (error) {
       if (g !== genWf.current) return;
       setDetail(null);
-      setWfError(m.atividade_erro_run());
+      setWfError(error instanceof ActivityTimeout ? error.message : m.atividade_erro_run());
     } finally {
       if (g === genWf.current) setWfLoading(false);
     }
@@ -260,13 +265,13 @@ export default function ActivitySheet() {
     setAgentLoading(true);
     setAgentError('');
     try {
-      const d = await getWorkflowAgent(name, runId, agentId, server);
+      const d = await readActivity(getWorkflowAgent(name, runId, agentId, server));
       if (g !== genAgent.current) return;
       setAgentDetail(d);
-    } catch {
+    } catch (error) {
       if (g !== genAgent.current) return;
       setAgentDetail(null);
-      setAgentError(m.atividade_erro_run());
+      setAgentError(error instanceof ActivityTimeout ? error.message : m.atividade_erro_run());
     } finally {
       if (g === genAgent.current) setAgentLoading(false);
     }
@@ -319,37 +324,39 @@ export default function ActivitySheet() {
   const headerTitle = level === 'list' ? m.ctx_atividade() : level === 'subagent' ? subTitle || m.atividade_subagente() : level === 'workflow' ? (detail?.name ?? m.atividade_workflow()) : (agentDetail?.label ?? m.atividade_agente());
   const countBadge = level === 'list' && activity.total > 0 ? `${activity.done}/${activity.total}` : null;
   const wfBadge = level === 'workflow' && detail ? detail.status : null;
-  // Opções novas a cada render fazem o Stack.Screen chamar setOptions a cada render; no iOS o cabeçalho
-  // nativo da folha remede, a tela redesenha e o laço estoura "Maximum update depth exceeded".
+  const backgroundColor = theme.tokens.bg.base;
   const headerOptions = useMemo(() => ({
-    ...header,
-    headerShown: Platform.OS !== 'android',
-    title: headerTitle,
-    headerLeft: level === 'list' ? undefined : () => <HeaderBack onPress={back} />,
-    headerRight: countBadge ? () => <Text style={[styles.count, { color: theme.tokens.text.secondary }]}>{countBadge}</Text> : wfBadge ? () => (
-      <Text style={[styles.wfStatus, wfBadge === 'completed' ? { color: theme.tokens.status.success } : wfBadge === 'running' ? { color: theme.tokens.accent.base } : { color: theme.tokens.text.secondary }]}>{wfBadge}</Text>
-    ) : undefined,
+    headerShown: false,
     sheetAllowedDetents: [0.92],
     sheetGrabberVisible: true,
-    contentStyle: { backgroundColor: 'transparent' },
-  }), [header, headerTitle, level, back, countBadge, wfBadge, theme]);
+    contentStyle: { backgroundColor },
+  }), [backgroundColor]);
 
-  const androidHeader = Platform.OS === 'android' ? (
-    <View style={styles.header}>
-      {headerOptions.headerLeft?.()}
+  const close = () => {
+    if (router.canGoBack()) router.back();
+    else router.replace(`/s/${encodeURIComponent(serverId)}/${encodeURIComponent(name)}` as never);
+  };
+  const localHeader = (
+    <View collapsable={false} style={styles.header}>
+      {level !== 'list' ? <HeaderBack onPress={back} /> : null}
       <Text style={[styles.title, { color: theme.tokens.text.primary }]} numberOfLines={1} accessibilityRole="header">{headerTitle}</Text>
-      {headerOptions.headerRight?.()}
+      {countBadge ? <Text style={[styles.count, { color: theme.tokens.text.secondary }]}>{countBadge}</Text> : wfBadge ? (
+        <Text style={[styles.wfStatus, { color: wfBadge === 'completed' ? theme.tokens.status.success : wfBadge === 'running' ? theme.tokens.accent.base : theme.tokens.text.secondary }]}>{wfBadge}</Text>
+      ) : null}
+      <Pressable accessibilityRole="button" accessibilityLabel={m.native_close()} onPress={close} style={styles.close}>
+        <Icon name="X" size={20} color={theme.tokens.text.secondary} />
+      </Pressable>
     </View>
-  ) : null;
+  );
 
   if (!server) {
     return (
       <>
         <Stack.Screen options={headerOptions} />
-        <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.root, { backgroundColor: theme.tokens.bg.base, paddingTop: Platform.OS === 'android' ? 0 : headerHeight }]}>
-          {androidHeader}
+        <View style={styles.root}>
+          {localHeader}
           <Text style={[styles.error, { color: theme.tokens.status.error }]}>{m.compare_servidor_nao_encontrado()}</Text>
-        </SafeAreaView>
+        </View>
       </>
     );
   }
@@ -357,10 +364,10 @@ export default function ActivitySheet() {
   return (
     <>
       <Stack.Screen options={headerOptions} />
-      <SafeAreaView edges={['bottom', 'left', 'right']} style={[styles.root, { backgroundColor: theme.tokens.bg.base, paddingTop: Platform.OS === 'android' || (level === 'list' && Platform.OS === 'ios') ? 0 : headerHeight }]}>
-        {androidHeader}
+      <View style={styles.root}>
+        {localHeader}
         {level === 'list' ? (
-          <ScrollView contentContainerStyle={styles.body} contentInsetAdjustmentBehavior="automatic" showsVerticalScrollIndicator={false}>
+          <ScrollView style={styles.scroll} contentContainerStyle={[styles.body, { paddingBottom: insets.bottom + theme.base.space[4] }]} contentInsetAdjustmentBehavior="never" showsVerticalScrollIndicator={false}>
             {workflows.length > 0 ? <WorkflowList workflows={workflows} onSelect={openWorkflow} /> : null}
             {listLoading ? (
               <View style={styles.center}>
@@ -487,22 +494,26 @@ export default function ActivitySheet() {
             {!listLoading && !workflowListError && !subError && workflows.length === 0 && activity.tasks.length === 0 && runningAgents.length === 0 && subs.length === 0 && shellsVivos.length === 0 && processos.length === 0 ? <Text style={[styles.empty, { color: theme.tokens.text.muted }]}>{m.atividade_vazio()}</Text> : null}
           </ScrollView>
         ) : level === 'workflow' ? (
-          <WorkflowDetailView
-            detail={detail}
-            loading={wfLoading}
-            onAgent={openAgent}
-            erro={wfError}
-            onTentar={() => runId && openWorkflow(runId)}
-          />
+          <View style={[styles.detail, { paddingBottom: insets.bottom }]}>
+            <WorkflowDetailView
+              detail={detail}
+              loading={wfLoading}
+              onAgent={openAgent}
+              erro={wfError}
+              onTentar={() => runId && openWorkflow(runId)}
+            />
+          </View>
         ) : level === 'agent' ? (
-          <AgentDetailView
-            detail={agentDetail}
-            loading={agentLoading}
-            erro={agentError}
-            onTentar={() => openAgent(agentAberto)}
-          />
+          <View style={[styles.detail, { paddingBottom: insets.bottom }]}>
+            <AgentDetailView
+              detail={agentDetail}
+              loading={agentLoading}
+              erro={agentError}
+              onTentar={() => openAgent(agentAberto)}
+            />
+          </View>
         ) : level === 'subagent' && subAgentId ? (
-          <View style={styles.subagentDetail}>
+          <View style={[styles.detail, { paddingBottom: insets.bottom }]}>
             <SubagentLive key={`${serverId}::${name}::${subAgentId}`} server={server} sessionName={name} agentId={subAgentId} paiRodando={paiRodando} />
           </View>
         ) : (
@@ -510,7 +521,7 @@ export default function ActivitySheet() {
             <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.atividade_sem_transcript()}</Text>
           </View>
         )}
-      </SafeAreaView>
+      </View>
     </>
   );
 }
@@ -519,10 +530,12 @@ const styles = StyleSheet.create((theme) => ({
   root: { flex: 1 },
   header: { flexDirection: 'row', alignItems: 'center', minHeight: 44, paddingHorizontal: theme.base.space[4], paddingVertical: theme.base.space[2], gap: theme.base.space[2] },
   title: { flex: 1, fontSize: theme.base.text.lg, fontWeight: '600' },
+  close: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   count: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.sm, fontVariant: ['tabular-nums'] },
   wfStatus: { fontSize: theme.base.text.xs, fontWeight: '600', paddingHorizontal: theme.base.space[2], paddingVertical: 2, borderRadius: theme.base.radius.full, overflow: 'hidden' },
-  body: { padding: theme.base.space[4], gap: theme.base.space[4], paddingBottom: theme.base.space[6] },
-  subagentDetail: { flex: 1, minHeight: 0, paddingHorizontal: theme.base.space[4] },
+  scroll: { flex: 1 },
+  body: { padding: theme.base.space[4], gap: theme.base.space[4] },
+  detail: { flex: 1, minHeight: 0, paddingHorizontal: theme.base.space[4] },
   section: { gap: theme.base.space[2] },
   olderToggle: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], minHeight: 44, minWidth: 44 },
   label: { fontSize: theme.base.text.xs, textTransform: 'uppercase', letterSpacing: 0.6, fontWeight: '600' },

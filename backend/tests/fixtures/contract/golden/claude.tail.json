@@ -225,6 +225,33 @@
   }
  },
  {
+  "offset": 1814,
+  "event": {
+   "kind": "user_msg",
+   "id": "u-006",
+   "text": "/model",
+   "tool_name": null,
+   "tool_input": null,
+   "tool_use_id": null,
+   "result": null,
+   "is_error": null,
+   "patch": null,
+   "bg_agent_id": null,
+   "ts": null,
+   "cache_read": null,
+   "cache_ttl_s": null,
+   "desistiu": null,
+   "hook_error": null,
+   "skill": null,
+   "orq": null,
+   "queued_delivered": null,
+   "queued_ts": null,
+   "queued_confirmed": null,
+   "queued_consumed": null,
+   "image_count": null
+  }
+ },
+ {
   "offset": 1958,
   "event": {
    "kind": "notice",

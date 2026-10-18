@@ -26,7 +26,7 @@ impl TerminalIo for FakeIo {
  Ok(CommandOutput {success:true,stdout:vec![]}) }) }
  fn socket<'a>(&'a self, _: &'a NativeMessage, envelope: Vec<u8>) -> IoFuture<'a, WriteOutcome> {Box::pin(async move {*self.envelope.lock().unwrap()=envelope;Ok(*self.socket.lock().unwrap())})}
 }
-fn driver(io:Arc<FakeIo>,s:Arc<Services>)->TerminalDriver {TerminalDriver::new(binding(),s,io,InputLimits {literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:3})}
+fn driver<S:TerminalServices+'static>(io:Arc<FakeIo>,s:Arc<S>)->TerminalDriver {TerminalDriver::new(binding(),s,io,InputLimits {literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:3})}
 #[test]
 fn terminal_input_composer_proof() {
  let old=ComposerSnapshot::parse(&screen("[Pasted text #1 +12 lines] [Image #1]")).unwrap();
@@ -946,4 +946,33 @@ async fn model_picker_b22_psmux_same_sequence() {
  let out = hangar_server::model_picker::drive(&driver, Some("sonnet"), None, false).await;
  assert_eq!(picker_keys(&io), ["/model", "Enter", "Enter", "\u{1b}[27;1;27;1;0;1_\u{1b}[27;1;27;0;0;1_"]);
  assert_eq!(out.unwrap_err().code, Some("erro_seletor_modelo_nao_abriu"));
+}
+/// Os hooks `UserPromptSubmit` da conta começaram para este texto e ainda não terminaram: o plugin não
+/// responde e o composer segue com o texto. O aviso do hook já basta para dar a entrada por aceita.
+struct HooksStarted { inner: Services, started: String, abandoned: Mutex<Vec<String>> }
+impl TerminalServices for HooksStarted {
+ fn facts<'a>(&'a self, b: &'a TerminalBinding) -> ServiceFuture<'a, InputFacts> { self.inner.facts(b) }
+ fn publish<'a>(&'a self, b: &'a TerminalBinding, r: PluginRequest) -> ServiceFuture<'a, PluginReply> { Box::pin(async move { let _ = self.inner.publish(b, r).await; std::future::pending().await }) }
+ fn permission_guard<'a>(&'a self, b: &'a TerminalBinding) -> ServiceFuture<'a, ()> { self.inner.permission_guard(b) }
+ fn abandon_publication<'a>(&'a self, id: &'a str) -> ServiceFuture<'a, ()> { Box::pin(async move { self.abandoned.lock().unwrap().push(id.into()); Ok(()) }) }
+ fn prompt_started<'a>(&'a self, _since: f64, text: &'a str) -> ServiceFuture<'a, bool> { Box::pin(async move { Ok(text == self.started) }) }
+}
+#[tokio::test]
+async fn terminal_input_plugin_user_accepts_when_the_prompt_hooks_start() {
+ let io=Arc::new(FakeIo::new(vec![screen("")]));
+ let s=Arc::new(HooksStarted { inner: Services::new(), started: "hello".into(), abandoned: Mutex::new(vec![]) });
+ s.inner.facts.lock().unwrap().plugin_live=true;s.inner.facts.lock().unwrap().plugin_user=true;
+ let r=tokio::time::timeout(Duration::from_secs(5),driver(io.clone(),s.clone()).prompt("hello","op-1")).await.expect("não esperou o plugin");
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"prompt_started"));
+ assert_eq!(*s.abandoned.lock().unwrap(),vec!["op-1".to_string()]);
+ assert!(io.writes().is_empty());
+}
+#[tokio::test]
+async fn terminal_input_slash_accepts_when_the_prompt_hooks_start_without_a_second_enter() {
+ // O composer segue mostrando o comando enquanto os hooks rodam: sem o aviso, isso pediria outro Enter.
+ let io=Arc::new(FakeIo::new(vec![screen(""),screen("/pr-review-auto 225")]));
+ let s=Arc::new(HooksStarted { inner: Services::new(), started: "/pr-review-auto 225".into(), abandoned: Mutex::new(vec![]) });
+ let r=driver(io.clone(),s).prompt("/pr-review-auto 225","op-2").await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"prompt_started"));
+ assert_eq!(io.writes().iter().filter(|w|w.args.last().is_some_and(|a|a=="\r")).count(),1);
 }

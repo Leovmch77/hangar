@@ -14,6 +14,7 @@ export interface ProjectionInput {
   eventsRevision?: number;
   pref: PensamentoTools;
   merge: boolean;
+  terminal?: boolean;
   tasksEnabled: boolean;
   pagesEnabled: boolean;
   running: ReadonlySet<string>;
@@ -52,7 +53,7 @@ const resultOf = (results: Map<string, ChatEvent>) => (ev: ChatEvent) => results
 const emptyGroup = (): GroupState => ({ mode: null, count: 0, first: '' });
 
 function configKey(input: ProjectionInput): string {
-  return JSON.stringify([input.pref, input.merge, input.tasksEnabled, input.pagesEnabled,
+  return JSON.stringify([input.pref, input.merge, !!input.terminal, input.tasksEnabled, input.pagesEnabled,
     [...input.running].sort(), input.queuePanel?.entries.map((e) => e.id).sort() ?? []]);
 }
 
@@ -69,6 +70,7 @@ function sameRow(a: MessageRow, b: MessageRow, results: Map<string, ChatEvent>, 
 
 /** A revisão igual autoriza apenas a cauda; sem ela, um array novo é uma substituição. */
 export function projectConversation(before: ConversationProjection | null, input: ProjectionInput): ConversationProjection {
+  const groupMin = input.terminal ? 1 : 3;
   const config = configKey(input);
   if (before && before.events === input.events && before.revision === input.eventsRevision && before.config === config) return before;
   const append = !!before && before.config === config && input.eventsRevision !== undefined
@@ -166,7 +168,7 @@ export function projectConversation(before: ConversationProjection | null, input
       const extend = g.mode === 'run';
       if (!extend) { g.first = ev.id; g.count = 0; }
       g.count++;
-      if (!input.merge && extend && g.count === 3) {
+      if (!input.merge && extend && g.count === 3 && !input.terminal) {
         const first = rows[rows.length - 2], second = rows[rows.length - 1];
         if (first.type === 'fold' && second.type === 'fold') {
           const left = first.summary!, right = second.summary!;
@@ -183,8 +185,8 @@ export function projectConversation(before: ConversationProjection | null, input
           for (const part of row.parts) remember(part, rows.length - 1);
         }
       } else {
-        const index = addFold(ev, g.count >= 3 ? `g-${g.first}` : ev.id, g.count >= 3 ? 'group' : 'tool', extend && g.count > 3);
-        if (input.merge && g.count === 3 && rows[index].id === `f-${g.first}`) {
+        const index = addFold(ev, g.count >= groupMin ? `g-${g.first}` : ev.id, g.count >= groupMin ? 'group' : 'tool', extend && g.count > groupMin);
+        if (input.merge && !input.terminal && g.count === 3 && rows[index].id === `f-${g.first}`) {
           rows[index].id = `f-g-${g.first}`;
         }
       }
@@ -230,7 +232,7 @@ export function projectConversation(before: ConversationProjection | null, input
         if (rows[to]?.type === 'fold') to++;
       }
       const parts = rows.slice(from, to).flatMap((r) => r.type === 'fold' ? r.parts : r.type === 'page' ? [r.ev] : []);
-      const replacement = foldConversation(agruparConversa(parts, { entraNoPensamento: (name) => entraNoPensamento(input.pref, name) }), input.merge, pageOf)
+      const replacement = foldConversation(agruparConversa(parts, { entraNoPensamento: (name) => entraNoPensamento(input.pref, name), groupMin }), input.merge, pageOf)
         .map((r) => ({ ...r, ...(r.type === 'fold' && { summary: appendFoldSummary(undefined, r.parts, resultOf(next.results)) }), resultOf: resultOf(next.results) }));
       rows.splice(from, to - from, ...replacement);
     }
@@ -245,7 +247,7 @@ export function projectConversation(before: ConversationProjection | null, input
     const visibleEvents = input.events.filter((ev) => visible(ev) && !(input.tasksEnabled && isTask(ev))
       && !(ev.kind === 'tool_use' && input.running.has(ev.tool_use_id ?? ''))
       && !(input.queuePanel && hiddenByQueuePanel(ev, input.queuePanel)));
-    const normalized = foldConversation(agruparConversa(visibleEvents, { entraNoPensamento: (name) => entraNoPensamento(input.pref, name) }), input.merge, pageOf);
+    const normalized = foldConversation(agruparConversa(visibleEvents, { entraNoPensamento: (name) => entraNoPensamento(input.pref, name), groupMin }), input.merge, pageOf);
     rows.splice(0, rows.length, ...normalized.map((r) => ({ ...r,
       ...(r.type === 'event' && r.ev.orq && { dayTs: days.get(r.ev) }),
       ...(r.type === 'fold' && { summary: appendFoldSummary(undefined, r.parts, resultOf(next.results)), resultOf: resultOf(next.results) }),

@@ -1602,12 +1602,12 @@ impl RuntimeRegistry {
         let entry=matches.next()?;if matches.next().is_some() {return None;}
         match &entry.handle {
             EntryHandle::Terminal {target,..}=>Some(crate::transcript::InternalInfo {provider:"claude".into(),jsonl:Some(target.transcript.clone()),session_key:target.binding.conversation.clone(),
-                history:json!({"queue":target.projection_dir.join(format!("{}.jsonl",name))}),headless:false,lifecycle_id:None}),
+                history:json!({"queue":target.projection_dir.join(format!("{}.jsonl",name))}),headless:false,lifecycle_id:None,cwd:None}),
             EntryHandle::Headless(_)=> {
                 let live=entry.live.borrow().clone()?;
                 let binding=live.binding.as_ref().filter(|binding|binding.key==entry.mode_source.binding.key && binding.generation==entry.generation && !binding.conversation.is_empty())?;
                 let jsonl=entry.mode_source.transcript.with_file_name(format!("{}.jsonl",binding.conversation));
-                Some(crate::transcript::InternalInfo {provider:crate::transcript::Provider::ClaudeHeadless.as_str().into(),jsonl:Some(jsonl),session_key:binding.conversation.clone(),history:json!({"queue":entry.lease_path.parent()?.parent()?.join(format!("{name}.jsonl"))}),headless:true,lifecycle_id:None})
+                Some(crate::transcript::InternalInfo {provider:crate::transcript::Provider::ClaudeHeadless.as_str().into(),jsonl:Some(jsonl),session_key:binding.conversation.clone(),history:json!({"queue":entry.lease_path.parent()?.parent()?.join(format!("{name}.jsonl"))}),headless:true,lifecycle_id:None,cwd:None})
             },
             _=>None,
         }
@@ -2659,7 +2659,8 @@ mod tests {
         registry.bind_lifecycle();
         let hubs=crate::side::Hubs::default();registry.bind_hubs(hubs.downgrade());
         registry.open_claude_headless("cl-rebind",false).await.expect("é dela").expect("abriu");
-        let binding=tokio::time::timeout(Duration::from_secs(5),async {
+        // Teto só contra travamento: no Windows do CI, com a bateria em paralelo, a troca passou de 5 s.
+        let binding=tokio::time::timeout(Duration::from_secs(60),async {
             loop {
                 if let Ok(binding)=registry.interaction_binding_readonly("cl-rebind").await && binding.conversation=="b" {break binding;}
                 tokio::time::sleep(Duration::from_millis(20)).await;

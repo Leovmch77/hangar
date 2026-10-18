@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StatusBar, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Image } from 'expo-image';
@@ -9,7 +9,9 @@ import { scheduleOnRN } from 'react-native-worklets';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as m from '../../paraglide/messages';
 import { Icon } from '../../ui/Icon';
-import { localCopy } from './mediaCache';
+import { localCopy, saveImage } from './mediaCache';
+import { toast } from '../../ui/Toast';
+import { haptic } from '../../ui/haptics';
 
 export interface LightboxProps {
   visible: boolean;
@@ -53,6 +55,20 @@ export function Lightbox({ visible, uri, headers, filename, onClose, kind = 'ima
   const handleClose = () => {
     reset();
     onClose();
+  };
+
+  const [saving, setSaving] = useState(false);
+  const savingNow = useRef(false);
+  const save = () => {
+    // O `disabled` só vale depois do próximo render: dois toques rápidos abriam duas folhas.
+    if (savingNow.current) return;
+    savingNow.current = true;
+    haptic.selection();
+    setSaving(true);
+    saveImage(uri, headers, filename)
+      .then((gravou) => { if (gravou) toast.ok(m.file_card_saved()); })
+      .catch((e: unknown) => toast.erro(e instanceof Error ? e.message : String(e)))
+      .finally(() => { savingNow.current = false; setSaving(false); });
   };
 
   const pinch = Gesture.Pinch()
@@ -115,6 +131,21 @@ export function Lightbox({ visible, uri, headers, filename, onClose, kind = 'ima
             <Text style={styles.closeTxt}>✕</Text>
           </View>
         </Pressable>
+        {kind === 'image' ? (
+          <Pressable
+            style={[styles.saveArea, { top: topo }]}
+            onPress={save}
+            disabled={saving}
+            hitSlop={2}
+            accessibilityLabel={m.anexos_baixar({ nome: filename })}
+            accessibilityRole="button"
+            accessibilityState={{ busy: saving }}
+          >
+            <View style={styles.roundBtn}>
+              {saving ? <ActivityIndicator size="small" color="#fff" /> : <Icon name="Download" size={18} color="#fff" />}
+            </View>
+          </Pressable>
+        ) : null}
         {kind === 'video' ? (
           <View style={[styles.videoWrap, { paddingTop: topo + 48 }]}>
             <VideoPage uri={uri} headers={headers} name={filename} />
@@ -215,6 +246,12 @@ const styles = StyleSheet.create((theme) => ({
   closeArea: {
     position: 'absolute',
     right: theme.base.space[4],
+    zIndex: 2,
+  },
+  // À esquerda do botão de fechar, que tem 40 de largura.
+  saveArea: {
+    position: 'absolute',
+    right: theme.base.space[4] + 40 + theme.base.space[3],
     zIndex: 2,
   },
   roundBtn: {

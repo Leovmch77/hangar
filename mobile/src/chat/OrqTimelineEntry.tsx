@@ -186,7 +186,7 @@ const styles = StyleSheet.create((theme) => ({
   warning: { color: theme.tokens.status.warning, fontSize: theme.base.text.xs },
   error: { color: theme.tokens.status.error, fontSize: theme.base.text.xs },
   line: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
-  dot: { width: 6, height: 6, borderRadius: 3 },
-  task: { color: theme.tokens.text.primary, fontSize: theme.base.text.xs, fontWeight: '600' },
+  dot: { width: 6, height: 6, borderRadius: theme.base.radius.full },
+  task: { color: theme.tokens.text.primary, fontSize: theme.base.text.xs, fontWeight: theme.base.weight.semibold },
   phrase: { flex: 1, color: theme.tokens.text.secondary, fontSize: theme.base.text.sm },
 }));

@@ -5,12 +5,12 @@ import type { UnistylesThemes } from 'react-native-unistyles';
 import { ImageThumb, type MediaItem } from './ImageThumb';
 import { AudioChip } from './AudioChip';
 import { DocumentViewer, type DocumentItem } from '../features/attachments/DocumentViewer';
-import { canShareFile, shareFile } from '../features/attachments/mediaCache';
+import { FileCard } from './FileCard';
 import { toast } from '../ui/Toast';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 import type { MarkdownStyle } from 'react-native-enriched-markdown';
 import { useRouter } from 'expo-router';
-import { fileUrlNative, fileAuthHeader, fileKind, lerTabelaMarkdown, linkCodeReferences, parseCodePaths, parseFileLink, parseFilePaths, parseMediaUrls, proposedPlan, planDisplayText, splitMermaidBlocks, buildQuoteRef, quoteAffixesInMarkdown, quoteTooLong } from '@hangar/core';
+import { codeCitation, fileUrlNative, fileAuthHeader, hideAttachmentPaths, lerTabelaMarkdown, linkCodeReferences, parseCodePaths, parseFileLink, parseFilePaths, parseMediaUrls, proposedPlan, planDisplayText, splitMermaidBlocks, buildQuoteRef, quoteAffixesInMarkdown, quoteTooLong } from '@hangar/core';
 import type { TextContextMenuItem, TextSelectionMenuConfig } from 'react-native-enriched-markdown';
 import { MermaidBlock } from './MermaidBlock';
 import { contextRefsKey } from '../stores/contextRefs';
@@ -46,12 +46,12 @@ export function mkMarkdownStyle(t: TemaApp): MarkdownStyle {
   const bloco = (size: number, lh: number) => ({ fontSize: size * texto, lineHeight: Math.round(lh * texto * linha) });
   return {
     paragraph: { color: t.tokens.text.primary, ...bloco(t.base.text.base, LH.p) },
-    h1: { color: t.tokens.text.primary, ...bloco(t.base.text.xl, LH.h1), fontWeight: '700' },
-    h2: { color: t.tokens.text.primary, ...bloco(t.base.text.lg, LH.h2), fontWeight: '700' },
-    h3: { color: t.tokens.text.primary, ...bloco(t.base.text.base, LH.h3), fontWeight: '600' },
-    h4: { color: t.tokens.text.primary, ...bloco(t.base.text.base, LH.h4), fontWeight: '600' },
-    h5: { color: t.tokens.text.primary, ...bloco(t.base.text.sm, LH.h5), fontWeight: '600' },
-    h6: { color: t.tokens.text.secondary, ...bloco(t.base.text.sm, LH.h6), fontWeight: '600' },
+    h1: { color: t.tokens.text.primary, ...bloco(t.base.text.xl, LH.h1), fontWeight: t.base.weight.bold },
+    h2: { color: t.tokens.text.primary, ...bloco(t.base.text.lg, LH.h2), fontWeight: t.base.weight.bold },
+    h3: { color: t.tokens.text.primary, ...bloco(t.base.text.base, LH.h3), fontWeight: t.base.weight.semibold },
+    h4: { color: t.tokens.text.primary, ...bloco(t.base.text.base, LH.h4), fontWeight: t.base.weight.semibold },
+    h5: { color: t.tokens.text.primary, ...bloco(t.base.text.sm, LH.h5), fontWeight: t.base.weight.semibold },
+    h6: { color: t.tokens.text.secondary, ...bloco(t.base.text.sm, LH.h6), fontWeight: t.base.weight.semibold },
     link: { color: t.tokens.accent.base, underline: true },
     strong: { color: t.tokens.text.primary },
     em: { color: t.tokens.text.primary },
@@ -130,7 +130,12 @@ export const AssistantBubble = memo(function AssistantBubble({
   const server = useServers((s) => s.servers.find((x) => x.id === serverId) ?? null);
   const paths = useMemo(() => parseFilePaths(text), [text]);
   const proposed = useMemo(() => proposedPlan(text), [text]);
-  const display = useMemo(() => planDisplayText(text), [text]);
+  // O caminho que vira prévia logo abaixo some do texto (fica no transcript, que é o que autoriza o arquivo).
+  const drawsLocal = !!sessionName && !!server;
+  const display = useMemo(() => {
+    const d = planDisplayText(text);
+    return drawsLocal ? hideAttachmentPaths(d, paths) : d;
+  }, [text, drawsLocal, paths]);
   const md = useMemo(() => mkMarkdownStyle(theme), [theme]);
   // Anexos: mídia/pdf/html citados por caminho (precisam da sessão) + mídia remota por URL, que o
   // web desenha igual. Imagem e vídeo da mensagem formam UMA galeria no visor.
@@ -196,9 +201,9 @@ export const AssistantBubble = memo(function AssistantBubble({
     Linking.openURL(url).catch((e: unknown) => toast.erro(e instanceof Error ? e.message : String(e)));
   }, [abrirArquivo, podeAbrirArquivo]);
   // Arquivo de CÓDIGO citado na prosa (o parseFilePaths acima só pega mídia/pdf/html, que viram
-  // miniatura). Só vira chip quando dá pra abrir na aba Arquivos. O `fileKind` tira a mídia daqui:
+  // miniatura). Só vira chip quando dá pra abrir na aba Arquivos. O `codeCitation` tira a mídia daqui:
   // com extensão aberta no absoluto o `parseCodePaths` casa `.png` e o arquivo saía nos dois.
-  const codigos = useMemo(() => parseCodePaths(text).filter((p) => !fileKind(p)), [text]);
+  const codigos = useMemo(() => parseCodePaths(text).filter((p) => codeCitation(p)), [text]);
   const hasCodigos = codigos.length > 0 && !!sessionName && !!serverId;
   const tabelas = useMemo(() => lerTabelaMarkdown(display), [display]);
   const [pref, setPref] = useState(() => getTableChartPref());
@@ -259,27 +264,21 @@ export const AssistantBubble = memo(function AssistantBubble({
             }
             if (r.kind === 'audio') return <AudioChip key={r.path} uri={r.uri} headers={r.headers} name={r.name} />;
             const kind = r.kind;
-            // Documento sem visor (zip, docx…): no web é o link de baixar; aqui a folha do sistema.
-            const onPress = kind === 'pdf' || kind === 'html'
-              ? () => setDoc({ uri: r.uri, headers: r.headers, name: r.name, kind })
-              : canShareFile
-                ? () => { shareFile(r.uri, r.headers, r.name).catch((e: unknown) => toast.erro(e instanceof Error ? e.message : String(e))); }
-                : undefined;
-            const icon: IconName = kind === 'pdf' ? 'FileText' : kind === 'html' ? 'Globe' : 'Paperclip';
+            if (kind === 'document') return <FileCard key={r.path} uri={r.uri} headers={r.headers} name={r.name} />;
+            const icon: IconName = kind === 'pdf' ? 'FileText' : 'Globe';
             return (
               <Pressable
                 key={r.path}
-                onPress={onPress}
-                disabled={!onPress}
+                onPress={() => setDoc({ uri: r.uri, headers: r.headers, name: r.name, kind })}
                 style={[styles.chip, { backgroundColor: superficie(theme), borderColor: theme.tokens.border.subtle }]}
                 accessibilityRole="button"
-                accessibilityLabel={kind === 'document' ? m.anexos_baixar({ nome: r.name }) : m.anexos_visualizar({ nome: r.name })}
+                accessibilityLabel={m.anexos_visualizar({ nome: r.name })}
               >
                 <Icon name={icon} size={14} color={theme.tokens.text.secondary} />
                 <Text style={[styles.chipName, { color: theme.tokens.text.primary }]} numberOfLines={1}>
                   {r.name}
                 </Text>
-                {onPress ? <Icon name={kind === 'document' ? 'Download' : 'ChevronRight'} size={14} color={theme.tokens.text.muted} /> : null}
+                <Icon name="ChevronRight" size={14} color={theme.tokens.text.muted} />
               </Pressable>
             );
           })}
@@ -297,7 +296,7 @@ export const AssistantBubble = memo(function AssistantBubble({
           ))}
         </View>
       ) : null}
-      <BubbleActions text={text} ts={ts} serverId={serverId} />
+      <View style={styles.meta}><BubbleActions text={text} ts={ts} serverId={serverId} /></View>
     </View>
   );
 });
@@ -306,7 +305,7 @@ const styles = StyleSheet.create((theme) => ({
   planLabel: {
     color: theme.tokens.accent.base,
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   // Sem bolha, como no nativo: texto corrido na largura toda. Só tabela, código e anexo têm caixa,
   // e essa caixa vem da superficie() para seguir Transparência e Solidez.
@@ -314,6 +313,8 @@ const styles = StyleSheet.create((theme) => ({
     alignSelf: 'stretch',
     gap: theme.base.space[2],
   },
+  // Hora e ⋯ pertencem ao texto de cima: colados nele, longe da próxima linha da conversa.
+  meta: { marginTop: -theme.base.space[1.5] },
   atts: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -353,6 +354,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   chartBtnText: {
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
 }));

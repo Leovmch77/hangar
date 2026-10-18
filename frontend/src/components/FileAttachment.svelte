@@ -2,6 +2,7 @@
   import { useSessionServer } from '../lib/sessionServer';
   import * as m from '../paraglide/messages';
   import ModalDialog from './ModalDialog.svelte';
+  import FileIcon from './files/FileIcon.svelte';
   import { fileUrl } from '@hangar/core';
   import { abrirVisor } from '../lib/visor';
   import { saveFile } from '../lib/saveFile';
@@ -25,19 +26,30 @@
     return r.url ?? fileUrl(sessionName, r.path, download, sessionServer());
   }
   // path -> estado do salvar daquele arquivo; ausente = parado.
-  let saving = $state<Record<string, 'busy' | 'again' | 'failed'>>({});
+  let saving = $state<Record<string, 'busy' | 'again' | 'failed' | 'missing' | 'empty' | 'saved'>>({});
 
   async function save(r: FileRef) {
     saving[r.path] = 'busy';
     try {
-      const result = await saveFile(url(r, true), r.name);
+      const result = await saveFile(url(r, true), r.name, { refuseEmpty: true });
       if (result === 'tap-again') saving[r.path] = 'again';
+      else if (result === 'empty') saving[r.path] = 'empty';
+      else if (result === 'saved' && r.kind === 'document') saving[r.path] = 'saved';
       else delete saving[r.path];
     } catch (e) {
       console.error('attachment: save failed', e);
-      saving[r.path] = 'failed';
+      saving[r.path] = (e as { status?: number })?.status === 404 ? 'missing' : 'failed';
     }
   }
+
+  const cardStatus = { busy: m.file_card_downloading, again: m.save_file_tap_again, failed: m.file_card_failed,
+    missing: m.file_card_missing, empty: m.file_card_empty, saved: m.file_card_saved };
+  function cardAction(r: FileRef): string {
+    const s = saving[r.path];
+    return s === 'busy' ? m.file_card_downloading()
+      : s === 'failed' || s === 'missing' ? m.file_card_retry() : m.file_card_download();
+  }
+  const ext = (name: string) => name.split('.').pop()!.toUpperCase();
 
   function saveLabel(r: FileRef): string {
     const s = saving[r.path];
@@ -45,8 +57,10 @@
       ? m.save_file_downloading()
       : s === 'again'
         ? m.save_file_tap_again()
-        : s === 'failed'
+        : s === 'failed' || s === 'missing'
           ? m.save_file_failed()
+          : s === 'empty'
+            ? m.file_card_empty()
           : `↓ ${m.visor_baixar()}`;
   }
 
@@ -106,11 +120,17 @@
       {:else if r.kind === 'audio'}
         <audio class="att-audio" src={url(r)} controls onerror={() => fail(r)}></audio>
       {:else if r.kind === 'document'}
-        <button class="att-chip" type="button" disabled={saving[r.path] === 'busy'} onclick={() => save(r)} aria-label={m.anexos_baixar({ nome: r.name })}>
-          <span class="att-ico" aria-hidden="true">📄</span>
-          <span class="att-name">{r.name}</span>
-          <span class="att-open" aria-live="polite">{saveLabel(r)}</span>
-        </button>
+        {@const state = saving[r.path]}
+        <div class="file-card" data-state={state ?? 'idle'}>
+          <span class="fc-ico"><FileIcon nome={r.name} /></span>
+          <span class="fc-text">
+            <span class="att-name" title={r.name}>{r.name}</span>
+            <span class="fc-meta" aria-live="polite">{ext(r.name)}{#if state} · {cardStatus[state]()}{/if}</span>
+          </span>
+          <button class="fc-btn" type="button" disabled={state === 'busy'} onclick={() => save(r)} aria-label={m.anexos_baixar({ nome: r.name })}>
+            {cardAction(r)}
+          </button>
+        </div>
       {:else}
         <div class="att-document">
           <button class="att-chip" onclick={() => (open = r)}>
@@ -178,6 +198,23 @@
   .att-download { display: inline-flex; align-items: center; flex-shrink: 0; min-height: 38px; padding: 0 var(--space-2); color: var(--accent); font-size: var(--text-sm); }
   .att-chip:active { background: var(--bg-hover); }
   .att-ico { flex-shrink: 0; }
+
+  .file-card {
+    display: flex; align-items: center; gap: var(--space-2); width: 320px; max-width: 100%; min-width: 0;
+    padding: var(--space-2) var(--space-3); background: var(--surface-raised);
+    border: 1px solid var(--border-subtle); border-radius: var(--radius-md); color: var(--text-primary);
+  }
+  .fc-ico { display: inline-flex; flex-shrink: 0; }
+  .fc-ico :global(.fi) { width: 22px; height: 22px; }
+  .fc-text { display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 2px; font-size: var(--text-sm); }
+  .fc-meta { color: var(--text-muted); font-size: var(--text-xs); }
+  .file-card[data-state='failed'] .fc-meta, .file-card[data-state='missing'] .fc-meta { color: var(--error); }
+  .fc-btn {
+    flex-shrink: 0; min-height: 38px; padding: 0 var(--space-3); border-radius: var(--radius-sm);
+    color: var(--accent); font-size: var(--text-sm); font-weight: 600;
+  }
+  .fc-btn:active { background: var(--bg-hover); }
+  .fc-btn:disabled { color: var(--text-muted); }
   .att-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
   .att-open { flex-shrink: 0; color: var(--text-muted); font-size: var(--text-xs); }
 

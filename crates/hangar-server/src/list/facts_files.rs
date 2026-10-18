@@ -362,6 +362,22 @@ impl HookStates {
     }
 }
 
+/// Pids do agente que o registro nativo de cada conta dá para a sessão `sid`.
+pub fn native_pids(dirs: &[PathBuf], sid: &str) -> Vec<i64> {
+    let mut out = Vec::new();
+    for d in unique(dirs, NATIVE_DIR) {
+        for e in entries(&d, NATIVE_DIR) {
+            if !e.file_name().to_str().is_some_and(is_native_name) {
+                continue;
+            }
+            if let Ok((found, native)) = read_native(&e.path()) && found == sid && !out.contains(&native.pid) {
+                out.push(native.pid);
+            }
+        }
+    }
+    out
+}
+
 /// Session id do arquivo lido: o nome do marcador, o `sessionId` do registro nativo.
 fn parsed_sid(path: &Path, parsed: &Parsed) -> Option<String> {
     match parsed {

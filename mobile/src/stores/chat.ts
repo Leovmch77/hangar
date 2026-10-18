@@ -986,6 +986,7 @@ export async function submitConversationDraft(serverId: string, name: string, te
         || latest.submission?.draftRevision !== submission.draftRevision || latest.submission.text !== text) return;
       writeDraft(serverId, name, { ...latest,
         text: status === null && latest.revision === submission.draftRevision ? '' : latest.text,
+        ...(status === null && latest.revision === submission.draftRevision && latest.recordings ? { recordings: [] } : {}),
         revision: status === null && latest.revision === submission.draftRevision ? latest.revision + 1 : latest.revision,
         submission: status === null ? null : { ...submission, status },
       });
