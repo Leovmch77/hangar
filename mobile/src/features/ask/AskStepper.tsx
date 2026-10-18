@@ -308,7 +308,7 @@ const styles = StyleSheet.create((theme) => ({
   scroll: {
     padding: theme.base.space[4],
     gap: theme.base.space[3],
-    paddingBottom: 32,
+    paddingBottom: theme.base.space[8],
   },
   statusRow: {
     flexDirection: 'row',
@@ -324,21 +324,21 @@ const styles = StyleSheet.create((theme) => ({
   },
   statusGlyphText: {
     fontSize: theme.base.text.xs,
-    fontWeight: '700',
+    fontWeight: theme.base.weight.bold,
   },
   statusLabel: {
     flex: 1,
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   statusBadge: {
     paddingHorizontal: theme.base.space[2],
-    paddingVertical: 3,
+    paddingVertical: theme.base.space[0.5],
     borderRadius: theme.base.radius.full,
   },
   statusBadgeText: {
     fontSize: theme.base.text.xxxs,
-    fontWeight: '700',
+    fontWeight: theme.base.weight.bold,
     textTransform: 'uppercase',
   },
   stepNav: {
@@ -350,11 +350,11 @@ const styles = StyleSheet.create((theme) => ({
     minHeight: 44,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 2,
+    gap: theme.base.space[0.5],
   },
   backTxt: {
     fontSize: theme.base.text.sm,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
   },
   counter: {
     fontSize: theme.base.text.sm,
@@ -363,19 +363,19 @@ const styles = StyleSheet.create((theme) => ({
     alignSelf: 'flex-start',
     borderRadius: theme.base.radius.full,
     paddingHorizontal: theme.base.space[2],
-    paddingVertical: 4,
+    paddingVertical: theme.base.space[1],
   },
   chipTxt: {
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   sheetTitle: {
     fontSize: theme.base.text.lg,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   question: {
     fontSize: theme.base.text.base,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
     lineHeight: 22,
   },
   optionsList: {
@@ -397,12 +397,12 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.base.radius.full,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 2,
+    marginTop: theme.base.space[0.5],
   },
   checkBox: {
     width: 20,
     height: 20,
-    borderRadius: 4,
+    borderRadius: theme.base.radius.xs,
     marginTop: 1,
   },
   radioDot: {
@@ -412,16 +412,16 @@ const styles = StyleSheet.create((theme) => ({
   },
   checkMark: {
     fontSize: theme.base.text.xs,
-    fontWeight: '700',
+    fontWeight: theme.base.weight.bold,
     lineHeight: 14,
   },
   optContent: {
     flex: 1,
-    gap: 2,
+    gap: theme.base.space[0.5],
   },
   optLabel: {
     fontSize: theme.base.text.base,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   optDesc: {
     fontSize: theme.base.text.sm,
@@ -448,8 +448,8 @@ const styles = StyleSheet.create((theme) => ({
     opacity: 0.5,
   },
   primaryTxt: {
-    color: '#fff',
-    fontWeight: '600',
+    color: theme.ink.onAccent,
+    fontWeight: theme.base.weight.semibold,
     fontSize: theme.base.text.base,
   },
   ghostBtn: {
@@ -464,7 +464,7 @@ const styles = StyleSheet.create((theme) => ({
   ghostOpt: {
     height: 44,
     flexDirection: 'row',
-    gap: 6,
+    gap: theme.base.space[1.5],
     justifyContent: 'center',
     alignItems: 'center',
     borderWidth: 1,
@@ -502,15 +502,15 @@ const styles = StyleSheet.create((theme) => ({
     padding: theme.base.space[3],
     borderWidth: 1,
     borderRadius: theme.base.radius.md,
-    gap: 2,
+    gap: theme.base.space[0.5],
   },
   reviewQ: {
     fontSize: theme.base.text.sm,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
   },
   reviewA: {
     fontSize: theme.base.text.base,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   error: {
     fontSize: theme.base.text.sm,
