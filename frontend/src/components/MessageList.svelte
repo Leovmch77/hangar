@@ -34,7 +34,7 @@
   import { lerRecadoBastao } from '../lib/bastaoRecado';
   import SubagenteCard from './SubagenteCard.svelte';
   import { lerSubagenteCodex } from '../lib/subagenteCodex';
-  import { transcriptImageUrl, uploadUrl } from '@hangar/core';
+  import { fileKind, transcriptImageUrl, uploadUrl, type FileRef } from '@hangar/core';
   import { windowStartFor, nextWindowEnd, precisaPreencher, mostrarIrPraoFim, nextAtBottom, renovarGesto } from '../lib/window';
   import * as diag from '../lib/diag';
   import { splitContextRefs, type QuoteRef } from '@hangar/core';
@@ -128,6 +128,9 @@
     onForward, onRunCommand, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0, focoId = null, pluginServers = [], hiddenQueued
   }: Props = $props();
   const sessionServer = useSessionServer();
+  // Anexo enviado que não é foto (`📎 arquivo:`): card de download, servido pela rota de uploads.
+  const anexos = (files: string[]): FileRef[] => files.map((f) => ({
+    path: f, name: f, kind: fileKind(f) ?? 'document', url: uploadUrl(sessionName, f, false, sessionServer()) }));
 
   type PlanComponentProps = {
     sessionName: string;
@@ -603,7 +606,7 @@
              (some o path, fica o marcador): ali a legenda limpa ainda serve, mas uma ImageBubble sem
              nenhuma miniatura nao — por isso os ramos abaixo exigem `imgFotos`, e so o ramo do
              image_count (que traz a foto do transcript) usa o `img` sozinho. -->
-        {@const imgFotos = img && img.filenames.length ? img : null}
+        {@const imgFotos = img && (img.filenames.length || img.files.length) ? img : null}
         {@const peer = ev.text ? parsePeerMessage(ev.text) : null}
         {@const voice = ev.text ? parseRealtimeDelegation(ev.text) : null}
         {@const shownText = peer ? peer.text : ev.text ?? ''}
@@ -639,7 +642,7 @@
                         onForward={onForward ? () => onForward(forwardText) : null}
                         onOpenPeer={onOpenSession ? () => onOpenSession(peer.from) : null} />
           {:else}
-            <ImageBubble caption={img ? img.caption : ev.text ?? ''} {srcs} {thumbs} onQuoteClick={goToQuote} />
+            <ImageBubble caption={img ? img.caption : ev.text ?? ''} {srcs} {thumbs} files={anexos(img?.files ?? [])} onQuoteClick={goToQuote} />
           {/if}
         {:else if ev.id.startsWith('queued-') || ev.id.startsWith('held:')}
           <!-- Msg da fila durável ("queued-") ou recado preso em entrega bloqueada ("held:", o
@@ -652,7 +655,7 @@
           <div class="queued-row" class:dim={working && !ev.desistiu
             && (ev.id.startsWith('held:') || waitsInQueue(ev, codex ? 'codex' : null, headless))}>
             {#if imgFotos}
-              <ImageBubble caption={imgFotos.caption} onQuoteClick={goToQuote} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))}
+              <ImageBubble caption={imgFotos.caption} files={anexos(imgFotos.files)} onQuoteClick={goToQuote} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))}
                            thumbs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer(), 192))} />
             {:else if bastao}
               <!-- O kick-off da passagem chega SEMPRE por aqui: quem o entrega é a fila durável, e
@@ -692,7 +695,7 @@
         {:else if sub}
           <SubagenteCard {sub} cru={ev.text ?? ''} ts={ev.ts} />
         {:else if imgFotos}
-          <ImageBubble caption={imgFotos.caption} onQuoteClick={goToQuote} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))}
+          <ImageBubble caption={imgFotos.caption} files={anexos(imgFotos.files)} onQuoteClick={goToQuote} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))}
                            thumbs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer(), 192))} />
         {:else if bastao}
           <!-- Passagem de bastão: cartão com os dois passos e os dois avisos do kick-off. O recado
@@ -785,10 +788,10 @@
 
     {#each pending as p (p.id)}
       {@const pimg0 = parseImageMessage(p.text)}
-      {@const pimg = pimg0 && pimg0.filenames.length ? pimg0 : null}
+      {@const pimg = pimg0 && (pimg0.filenames.length || pimg0.files.length) ? pimg0 : null}
       <div class="pending-bubble" class:solid={p.solid}>
         {#if pimg}
-          <ImageBubble caption={pimg.caption} onQuoteClick={goToQuote} srcs={pimg.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))}
+          <ImageBubble caption={pimg.caption} files={anexos(pimg.files)} onQuoteClick={goToQuote} srcs={pimg.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))}
                        thumbs={pimg.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer(), 192))} />
         {:else}
           <UserBubble text={p.text} ts={undefined} onQuoteClick={goToQuote} />

@@ -2,6 +2,7 @@ import { memo, useState, type ReactNode } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { ImageThumb, type MediaItem } from './ImageThumb';
+import { FileCard } from './FileCard';
 import { hasContextRefs, parseImageMessage, parsePeerMessage, parseRealtimeDelegation, transcriptImageUrlNative, uploadUrlNative, fileAuthHeader, type QuoteRef } from '@hangar/core';
 import { ContextRefView } from './ContextRefView';
 import * as m from '../paraglide/messages';
@@ -104,17 +105,22 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, serverId
       {caption ? <Text style={[styles.txt, { color: theme.tokens.text.primary }]}>{caption}</Text> : null}
       <Text style={[styles.txt, { color: theme.tokens.status.error }]} accessibilityRole="alert">{m.chat_servidor_removido()}</Text>
     </>, caption || body);
+    // Anexo que não é foto (`📎 arquivo:`): o card de download, embaixo das miniaturas.
+    const cards = parsed?.files.map((f) => (
+      <FileCard key={f} uri={uploadUrlNative(sessionName!, f, server)} headers={fileAuthHeader(server)} name={f} />
+    )) ?? [];
     // galeria vazia = foto única absorvida como anexo real: mostra só a legenda, ou o texto original
-    if (galeria.length === 0) {
+    if (galeria.length === 0 && cards.length === 0) {
       const display = caption || body;
       return bolha(renderCaption(display), display);
     }
     return bolha(
       <>
         {caption ? renderCaption(caption) : null}
-        <View style={styles.thumbs}>
+        {galeria.length ? <View style={styles.thumbs}>
           {galeria.map((g, i) => <ImageThumb key={g.uri} items={galeria} index={i} style={styles.thumb} />)}
-        </View>
+        </View> : null}
+        {cards}
       </>,
       caption || body,
     );

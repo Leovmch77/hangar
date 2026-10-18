@@ -1023,6 +1023,16 @@ describe('parseImageMessage', () => {
   it('sem marcador não é mensagem de imagem', () => {
     expect(parseImageMessage('só texto')).toBeNull();
   });
+  it('imagem e arquivo juntos: o arquivo sai à parte, não vira miniatura', () => {
+    const out = parseImageMessage('veja — 📎 imagem: /up/1-a.png 📎 arquivo: /up/2-b.txt')!;
+    expect(out.caption).toBe('veja');
+    expect(out.filenames).toEqual(['1-a.png']);
+    expect(out.files).toEqual(['2-b.txt']);
+    expect(out.marcadores).toBe(1);
+    const so = parseImageMessage('📎 arquivo: C:\\up\\3-c.zip')!;
+    expect(so.filenames).toEqual([]);
+    expect(so.files).toEqual(['3-c.zip']);
+  });
   it('marcador dentro de um bloco citado é texto: só vale o que vem depois do último bloco', () => {
     const c = contextRefsFixtures.parse.find((x) => x.name === 'marcador de anexo dentro do bloco')!;
     const out = parseImageMessage(c.message)!;

@@ -16,6 +16,8 @@ vi.mock('../stores/servers', () => ({ useServers: (select: (state: unknown) => u
 ] }) }));
 vi.mock('./ImageThumb', () => ({ ImageThumb: ({ items }: { items: { uri: string }[] }) =>
   createElement('span', { 'data-images': items.map((item) => item.uri).join(',') }) }));
+vi.mock('./FileCard', () => ({ FileCard: ({ name, uri }: { name: string; uri: string }) =>
+  createElement('a', { 'data-file': uri }, name) }));
 vi.mock('./BubbleActions', () => ({ BubbleActions: ({ text }: { text: string }) =>
   createElement('output', null, text) }));
 vi.mock('./AssistantBubble', () => ({ mkMarkdownStyle: () => ({ paragraph: {} }), mkMutedMarkdownStyle: () => ({ paragraph: {} }) }));
@@ -60,6 +62,14 @@ describe('recados na bolha', () => {
     const raw = '[grupo fora: agente] corpo';
     const { container, root } = await render(raw);
     expect(container.textContent).toBe(raw);
+    act(() => root.unmount());
+  });
+
+  it('imagem e arquivo juntos: foto em miniatura, arquivo em card', async () => {
+    const { container, root } = await render('veja — 📎 imagem: /up/1-a.png 📎 arquivo: /up/2-b.txt');
+    expect(container.querySelector('[data-images]')!.getAttribute('data-images')).toMatch(/1-a\.png$/);
+    expect(container.querySelector('[data-file]')!.getAttribute('data-file')).toMatch(/uploads\/2-b\.txt$/);
+    expect(container.textContent).toBe('veja2-b.txt');
     act(() => root.unmount());
   });
 

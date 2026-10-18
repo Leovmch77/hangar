@@ -501,34 +501,35 @@ export function parseMediaUrls(text: string): FileRef[] {
 // "<legenda> — 📎 imagem: <path1> 📎 imagem: <path2> ..." (1+ imagens, ou sem legenda).
 // Devolve { caption, filenames } ou null. Cada filename e o basename do path (sem espaco,
 // nome gerado), entao da pra separar varias numa linha so pelo proprio marcador.
-export function parseImageMessage(text: string): { caption: string; filenames: string[]; marcadores: number } | null {
+export function parseImageMessage(text: string): { caption: string; filenames: string[]; files: string[]; marcadores: number } | null {
   // O separador e uma REGEX, nao a string "📎 imagem: ": o que a fila digita numa linha so volta do
   // transcript reescrito pelo Claude Code — quebra de linha depois do marcador, prefixo "[Image #N]"
   // na frente e o path da ULTIMA imagem consumido (ela virou anexo de verdade, entao o marcador fica
   // sozinho no fim). Com o indexOf da string exata nada disso casava e a bolha real caia no texto
   // cru: o usuario via os paths escritos no chat em vez das miniaturas (medido em 03/08/2026).
-  const marker = /📎\s*imagem:\s*/g;
+  // `arquivo:` é o anexo que não é foto (o Composer marca pelo tipo): vai para `files`, nunca miniatura.
+  const marker = /📎\s*(imagem|arquivo):\s*/g;
   // Marcador dentro de um bloco `<hangar-ref>` (trecho citado, comentário) é texto: só vale depois do
   // último bloco lido.
   const tail = contextRefsEnd(text);
   const found = text.slice(tail).search(marker);
   if (found < 0) return null;
   const first = tail + found;
-  const filenames = text
-    .slice(first)
-    .split(marker)
-    .map((s) => s.trim())
-    .filter(Boolean)
-    // Os DOIS separadores: no Windows o marcador traz o caminho nativo
-    // (`C:\cockpit\.hangar-uploads\<arquivo>.png`), que não tem `/` nenhum — o split por `/`
-    // devolvia o caminho INTEIRO como se fosse o basename. Aí `uploadUrl` montava
-    // `/uploads/C%3A%5C…` e o backend recusava com 400 "filename invalido" (resolve_upload rejeita
-    // `\` de propósito, contra path traversal): no celular a foto virava o quadrinho de imagem
-    // quebrada, com a legenda do lado. Medido em 21/08/2026, mandando um print do celular pra uma
-    // sessão no Windows. Dividir por `\` também é seguro no Linux: o nome é GERADO pelo servidor
-    // (`<epoch>-<hex>.<ext>`, uploads.py:30) e nunca contém separador.
-    .map((p) => p.split(/[\\/]/).filter(Boolean).pop() ?? '')
-    .filter(Boolean);
+  const parts = text.slice(first).split(marker);
+  const filenames: string[] = [];
+  const files: string[] = [];
+  // Os DOIS separadores: no Windows o marcador traz o caminho nativo
+  // (`C:\cockpit\.hangar-uploads\<arquivo>.png`), que não tem `/` nenhum — o split por `/`
+  // devolvia o caminho INTEIRO como se fosse o basename. Aí `uploadUrl` montava
+  // `/uploads/C%3A%5C…` e o backend recusava com 400 "filename invalido" (resolve_upload rejeita
+  // `\` de propósito, contra path traversal): no celular a foto virava o quadrinho de imagem
+  // quebrada, com a legenda do lado. Medido em 21/08/2026, mandando um print do celular pra uma
+  // sessão no Windows. Dividir por `\` também é seguro no Linux: o nome é GERADO pelo servidor
+  // (`<epoch>-<hex>.<ext>`, uploads.py:30) e nunca contém separador.
+  for (let i = 1; i < parts.length; i += 2) {
+    const name = parts[i + 1].trim().split(/[\\/]/).filter(Boolean).pop();
+    if (name) (parts[i] === 'imagem' ? filenames : files).push(name);
+  }
   // `filenames` VAZIO nao e "nao e mensagem de imagem": e o caso mais comum do celular — UMA foto,
   // que o Claude Code absorve como anexo de verdade e cujo path ele apaga, deixando so o marcador
   // pendurado. Devolver null aqui jogava a bolha pro texto cru ("legenda — 📎 imagem:"), que e
@@ -538,8 +539,8 @@ export function parseImageMessage(text: string): { caption: string; filenames: s
   // `marcadores` > `filenames.length` = o Claude Code apagou o path da foto que absorveu como
   // anexo (comportamento antigo); iguais = o path ficou escrito E a foto veio no transcript, e
   // quem desenha precisa descontar uma delas — senão a mesma imagem sai duas vezes na bolha.
-  const marcadores = (text.slice(first).match(marker) ?? []).length;
-  return { caption, filenames, marcadores };
+  const marcadores = parts.filter((p, i) => i % 2 === 1 && p === 'imagem').length;
+  return { caption, filenames, files, marcadores };
 }
 
 // Painel de tarefas do TUI dentro da PREVIA AO VIVO. Ele nao e prosa: e o mesmo TodoWrite/TodoList
