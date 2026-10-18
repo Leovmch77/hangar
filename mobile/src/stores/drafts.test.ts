@@ -4,7 +4,7 @@ import {
   clearDraft, clearRecoverableDraft, readDraft, readRecoverableDraft, resolveDraftTranscript, reusableUploadPath, withoutUpload,
   writeDraft, writeRecoverableDraft,
   readDictation, writeDictation, clearDictation, finishDictation, recoverDictation, associateDictationTranscript,
-  setDictationInFlight, applyReadyDictation,
+  setDictationInFlight, applyReadyDictation, removeDraftRecording,
 } from './drafts';
 import type { ConversationDraft, DraftAttachment, DictationDraft } from './drafts';
 
@@ -268,6 +268,28 @@ describe('ditado conservado na origem', () => {
     text: '', raw: '', issue: '', ...patch,
   });
   beforeEach(() => { memory.clear(); vi.restoreAllMocks(); });
+
+  it('acrescenta gravações, restaura a lista e remove uma sem alterar o texto', async () => {
+    writeDraft('linux', 'sessao', draft());
+    writeDictation('linux', 'sessao', voice());
+    finishDictation('linux', 'sessao', 'recording-1',
+      { text: 'Primeiro áudio', raw: '', issue: '', serverPath: '/uploads/primeiro.m4a' }, true);
+    writeDictation('linux', 'sessao', voice({ id: 'recording-2', draftRevision: 4 }));
+    finishDictation('linux', 'sessao', 'recording-2',
+      { text: 'Segundo áudio', raw: '', issue: '', serverPath: '/uploads/segundo.m4a' }, true);
+    vi.resetModules();
+    const reopened = await import('./drafts');
+    expect(reopened.readDraft('linux', 'sessao')?.recordings).toEqual([
+      { id: 'recording-1', serverPath: '/uploads/primeiro.m4a' },
+      { id: 'recording-2', serverPath: '/uploads/segundo.m4a' },
+    ]);
+    const before = readDraft('linux', 'sessao')!;
+    const after = removeDraftRecording('linux', 'sessao', 'recording-1');
+    expect(after?.recordings).toEqual([{ id: 'recording-2', serverPath: '/uploads/segundo.m4a' }]);
+    expect(after?.text).toBe('Mensagem atual Primeiro áudio Segundo áudio');
+    expect(after?.revision).toBe(before.revision);
+    expect(readDraft('linux', 'sessao')).toEqual(after);
+  });
 
   it('reabrir conserva áudio sem repetir automaticamente um POST pendente', async () => {
     writeDictation('linux', 'sessao', voice());

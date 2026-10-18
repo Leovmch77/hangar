@@ -20,17 +20,18 @@ vi.mock('../paraglide/messages', () => ({
   anexos_tocar: ({ nome }: { nome: string }) => `play-${nome}`,
   visor_nao_carregou: () => 'audio-error',
   comum_carregando: () => 'loading',
+  board_remover_anexo: () => 'remove-attachment',
 }));
 
 import { AudioChip } from './AudioChip';
 
 const roots: Root[] = [];
-async function mount() {
+async function mount(props: Partial<Parameters<typeof AudioChip>[0]> = {}) {
   const container = document.createElement('div');
   const root = createRoot(container);
   roots.push(root);
   await act(async () => root.render(createElement(AudioChip, {
-    uri: 'https://a.test/audio.m4a', headers: { Authorization: 'Bearer token' }, name: 'ditado.m4a',
+    uri: 'https://a.test/audio.m4a', headers: { Authorization: 'Bearer token' }, name: 'ditado.m4a', ...props,
   })));
   return { container, root };
 }
@@ -109,5 +110,31 @@ describe('AudioChip — coexistência com voz ao vivo', () => {
     await act(async () => root.render(null));
     act(() => setLiveVoiceAudioActive(true));
     expect(h.player.pause).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('AudioChip — remoção no campo', () => {
+  it('pausa e remove somente o áudio escolhido', async () => {
+    const onRemove = vi.fn();
+    const { container } = await mount({ onRemove });
+    const remove = container.querySelector<HTMLButtonElement>('[aria-label="remove-attachment: ditado.m4a"]');
+    expect(remove).not.toBeNull();
+    await act(async () => remove!.click());
+    expect(h.player.pause).toHaveBeenCalledTimes(1);
+    expect(onRemove).toHaveBeenCalledExactlyOnceWith();
+    expect(h.player.play).not.toHaveBeenCalled();
+  });
+
+  it('não oferece remover em bolha da conversa e bloqueia no envio', async () => {
+    const { container, root } = await mount();
+    expect(container.querySelectorAll('button')).toHaveLength(1);
+    const onRemove = vi.fn();
+    await act(async () => root.render(createElement(AudioChip, { uri: 'file:///ditado.m4a', name: 'ditado.m4a', onRemove, disabled: true })));
+    const remove = container.querySelector<HTMLButtonElement>('[aria-label="remove-attachment: ditado.m4a"]')!;
+    expect(remove.disabled).toBe(true);
+    expect(button(container).disabled).toBe(true);
+    await act(async () => remove.click());
+    expect(onRemove).not.toHaveBeenCalled();
   });
 });

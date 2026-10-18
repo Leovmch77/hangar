@@ -1421,6 +1421,25 @@ test('ACK compara revisão mesmo quando a nova edição tem texto idêntico; ass
   expect(readDraft('srv1', 'sess')).toMatchObject({ text: 'oi', revision: 2, transcript: '/first', submission: null });
 });
 
+test('ACK retira chips de áudio só se o rascunho enviado não ganhou outro ditado', async () => {
+  const recording = { id: 'voice-1', serverPath: '/uploaded/voice.m4a' };
+  writeDraft('srv1', 'sess', { version: 1, text: 'ditado', revision: 7, transcript: '/first',
+    recordings: [recording], attachments: [], submission: null });
+  const requests = fetchManual();
+  const sending = chatStore('srv1', 'sess').send('ditado', 7);
+  requests[0].responder(null);
+  await sending;
+  expect(readDraft('srv1', 'sess')?.recordings).toEqual([]);
+  writeDraft('srv1', 'sess', { version: 1, text: 'outro', revision: 9, transcript: '/first',
+    recordings: [recording], attachments: [], submission: null });
+  const later = chatStore('srv1', 'sess').send('outro', 9);
+  writeDraft('srv1', 'sess', { ...readDraft('srv1', 'sess')!, text: 'outro novo', revision: 10,
+    recordings: [recording, { id: 'voice-2', serverPath: '/uploaded/new.m4a' }] });
+  requests[1].responder(null);
+  await later;
+  expect(readDraft('srv1', 'sess')?.recordings).toHaveLength(2);
+});
+
 test('ACK limpa campo da mesma revisão e conserva demais metadados do rascunho', async () => {
   writeDraft('srv1', 'sess', { version: 1, text: 'legenda', revision: 7, transcript: '/first',
     attachments: [{ uri: 'file:///own/image', name: 'image.jpg', mime: 'image/jpeg', kind: 'image' }], submission: null });

@@ -2580,14 +2580,14 @@ describe('ditado entregue à conversa de origem', () => {
     await act(async () => mic(container).click());
     await act(async () => voiceInput.onFim!(new File(['a'], 'ditado.m4a', { type: 'audio/m4a' }), 'botao', 'file:///cache/ditado.m4a'));
     expect(container.querySelector('textarea')!.value).toBe('antes texto prosa');
-    // A barra é só as quatro versões (e o player): sem botão de fechar, como no PC.
+    // As versões ficam na barra; os áudios pertencem ao rascunho e têm remoção própria.
     const labels = ['composer_ditado_cru', ...estilosDitado().map((e) => e.rotulo)];
     const row = button(container, 'composer_ditado_cru')!.parentElement!;
     expect([...row.querySelectorAll('button')].map((b) => b.getAttribute('aria-label'))).toEqual(labels);
     const selected = () => [...row.querySelectorAll('button[aria-selected="true"]')].map((b) => b.getAttribute('aria-label'));
     const prosa = estilosDitado().find((e) => e.valor === 'prosa')!.rotulo;
     expect(selected()).toEqual([prosa]);
-    expect(row.querySelector('[data-audio$="/uploads/ditado-1.m4a"]')).not.toBeNull();
+    expect(container.querySelector('[data-audio$="/uploads/ditado-1.m4a"]')).not.toBeNull();
     // O "Cru" faz o papel do desfazer: os dois não aparecem juntos.
     expect(button(container, 'composer_desfazer_limpeza')).toBeUndefined();
     await act(async () => button(container, 'composer_ditado_cru')!.click());
@@ -2604,10 +2604,10 @@ describe('ditado entregue à conversa de origem', () => {
     await act(async () => button(container, 'composer_ditado_cru')!.click());
     expect(container.querySelector('textarea')!.value).toBe('antes texto limpo e mais');
     expect(container.textContent).toContain('native_dictation_draft_changed');
-    // Mexer no próprio texto ditado esconde as versões e o player juntos.
+    // Editar o texto esconde as versões, mas conserva o áudio gravado.
     type(container, 'antes outro texto');
     expect(button(container, 'composer_ditado_cru')).toBeUndefined();
-    expect(container.querySelector('[data-audio]')).toBeNull();
+    expect(container.querySelector('[data-audio$="/uploads/ditado-1.m4a"]')).not.toBeNull();
     act(() => root.unmount());
   });
 

@@ -3,11 +3,14 @@ import { AppState, Platform } from 'react-native';
 import {
   AudioModule,
   RecordingPresets,
+  requestNotificationPermissionsAsync,
   requestRecordingPermissionsAsync,
   setAudioModeAsync,
 } from 'expo-audio';
 import type { AudioRecorder, RecordingEvents, RecordingStatus } from 'expo-audio';
 import type { SharedObject } from 'expo';
+import { runtimeVersion } from 'expo-updates';
+import { useSharedValue } from 'react-native-reanimated';
 import { novoEstadoVad, passoVad, registrarDiag } from '@hangar/core';
 import type { EstadoVad, MotivoFim, Server } from '@hangar/core';
 import * as m from '../../paraglide/messages';
@@ -15,6 +18,10 @@ import { dictationStyleStore } from './ditadoEstiloStore';
 import { beginVoiceDictation } from '../voice/audioSession';
 
 const STOP_STATUS_TIMEOUT_MS = 5_000;
+
+// O serviço de segundo plano precisa existir no binário, não só na atualização JS.
+const backgroundRecording = () => Platform.OS === 'ios'
+  || (Platform.OS === 'android' && Number(/^native-(\d+)$/.exec(runtimeVersion ?? '')?.[1]) >= 3);
 
 // O tipo do áudio não resolve a base quando o core do Expo fica aninhado no SDK.
 type ManagedRecorder = AudioRecorder & InstanceType<SharedObject<RecordingEvents>>;
@@ -38,6 +45,7 @@ interface Recording {
   finished: Promise<RecordingStatus>;
   error?: Error;
   errorReported?: boolean;
+  ceilingMs?: number;
   subscription?: { remove(): void };
 }
 
@@ -53,7 +61,7 @@ function reportRecordingError(recording: Recording, error: unknown) {
 
 export function useDitado({ onFim, onErroParada, server }: Opts) {
   const [gravando, setGravando] = useState(false);
-  const [rms, setRms] = useState(0);
+  const rms = useSharedValue(0);
 
   const vadRef = useRef<EstadoVad>(novoEstadoVad());
   const recordingRef = useRef<Recording | null>(null);
@@ -127,13 +135,13 @@ export function useDitado({ onFim, onErroParada, server }: Opts) {
           releaseRecording(recording);
           if (mountedRef.current) {
             setGravando(false);
-            setRms(0);
+            rms.value = 0;
           }
         }
       })();
       return recording.stopping;
     },
-    [limparTimers, releaseRecording],
+    [limparTimers, releaseRecording, rms],
   );
 
   const parar = useCallback((motivo: MotivoFim) => {
@@ -157,8 +165,14 @@ export function useDitado({ onFim, onErroParada, server }: Opts) {
       const perm = await requestRecordingPermissionsAsync();
       if (recording.interrupted) return;
       if (!perm.granted) throw new Error('permission_denied');
+      const background = backgroundRecording();
+      if (background && Platform.OS === 'android' && Number(Platform.Version) >= 33) {
+        const notifications = await requestNotificationPermissionsAsync();
+        if (recording.interrupted) return;
+        if (!notifications.granted) throw new Error(m.push_permissao_negada());
+      }
       recording.phase = 'preparing';
-      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true, allowsBackgroundRecording: background });
       if (recording.interrupted) return;
 
       const options = { ...RecordingPresets.HIGH_QUALITY, isMeteringEnabled: true };
@@ -179,33 +193,32 @@ export function useDitado({ onFim, onErroParada, server }: Opts) {
         }
         if (status.isFinished || recording.error) {
           complete(status);
-          if (recording.phase === 'recording') void finishRecording(recording, 'escondeu');
+          if (recording.phase === 'recording') {
+            const atCeiling = recording.ceilingMs !== undefined && Date.now() - inicioRef.current >= recording.ceilingMs;
+            void finishRecording(recording, atCeiling ? 'teto' : 'escondeu');
+          }
         }
       });
-      await recorder.prepareToRecordAsync();
+      const styleStore = dictationStyleStore(server);
+      await Promise.all([recorder.prepareToRecordAsync(), styleStore.getState().refreshCeiling()]);
       if (recording.interrupted) return;
-      recorder.record();
+      const ceilingMs = styleStore.getState().ceilingMs;
+      recording.ceilingMs = ceilingMs;
+      // O teto nativo continua valendo quando o sistema suspende os timers JS.
+      recorder.record({ forDuration: ceilingMs / 1000 });
       if (recording.interrupted) return;
       recording.phase = 'recording';
       vadRef.current = novoEstadoVad();
       inicioRef.current = Date.now();
       setGravando(true);
-      setRms(0);
+      rms.value = 0;
 
-      const armCeiling = (ceilingMs: number) => {
-        if (tetoRef.current) clearTimeout(tetoRef.current);
-        tetoRef.current = setTimeout(() => {
-          void finishRecording(recording, 'teto');
-        }, Math.max(0, ceilingMs - (Date.now() - inicioRef.current)));
-      };
-      const styleStore = dictationStyleStore(server);
-      armCeiling(styleStore.getState().ceilingMs);
-      // O teto pode ter mudado na tela de Voz: relido agora, rearma o prazo desta gravação.
-      void styleStore.getState().refreshCeiling().then(() => {
-        if (recording.phase === 'recording') armCeiling(styleStore.getState().ceilingMs);
-      });
+      tetoRef.current = setTimeout(() => {
+        void finishRecording(recording, 'teto');
+      }, ceilingMs);
 
       intervaloRef.current = setInterval(() => {
+        if (appStateRef.current !== 'active') return;
         const st = recorder.getStatus();
         const dB = (st as unknown as { metering?: number }).metering;
         let rmsVal = 0;
@@ -225,8 +238,8 @@ export function useDitado({ onFim, onErroParada, server }: Opts) {
           // sem metering (Android sem suporte ou falha) → VAD desligado, só botão/teto
           rmsVal = 0;
         }
-        setRms(rmsVal);
-        if (Date.now() - inicioRef.current >= styleStore.getState().ceilingMs) {
+        rms.value = rmsVal;
+        if (Date.now() - inicioRef.current >= ceilingMs) {
           void finishRecording(recording, 'teto');
         }
       }, 55);
@@ -242,14 +255,26 @@ export function useDitado({ onFim, onErroParada, server }: Opts) {
         }
       }
     }
-  }, [onFim, onErroParada, server, finishRecording, releaseRecording]);
+  }, [onFim, onErroParada, server, finishRecording, releaseRecording, rms]);
 
   useEffect(() => {
     mountedRef.current = true;
     const sub = AppState.addEventListener('change', (next) => {
       appStateRef.current = next;
-      if (next !== 'active' && recordingRef.current && recordingRef.current.phase !== 'permission') {
-        void pararRef.current('escondeu');
+      const recording = recordingRef.current;
+      if (!recording || recording.phase === 'permission') return;
+      if (next !== 'active') {
+        vadRef.current = novoEstadoVad();
+        if (recording.phase !== 'recording' || !backgroundRecording()) void pararRef.current('escondeu');
+      } else if (recording.phase === 'recording' && recording.recorder) {
+        // Uma interrupção real do microfone não pode deixar a onda fingindo que ainda capta.
+        try {
+          if (recording.recorder.getStatus().isRecording === false) void pararRef.current('escondeu');
+        } catch (error) {
+          registrarDiag({ evento: 'dictation.recording_failed', nivel: 'erro', codigo: 'recording_status_failed' });
+          recording.error = error instanceof Error ? error : new Error(m.composer_falha_gravacao());
+          void pararRef.current('escondeu');
+        }
       }
     });
     return () => {
