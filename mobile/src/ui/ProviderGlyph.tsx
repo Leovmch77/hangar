@@ -31,14 +31,14 @@ export function ProviderGlyph({ provider, size = 16, inline = false, color: tint
   const logoSize = inline ? size : size * 0.72;
   return (
     <View
-      style={{ width: size, height: size, flexShrink: inline ? 0 : undefined, borderRadius: 4, backgroundColor: inline ? 'transparent' : `${color}33`, alignItems: 'center', justifyContent: 'center' }}
+      style={{ width: size, height: size, flexShrink: inline ? 0 : undefined, borderRadius: theme.base.radius.xs, backgroundColor: inline ? 'transparent' : `${color}33`, alignItems: 'center', justifyContent: 'center' }}
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
     >
       {d ? (
         <Svg width={logoSize} height={logoSize} viewBox="0 0 24 24" fill={color}><Path d={d} /></Svg>
       ) : (
-        <Text style={{ color, fontSize: inline ? theme.base.text.base : theme.base.text.xxxs, fontWeight: '700' }} maxFontSizeMultiplier={1}>{letter}</Text>
+        <Text style={{ color, fontSize: inline ? theme.base.text.base : theme.base.text.xxxs, fontWeight: theme.base.weight.bold }} maxFontSizeMultiplier={1}>{letter}</Text>
       )}
     </View>
   );

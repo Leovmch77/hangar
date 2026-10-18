@@ -51,5 +51,5 @@ export const MultilineInput = forwardRef<TextInput, Props>(
 );
 
 const styles = StyleSheet.create((theme) => ({
-  input: { fontSize: theme.base.text.base, paddingVertical: 8, paddingHorizontal: 10, textAlignVertical: 'top' },
+  input: { fontSize: theme.base.text.base, paddingVertical: theme.base.space[2], paddingHorizontal: theme.base.space[2], textAlignVertical: 'top' },
 }));

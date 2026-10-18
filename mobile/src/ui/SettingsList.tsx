@@ -43,14 +43,14 @@ export function SettingsList({ items, onPick, searchable = true }: {
 }
 
 const styles = StyleSheet.create((theme) => ({
-  search: { height: 32, marginHorizontal: 4, marginBottom: 4, flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingHorizontal: 8, borderRadius: 8, borderWidth: 1, borderColor: theme.tokens.border.default, backgroundColor: theme.tokens.fillSubtle },
+  search: { height: 32, marginHorizontal: theme.base.space[1], marginBottom: theme.base.space[1], flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5],
+    paddingHorizontal: theme.base.space[2], borderRadius: theme.base.radius.sm, borderWidth: 1, borderColor: theme.tokens.border.default, backgroundColor: theme.tokens.fillSubtle },
   searchInput: { flex: 1, padding: 0, fontSize: theme.base.text.xs, color: theme.tokens.text.primary },
   list: { flexGrow: 0, flexShrink: 1, minHeight: 72, maxHeight: 288 },
-  row: { minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 8, paddingVertical: 6, borderRadius: 7 },
+  row: { minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[2], paddingVertical: theme.base.space[1.5], borderRadius: theme.base.radius.sm },
   rowText: { flex: 1, minWidth: 0, fontSize: theme.base.text.xs, color: theme.tokens.text.primary },
-  modelName: { fontWeight: '500' },
+  modelName: { fontWeight: theme.base.weight.medium },
   detail: { fontSize: theme.base.text.xxs, color: theme.tokens.text.muted },
-  empty: { paddingHorizontal: 8, paddingVertical: 16, fontSize: theme.base.text.xxs, textAlign: 'center', color: theme.tokens.text.muted },
+  empty: { paddingHorizontal: theme.base.space[2], paddingVertical: theme.base.space[4], fontSize: theme.base.text.xxs, textAlign: 'center', color: theme.tokens.text.muted },
   disabled: { opacity: 0.5 },
 }));
