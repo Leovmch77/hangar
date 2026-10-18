@@ -86,144 +86,7 @@ class _FakeClient:
 
 # --- Teste 1: criar sessao Codex e o caminho NORMAL, com o lancador no pane ------------------
 
-def test_create_codex_usa_o_lancador_e_nao_pre_semeia_transcript(tmp_path):
-    reg = SessionRegistry(projects_dir=tmp_path)
-    with patch.object(registry.tmux, "has_session", return_value=False), \
-         patch.object(registry.shutil, "which", return_value="/usr/bin/hangar-codex-tui"), \
-         patch.object(codex_sessions, "pretrust_cwd") as pretrust, \
-         patch.object(registry.tmux, "new_session", return_value=True) as new_sess:
-        info = reg.create("mysess", "/tmp/proj", provider="codex",
-                          initial_prompt="revise este projeto")
-    assert info.provider == "codex"
-    # O rollout so nasce quando a TUI abre a thread: um path do layout do Claude aqui envenenaria o
-    # _jsonl_cache, que e de classe e compartilhado com o SSE.
-    assert info.jsonl is None
-    assert info.tracked is False
-    assert new_sess.call_args.kwargs["provider"] == "codex"
-    assert "mysess" not in SessionRegistry._jsonl_cache
-    comando = new_sess.call_args[0][2]
-    assert "hangar-codex-tui" in comando
-    assert "/tmp/proj" in comando
-    assert "revise este projeto" in comando
-    pretrust.assert_called_once()
 
-
-@pytest.mark.parametrize("tier", [None, "priority", "default"])
-def test_create_codex_tier_reaches_launcher_without_prelaunch_sidecar(tmp_path, tier):
-    import shlex
-    reg = SessionRegistry(projects_dir=tmp_path)
-    with patch.object(registry.tmux, "has_session", return_value=False), \
-         patch.object(registry.shutil, "which", return_value="/usr/bin/hangar-codex-tui"), \
-         patch.object(codex_sessions, "pretrust_cwd"), \
-         patch.object(registry.tmux, "new_session", return_value=True) as spawn:
-        reg.create("cx", "/tmp/proj", provider="codex", service_tier=tier, initial_prompt="primeiro prompt")
-    argv = shlex.split(spawn.call_args.args[2])
-    if tier is None:
-        assert "--service-tier" not in argv
-    else:
-        assert argv[argv.index("--service-tier") + 1] == tier
-        assert argv.index("--service-tier") < argv.index("--prompt")
-    assert codex_sessions.load("cx") is None
-
-
-@pytest.mark.parametrize("tier", [None, "priority", "default"])
-def test_create_codex_headless_saves_tier_before_process_start(tmp_path, tier):
-    from app.adapters.codex import sem_terminal
-    reg = SessionRegistry(projects_dir=tmp_path)
-    with patch.object(registry.tmux, "has_session", return_value=False), \
-         patch.object(codex_sessions, "pretrust_cwd"), \
-         patch.object(registry.tmux, "new_session") as spawn:
-        info = reg.create("cx", "/tmp/proj", provider="codex", headless=True, service_tier=tier)
-    meta = codex_sessions.load("cx")
-    assert meta.get("service_tier") == tier
-    assert meta["thread_id"] is None and meta["headless"] is True
-    assert info.headless is True
-    argv = sem_terminal.argv(meta)
-    assert (f'service_tier="{tier}"' in argv) if tier else not any("service_tier=" in arg for arg in argv)
-    spawn.assert_not_called()
-
-
-@pytest.mark.parametrize("provider,tier", [("codex", "fast"), ("claude", "default"), ("pi", "priority")])
-def test_registry_rejects_invalid_tier_before_effects(tmp_path, provider, tier):
-    reg = SessionRegistry(projects_dir=tmp_path)
-    with patch.object(registry.tmux, "new_session") as spawn, \
-         patch.object(registry, "_pretrust_cwd") as trust, \
-         patch.object(codex_sessions, "save") as save:
-        with pytest.raises(ValueError, match="service_tier"):
-            reg.create("cx", "/tmp/proj", provider=provider, service_tier=tier)
-    spawn.assert_not_called()
-    trust.assert_not_called()
-    save.assert_not_called()
-
-
-def test_create_codex_transporta_a_conta_secundaria_ao_lancador(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    monkeypatch.setattr(codex_accounts, "_DEFAULT_HOME", tmp_path / ".codex")
-    account = codex_contas_apoio.create_account("work")
-    reg = SessionRegistry(projects_dir=tmp_path)
-    with patch.object(registry.tmux, "has_session", return_value=False), \
-         patch.object(registry.shutil, "which", return_value="/usr/bin/hangar-codex-tui"), \
-         patch.object(codex_sessions, "pretrust_cwd") as pretrust, \
-         patch.object(registry.tmux, "new_session", return_value=True) as new_sess:
-        reg.create("mysess", "/tmp/proj", provider="codex", codex_account="work")
-    comando = new_sess.call_args[0][2]
-    assert "--codex-home" in comando
-    assert str(account.home) in comando
-    pretrust.assert_not_called()
-
-
-def test_create_codex_com_resume_abre_a_conversa_existente(tmp_path):
-    """Retomar do Arquivo: o id vai pro lancador, que abre a TUI com `codex resume <id>`. O
-    historico ja esta no rollout, entao a sessao nova nasce com a conversa inteira."""
-    reg = SessionRegistry(projects_dir=tmp_path)
-    sid = "01a052d1-3e59-7441-9ed3-6bbd9e2704fc"
-    with patch.object(registry.tmux, "has_session", return_value=False), \
-         patch.object(registry.shutil, "which", return_value="/usr/bin/hangar-codex-tui"), \
-         patch.object(registry.tmux, "new_session", return_value=True) as new_sess:
-        info = reg.create("retomada", "/tmp/proj", provider="codex", resume_session_id=sid)
-    assert info.provider == "codex"
-    comando = new_sess.call_args[0][2]
-    assert "--resume" in comando and sid in comando
-
-
-def test_create_codex_recusa_id_de_conversa_invalido(tmp_path):
-    """O id vai pro comando do pane: aceitar lixo aqui e mandar lixo pro shell."""
-    reg = SessionRegistry(projects_dir=tmp_path)
-    with patch.object(registry.tmux, "has_session", return_value=False), \
-         patch.object(registry.shutil, "which", return_value="/usr/bin/hangar-codex-tui"), \
-         patch.object(registry.tmux, "new_session", return_value=True) as new_sess:
-        with pytest.raises(ValueError, match="session_id invalido"):
-            reg.create("retomada", "/tmp/proj", provider="codex",
-                       resume_session_id="; rm -rf /")
-    new_sess.assert_not_called()
-
-
-def test_create_codex_recusa_quando_o_lancador_nao_esta_no_path(tmp_path):
-    """Sem o lancador o pane morre no ato e o tmux devolve 0 — a sessao evaporaria calada."""
-    reg = SessionRegistry(projects_dir=tmp_path)
-    with patch.object(registry.tmux, "has_session", return_value=False), \
-         patch.object(registry.shutil, "which", return_value=None), \
-         patch.object(registry.tmux, "new_session", return_value=True) as new_sess:
-        with pytest.raises(ValueError, match="hangar-codex-tui"):
-            reg.create("mysess", "/tmp/proj", provider="codex")
-    new_sess.assert_not_called()
-
-
-def test_create_codex_recusa_quando_o_binario_codex_nao_esta_no_path(tmp_path):
-    """Mesmo desfecho do lancador ausente, por outra porta: o lancador esta la e o `codex` nao.
-
-    Ele so chama `codex app-server` DEPOIS que o pane nasceu, entao a falta virava
-    FileNotFoundError dentro do pane — que morre com o `new-session` ja tendo devolvido 0. Sem
-    sidecar escrito, a sessao nao aparece nem no tmux nem em `list_all()`: sucesso reportado,
-    sessao inexistente."""
-    reg = SessionRegistry(projects_dir=tmp_path)
-    presentes = {"hangar-codex-tui": "/usr/bin/hangar-codex-tui"}
-    with patch.object(registry.tmux, "has_session", return_value=False), \
-         patch.object(registry.shutil, "which", side_effect=presentes.get), \
-         patch.object(registry.tmux, "new_session", return_value=True) as new_sess:
-        with pytest.raises(ValueError, match="codex nao esta no PATH"):
-            reg.create("mysess", "/tmp/proj", provider="codex")
-    new_sess.assert_not_called()
 
 
 def test_kill_codex_falho_nao_derruba_o_app_server_antes(tmp_path):
@@ -273,19 +136,6 @@ def test_list_does_not_duplicate_codex_tmux_tui_as_claude(tmp_path):
         out = reg.list()
     assert [(s.name, s.provider) for s in out] == [("cx", "codex")]
     resolve.assert_not_called()
-
-
-# --- Teste 3: create(provider="claude") = nao-regressao (tmux, sem sidecar) -----------------
-
-def test_create_claude_still_uses_tmux_no_sidecar(tmp_path):
-    reg = SessionRegistry(projects_dir=tmp_path)
-    with patch.object(registry.tmux, "has_session", return_value=False), \
-         patch.object(registry.tmux, "new_session", return_value=True) as new_sess:
-        info = reg.create("claudesess", "/tmp/proj")
-    assert info.provider == "claude"
-    new_sess.assert_called_once()  # caminho tmux intacto
-    # nenhum sidecar Codex gravado
-    assert codex_sessions.load("claudesess") is None
 
 
 # --- Teste 4: kill de Codex fecha o client (mock) e apaga o sidecar -------------------------
@@ -394,26 +244,7 @@ def test_list_codex_preserva_conta_do_sidecar_sem_ler_cota(tmp_path, monkeypatch
     assert info.conta == f"codex:{home.resolve()}"
 
 
-def test_rename_avisa_lease_codex_antes_do_sidecar(tmp_path):
-    avisos = []
-    reg = SessionRegistry(projects_dir=tmp_path)
-    with patch.object(registry, "apos_renomear_codex", lambda old, new: avisos.append((old, new))), \
-         patch.object(registry.tmux, "is_hidden", return_value=False), \
-         patch.object(registry.tmux, "rename_session", return_value=True):
-        reg.rename("old", "new")
-    assert avisos == [("old", "new")]
-
-
 # --- Colisao de nome cross-provider (review Important #1) ------------------------------------
-
-def test_create_claude_rejects_existing_codex_name(tmp_path):
-    codex_sessions.save("dup", "tid-1", "/home/u/.codex/rollout.jsonl", "/tmp/a")
-    reg = SessionRegistry(projects_dir=tmp_path)
-    with patch.object(registry.tmux, "has_session", return_value=False), \
-         patch.object(registry.tmux, "new_session", return_value=True) as new_sess:
-        with pytest.raises(ValueError):
-            reg.create("dup", "/tmp/proj")
-    new_sess.assert_not_called()  # nao chegou a spawnar pane tmux orfao
 
 
 async def test_ensure_running_conecta_no_app_server_do_pane(tmp_path):
@@ -423,13 +254,11 @@ async def test_ensure_running_conecta_no_app_server_do_pane(tmp_path):
     adapter = CodexAdapter()
     fake = _FakeClient()
     with patch.object(codex_adapter, "AppServerClient", lambda *a, **k: fake), \
-         patch.object(codex_adapter, "pid_vivo", return_value=True), \
-         patch.object(codex_adapter, "ensure_tmux_tui") as tui:
+         patch.object(codex_adapter, "pid_vivo", return_value=True):
         client = await adapter.ensure_running("cx")
     assert client is fake
     assert fake.conectado == "ws://127.0.0.1:45999"
     assert fake.started is False     # nao subiu app-server nenhum
-    tui.assert_not_called()          # a TUI ja esta viva no pane; recriar mataria a conversa na tela
     assert "cx" in adapter._sessions
 
 
@@ -457,36 +286,10 @@ async def test_pane_vivo_sem_controle_nunca_e_substituido(tmp_path):
     adapter = CodexAdapter()
     with patch.object(codex_adapter.tmux, "has_session", return_value=True), \
          patch.object(codex_adapter, "AppServerClient") as cliente, \
-         patch.object(codex_adapter, "ensure_tmux_tui") as tui:
+         patch.object(codex_adapter.tmux, "new_session") as pane:
         assert await adapter.ensure_running("cx") is None
     cliente.assert_not_called()   # nem chega a spawnar um app-server
-    tui.assert_not_called()       # e muito menos a derrubar o pane
-
-
-async def test_sem_pane_o_resume_do_desenho_antigo_ainda_recria(tmp_path):
-    """A guarda acima nao pode matar o resume: sem pane nao ha tela de ninguem pra destruir, e
-    reabrir a conversa pelo app continua valendo."""
-    codex_sessions.save("cx", "tid-1", "/x/rollout.jsonl", "/tmp/a")
-    adapter = CodexAdapter()
-    fake = _FakeClient()
-    with patch.object(codex_adapter.tmux, "has_session", return_value=False), \
-         patch.object(codex_adapter, "AppServerClient", lambda *a, **k: fake), \
-         patch.object(codex_adapter, "ensure_tmux_tui") as tui:
-        assert await adapter.ensure_running("cx") is fake
-    assert tui.call_args.kwargs["replace"] is True
-    assert [m for m, _ in fake.requests] == ["initialize", "thread/resume"]
-
-
-async def test_resume_legacy_usa_codex_home_do_sidecar(tmp_path):
-    codex_sessions.save("cx", "tid-1", "/x/rollout.jsonl", "/tmp/a",
-                        codex_home="/tmp/codex-work")
-    adapter = CodexAdapter()
-    fake = _FakeClient()
-    with patch.object(codex_adapter.tmux, "has_session", return_value=False), \
-         patch.object(codex_adapter, "AppServerClient", lambda *a, **k: fake), \
-         patch.object(codex_adapter, "ensure_tmux_tui") as tui:
-        assert await adapter.ensure_running("cx") is fake
-    assert tui.call_args.kwargs["codex_home"] == "/tmp/codex-work"
+    pane.assert_not_called()      # e muito menos a derrubar o pane
 
 
 async def test_app_server_morto_com_pane_vivo_nao_tira_a_sessao_da_lista(tmp_path):
@@ -502,10 +305,10 @@ async def test_app_server_morto_com_pane_vivo_nao_tira_a_sessao_da_lista(tmp_pat
     with patch.object(codex_adapter, "pid_vivo", return_value=False), \
          patch.object(codex_adapter.tmux, "has_session", return_value=True), \
          patch.object(codex_adapter, "AppServerClient") as cliente, \
-         patch.object(codex_adapter, "ensure_tmux_tui") as tui:
+         patch.object(codex_adapter.tmux, "new_session") as pane:
         assert await adapter.ensure_running("cx") is None
     cliente.assert_not_called()
-    tui.assert_not_called()
+    pane.assert_not_called()
 
     # E o sidecar segue no disco, entao a sessao segue na lista. `_watch_tmux` e o unico que apaga,
     # e ele so age quando o PANE some — nunca por causa do app-server.
@@ -738,36 +541,7 @@ def test_kill_nao_manda_sinal_pra_pid_morto(tmp_path):
     assert mortos == []
 
 
-def test_create_codex_rejects_existing_tmux_name(tmp_path):
-    reg = SessionRegistry(projects_dir=tmp_path)
-    with patch.object(registry.tmux, "has_session", return_value=True), \
-         patch.object(registry.shutil, "which", return_value="/usr/bin/hangar-codex-tui"), \
-         patch.object(registry.tmux, "new_session", return_value=True) as new_sess:
-        with pytest.raises(ValueError):
-            reg.create("dup", "/tmp/proj", provider="codex")
-    new_sess.assert_not_called()
-
-
 # --- Teste 5: ensure_running pos-restart reabre client e retoma pelo thread_id --------------
-
-async def test_ensure_running_resumes_by_thread_id(tmp_path):
-    # Simula pos-restart: sidecar no disco, dict de clients vazio.
-    codex_sessions.save("cx", "tid-42", "/home/u/.codex/rollout-a.jsonl", "/tmp/a")
-    adapter = CodexAdapter()
-    assert "cx" not in adapter._sessions
-    fake = _FakeClient()
-    with patch("app.adapters.codex.adapter.AppServerClient", lambda *a, **k: fake):
-        client = await adapter.ensure_running("cx")
-    assert client is fake
-    assert fake.started is True
-    methods = [m for m, _ in fake.requests]
-    assert "initialize" in methods
-    # RETOMA o thread existente via thread/resume passando o threadId do sidecar
-    assert "thread/resume" in methods
-    resume_params = next(p for m, p in fake.requests if m == "thread/resume")
-    assert resume_params["threadId"] == "tid-42"
-    # anexado na memoria pra proximas chamadas
-    assert "cx" in adapter._sessions
 
 
 async def test_ensure_running_reuses_live_client(tmp_path):
@@ -780,30 +554,6 @@ async def test_ensure_running_reuses_live_client(tmp_path):
 
 
 # --- IMPORTANT 1: lock por-nome evita spawn duplicado em ensure_running concorrente ----------
-
-async def test_ensure_running_concurrent_calls_spawn_once(tmp_path):
-    # 2 chamadores concorrentes pro mesmo nome, sem client vivo (pos-restart): sem lock, ambos
-    # passavam pelo `sess is None`, ambos spawnavam+resumiam, e o 2o attach() sobrescrevia o 1o
-    # AppServerClient no dict -- o 1o (subprocess + reader task) ficava orfao, nunca fechado.
-    codex_sessions.save("cx-race", "tid-race", "/home/u/.codex/rollout-race.jsonl", "/tmp/race")
-    adapter = CodexAdapter()
-    starts = 0
-
-    class _SlowFakeClient(_FakeClient):
-        async def start_shared(self):
-            nonlocal starts
-            starts += 1
-            await asyncio.sleep(0)  # forca o interleaving entre as 2 corrotinas
-            self.started = True
-            return "ws://127.0.0.1:45123"
-
-    with patch("app.adapters.codex.adapter.AppServerClient", lambda *a, **k: _SlowFakeClient()):
-        c1, c2 = await asyncio.gather(
-            adapter.ensure_running("cx-race"), adapter.ensure_running("cx-race"),
-        )
-    assert starts == 1          # client.start() chamado 1x so
-    assert c1 is c2             # os dois chamadores recebem o MESMO client
-    assert len(adapter._sessions) == 1
 
 
 async def test_ensure_running_double_check_skips_spawn_if_attached_meanwhile(tmp_path):
@@ -941,53 +691,3 @@ def test_transfer_record_corruption_is_not_silently_skipped(tmp_path):
         codex_sessions.list_all()
 
 
-async def test_legacy_restart_keeps_budget_account_and_resume_request(tmp_path):
-    import hashlib
-    import uuid
-    from app import conversation_transfer as transfers
-    home = str(tmp_path / "account")
-    transfer_id = str(uuid.uuid4())
-    thread_id = str(uuid.uuid4())
-    rollout = tmp_path / "account" / "sessions" / f"rollout-test-{thread_id}.jsonl"
-    rollout.parent.mkdir(parents=True)
-    prefix = (json.dumps({"type": "session_meta", "payload": {"id": thread_id}}) + "\n").encode()
-    rollout.write_bytes(prefix)
-    source = tmp_path / "source.jsonl"
-    source.write_text(json.dumps({"type": "user", "uuid": "u", "parentUuid": None,
-                                  "message": {"role": "user", "content": "histórico"}}) + "\n")
-    record = transfers.TransferRecord(transfer_id, "cx", "k:original-key", transfers.TransferPhase.COMPLETE,
-        transfers.ConversationSource(str(source), "claude", hashlib.sha256(source.read_bytes()).hexdigest(), ("u",)),
-        {"name": "cx", "key": "original-key", "cwd": str(tmp_path)},
-        {"codex_home": home, "codex_account": "work", "thread_id": thread_id,
-         "rollout_path": str(rollout), "tool_output_token_limit": 144000},
-        transfers.ImportBoundary(thread_id, str(rollout), len(prefix), (), hashlib.sha256(prefix).hexdigest()), None)
-    transfers.save_transfer(record)
-    codex_sessions.save("cx", thread_id, str(rollout), str(tmp_path),
-                        codex_home=home, codex_account="work", tool_output_token_limit=144000,
-                        transfer_id=transfer_id, key="original-key", model="native-model", effort="low")
-    codex_sessions.update("cx", permission_mode="Ask for approval")
-    fake = _FakeClient()
-    fake._thread_id = thread_id
-    fake._path = str(rollout)
-    from unittest.mock import AsyncMock
-    previous_request = fake.request
-    async def request(method, params, timeout=30.0):
-        if method == "thread/read":
-            fake.requests.append((method, params))
-            return {"thread": {"id": thread_id, "model": "native-model", "reasoningEffort": "low"}}
-        return await previous_request(method, params, timeout)
-    fake.request = request
-    fake.start_shared = AsyncMock(return_value="ws://127.0.0.1:45123")
-    with patch.object(codex_adapter.tmux, "has_session", return_value=False), \
-         patch.object(codex_adapter, "AppServerClient", lambda: fake), \
-         patch.object(codex_adapter, "ensure_tmux_tui") as tui:
-        adapter = CodexAdapter()
-        await adapter.ensure_running("cx")
-    fake.start_shared.assert_awaited_once_with(codex_home=home, tool_output_token_limit=144000,
-                                               session_name="cx", session_key="original-key")
-    assert tui.call_args.kwargs["codex_account"] == "work"
-    assert next(p for m, p in fake.requests if m == "thread/resume")["threadId"] == thread_id
-    assert next(p for m, p in fake.requests if m == "thread/resume")["approvalPolicy"] == "on-request"
-    assert "turn/start" not in [m for m, _ in fake.requests]
-    assert transfers.transfer_for_session("cx").id == transfer_id
-    assert transfers.load_transfer(transfer_id).phase == transfers.TransferPhase.COMPLETE

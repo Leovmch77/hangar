@@ -664,24 +664,6 @@ def config_dir_de(config_dir: str | None) -> str:
     return config_dir or os.environ.get("CLAUDE_CONFIG_DIR") or _config_dir_padrao()
 
 
-def claude_json_de(config_dir: str | None) -> Path:
-    """O `.claude.json` que o pane criado com este `config_dir` vai LER de verdade.
-
-    Nao e derivavel do config dir sozinho: com `CLAUDE_CONFIG_DIR` ausente o CLI le o da HOME, e
-    com ela setada le o de DENTRO do config dir — dois arquivos diferentes (ver
-    `_config_dir_padrao`). Quem decide se a variavel chega ao pane e o `_e_config_dir`, entao a
-    resposta vem dele, nunca de uma segunda copia da regra. Excecao: a janela escondida de login
-    (`new_hidden_shell`) manda a pasta padrao por `-e` no tmux; ela morre logo depois do login e
-    ninguem le o `.claude.json` de dentro dela. Sem isso o pre-trust da pasta escrevia
-    no `~/.claude.json` enquanto o pane lia `~/.claude/.claude.json`, e a sessao nova nascia presa
-    no "trust this folder?".
-    """
-    cfg = config_dir_de(config_dir)
-    if not _e_config_dir(cfg):
-        return Path.home() / ".claude.json"
-    return Path(cfg) / ".claude.json"
-
-
 def new_session(name: str, cwd: str, command: str, config_dir: str | None = None,
                 *, provider: str | None = None, env: dict[str, str] | None = None) -> bool:
     # -e: cores corretas do Claude Code DENTRO do tmux (o claude e spawnado via `exec`, virando o

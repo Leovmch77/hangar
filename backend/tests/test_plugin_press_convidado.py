@@ -15,7 +15,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from app import api, guest_users, internal_api, list_bridge, plugin_click, runtime_coordinator
+from app import api, guest_users, internal_api, list_bridge, runtime_coordinator
 from app.config import settings
 from app.runtime_coordinator import Binding, Phase, RuntimeCoordinator
 
@@ -45,18 +45,8 @@ def env(tmp_path, monkeypatch):
     guest_users.claim("t", guest.id)
     # Convite da sessão `t`, vivo: o Rust o decidiu e assina o repasse.
     internal_api.set_secret(SECRET)
+    # O clique é do Rust: o Python não clica nada, em modo nenhum.
     pressed = []
-
-    async def press(name, site, key, plugin):
-        pressed.append((name, site, key, plugin))
-        return {"ok": True}
-
-    async def close(name, site):
-        pressed.append(("close", name, site))
-        return {"ok": True}
-
-    monkeypatch.setattr(plugin_click, "press", press)
-    monkeypatch.setattr(plugin_click, "close", close)
     api.app.dependency_overrides[api._transfer_guard] = lambda: None
     coordinator = RuntimeCoordinator()
     coordinator.instance = "instance-1"
@@ -92,40 +82,21 @@ def test_terminal_in_rust_needs_rust_phase_and_a_claude_terminal(env, tmp_path):
     assert not coordinator.terminal_in_rust("outra")
 
 
-def test_guests_still_press_without_a_runtime_registry(env, monkeypatch):
-    _, guest_token, pressed = env
-    monkeypatch.setattr(runtime_coordinator, "_current", None)
-    assert _press(guest_token).status_code == 200
-    assert pressed == [("t", "above-prompt", "mr-a", "pm-mock")]
+def _needs_rust(response):
+    return (response.status_code, response.json()["detail"]["code"]) == (503, "mods_need_rust_server")
 
 
-def test_an_app_without_the_mod_is_still_served(env):
-    # O app de antes desta versão não manda o mod: o clique segue sem ele (o `plugin_click` acha o único
-    # botão com a `key`), e o `press` com `__close__` continua fechando o painel.
-    _, _, pressed = env
+def test_without_the_rust_the_press_answers_with_a_code(env, monkeypatch):
+    # Modo `python`: o clique dos mods é do Rust, sem reserva aqui; o corpo continua conferido.
+    _, guest_token, _ = env
     assert _press(OWNER, body={"site": "above-prompt", "key": "mr-a", "plugin": ""}).status_code == 422
-    assert _press(OWNER, body={"site": "above-prompt", "key": "mr-a"}).status_code == 200
-    assert _press(OWNER, body={"site": "pm-mock-mr", "key": "__close__"}).status_code == 200
-    assert pressed == [("t", "above-prompt", "mr-a", None), ("close", "t", "pm-mock-mr")]
-
-
-def test_closing_a_pane_has_its_own_route(env):
-    _, guest_token, pressed = env
-    close = {"site": "pm-mock-mr"}
-    assert _press(OWNER, route="close", body=close).status_code == 200
     assert _press(OWNER, route="close", body={"site": "pm-mock-mr", "key": "x"}).status_code == 422
-    assert _press(guest_token, route="close", body=close).status_code == 200
-    assert pressed == [("close", "t", "pm-mock-mr")] * 2
-
-
-@pytest.mark.parametrize("headless,phase", [(False, Phase.Rust), (False, Phase.Python), (True, Phase.Rust)])
-def test_guests_press_like_the_owner(env, tmp_path, headless, phase):
-    # Sem o Rust de pé o clique é o do Python, com o teclado emprestado quando o terminal é do Rust.
-    coordinator, guest_token, pressed = env
-    _register(coordinator, tmp_path, headless=headless).phase = phase
-    assert _press(guest_token).status_code == 200
-    assert _press(INVITE, invite_port=True).status_code == 200
-    assert pressed == [("t", "above-prompt", "mr-a", "pm-mock")] * 2
+    for token, port in [(OWNER, False), (guest_token, False), (INVITE, True)]:
+        assert _needs_rust(_press(token, invite_port=port))
+        assert _needs_rust(_press(token, invite_port=port, body={"site": "pm-mock-mr", "key": "__close__"}))
+        assert _needs_rust(_press(token, invite_port=port, route="close", body={"site": "pm-mock-mr"}))
+    monkeypatch.setattr(runtime_coordinator, "_current", None)
+    assert _needs_rust(_press(guest_token))
 
 
 def test_show_and_input_outside_the_rust_answer_with_a_code(env):
@@ -180,13 +151,11 @@ def test_guests_act_on_a_rust_session_through_the_bridge(env, rust):
     assert pressed == [], "o clique é do Rust, não do Python"
 
 
-def test_session_the_rust_does_not_serve_falls_back_to_python(env, rust):
-    _, guest_token, pressed = env
+def test_session_the_rust_does_not_serve_is_a_code_not_a_python_click(env, rust):
     response = TestClient(api.app).post("/api/sessions/outra/plugin/press", json=BODY,
                                         headers={"Authorization": f"Bearer {OWNER}"})
-    assert response.status_code == 200
+    assert _needs_rust(response)
     assert [path for path, _, _ in rust] == ["/__hangar_server/mods/outra/press"]
-    assert pressed == [("outra", "above-prompt", "mr-a", "pm-mock")]
 
 
 def _bridge_answers(monkeypatch, coordinator, status):
@@ -211,15 +180,13 @@ def test_bridge_refusal_never_falls_back_to_python(env, monkeypatch, status):
 
 
 def test_guest_never_drives_a_rust_terminal_from_python(env, monkeypatch, tmp_path):
-    # O Rust tem o terminal mas a ponte diz que os mods não são dele: o convidado não dirige o pane por
-    # aqui; o dono segue com o clique do Python (teclado emprestado).
-    coordinator, guest_token, pressed = env
+    # O Rust tem o terminal mas a ponte diz que os mods não são dele: ninguém dirige o pane por aqui.
+    coordinator, guest_token, _ = env
     _register(coordinator, tmp_path, headless=False).phase = Phase.Rust
     _bridge_answers(monkeypatch, coordinator, 404)
     assert _press(guest_token).status_code == 503
     assert _press(INVITE, invite_port=True).status_code == 503
-    assert _press(OWNER).status_code == 200
-    assert pressed == [("t", "above-prompt", "mr-a", "pm-mock")]
+    assert _needs_rust(_press(OWNER))
 
 
 def test_silent_rust_is_a_code_not_a_500(env, monkeypatch):

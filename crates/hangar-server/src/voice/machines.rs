@@ -72,11 +72,11 @@ impl SelfApi {
     }
 }
 
-/// Cabeçalho que identifica a assistente de voz no MCP (`backend/app/quem_chama.py`).
+/// Cabeçalho que identifica a assistente de voz no MCP (`mcp::identity`).
 pub const VOICE_HEADER: &str = "X-Hangar-Voice";
 
 /// `<nonce>.<hmac>`: nonce novo a cada chamada e HMAC-SHA256 dele com o segredo interno, que só este servidor e o Python
-/// conhecem; o Python confere sem pedir nada ao Rust.
+/// conhecem; o MCP deste servidor confere.
 pub fn voice_signature(secret: &str) -> Option<String> {
     use ring::{hmac, rand::SecureRandom};
     let mut nonce = [0u8; 16];

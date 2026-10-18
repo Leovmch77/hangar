@@ -18,18 +18,21 @@ pub mod groups;
 pub mod interactions;
 pub mod list;
 pub mod locate;
+pub mod mcp;
 pub mod mermaid;
 pub mod migration_status;
 pub mod mods;
 pub mod pages;
 pub(crate) mod queue_feed;
 pub mod plugin;
+pub mod problem_gate;
 pub mod proxy;
 pub mod query;
 pub mod queue_panel;
 mod plugin_listener;
 pub mod routes;
 pub mod runtime;
+pub mod session_open;
 pub mod session_write;
 pub mod share_reach;
 pub mod side;
@@ -42,6 +45,7 @@ pub mod terminal_state;
 pub mod terminal_control;
 pub mod terminal_input;
 pub mod permission_control;
+pub mod model_picker;
 pub mod terminal_facts;
 mod terminal_process;
 mod thumbnail;
@@ -60,7 +64,7 @@ mod warn_limit;
 
 /// Versão do contrato com o Python (rotas `/internal`, eventos do side-events, ambiente). O
 /// Python (`RUST_SERVER_PROTOCOL`) recusa um binário de outra versão e atende sozinho.
-pub const INTERNAL_PROTOCOL: u32 = 75;
+pub const INTERNAL_PROTOCOL: u32 = 82;
 
 /// Todo socket TCP do servidor, aceito ou aberto. Sem isso o Nagle segura o último pedaço de uma
 /// resposta em pedaços até o ACK atrasado do outro lado; o asyncio do Python já liga sozinho.
@@ -132,7 +136,8 @@ pub async fn serve_until_with_guest(
             cfg.internal_secret.clone(),instance.clone()).with_mods(state.mods.clone()).with_accounts(state.accounts.clone())
             .with_interactions(state.interactions.clone()).with_plugin(state.plugin.clone())
             .with_terminal_states(state.list.published.clone()).with_terms(state.term.clone())
-            .with_permissions(state.state.permissions.clone()));
+            .with_permissions(state.state.permissions.clone())
+            .with_plugin_bridge(session_open::claude::PluginBridge { port: cfg.listen.port(), secret: cfg.auth_token.clone() }));
         registry.bind_lifecycle();
         state.state.lifecycle.set(registry.clone()).map_err(|_|std::io::Error::other("state_lifecycle_already_bound"))?;
         runtime_registry=Some(registry.clone());
@@ -149,6 +154,11 @@ pub async fn serve_until_with_guest(
         refresh_loop=Some(accounts::claude_refresh::start(state.accounts.clone(),quota_bridge,registry.clone()));
         let _watchdog = std::env::home_dir().map(|home| AbortOnDrop(tokio::spawn(
             watchdog::run(state.http.clone(), cfg.upstream, cfg.internal_secret.clone(), home))));
+        // A troca de conta que o Rust anterior deixou no meio, antes de qualquer sessão subir pelo spec.
+        { let env=registry.codex_environment();
+          if tokio::task::spawn_blocking(move||runtime::claude_reopen::settle_switches(&env)).await.is_err() {
+              tracing::warn!("trocas de conta interrompidas não foram conferidas");
+          } }
         // A vigia do Codex com terminal precisa das pastas da lista (sidecars e fila).
         let _codex_watch = match state.list.env().dirs.clone() {
             Some(dirs) => {
@@ -156,10 +166,20 @@ pub async fn serve_until_with_guest(
                     home: dirs.home.clone(), queue_dir: dirs.claude.join(".hangar-queue"),
                     mux: list::mux::Mux::default(), mux_program: state.list.env().capture_program.clone() }));
                 registry.bind_watcher(watcher.clone());
-                Some(AbortOnDrop(tokio::spawn(watcher.run(registry.clone()))))
+                // Presas ao desligamento: uma adoção tardia abriria sessão depois do `registry.shutdown()`.
+                // Os Claude com terminal que já tinham fila aqui: o Rust os adota, sem esperar o Python.
+                let claude_terminals = { let (watcher,registry)=(watcher.clone(),registry.clone());
+                  AbortOnDrop(tokio::spawn(async move { watcher.register_claude_terminals(&registry).await; })) };
+                // E os Codex sem terminal com cano vivo ou mensagem esperando.
+                let codex_headless = { let (watcher,registry)=(watcher.clone(),registry.clone());
+                  AbortOnDrop(tokio::spawn(async move { watcher.register_codex_headless(&registry).await; })) };
+                vec![claude_terminals,codex_headless,AbortOnDrop(tokio::spawn(watcher.run(registry.clone())))]
             }
-            _ => None,
+            _ => Vec::new(),
         };
+        // As sessões Claude sem terminal que já existem: o Rust as reconhece sozinho, sem esperar o Python.
+        let _claude_boot = AbortOnDrop(tokio::spawn(registry.clone().register_claude_headless()));
+        let _claude_park = AbortOnDrop(tokio::spawn(registry.clone().watch_idle_claude()));
         println!("{}",runtime::gateway::startup_line(INTERNAL_PROTOCOL,&instance,port));
         let gateway = runtime::gateway::serve(private,registry.clone(),cfg.internal_secret.clone(),instance,INTERNAL_PROTOCOL);
         let result = tokio::select! {
@@ -309,7 +329,7 @@ mod tests {
 /// Grava um executável de teste sem abrir o arquivo para escrita neste processo: quem grava é um
 /// `install` à parte. Gravado aqui, um filho de outro teste nascido nesse instante herdaria o descritor
 /// de escrita, e rodar o arquivo daria "Text file busy" (ETXTBSY).
-#[cfg(all(test, unix))]
+#[cfg(all(unix, any(test, target_os = "linux")))]
 pub(crate) fn write_test_executable(path: &std::path::Path, content: impl AsRef<[u8]>) {
     let source = path.with_extension("conteudo");
     std::fs::write(&source, content).unwrap();

@@ -212,3 +212,39 @@ fn branches_say_which_ones_are_open_in_another_worktree() {
     assert_eq!(from_other["elsewhere"]["main"]["main"], json!(true));
     assert!(from_other["elsewhere"].get("feat").is_none());
 }
+
+/// Desfazer a worktree apaga só a branch local que a criação fez (a nova e a trazida do
+/// remoto com `--track -b`), nunca a que já existia; a pasta ocupada ganha `-2`.
+#[test]
+fn undoing_a_worktree_deletes_only_the_branch_it_created() {
+    use hangar_workspace::git::{create_branch_worktree, undo_worktree};
+    let base = tempfile::tempdir().unwrap();
+    // Sem o prefixo `\\?\` do Windows: o git não cria pasta por ele.
+    let root = hangar_workspace::simplify(base.path().canonicalize().unwrap());
+    let origin = root.join("origin");
+    fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "main"]);
+    fs::write(origin.join("a.txt"), "a\n").unwrap();
+    git(&origin, &["add", "."]);
+    git(&origin, &["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "a"]);
+    git(&origin, &["branch", "remota"]);
+    git(&root, &["clone", "-q", "origin", "repo"]);
+    let repo = root.join("repo");
+    let worktrees = root.join("worktrees");
+    let local = |name: &str| Command::new("git").arg("-C").arg(&repo).args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{name}")])
+        .status().unwrap().success();
+    let made = create_branch_worktree(&repo, "remota", "remota", &root, false, None, &worktrees).unwrap();
+    assert!(made.created && made.branch_created && local("remota"), "{made:?}");
+    undo_worktree(&repo, &made, "remota").unwrap();
+    assert!(!local("remota") && !worktrees.join("repo/remota").exists(), "a branch trazida do remoto sai junto");
+    git(&repo, &["branch", "dev"]);
+    let made = create_branch_worktree(&repo, "dev", "dev", &root, false, None, &worktrees).unwrap();
+    assert!(made.created && !made.branch_created);
+    undo_worktree(&repo, &made, "dev").unwrap();
+    assert!(local("dev"), "a branch que já existia fica");
+    fs::create_dir_all(worktrees.join("repo/nova")).unwrap();
+    let made = create_branch_worktree(&repo, "nova", "nova", &root, true, None, &worktrees).unwrap();
+    assert!(std::path::Path::new(&made.path) == worktrees.join("repo/nova-2") && made.branch_created);
+    undo_worktree(&repo, &made, "nova").unwrap();
+    assert!(!local("nova"));
+}

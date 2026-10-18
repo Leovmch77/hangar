@@ -90,7 +90,7 @@ impl TerminalMetadata {
 #[derive(Clone)]
 pub struct ModeSource { pub binding: InteractionBinding, pub transcript: PathBuf, pub confirmed: Option<String> }
 pub type ModeReader = Arc<dyn Fn(String) -> input::ServiceFuture<'static, Option<ModeSource>> + Send + Sync>;
-type TranscriptModes = crate::list::capped::Capped<PathBuf, ((SystemTime, u64), Option<String>)>;
+pub(crate) type TranscriptModes = crate::list::capped::Capped<PathBuf, ((SystemTime, u64), Option<String>)>;
 pub struct LocalTerminalFacts {
     io: Arc<dyn TerminalIo>, plugin: Option<Arc<Store>>, modes: Option<ModeReader>,
     transcripts: Arc<Mutex<TranscriptModes>>,
@@ -317,7 +317,7 @@ pub(crate) fn message_id(key: &str, operation: &str) -> String {
     let mut bytes = hash.digest().bytes();bytes[6] = (bytes[6] & 0x0f) | 0x50;bytes[8] = (bytes[8] & 0x3f) | 0x80;
     let hex: String = bytes[..16].iter().map(|byte| format!("{byte:02x}")).collect();format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
 }
-fn transcript_mode(path: &Path, cache: &Mutex<TranscriptModes>) -> Result<Option<String>, ServiceError> {
+pub(crate) fn transcript_mode(path: &Path, cache: &Mutex<TranscriptModes>) -> Result<Option<String>, ServiceError> {
     let mut file = match std::fs::File::open(path) { Ok(file) => file, Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None), Err(_) => return Err(ServiceError("terminal_transcript_mode_unavailable")) };
     let meta = file.metadata().map_err(|_| ServiceError("terminal_transcript_mode_unavailable"))?;let key = (meta.modified().map_err(|_| ServiceError("terminal_transcript_mode_unavailable"))?, meta.len());
     let mut cache = cache.lock().map_err(|_| ServiceError("terminal_transcript_mode_unavailable"))?;if let Some((version, mode)) = cache.get(path) && version == &key { return Ok(mode.clone()); }

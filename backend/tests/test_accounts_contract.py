@@ -331,28 +331,6 @@ def test_codex_lost_http_response_keeps_owned_auth_reader_until_cleanup(tmp_path
                 pass
         reference.close()
 
-def test_codex_birth_blocks_login_before_and_after_restart(tmp_path):
-    from accounts_contract import RustCodex
-    reference = PythonReference(tmp_path / "home")
-    barrier = reference.block("session_before_registration")
-    birth = reference.start_session_async(provider="codex", account_id="alpha")
-    server = RustCodex(reference)
-    try:
-        assert barrier.entered.wait()
-        for index in range(2):
-            response = server.request("POST", "/api/codex-contas/alpha/login")
-            assert response.status_code == 409
-            assert response.json()["detail"]["code"] == "codex_account_in_use"
-            assert server.native_calls("alpha") == []
-            if index == 0:
-                server.close()
-                server = RustCodex(reference)
-        barrier.release.set()
-        assert birth.result(timeout=20).status_code == 200
-    finally:
-        barrier.release.set()
-        server.close()
-        reference.close()
 
 def test_codex_uncertain_usage_refuses_login_without_cli(tmp_path):
     from accounts_contract import RustCodex, publish_unknown_birth
@@ -504,4 +482,16 @@ def test_python_asks_rust_whether_a_process_uses_an_account(tmp_path, monkeypatc
         account_bridge.configure_preparation(None, None)
         child.communicate(b"\n", timeout=10)
         server.close()
+        reference.close()
+
+
+def test_python_does_not_open_sessions(tmp_path):
+    """Abrir é do Rust: na referência Python a abertura recusa com o código, sem nascer nada."""
+    reference = PythonReference(tmp_path / "home")
+    try:
+        response = reference.start_session_async(provider="codex", account_id="alpha").result(timeout=20)
+        assert response.status_code == 503
+        assert response.json()["detail"]["code"] == "session_open_needs_rust_server"
+        assert reference.request("GET", "/__contract__/usage").json()["sessions"] == []
+    finally:
         reference.close()

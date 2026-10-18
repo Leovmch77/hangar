@@ -1,11 +1,11 @@
-//! Rotas das páginas: publicação pela ponte privada (MCP do Python), leitura pelo dono. Convidado segue ao Python.
+//! Páginas: publicação pelo `html_render` do MCP (no processo), leitura pelo dono. Convidado segue ao Python.
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use axum::body::{Body, to_bytes};
+use axum::body::Body;
 use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -19,8 +19,6 @@ use super::{HEIGHT_MAX, HEIGHT_MIN, HTML_MAX_CHARS, TITLE_MAX_CHARS, Theme, WIDT
 use crate::routes::{AppState, INFO_REASON, cors, gate, pass, route_failed};
 
 const MESSAGE: &str = "Mostrada ao leitor acima da resposta. Não mencione nem descreva a página; responda só o que ela não diz.";
-const BODY_LIMIT: usize = 4 * 1024 * 1024;
-const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 const SHOT_WIDTH: u32 = 728;
 const DRAFT_WIDTH_MIN: u32 = 240;
 const DRAFT_WIDTH_MAX: u32 = 1600;
@@ -57,16 +55,12 @@ fn json_reply(status: StatusCode, value: Value) -> Response {
 
 fn fail(code: &str, detail: &str) -> Value { json!({"ok": false, "error": {"code": code, "detail": detail}}) }
 
-pub async fn publish_bridge(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
-    if !crate::terminal_routes::trusted_internal(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
-    let reply = match tokio::time::timeout(BODY_TIMEOUT, to_bytes(req.into_body(), BODY_LIMIT)).await {
-        Ok(Ok(bytes)) => match serde_json::from_slice::<PublishBody>(&bytes) {
-            Ok(body) => publish(&st, body).await,
-            Err(_) => fail("erro_pagina_invalida", "corpo inválido"),
-        },
-        _ => fail("erro_pagina_invalida", "corpo grande demais ou incompleto"),
-    };
-    json_reply(StatusCode::OK, reply)
+/// Publica a página do pedido do `html_render` (MCP): `{"ok": true, "result"}` ou `{"ok": false, "error"}`.
+pub async fn publish_value(st: &AppState, body: Value) -> Value {
+    match serde_json::from_value::<PublishBody>(body) {
+        Ok(body) => publish(st, body).await,
+        Err(_) => fail("erro_pagina_invalida", "corpo inválido"),
+    }
 }
 
 struct Prepared { id: String, html: String, missing: Vec<String>, bin: Option<PathBuf> }
@@ -400,6 +394,7 @@ pub fn spawn_sweep(list: Arc<crate::list::bridge::ListBridge>, pages: Arc<Store>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
 
     async fn body(r: Response) -> String {
         String::from_utf8(to_bytes(r.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap()

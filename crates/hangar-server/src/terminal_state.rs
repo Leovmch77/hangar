@@ -150,8 +150,8 @@ static P: LazyLock<Patterns> = LazyLock::new(|| {
     }
 });
 
-fn whitespace(c: char) -> bool { c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c) }
-fn trim(s: &str) -> &str { s.trim_matches(whitespace) }
+pub(crate) fn whitespace(c: char) -> bool { c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c) }
+pub(crate) fn trim(s: &str) -> &str { s.trim_matches(whitespace) }
 fn left(s: &str) -> &str { s.trim_start_matches(whitespace) }
 pub(crate) fn right(s: &str) -> &str { s.trim_end_matches(whitespace) }
 fn word(c: char) -> bool {

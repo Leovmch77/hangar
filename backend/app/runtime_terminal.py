@@ -5,6 +5,7 @@ import asyncio
 import contextvars
 import copy
 import hashlib
+import re
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ _log = logging.getLogger("hangar.runtime_terminal")
 _writer = contextvars.ContextVar('runtime_terminal_writer', default=None)
 
 
-# Teto do teclado emprestado pelo Rust a uma administração (troca de modelo/motor, /btw, modo).
+# Teto do teclado emprestado pelo Rust a uma administração (troca de modelo/motor, modo).
 _LOAN_S = 60
 # Folga sobre o prazo do Rust: o Python para de digitar antes de o Rust retomar o pane.
 _LOAN_MARGIN_S = 1
@@ -134,6 +135,9 @@ def _collect(name):
     if len(fields) != 6 or not fields[0] or not fields[1].isdigit() or not fields[2].isdigit() or fields[4] != name:
         return None
     mux_pid, created = int(fields[1]), int(fields[2])
+    # A chave que o Rust deu à sessão (o spec, ou a da adoção): os dois lados abrem a mesma fila.
+    shown = tmux._run(['tmux', 'show-environment', '-t', name if os.name == 'nt' else f'={name}', 'CP_SESSION_KEY'])
+    session_key = shown.stdout.strip().removeprefix('CP_SESSION_KEY=') if not shown.returncode else ''
     namespace = f'{fields[0]}:{mux_pid}:{psutil.Process(mux_pid).create_time()}'
     pane_birth = psutil.Process(pane['pid']).create_time()
     config_dir = str(procinfo._config_dir_of(agent) or api.registry.projects_dir.parent)
@@ -173,6 +177,7 @@ def _collect(name):
         pane_birth=pane_birth, agent_pid=agent, agent_birth=agent_birth,
         session_proof=_session_hash(namespace, fields[5], created),
         jsonl=jsonl, session_id=Path(jsonl).stem, config_dir=config_dir, cwd=cwd,
+        session_key=session_key if re.fullmatch(r'[A-Za-z0-9_-]{1,128}', session_key) else None,
         mux_argv=['tmux'], windows=os.name == 'nt',
         claude_settings=claude_customizations.from_environment(
             procinfo._env_var_of(agent, claude_customizations.SESSION_SETTINGS_ENV)),
@@ -190,11 +195,11 @@ def resolve_binding(name, previous=None):
         return None
     fingerprint = hashlib.sha256(json.dumps([facts['namespace'], facts['pane'].split(':')[-1],
         facts['created'], facts.get('pane_birth')], ensure_ascii=False).encode()).hexdigest()
-    same = previous is not None and (previous.meta.get('fingerprint') == fingerprint
+    same = previous is not None and (previous.key == facts.get('session_key') or previous.meta.get('fingerprint') == fingerprint
         or previous.meta.get('pending_terminal') and previous.meta['pending_terminal'] == facts.get('session_proof')
             and previous.meta.get('session_id') in (None, facts['session_id'])
         or previous.headless and previous.meta.get('session_id') == facts['session_id'])
-    key = previous.key if same else 'terminal_' + fingerprint
+    key = previous.key if same else facts.get('session_key') or 'terminal_' + fingerprint
     plugin_key = facts.get('plugin_token', '').partition('.')[0] if '.' in facts.get('plugin_token', '') else None
     kept = previous.meta.get('plugin_key') if same and previous.meta.get('agent_pid') == facts.get('agent_pid') else None
     if plugin_key is None and kept:

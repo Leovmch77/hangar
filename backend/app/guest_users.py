@@ -7,6 +7,7 @@ sistema que o dono (mesma premissa do compartilhamento de sessão).
 from __future__ import annotations
 
 import contextvars
+from contextlib import contextmanager
 import hashlib
 import json
 import logging
@@ -28,6 +29,8 @@ _FILE = "guests.json"
 _path_override: Path | None = None
 _lock = threading.RLock()
 _state: dict | None = None
+# O `hangar-server` também grava (o dono da sessão que ele abre): relê quando o arquivo muda.
+_state_sig: tuple | None = None
 # Arquivo existe mas não foi lido: gravar por cima apagaria todos os convidados.
 _unreadable = False
 # ponytail: vida cacheada 2 s por nome; cada consulta é um fork do tmux.
@@ -61,6 +64,14 @@ def _hash(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def _sig() -> tuple | None:
+    try:
+        st = _path().stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size, st.st_ino
+
+
 def _reset() -> None:
     global _state, _unreadable
     with _lock:
@@ -70,11 +81,12 @@ def _reset() -> None:
 
 
 def _load() -> dict:
-    global _state, _unreadable
+    global _state, _unreadable, _state_sig
     with _lock:
-        if _state is None:
+        if _state is None or _sig() != _state_sig:
+            _state_sig, _unreadable = _sig(), False
             try:
-                raw = json.loads(_path().read_text(encoding="utf-8"))
+                raw = json.loads(atomico.read(_path()).decode("utf-8"))
                 _state = {"guests": {g["id"]: Guest(**g) for g in raw.get("guests", [])},
                           "sessions": dict(raw.get("sessions", {}))}
             except FileNotFoundError:
@@ -85,6 +97,9 @@ def _load() -> dict:
                              _path(), e)
                 _state = {"guests": {}, "sessions": {}}
                 _unreadable = True
+                if isinstance(e, OSError):
+                    # Leitura que falhou no meio da troca (Windows): a próxima chamada tenta de novo.
+                    _state_sig = None
         return _state
 
 
@@ -105,9 +120,19 @@ def _save() -> None:
         except OSError:
             pass
         atomico.substituir(tmp, destino)
+        global _state_sig
+        _state_sig = _sig()
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+@contextmanager
+def _writing():
+    """Toda gravação: a mesma `guests.lock` do Rust, relendo o arquivo dentro dela."""
+    _path().parent.mkdir(parents=True, exist_ok=True)
+    with _lock, atomico.locked(_path().with_name("guests.lock")):
+        yield _load()
 
 
 def _valid_root(root: str) -> str:
@@ -122,16 +147,16 @@ def create(name: str, root: str, sees_owner: bool, owner_sees: bool) -> tuple[Gu
     token = secrets.token_urlsafe(32)
     g = Guest(id=secrets.token_hex(8), name=name.strip(), token_hash=_hash(token), root=real,
               sees_owner=sees_owner, owner_sees=owner_sees)
-    with _lock:
-        _load()["guests"][g.id] = g
+    with _writing() as st:
+        st["guests"][g.id] = g
         _save()
     return g, token
 
 
 def update(gid: str, root: str, sees_owner: bool, owner_sees: bool) -> Guest:
     real = _valid_root(root)
-    with _lock:
-        g = _load()["guests"].get(gid)
+    with _writing() as st:
+        g = st["guests"].get(gid)
         if g is None:
             raise GuestError("convidado_inexistente")
         g.root, g.sees_owner, g.owner_sees = real, sees_owner, owner_sees
@@ -140,8 +165,7 @@ def update(gid: str, root: str, sees_owner: bool, owner_sees: bool) -> Guest:
 
 
 def delete(gid: str) -> None:
-    with _lock:
-        st = _load()
+    with _writing() as st:
         if st["guests"].pop(gid, None) is None:
             raise GuestError("convidado_inexistente")
         # As sessões que ele deixou voltam a ser do dono.
@@ -176,15 +200,14 @@ def claim(session: str, gid: str) -> None:
             break
         time.sleep(0.2)
     # ponytail: sem poda; entrada de sessão morta é ignorada pela vida diferente. Podar se o arquivo pesar.
-    with _lock:
-        _load()["sessions"][session] = {"guest": gid, "life": life}
+    with _writing() as st:
+        st["sessions"][session] = {"guest": gid, "life": life}
         _save()
         _life_cache.pop(session, None)
 
 
 def rename_session(old: str, new: str) -> None:
-    with _lock:
-        st = _load()
+    with _writing() as st:
         entry = st["sessions"].pop(old, None)
         if entry is None:
             return
@@ -196,8 +219,8 @@ def set_life(session: str, life: str | None) -> None:
     # Trocar terminal <-> sem terminal muda a vida; sem isto a sessão deixaria de ser do convidado.
     if life is None:
         return
-    with _lock:
-        entry = _load()["sessions"].get(session)
+    with _writing() as st:
+        entry = st["sessions"].get(session)
         if entry is None:
             return
         entry["life"] = life
@@ -219,14 +242,16 @@ def owner_of(session: str) -> Guest | None:
         return None
     life = _life(session)
     if entry["life"] is None and life is not None:
-        with _lock:
-            entry["life"] = life
-            # Leitura nunca falha por causa da escrita: a vida adotada fica na memória e o disco
-            # tenta de novo na próxima gravação.
-            try:
+        # Leitura nunca falha por causa da escrita: a vida adotada fica na memória e o disco
+        # tenta de novo na próxima gravação.
+        try:
+            with _writing() as fresh:
+                if cur := fresh["sessions"].get(session):
+                    cur["life"] = life
                 _save()
-            except (OSError, GuestError) as e:
-                _log.warning("[guests] nao gravou a vida de %s: %s", session, e)
+        except (OSError, GuestError) as e:
+            entry["life"] = life
+            _log.warning("[guests] nao gravou a vida de %s: %s", session, e)
         return guest
     # Vida desconhecida (tmux sem responder) mantém o dono registrado; só OUTRA vida desfaz.
     return guest if life is None or life == entry["life"] else None

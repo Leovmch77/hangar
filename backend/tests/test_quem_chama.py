@@ -30,6 +30,18 @@ def test_chave_sem_sidecar_nao_cai_no_pane(mundo):
         quem_chama.resolver({"X-Hangar-Key": "nada", "X-Hangar-Pane": "%7"})
 
 
+def test_chave_de_sessao_com_terminal_do_rust_resolve_pelo_pane(mundo, tmp_path, monkeypatch):
+    """O Claude com terminal que o Rust abre leva CP_SESSION_KEY sem sidecar: com o registro dele,
+    vale o pane; sem registro, a chave segue recusada."""
+    chave = "0123456789abcdef0123456789abcdef"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    with pytest.raises(quem_chama.SessaoDesconhecida):
+        quem_chama.resolver({"X-Hangar-Key": chave, "X-Hangar-Pane": "%7"})
+    (tmp_path / ".hangar" / "session-specs").mkdir(parents=True)
+    (tmp_path / ".hangar" / "session-specs" / f"{chave}.json").write_text("{}")
+    assert quem_chama.resolver({"X-Hangar-Key": chave, "X-Hangar-Pane": "%7"}) == ("beta", "pane")
+
+
 def test_pane_unico_resolve(mundo):
     assert quem_chama.resolver({"X-Hangar-Pane": "%7", "X-Hangar-Session": "alfa"}) == ("beta", "pane")
 

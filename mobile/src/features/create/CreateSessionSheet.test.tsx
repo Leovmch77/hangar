@@ -1517,6 +1517,21 @@ describe('CreateSessionSheet Codex', () => {
     root.unmount();
   });
 
+  it.each([
+    ['sem escolha, a conta ativa não vai (D-003: o servidor decide)', null, null, null],
+    ['a conta ativa escolhida à mão vai', null, 'Conta A', '/a'],
+    ['a conta lembrada de uma escolha anterior vai', '/b', null, '/b'],
+  ])('%s', async (_case, remembered, pick, expected) => {
+    calls.configs.mockResolvedValue([{ path: '/a', label: 'Conta A', active: true }, { path: '/b', label: 'Conta B', active: false }]);
+    if (remembered) localStorage.setItem(`create.choices.v1:${server.id}`, JSON.stringify({ configDir: remembered }));
+    const { container, root } = await renderSheet(false, false);
+    if (pick) await pickAccount(container, pick, false);
+    await send(container);
+    expect(calls.create.mock.calls.at(-1)?.[1]).toMatchObject({ provider: 'claude' });
+    expect(calls.create.mock.calls.at(-1)?.[1]?.config_dir).toBe(expected);
+    root.unmount();
+  });
+
   it('diz por que a cota da conta não atualizou ao lado dos números antigos', async () => {
     calls.configs.mockResolvedValue([{ path: '/a', label: 'Conta A', active: true }, { path: '/b', label: 'Conta B', active: false }]);
     const antiga: CotaContaResumo = { id: 'claude:/a', estado: 'lida', janelas: [{ rotulo: '5h', pct: 42 }], motivo: 'sem-resposta' };
@@ -1843,8 +1858,33 @@ describe('CreateSessionSheet Codex', () => {
         expect(calls.create).toHaveBeenCalledTimes(1);
         const body = calls.create.mock.calls[0][1];
         expect(body).toMatchObject({ cwd: '/repo/hangar', provider: 'claude' });
-        expect(body.name).toMatch(/^hangar-[a-z0-9]{4}$/);
+        expect(body.name).toBe('hangar');
         expect(calls.send).not.toHaveBeenCalled();
+        expect(calls.replace).toHaveBeenCalledWith('/s/server-b/nova');
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('sem nome digitado, a sessão segue a pasta como no servidor: a pasta já em uso vira pasta-2', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      calls.sessions.mockResolvedValue([{ name: 'hangar', cwd: '/repo/hangar' }]);
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        await act(async () => button(container, 'criar_criar')!.click());
+        await act(async () => Promise.resolve());
+        expect(calls.create.mock.calls[0][1].name).toBe('hangar-2');
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('nome automático que o servidor diz em uso tenta uma vez com o próximo, sem abrir a sessão antiga', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      calls.create.mockRejectedValueOnce(Object.assign(new Error('nome em uso'), { status: 409, code: 'erro_nome_em_uso' }));
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        await act(async () => button(container, 'criar_criar')!.click());
+        for (let i = 0; i < 5; i++) await act(async () => Promise.resolve());
+        expect(calls.create.mock.calls.map((call) => call[1].name)).toEqual(['hangar', 'hangar-2']);
         expect(calls.replace).toHaveBeenCalledWith('/s/server-b/nova');
       } finally { act(() => root.unmount()); }
     });
@@ -1952,6 +1992,24 @@ describe('CreateSessionSheet Codex', () => {
         await act(async () => Promise.resolve());
         expect(calls.replace).not.toHaveBeenCalled();
         expect([...container.querySelectorAll('[role="alert"]')].map((n) => n.textContent)).toContain('nome em uso');
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('recusa respondida não vira repetição: o segundo toque no nome em uso não abre a sessão existente', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      calls.create.mockRejectedValue(Object.assign(new Error('nome em uso'), { status: 409, code: 'erro_nome_em_uso' }));
+      calls.sessions.mockResolvedValue([{ name: 'antiga', cwd: '/repo/hangar' }]);
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        const field = container.querySelector('textarea[aria-label="comum_nome"]') as HTMLTextAreaElement;
+        await act(async () => { field.value = 'antiga'; field.dispatchEvent(new Event('input', { bubbles: true })); });
+        for (let press = 0; press < 2; press++) {
+          await act(async () => button(container, 'criar_criar')!.click());
+          await act(async () => Promise.resolve());
+        }
+        expect(calls.create).toHaveBeenCalledTimes(2);
+        expect(calls.replace).not.toHaveBeenCalled();
       } finally { act(() => root.unmount()); }
     });
 

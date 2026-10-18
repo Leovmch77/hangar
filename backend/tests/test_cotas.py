@@ -38,23 +38,3 @@ def test_rotulo_vem_da_duracao_do_provedor():
     assert cotas._rotulo_janela("10080") == "7d"
     assert cotas._rotulo_janela(90) == "90min"
     assert cotas._rotulo_janela(None) == "janela"
-
-
-# --------------------------------------------------------------------- conta herdada acabando
-
-
-def test_conta_herdada_acabando_vai_para_a_de_mais_folga():
-    """Criadora a 95% numa janela: a sessão nova nasce na de mais folga, como o --conta auto."""
-    contas = [_conta("claude:/mae", 40, 95), _conta("claude:/folga", 10, 20)]
-    cfg, aviso = cotas.conta_com_cota("/mae", contas)
-    assert cfg == "/folga" and "95%" in aviso
-
-
-def test_conta_herdada_com_folga_fica():
-    contas = [_conta("claude:/mae", 50, 30), _conta("claude:/folga", 10, 20)]
-    assert cotas.conta_com_cota("/mae", contas) == ("/mae", None)
-
-
-def test_conta_acabando_fica_se_nenhuma_outra_tem_mais_folga():
-    contas = [_conta("claude:/mae", 96), _conta("claude:/outra", 97)]
-    assert cotas.conta_com_cota("/mae", contas) == ("/mae", None)

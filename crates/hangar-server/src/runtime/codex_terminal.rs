@@ -221,6 +221,8 @@ pub struct Watcher {
     /// Relançamentos seguidos que falharam do sidecar antigo, por nome, com a hora da última falha (o
     /// `TETO_SUBIDAS` do Python).
     pub(super) legacy_failures:tokio::sync::Mutex<BTreeMap<String,(u8,std::time::Instant)>>,
+    /// O prefixo do escopo do systemd do pane que o Rust cria; os testes nunca rodam o `systemd-run`.
+    scope_probe:fn()->Vec<String>,
 }
 
 /// Sidecar do desenho antigo (terminal sem `endpoint`): a escrita o relança pelo lançador.
@@ -246,11 +248,21 @@ pub(super) fn candidate(meta:&Map<String,Value>,home:&Path) -> Option<Candidate>
 
 // ponytail: só o `transfer_id` do sidecar; o índice por thread do Python (`transfer_for_thread`) fica de
 // fora. Sessão de destino sem `transfer_id` é adotada mesmo com a transferência em curso.
-pub(super) fn transfer_complete(home:&Path,id:&str) -> bool {
+pub(super) fn transfer_complete(home:&Path,id:&str) -> bool { transfer_state(home,id).unwrap_or(false) }
+
+/// A transferência `id` terminou? O registro ausente ou ilegível é erro: o sidecar aponta para ele.
+pub(super) fn transfer_state(home:&Path,id:&str) -> Result<bool,RuntimeError> {
     let id = id.to_ascii_lowercase();
-    if id.len() != 36 || !id.bytes().all(|b|b.is_ascii_hexdigit() || b == b'-') { return false; }
+    let unreadable = ||RuntimeError::new("codex_transfer_record_unreadable","o registro da transferência desta sessão não pôde ser lido");
+    if id.len() != 36 || !id.bytes().all(|b|b.is_ascii_hexdigit() || b == b'-') { return Err(unreadable()); }
     let record = home.join(".hangar").join("conversation-transfers").join(format!("{id}.json"));
-    std::fs::read(record).ok().and_then(|raw|serde_json::from_slice::<Value>(&raw).ok()).is_some_and(|record|record["phase"] == "complete")
+    let raw = match std::fs::read(record) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound =>
+            return Err(RuntimeError::new("codex_transfer_record_missing","o sidecar aponta para uma transferência cujo registro sumiu")),
+        Err(_) => return Err(unreadable()),
+    };
+    serde_json::from_slice::<Value>(&raw).map(|record|record["phase"] == "complete").map_err(|_|unreadable())
 }
 
 /// O pane da sessão: o do Codex, e entre eles o ativo.
@@ -406,7 +418,15 @@ fn pending_projection(queue_dir:&Path,name:&str) -> Result<Vec<Value>,RuntimeErr
 }
 
 impl Watcher {
-    pub fn new(cfg:WatchConfig) -> Self { Self { cfg,misses:Default::default(),death_after:DEATH_AFTER,legacy_failures:Default::default() } }
+    pub fn new(cfg:WatchConfig) -> Self {
+        Self { cfg,misses:Default::default(),death_after:DEATH_AFTER,legacy_failures:Default::default(),scope_probe:crate::session_open::terminal::systemd_scope }
+    }
+    pub fn with_scope_probe(mut self,probe:fn()->Vec<String>) -> Self { self.scope_probe = probe; self }
+    /// O multiplexador que cria panes, com o escopo desta vigia.
+    pub(super) fn spawn_mux(&self) -> crate::session_open::terminal::ProcessMux {
+        crate::session_open::terminal::ProcessMux { probe:self.scope_probe,..Default::default() }
+    }
+    pub(super) fn mux_program(&self) -> String { self.cfg.mux_program.to_string_lossy().into_owned() }
     /// Prazo de ausência antes da morte; os testes encurtam.
     pub fn with_death_after(mut self,after:Duration) -> Self { self.death_after = after; self }
 
@@ -467,6 +487,10 @@ impl Watcher {
             }
         }
         for meta in sidecars.iter().map(|(_,meta)|meta) {
+            if let (Some(name),Some(transfer)) = (text(meta,"name"),text(meta,"transfer_id"))
+                && let Err(error) = transfer_state(home,transfer) && crate::warn_limit::allow(Some(name),&error.code) {
+                tracing::warn!(session=%name,code=%error.code,reason=%error.message,"Codex com terminal não adotado");
+            }
             let Some(c) = candidate(meta,home) else { continue };
             if registry.has_entry(c.key.as_deref(),&c.name).await { continue; }
             match pane_of(&panes,&c.name) {
@@ -519,6 +543,7 @@ impl Watcher {
         if text(&meta,"endpoint").is_none() {
             return Some(Err(RuntimeError::new(LEGACY_SIDECAR,"o arquivo da sessão é do desenho antigo, sem o endereço do app-server")));
         }
+        if let Some(transfer) = text(&meta,"transfer_id") && let Err(error) = transfer_state(&self.cfg.home,transfer) { return Some(Err(error)); }
         let Some(c) = candidate(&meta,&self.cfg.home) else {
             return Some(Err(RuntimeError::new("codex_terminal_not_ready","o Codex com terminal ainda não tem app-server pronto")));
         };

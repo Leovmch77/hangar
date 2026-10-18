@@ -213,6 +213,18 @@ def delete(name: str) -> None:
         pass
 
 
+def delete_if(name: str, antes=None, **vida) -> bool:
+    """Apaga o sidecar só se ainda é da vida esperada (campos iguais); `antes` roda sob a trava."""
+    with _locked(name):
+        meta = load(name)
+        if meta is None or any(meta.get(k) != v for k, v in vida.items()):
+            return False
+        if antes is not None:
+            antes()
+        _path(name).unlink(missing_ok=True)
+        return True
+
+
 def rename(old: str, new: str) -> None:
     """Move o sidecar junto com a sessao tmux, preservando a identidade da thread."""
     src, dst = _path(old), _path(new)

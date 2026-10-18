@@ -4,9 +4,10 @@
 Mesma razão de existir do hangar-engine: a regra mora num lugar SÓ. O backend importa app.contas
 direto; o shell não pode (não tem venv), então chama este script com o python3 do sistema.
 
-  hangar-conta --list          -> um nome de conta por linha
-  hangar-conta --prep <nome>   -> refaz os atalhos e imprime o caminho do config dir
-  hangar-conta --new <nome>    -> cria a conta e imprime o caminho
+  hangar-conta --list                    -> um nome de conta por linha
+  hangar-conta --prep <nome> [<projeto>] -> refaz os atalhos e imprime o caminho do config dir;
+                                            com o projeto (a pasta já saneada), liga a memória dele
+  hangar-conta --new <nome>              -> cria a conta e imprime o caminho
 """
 import sys
 from pathlib import Path
@@ -27,16 +28,15 @@ def main(argv: list[str]) -> int:
             print(nome)
         return 0
 
-    if len(argv) == 3 and argv[1] in ("--prep", "--new"):
+    if (len(argv) == 3 and argv[1] in ("--prep", "--new")) or (len(argv) == 4 and argv[1] == "--prep"):
         nome = argv[2]
         try:
             if argv[1] == "--new":
                 print(contas.criar(nome))
             else:
-                # Sem `projeto`: daqui não dá pra sanitizar o cwd sem duplicar a regra do
-                # registry.sanitize_cwd. A varredura do que já existe cobre todo projeto conhecido;
-                # projeto novo aberto pelo terminal ganha a memória na abertura seguinte.
-                for aviso in contas.reconciliar(nome):
+                # O projeto vem saneado de quem chama (o lançador do Rust): a regra do
+                # sanitize_cwd fica num lugar só. Sem ele, a varredura cobre os projetos conhecidos.
+                for aviso in contas.reconciliar(nome, argv[3] if len(argv) == 4 else None):
                     print(f"hangar-conta: {aviso}", file=sys.stderr)
                 print(contas.caminho(nome))
         except contas.ContaError as e:

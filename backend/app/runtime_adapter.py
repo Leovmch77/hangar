@@ -903,10 +903,6 @@ class RuntimeAdapter:
                 from app.adapters.codex.chat_controls import skills_do_catalogo
                 return skills_do_catalogo(result)
             return None if method in {"skip_question", "compact"} else result
-        if self.provider == "codex" and method in {"recarregar", "restart"}:
-            # O Rust mata e sobe o processo na mesma conversa; a sessão não sai dele.
-            await self.control(name, "restart")
-            return None
         if self.provider == "codex" and method == "set_permission_mode_sem_terminal":
             from app.adapters.codex.sem_terminal import Ocupada
             from app.rust_server import RustOpError
@@ -919,7 +915,7 @@ class RuntimeAdapter:
                 if exc.code == "erro_modo_desconhecido":
                     raise ValueError(exc.message) from None
                 raise
-        if method in {"parar", "recarregar", "restart", "open_terminal", "open_headless", "set_permission_mode_sem_terminal"}:
+        if method in {"parar", "recarregar", "set_permission_mode_sem_terminal"}:
             return await runtime_coordinator.current().lifecycle_call(name, method, arguments)
         raise RuntimeError("método exige encaminhamento explícito ao responsável")
 
@@ -1009,8 +1005,8 @@ async def owner_state_stream(legacy, native, name):
 
 _ASYNC = {"ensure_running", "send_prompt", "deliverable", "drain", "steer", "steer_queue", "interrupt", "select",
     "answer_questions", "set_model", "set_service_tier", "set_permission_mode", "list_models", "read_settings", "read_rate_limits", "set_mode",
-    "compact", "list_skills", "skip_question", "parar", "recarregar", "restart", "open_terminal", "open_headless", "set_permission_mode_sem_terminal"}
-_CODEX_OPENS_IN_RUST = {"restart", "set_permission_mode_sem_terminal", "open_terminal"}
+    "compact", "list_skills", "skip_question", "parar", "recarregar", "set_permission_mode_sem_terminal"}
+_CODEX_OPENS_IN_RUST = {"set_permission_mode_sem_terminal"}
 _SYNC = {"snapshot", "escolhas", "problema_de", "current_model", "aprovacao_pendente", "permission_modes_sem_terminal", "rename", "close_sync"}
 
 
@@ -1085,7 +1081,7 @@ def install_adapter(cls, provider):
                 if context is not None and coordinator is not None and context.get("operation_id") in coordinator.legacy_active:
                     return await _original(self, *args, **kwargs)
                 managed = coordinator is not None and getattr(coordinator, "legacy", None) is not None
-                # Reiniciar, trocar o sandbox e passar para terminal precisam do processo: abrem no Rust
+                # Trocar o sandbox precisa do processo: abre no Rust
                 # como o envio, senão a sessão parada caía no Python, que não pode subir o cano.
                 opens = _method == "ensure_running" or _facade.provider == "codex" and _method in _CODEX_OPENS_IN_RUST
                 if (managed and opens and _facade.provider == "codex" and coordinator.mode != "python"
@@ -1097,8 +1093,7 @@ def install_adapter(cls, provider):
                         and not bound.arguments.get("so_reconectar") and bound.arguments.get("transfer_id") is None):
                     # Subir a sessão é abri-la no Rust, com a conta/motor pedidos e a espera do initialize;
                     # dentro da barreira (troca de conta) é reabrir já o que a administração fechou.
-                    options = {"engine_models":bound.arguments.get("engine_models"),
-                        "wait_initialized":bool(bound.arguments.get("esperar_pronta") or bound.arguments.get("require_initialize"))}
+                    options = {"wait_initialized":bool(bound.arguments.get("esperar_pronta") or bound.arguments.get("require_initialize"))}
                     if coordinator.managed_queue(name) and coordinator.in_lifecycle(coordinator.slot(name)):
                         await coordinator.reopen_in_change(name, **options)
                     else:
@@ -1117,7 +1112,7 @@ def install_adapter(cls, provider):
     original = getattr(cls, "acordar", None)
     if original is not None and not getattr(original, "runtime_wrapped", False):
         @functools.wraps(original)
-        def wake(self, name, *, engine_models=None, _original=original):
+        def wake(self, name, *, _original=original):
             if native_slot(name) is not None:
                 runtime_coordinator.current().request_drain(name)
                 return
@@ -1126,7 +1121,6 @@ def install_adapter(cls, provider):
                 from app.conversation_transfer import transfer_active
                 if transfer_active(name):
                     return
-                self.reset_start_attempts(name)   # ação do usuário: nova rodada de tentativas
                 if coordinator.managed_queue(name) and (slot := coordinator.slot(name)).change is not None and coordinator.in_lifecycle(slot):
                     slot.change["relaunch"] = True      # a administração reabre lançando o processo
                     return
@@ -1134,7 +1128,7 @@ def install_adapter(cls, provider):
                 # quando a sessão fica entregável.
                 async def open_in_rust():
                     try:
-                        slot = await coordinator.ensure_open(name, engine_models=engine_models)
+                        slot = await coordinator.ensure_open(name)
                         if slot.phase != runtime_coordinator.Phase.Rust:
                             await self.ensure_running(name)
                             await coordinator.op(name, {"kind":"drain"}, uuid.uuid4().hex)
@@ -1160,6 +1154,6 @@ def install_adapter(cls, provider):
                 self._tarefas.add(task)
                 task.add_done_callback(self._tarefas.discard)
                 return
-            _original(self, name, **({"engine_models":engine_models} if engine_models is not None else {}))
+            _original(self, name)
         wake.runtime_wrapped = True
         cls.acordar = wake

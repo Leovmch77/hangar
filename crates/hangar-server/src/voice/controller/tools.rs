@@ -453,31 +453,32 @@ impl Controller {
             let work = request.request.clone();
             let created = create(&ctx.machines, &machine, &request).await;
             let (created, sent) = match (created, work) {
-                (Ok(name), Some(work)) => {
+                (Ok((name, notice)), Some(work)) => {
                     let delivery = ctx.machines.send(&machine, &name, &work).await.map_err(|e| e.text);
-                    (Ok(name), Some(delivery))
+                    (Ok((name, notice)), Some(delivery))
                 }
                 (Err(text), Some(_)) => (Err(format!("{text} O pedido não foi enviado.")), None),
                 (created, None) => (created, None),
             };
             match created {
-                Ok(name) => { let _ = ctx.done.send(Done::Opened { call, machine, name, sent, reopened: false }); }
+                Ok((name, notice)) => { let _ = ctx.done.send(Done::Opened { call, machine, name, sent, reopened: false, notice }); }
                 Err(text) => { log("open_session failed"); ctx.fail(call, "open_session", text); }
             }
         });
     }
 
-    pub(super) fn opened(&mut self, call: CallId, machine: String, name: String, sent: Option<Result<Delivery, String>>, reopened: bool) {
+    pub(super) fn opened(&mut self, call: CallId, machine: String, name: String, sent: Option<Result<Delivery, String>>, reopened: bool,
+        notice: String) {
         log(format!("open_session created request={} reopened={reopened}", sent.is_some()));
         let key = (machine, name.clone());
         if sent.is_some() { self.watched.insert(key.clone()); }
         if self.can("switch_session") {
             let args = self.switch_args(&key);
-            self.send_tool("switch_session", args, Forwarded::Opened { call, name, sent, reopened });
+            self.send_tool("switch_session", args, Forwarded::Opened { call, name, sent, reopened, notice });
             return;
         }
         if reopened {
-            self.voice.reply(call, tool_reply(format!("Conversa reaberta como sessão {name}; este aparelho não a abre na tela pela voz."), true));
+            self.voice.reply(call, tool_reply(format!("Conversa reaberta como sessão {name}; este aparelho não a abre na tela pela voz.{notice}"), true));
             return;
         }
         let note = match &sent {
@@ -486,7 +487,7 @@ impl Controller {
             Some(_) => " O pedido não chegou a ela; não reenvie, peça para o usuário conferir o chat.".into(),
         };
         let ok = sent.as_ref().is_none_or(|r| r.as_ref().is_ok_and(|d| d.ok));
-        self.voice.reply(call, tool_reply(format!("Sessão {name} criada; este aparelho não a abre na tela pela voz.{note}"), ok));
+        self.voice.reply(call, tool_reply(format!("Sessão {name} criada; este aparelho não a abre na tela pela voz.{note}{notice}"), ok));
     }
 
     /// Pergunta ao Jev o que a fala pede, com as sessões e as ações de tela de agora; roda em paralelo ao organizador.
@@ -690,9 +691,14 @@ pub(super) async fn folders(machines: &Machines, machine: &str) -> Result<(Vec<(
     Ok((folders, unread))
 }
 
-/// Cria a sessão; devolve o nome com que ela nasceu. O que o usuário não disse fica com o padrão do servidor, como a tela de
-/// criação sem toque; o Claude sem modo dito nasce em `bypassPermissions`, o padrão do app.
-pub(super) async fn create(machines: &Machines, machine: &str, request: &OpenRequest) -> Result<String, String> {
+/// Os `avisos` da resposta de abertura (troca de conta no limite), em frase para o fim da resposta da ferramenta.
+pub(super) fn warnings_notice(info: &Value) -> String {
+    info["avisos"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|w| format!(" Aviso do servidor: {w}")).collect()
+}
+
+/// Cria a sessão; devolve o nome com que ela nasceu e os avisos dela. O que o usuário não disse fica com o padrão do servidor, como a tela de
+/// criação sem toque, inclusive o modo de permissão (o da conta).
+pub(super) async fn create(machines: &Machines, machine: &str, request: &OpenRequest) -> Result<(String, String), String> {
     let cwd = folder(machines, machine, &request.folder).await?;
     let name = match &request.name {
         Some(name) => name.clone(),
@@ -710,11 +716,7 @@ pub(super) async fn create(machines: &Machines, machine: &str, request: &OpenReq
         (Some(account), _) => body["config_dir"] = json!(account),
         (None, _) => {}
     }
-    match (&request.permission, request.provider) {
-        (Some(mode), _) => body["permission_mode"] = json!(mode),
-        (None, "claude") => body["permission_mode"] = json!("bypassPermissions"),
-        (None, _) => {}
-    }
+    if let Some(mode) = &request.permission { body["permission_mode"] = json!(mode); }
     let created = machines.call(machine, reqwest::Method::POST, "/api/sessions", Some(body)).await?;
-    Ok(created["name"].as_str().filter(|n| !n.is_empty()).map_or(name, str::to_owned))
+    Ok((created["name"].as_str().filter(|n| !n.is_empty()).map_or(name, str::to_owned), warnings_notice(&created)))
 }

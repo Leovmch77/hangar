@@ -833,6 +833,12 @@ impl NewSession {
         self.configs.finish(seq, Ok(list));
     }
 
+    /// D-003: a conta que ninguém escolheu não vai, e o servidor troca a que estiver a 95% ou mais. A saída
+    /// automática da esgotada é essa mesma regra, então também não conta como escolha.
+    pub(super) fn requested_config(&self) -> Value {
+        if self.account_touched || self.account_suggested || self.target().is_some() { json!(self.config) } else { Value::Null }
+    }
+
     pub(super) fn fallback_config(&self) -> Option<String> {
         self.accounts().find(|c| c.active).or_else(|| self.accounts().next()).map(|c| c.path.clone())
     }

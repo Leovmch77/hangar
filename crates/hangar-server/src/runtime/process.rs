@@ -167,8 +167,8 @@ fn probe_binary(bin: &Path) -> bool {
 
 /// Recusa do systemd ao criar um escopo logo depois de outro ("Failed to start transient scope unit:
 /// Unit run-….scope not found"). Só ela se repete, com estas esperas; qualquer outra falha responde na hora.
-const SCOPE_RETRY: [Duration; 3] = [Duration::from_millis(200), Duration::from_millis(400), Duration::from_millis(800)];
-const SCOPE_UNIT_MISSING: &str = "systemd_scope_unit_missing";
+pub(crate) const SCOPE_RETRY: [Duration; 3] = [Duration::from_millis(200), Duration::from_millis(400), Duration::from_millis(800)];
+pub(crate) const SCOPE_UNIT_MISSING: &str = "systemd_scope_unit_missing";
 const SCOPE_REFUSED: &str = "systemd_scope_refused";
 const SCOPE_ABSENT: &str = "systemd_scope_absent";
 
@@ -179,12 +179,12 @@ fn first_line(text: &[u8]) -> Option<String> {
 
 /// A recusa vem de escopos criados ao mesmo tempo: quem foi recusado junto não pode repetir junto.
 /// Espera entre a base e o dobro dela.
-fn scope_wait(base: Duration) -> Duration {
+pub(crate) fn scope_wait(base: Duration) -> Duration {
     let spread = u64::from_str_radix(&crate::mods::state::random_hex(2), 16).unwrap_or(0);
     base + base.mul_f64(spread as f64 / 65536.0)
 }
 
-fn scope_unit_missing(stderr: &[u8]) -> Option<String> {
+pub(crate) fn scope_unit_missing(stderr: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stderr);
     let line = text.lines().find(|line| line.contains("transient scope unit") && line.contains("not found"))?;
     Some(line.chars().take(200).collect())
@@ -198,7 +198,7 @@ fn scope_unit_missing(stderr: &[u8]) -> Option<String> {
 /// Recusa (a transitória esgotada ou outra) deixa esta subida sem escopo e a próxima sonda de novo.
 /// Bloqueante (processo e esperas): chamar fora do runtime.
 #[cfg(unix)]
-fn scope_prefix() -> &'static [std::ffi::OsString] {
+pub(crate) fn scope_prefix() -> &'static [std::ffi::OsString] {
     const ARGS: &[&str] = &["--user", "--scope", "--collect", "-q", "--"];
     static PREFIX: OnceLock<Vec<std::ffi::OsString>> = OnceLock::new();
     // Uma sondagem por vez: duas em paralelo criariam a colisão de escopos que a repetição tenta evitar.
@@ -244,10 +244,10 @@ fn scope_prefix() -> &'static [std::ffi::OsString] {
 }
 
 /// O executável pelo PATH do ambiente da sessão (PATHEXT no Windows: o `hangar-engine` é `.CMD`).
-pub(crate) fn resolve_program(name: &str, env: &[(String, String)]) -> Option<PathBuf> {
+pub(crate) fn resolve_program<'a>(name: &str, env: impl IntoIterator<Item = (&'a String, &'a String)> + Clone) -> Option<PathBuf> {
     let path = Path::new(name);
     if path.components().count() > 1 { return path.is_file().then(|| path.to_path_buf()); }
-    let var = |k: &str| env.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str());
+    let var = |k: &str| env.clone().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str());
     // No Windows o nome cru só vale se já termina numa extensão do PATHEXT, como o `shutil.which`:
     // `codex` sem extensão é o shim de shell do npm, que o CreateProcess não roda.
     let exts: Vec<String> = if cfg!(windows) {
@@ -286,12 +286,22 @@ pub async fn spawn(spec: &LaunchSpec) -> Result<Cano, ProcessError> {
     });
     #[cfg(not(unix))]
     let prefix: &[std::ffi::OsString] = &[];
+    spawn_recipe(prepared(spec, bin, prefix.to_vec(), Map::new())?).await
+}
+
+fn prepared(spec: &LaunchSpec, bin: PathBuf, prefix: Vec<std::ffi::OsString>, extra: Map<String, Value>) -> Result<PreparedRecipe, ProcessError> {
     let program = spec.program.first().ok_or_else(|| ProcessError::Spawn("comando vazio".into()))?;
-    let exe = resolve_program(program, &spec.env)
+    let exe = resolve_program(program, spec.env.iter().map(|(k, v)| (k, v)))
         .ok_or_else(|| ProcessError::Spawn(format!("binário não encontrado: {program}")))?;
     let program=std::iter::once(exe.into_os_string()).chain(spec.program[1..].iter().map(std::ffi::OsString::from)).collect();
     let env=spec.env.iter().map(|(k,v)|(k.into(),v.into())).collect();
-    spawn_recipe(PreparedRecipe {bin,prefix:prefix.to_vec(),program,env,cwd:spec.cwd.clone(),key:spec.key.clone(),sidecar_dir:spec.sidecar_dir.clone(),extra:Map::new()}).await
+    Ok(PreparedRecipe {bin,prefix,program,env,cwd:spec.cwd.clone(),key:spec.key.clone(),sidecar_dir:spec.sidecar_dir.clone(),extra})
+}
+
+/// O relançamento: tudo conferido antes de encerrar a vida antiga (cano, escopo do systemd sem reserva,
+/// executável no PATH da sessão), para a falha deixar a origem de pé. Bloqueante: chamar fora do runtime.
+pub fn prepare_launch(spec: &LaunchSpec, extra: Map<String, Value>) -> Result<PreparedRecipe, ProcessError> {
+    prepared(spec, cano_binary()?, scope_command()?, extra)
 }
 
 pub(crate) fn scope_command()->Result<Vec<std::ffi::OsString>,ProcessError> {
@@ -302,28 +312,8 @@ pub(crate) fn scope_command()->Result<Vec<std::ffi::OsString>,ProcessError> {
     Ok(prefix.to_vec())
 }
 
-/// Prévia privada de uma receita provada; ambiente só em memória, nunca no diário.
+/// Prévia privada de um lançamento; ambiente só em memória, nunca no diário.
 pub struct PreparedRecipe {bin:PathBuf,prefix:Vec<std::ffi::OsString>,program:Vec<std::ffi::OsString>,env:Vec<(std::ffi::OsString,std::ffi::OsString)>,cwd:PathBuf,key:String,sidecar_dir:PathBuf,extra:Map<String,Value>}
-/// Bloqueante (acha o cano e sonda o escopo): chamar fora do runtime.
-pub fn prepare_recipe(recipe:&crate::list::procs::ProcessRecipe,key:&str,sidecar_dir:&Path,extra:Map<String,Value>)->Result<PreparedRecipe,ProcessError> {
-    if recipe.argv.is_empty() || recipe.environ.is_empty() || !recipe.executable.is_file()
-        || recipe.argv.iter().any(|arg|arg.as_encoded_bytes().contains(&0)) {return Err(ProcessError::Spawn("receita incompleta".into()));}
-    let bin=cano_binary()?;
-    let prefix=scope_command()?;
-    let mut env=Vec::new();
-    for entry in &recipe.environ {
-        let bytes=entry.as_encoded_bytes();
-        if bytes.contains(&0) {return Err(ProcessError::Spawn("ambiente ilegível".into()));}
-        let at=bytes.iter().enumerate().find(|(i,b)|*i>0 && **b==b'=').map(|(i,_)|i).ok_or_else(||ProcessError::Spawn("ambiente ilegível".into()))?;
-        // SAFETY: o ambiente foi lido como OsString nativo; o corte é no `=` ASCII.
-        let key=unsafe {std::ffi::OsStr::from_encoded_bytes_unchecked(&bytes[..at])};
-        let value=unsafe {std::ffi::OsStr::from_encoded_bytes_unchecked(&bytes[at+1..])};
-        if ["HANGAR_INTERNAL_SECRET","HANGAR_RUNTIME_INSTANCE","CP_AUTH_TOKEN"].contains(&key.to_str().unwrap_or("")) {continue;}
-        env.push((key.to_owned(),value.to_owned()));
-    }
-    let program=std::iter::once(recipe.executable.as_os_str().to_owned()).chain(recipe.argv[1..].iter().cloned()).collect();
-    Ok(PreparedRecipe {bin,prefix,program,env,cwd:recipe.cwd.clone(),key:key.into(),sidecar_dir:sidecar_dir.to_owned(),extra})
-}
 /// Mantém settings privados vivos até a vida nova assumir; falha encerra só o cano lançado aqui.
 pub struct RelaunchGuard {cano:Cano,key:String,dir:PathBuf,settings:std::sync::Arc<super::claude_relaunch::Recipe>,armed:bool}
 impl RelaunchGuard {

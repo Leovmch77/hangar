@@ -14,7 +14,7 @@ import { semEsforco } from '../pills/pills';
 import { SettingsList } from '../../ui/SettingsList';
 import { useServers } from '../../stores/servers';
 import { readProject, rememberProject } from '../../stores/createPreferences';
-import { defaultSessionName, type NewConversationInput } from '../../stores/newConversation';
+import { autoSessionName, type NewConversationInput } from '../../stores/newConversation';
 import { CwdPicker } from './CwdPicker';
 import { loadErrorText } from './loadError';
 import { useCanceledLoadRetry } from './useCanceledLoadRetry';
@@ -170,6 +170,10 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
   const cotaSelecionada = selectedConfig ? cotaDaConta(cotas, selectedConfig) : undefined;
   // Só a escolha à mão no menu de conta desliga a troca automática por cota esgotada.
   const accountTouched = useRef(false);
+  // D-003: só vai no pedido a conta que a pessoa escolheu (agora ou lembrada de antes). A ativa sem
+  // escolha não vai, e o servidor troca a que estiver a 95% ou mais. A lembrada que a tela trocou por
+  // cota esgotada vai como a que a tela mostra: a regra é a mesma do servidor.
+  const [accountChosen, setAccountChosen] = useState(false);
   // Conta que a troca automática deixou para trás; a pílula avisa até a próxima escolha.
   const [switchedFrom, setSwitchedFrom] = useState('');
   const [motores, setMotores] = useState<Record<string, { label?: string; model?: string }>>({});
@@ -252,6 +256,7 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
     setConfigs([]);
     setSelectedConfig(null);
     accountTouched.current = false;
+    setAccountChosen(false);
     providerTouched.current = false;
     setSwitchedFrom('');
     setMotores({});
@@ -270,7 +275,10 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
       .then((cs) => {
         if (!alive) return;
         setConfigs(cs);
-        const sel = cs.find((c) => c.path === remembered.configDir)?.path ?? cs.find((c) => c.active)?.path ?? cs[0]?.path ?? null;
+        const kept = cs.find((c) => c.path === remembered.configDir)?.path;
+        const sel = kept ?? cs.find((c) => c.active)?.path ?? cs[0]?.path ?? null;
+        // Retomar a carga não desfaz a conta que a pessoa já escolheu.
+        if (!accountTouched.current) setAccountChosen(!!kept);
         setSelectedConfig((current) => cs.some((c) => c.path === current) ? current : sel);
       })
       .catch((cause: unknown) => {
@@ -502,7 +510,7 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
     ? { provider: 'codex', model: modelo || null, effort: esforco || null, codex_account: codexAccount, headless }
     : {
       provider,
-      config_dir: provider === 'claude' ? selectedConfig : null,
+      config_dir: provider === 'claude' && accountChosen ? selectedConfig : null,
       engine: provider === 'claude' ? engine || null : null,
       model: (provider === 'claude' || provider === 'pi' || provider === 'kimi' || provider === 'omp') ? modelo || null : null,
       effort: (provider === 'claude' || provider === 'pi' || provider === 'omp') ? esforco || null : null,
@@ -547,6 +555,7 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
     providerTouched.current = true;
     setProvidersError('');
     accountTouched.current = true;
+    setAccountChosen(true);
     setSwitchedFrom('');
     setSelectedConfig(v);
     remember({ configDir: v });
@@ -830,31 +839,48 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
 
   const blocked = contextBusy || retomando || !!retomavel || (!!picked && !codexReady);
   const canCreate = !!body && !blocked && !creating;
-  // Sem primeira mensagem: cria e abre a conversa vazia, como o formulário do PWA. O nome sorteado vale
+  // Sem primeira mensagem: cria e abre a conversa vazia, como o formulário do PWA. O nome escolhido vale
   // para a mesma pasta e nome digitado: repetir depois de uma falha de rede não abre uma segunda sessão.
   const createInFlight = useRef(false);
-  const attemptName = useRef<{ key: string; name: string } | null>(null);
+  const attemptName = useRef<{ key: string; name: string; known: boolean } | null>(null);
   const createSession = async () => {
     if (!body || !canCreate || createInFlight.current) return;
     createInFlight.current = true;
     setCreating(true);
     setError('');
     const key = `${body.cwd}\n${name.trim()}`;
+    const typed = name.trim();
     const previous = attemptName.current;
     const retry = previous?.key === key;
-    const finalName = retry ? previous.name : name.trim() || defaultSessionName(body.cwd);
-    attemptName.current = { key, name: finalName };
+    let chosen = retry ? previous : typed ? { name: typed, known: true } : await autoSessionName(active, body.cwd);
     // Quem cancelou já saiu: a sessão nasceu e fica na lista, sem puxar a pessoa de volta.
     const open = (session: string) => { if (mounted.current) router.replace(`/s/${active.id}/${session}` as never); };
     try {
-      const session = await createSessionForServer(active, { ...body, name: finalName,
-        ...(body.new_branch && !body.branch?.trim() ? { branch: sanitizeSessionName(finalName) } : {}) });
-      open(session.name);
+      for (let first = true; ; first = false) {
+        attemptName.current = { key, ...chosen };
+        try {
+          const session = await createSessionForServer(active, { ...body, name: chosen.name,
+            ...(body.new_branch && !body.branch?.trim() ? { branch: sanitizeSessionName(chosen.name) } : {}) });
+          open(session.name);
+          return;
+        } catch (cause: unknown) {
+          // Nome automático em uso (lista fora do ar, ou outra tela criou no meio): uma tentativa com o próximo.
+          if (!typed && !retry && first && (cause as { code?: unknown } | null)?.code === 'erro_nome_em_uso') {
+            chosen = await autoSessionName(active, body.cwd, [chosen.name]);
+            continue;
+          }
+          throw cause;
+        }
+      }
     } catch (cause: unknown) {
+      const finalName = chosen.name;
       // A resposta pode ter se perdido com a sessão já criada: a lista do servidor decide. Recusa
-      // definitiva (4xx) não criou nada; 409 só conta como "nasceu" na repetição da mesma tentativa.
+      // definitiva (4xx) não criou nada; 409 só conta como "nasceu" na repetição da mesma tentativa, e
+      // no nome automático só se ele estava livre na lista: senão a sessão com esse nome pode ser outra.
       const status = (cause as { status?: unknown } | null)?.status;
-      const lost = typeof status !== 'number' || status >= 500 || status === 408 || (status === 409 && retry);
+      const lost = typeof status !== 'number' || status >= 500 || status === 408 || (status === 409 && retry && chosen.known);
+      // Recusa respondida encerra a tentativa: o próximo toque escolhe o nome de novo, sem contar como repetição.
+      if (!lost) attemptName.current = null;
       const exists = !lost ? false : await fetchSessionsForServer(active)
         .then((list) => list.some((session) => session.name === finalName), () => null);
       if (exists) open(finalName);

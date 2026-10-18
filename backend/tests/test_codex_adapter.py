@@ -9,7 +9,7 @@ from unittest.mock import patch
 from app.adapters.codex import sessions as codex_sessions
 from app.adapters.codex import adapter as codex_adapter
 from app.adapters.codex.adapter import (
-    CodexAdapter, ensure_tmux_tui, format_status_line, map_state,
+    CodexAdapter, format_status_line, map_state,
 )
 from app.adapters.preview_push import PushPreviewSource
 from app.state import StateEvent
@@ -20,7 +20,6 @@ def _isolate_sidecar(tmp_path):
     # Sidecars duraveis redirecionados pra tmp -- mesmo padrao de test_codex_registry.py (evita
     # os testes de model/effort tocarem ~/.hangar/codex-sessions de verdade).
     with patch.object(codex_sessions, "_dir", lambda: tmp_path / "codex-sessions"), \
-         patch.object(codex_adapter, "ensure_tmux_tui"), \
          patch.object(codex_adapter.tmux, "has_session", return_value=True), \
          patch.object(codex_adapter.tmux, "sessao_existe", return_value=True), \
          patch.object(codex_adapter.tmux, "paste_text"), \
@@ -775,18 +774,6 @@ async def test_send_prompt_herda_configuracao_viva_sem_sobrescrever_terminal():
     })]
 
 
-async def test_set_model_does_not_restart_tui(monkeypatch):
-    # Guard da corrida: set_model NAO pode chamar ensure_tmux_tui (kill_session + new_session).
-    # Entre o kill e o new, o watcher de 1s via a sessao sumida e apagava sidecar + fila + app-server.
-    adapter = CodexAdapter()
-    adapter.attach("sess", _FakeClient([]), "thread-1")
-    called = []
-    monkeypatch.setattr(codex_adapter, "ensure_tmux_tui",
-                        lambda *a, **k: called.append(a))
-    await adapter.set_model("sess", "gpt-5-codex", "high")
-    assert called == []
-
-
 async def test_send_prompt_omits_model_effort_when_unset():
     # Sem escolha explicita, nao manda os campos -> a thread usa o proprio default.
     adapter = CodexAdapter()
@@ -796,27 +783,6 @@ async def test_send_prompt_omits_model_effort_when_unset():
     assert client.requests == [
         ("turn/start", {"threadId": "thread-1", "input": [{"type": "text", "text": "oi"}]}),
     ]
-
-
-async def test_ensure_running_resume_restores_model_effort_from_sidecar():
-    # Pos-restart: dict vazio, sidecar tem a escolha gravada antes do restart. ensure_running
-    # (resume) tem que repovoar model/effort no dict quente -- senao o proximo turn/start
-    # "esqueceria" a escolha ate o usuario reabrir o picker.
-    codex_sessions.save("sess", "thread-1", "/rollout.jsonl", "/tmp/proj",
-                         model="gpt-5-codex", effort="high")
-    adapter = CodexAdapter()
-    client = _FakeClient([])
-    # has_session False: este resume RECRIA a TUI, e recriar so e permitido quando nao ha pane —
-    # com pane vivo, a resposta certa e nao mexer (ver test_pane_vivo_sem_controle_nunca_e_substituido).
-    with patch("app.adapters.codex.adapter.AppServerClient", lambda *a, **k: client), \
-         patch.object(codex_adapter.tmux, "has_session", return_value=False):
-        await adapter.ensure_running("sess")
-    assert adapter._sessions["sess"]["model"] == "gpt-5-codex"
-    assert adapter._sessions["sess"]["effort"] == "high"
-    await adapter.send_prompt("sess", "oi")
-    assert client.requests[-1] == ("turn/start", {
-        "threadId": "thread-1", "input": [{"type": "text", "text": "oi"}],
-    })
 
 
 # --- default_model (fix-model-display): display cai pro default da thread sem escolha ------
@@ -858,59 +824,6 @@ async def test_status_line_shows_default_model_when_no_explicit_choice():
     assert any(e.status_line and "🤖 gpt-5.6-sol" in e.status_line for e in events)
 
 
-async def test_ensure_running_resume_captures_default_without_overwriting_choice():
-    # Pos-restart: sidecar tem a escolha explicita gravada; thread/resume devolve o `model` da
-    # thread (default) -- ensure_running tem que popular default_model SEM pisar na escolha.
-    codex_sessions.save("sess", "thread-1", "/rollout.jsonl", "/tmp/proj",
-                         model="gpt-5-codex", effort="high")
-    adapter = CodexAdapter()
-
-    class _ResumeClient(_FakeClient):
-        async def request(self, method, params, timeout=30.0):
-            self.requests.append((method, params))
-            if method == "thread/resume":
-                return {"thread": {"id": "thread-1"}, "model": "gpt-5.6-sol"}
-            return {}
-
-    client = _ResumeClient([])
-    with patch("app.adapters.codex.adapter.AppServerClient", lambda *a, **k: client), \
-         patch.object(codex_adapter.tmux, "has_session", return_value=False):
-        await adapter.ensure_running("sess")
-    sess = adapter._sessions["sess"]
-    assert sess["model"] == "gpt-5-codex"       # escolha preservada
-    assert sess["default_model"] == "gpt-5.6-sol"  # default capturado, so pra display
-    assert adapter.current_model("sess") == {"model": "gpt-5-codex", "effort": "high", "service_tier": None}
-
-
-# O campo do esforco na resposta de thread/start|resume chama `reasoningEffort`, e nao `effort`
-# como o parametro do turn/start (medido no codex-cli 0.153.4). Lendo `effort` a pilula do app
-# nascia VAZIA com o terminal mostrando `max`, e o modelo aparecia -- ele vem da mesma resposta.
-@pytest.mark.parametrize("service_tier", ["priority", "default", None])
-async def test_resume_le_o_esforco_da_thread_em_reasoning_effort(service_tier):
-    effective_tier = "default" if service_tier is None else service_tier
-    codex_sessions.save("sess", "thread-1", "/rollout.jsonl", "/tmp/proj", service_tier=effective_tier)
-    adapter = CodexAdapter()
-
-    class _ResumeClient(_FakeClient):
-        async def request(self, method, params, timeout=30.0):
-            self.requests.append((method, params))
-            if method == "thread/resume":
-                return {"thread": {"id": "thread-1"}, "model": "gpt-5.6-luna",
-                        "reasoningEffort": "max", "serviceTier": service_tier}
-            return {}
-
-    client = _ResumeClient([])
-    with patch("app.adapters.codex.adapter.AppServerClient", lambda *a, **k: client), \
-         patch.object(codex_adapter.tmux, "has_session", return_value=False), \
-         patch.object(codex_adapter, "ensure_tmux_tui") as tui:
-        await adapter.ensure_running("sess")
-    # null do Codex vira -c service_tier="default" na TUI, nunca a config global.
-    assert tui.call_args.kwargs["service_tier"] == effective_tier
-    assert adapter.current_model("sess") == {"model": "gpt-5.6-luna", "effort": "max", "service_tier": effective_tier}
-    assert codex_sessions.load("sess")["service_tier"] == effective_tier
-    assert next(params for method, params in client.requests if method == "thread/resume")["serviceTier"] == effective_tier
-
-
 def test_transcript_stream_creates_rollout_dir(tmp_path):
     # 1a sessao Codex do dia: o dir do rollout (~/.codex/sessions/YYYY/MM/DD) ainda nao existe quando o
     # SSE abre o tail -> sem o mkdir, awatch(parent) em follow() derruba o SSE com FileNotFoundError.
@@ -919,60 +832,6 @@ def test_transcript_stream_creates_rollout_dir(tmp_path):
     assert not rollout.parent.exists()
     CodexAdapter().transcript_stream(str(rollout))   # a chamada sync ja roda o mkdir (antes do return)
     assert rollout.parent.exists()
-
-
-def test_ensure_tmux_tui_starts_remote_codex_for_thread():
-    with patch.object(codex_adapter.tmux, "has_session", return_value=False), \
-         patch.object(codex_adapter.tmux, "new_session", return_value=True) as new_session:
-        ensure_tmux_tui("cx", "/tmp/proj", "thread-42", "ws://127.0.0.1:45123")
-    name, cwd, command = new_session.call_args.args
-    assert (name, cwd) == ("cx", "/tmp/proj")
-    assert command == (
-        "codex resume --remote ws://127.0.0.1:45123 --no-alt-screen -c check_for_update_on_startup=false thread-42"
-    )
-
-
-def test_ensure_tmux_tui_resumes_with_model_and_effort():
-    with patch.object(codex_adapter.tmux, "has_session", return_value=False), \
-         patch.object(codex_adapter.tmux, "new_session", return_value=True) as new_session:
-        ensure_tmux_tui(
-            "cx", "/tmp/proj", "thread-42", "ws://127.0.0.1:45123",
-            model="gpt-5-codex", effort="high", service_tier="default",
-        )
-    assert new_session.call_args.args[2] == (
-        "codex resume --remote ws://127.0.0.1:45123 --no-alt-screen -c check_for_update_on_startup=false "
-        "--model gpt-5-codex --config 'model_reasoning_effort=\"high\"' -c 'service_tier=\"default\"' thread-42"
-    )
-
-
-def test_ensure_tmux_tui_creates_thread_with_matching_permissions():
-    with patch.object(codex_adapter.tmux, "has_session", return_value=False), \
-         patch.object(codex_adapter.tmux, "new_session", return_value=True) as new_session:
-        ensure_tmux_tui("cx", "/tmp/proj", None, "ws://127.0.0.1:45123")
-    command = new_session.call_args.args[2]
-    assert command == (
-        "codex --remote ws://127.0.0.1:45123 --no-alt-screen -C /tmp/proj "
-        "--sandbox danger-full-access --ask-for-approval never -c check_for_update_on_startup=false"
-    )
-
-
-def test_ensure_tmux_tui_forwards_initial_prompt_as_single_argument():
-    with patch.object(codex_adapter.tmux, "has_session", return_value=False), \
-         patch.object(codex_adapter.tmux, "new_session", return_value=True) as new_session:
-        ensure_tmux_tui("cx", "/tmp/proj", None, "ws://127.0.0.1:45123",
-                        initial_prompt="revise docs; sem executar shell")
-    assert new_session.call_args.args[2].endswith(
-        "'revise docs; sem executar shell'"
-    )
-
-
-def test_ensure_tmux_tui_replaces_stale_remote_after_backend_restart():
-    with patch.object(codex_adapter.tmux, "has_session", return_value=True), \
-         patch.object(codex_adapter.tmux, "kill_session") as kill, \
-         patch.object(codex_adapter.tmux, "new_session", return_value=True):
-        ensure_tmux_tui("cx", "/tmp/proj", "thread-42", "ws://127.0.0.1:45123",
-                        replace=True)
-    kill.assert_called_once_with("cx")
 
 
 # --- assinatura da thread (thread/resume com retry) -----------------------------------------
@@ -1036,19 +895,6 @@ async def test_close_sync_cancels_subscription():
     assert "sess" not in adapter._subscribers
     with pytest.raises(asyncio.CancelledError):
         await task
-
-
-async def test_ensure_running_marks_subscribed_without_retry_task():
-    # Pos-restart o rollout ja existe -> o thread/resume do ensure_running cola de primeira e a
-    # sessao ja nasce assinada; nao faz sentido armar a task de retry.
-    codex_sessions.save("sess", "thread-1", "/rollout.jsonl", "/tmp/proj")
-    adapter = CodexAdapter()
-    client = _FakeClient([])
-    with patch("app.adapters.codex.adapter.AppServerClient", lambda *a, **k: client), \
-         patch.object(codex_adapter.tmux, "has_session", return_value=False):
-        await adapter.ensure_running("sess")
-    assert adapter._sessions["sess"]["subscribed"] is True
-    assert "sess" not in adapter._subscribers
 
 
 async def test_subscription_populates_default_model_for_display():
@@ -2064,3 +1910,20 @@ async def test_drain_never_replays_prompt_when_rpc_confirmation_is_lost(monkeypa
     assert rows[0]["id"] == entry["id"]
     assert rows[0]["delivered"] is True
     assert not rows[0].get("confirmed")
+
+
+async def test_pane_morto_nao_apaga_o_sidecar_nem_o_servidor_de_outra_vida(tmp_path):
+    # S-25: o nome recriado no segundo em que o vigia ainda olhava o pane velho é outra vida; o
+    # sidecar e o app-server dela ficam.
+    adapter = CodexAdapter()
+    codex_sessions.save("cx", "t-a", "", str(tmp_path), endpoint="ws://127.0.0.1:1", app_pid=111)
+    adapter._sessions["cx"] = {"client": _FakeClient([])}
+    mortos = []
+    with patch.object(codex_adapter.tmux, "sessao_existe", return_value=False), \
+         patch.object(codex_adapter, "matar_app_server", mortos.append):
+        vigia = asyncio.create_task(adapter._watch_tmux("cx"))
+        await asyncio.sleep(0)
+        codex_sessions.save("cx", "t-b", "", str(tmp_path), endpoint="ws://127.0.0.1:2", app_pid=222)
+        await vigia
+    assert (codex_sessions.load("cx") or {}).get("app_pid") == 222
+    assert mortos == []

@@ -164,7 +164,7 @@ pub(super) fn error_text(e: &Value) -> String {
     }
 }
 
-fn failures_text(errs: &[Value]) -> String {
+pub(crate) fn failures_text(errs: &[Value]) -> String {
     errs.iter().map(|x| format!("{}: {}", py_str(&x["sessao"]), error_text(&x["erro"]))).collect::<Vec<_>>().join("; ")
 }
 

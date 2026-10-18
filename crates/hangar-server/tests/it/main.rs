@@ -153,6 +153,8 @@ mod list_bridge;
 mod list_facts;
 mod list_routes;
 mod list_wake;
+#[cfg(unix)]
+mod mcp;
 mod mermaid_routes;
 mod mods_actor;
 mod mods_bridge;
@@ -179,6 +181,10 @@ mod queue_v2_terminal;
 mod runtime_actor;
 mod runtime_cano;
 mod runtime_claude;
+#[cfg(target_os = "linux")]
+mod runtime_claude_terminal;
+#[cfg(target_os = "linux")]
+mod runtime_claude_reopen;
 mod runtime_codex;
 #[cfg(unix)]
 mod runtime_codex_watch;
@@ -194,9 +200,12 @@ mod runtime_quota;
 mod runtime_receipt;
 mod runtime_recovery;
 mod runtime_side_events;
+mod session_open;
+mod btw;
 mod session_write_answer;
 mod session_write_control;
 mod session_write_input;
+mod session_write_model_effort;
 mod session_write_routes;
 mod share_reach;
 mod share_store;

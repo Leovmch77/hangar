@@ -214,6 +214,26 @@ async fn a_terminal_stuck_launching_stops_going_to_python() {
     assert_eq!(stuck.map(|r|r.map_err(|e|e.code)),Some(Err("codex_terminal_launch_stuck".into())));
 }
 
+/// Trocar de modo logo depois de criar com terminal (a TUI ainda abrindo a conversa, com ou sem
+/// sidecar) é recusa do Rust com código próprio, nunca o Python dizendo que o Rust não está rodando.
+#[tokio::test]
+async fn switching_mode_while_the_terminal_is_still_opening_asks_to_wait() {
+    let fx = fixture();
+    let registry = registry().await;
+    let watcher = fx.watcher();
+    registry.bind_watcher(watcher.clone());
+    fx.panes(&["cx-new","cx-l"]);
+    fx.put_sidecar("cx-l",json!({"name":"cx-l","provider":"codex","launching":true,"key":"k-l","cwd":fx.root}));
+    for name in ["cx-new","cx-l"] {
+        let error = watcher.switch_mode(&registry,name,false,PermissionRead::Known("Full Access".into())).await
+            .unwrap_or_else(||panic!("{name}: a troca do Codex é do Rust")).unwrap_err();
+        assert_eq!(error.code,"codex_terminal_starting","{name}: {}",error.message);
+    }
+    let (status,body) = hangar_server::session_write::relaunch::mode_refusal(&RuntimeError::new("codex_terminal_starting","x"));
+    assert_eq!((status.as_u16(),body["detail"]["code"].as_str(),body["detail"]["params"]["code"].as_str()),
+        (409,Some("erro_troca_modo"),Some("codex_terminal_starting")));
+}
+
 #[tokio::test]
 async fn limits_of_a_rust_codex_that_cannot_open_answers_its_code() {
     let fx = fixture();
@@ -275,6 +295,37 @@ async fn an_old_sidecar_without_endpoint_is_relaunched_by_the_rust_and_a_failure
     for _ in 0..2 { let _ = watcher.adopt_now(&registry,"cx-old").await; }
     let gave_up = watcher.adopt_now(&registry,"cx-old").await;
     assert_eq!(gave_up.map(|r|r.map_err(|e|e.code)),Some(Err("codex_terminal_relaunch_gave_up".into())));
+}
+
+/// O relançamento usa o lançador único da criação: o pane roda o `hangar-codex-tui` com a chave, o
+/// ambiente da sessão por `-e` (cores, Kimi, provedor) e a política explícita do modo gravado.
+#[tokio::test]
+async fn the_relaunch_pane_is_the_creation_launcher_with_the_session_environment() {
+    let fx = fixture();
+    fx.put_sidecar("cx-old",legacy_meta(&fx));
+    std::fs::write(&fx.panes,"").unwrap();
+    let registry = relaunch_registry(&fx).await;
+    let bin = fx.root.join("bin");
+    crate::write_executable(&bin.join("hangar-codex-tui"),"#!/bin/sh\nexit 0\n");
+    crate::write_executable(&bin.join("codex"),"#!/bin/sh\nexit 0\n");
+    let asked = fx.root.join("new-session.args");
+    let tmux = fx.root.join("tmux-record");
+    crate::write_executable(&tmux,format!("#!/bin/sh\ncase \"$1\" in\n  list-panes) cat '{}';;\n  \
+        new-session) for a in \"$@\"; do printf '%s\\n' \"$a\"; done > '{}'; exit 1;;\n  *) exit 1;;\nesac\n",fx.panes.display(),asked.display()));
+    let watcher = relaunch_watcher(&fx,&tmux);
+    registry.bind_watcher(watcher.clone());
+    let refused = watcher.adopt_now(&registry,"cx-old").await;
+    assert_eq!(refused.map(|r|r.map_err(|e|e.code)),Some(Err("terminal_nao_criado".into())),"o tmux falso não cria a sessão");
+    let args:Vec<String> = std::fs::read_to_string(&asked).expect("o pane foi pedido ao tmux").lines().map(str::to_owned).collect();
+    let key = key_of(&fx.sidecar("cx-old").unwrap());
+    for env in ["CP_SESSION_NAME=cx-old","CP_PROVIDER=codex",&format!("CP_SESSION_KEY={key}"),"COLORTERM=truecolor","KIMI_CODE_TUI_FULL_SCREEN=1","HANGAR_JEV=off"] {
+        assert!(args.windows(2).any(|w|w[0] == "-e" && w[1] == env),"-e {env}: {args:?}");
+    }
+    let command = args.last().unwrap();
+    assert!(!command.contains("--session-relaunch"),"sem o auxiliar com IPC: {command}");
+    let launcher = format!("hangar-codex-tui --cwd {} --codex-home {} --codex-account default --resume thread-1 --approval-policy never --sandbox danger-full-access",
+        fx.root.display(),fx.home.join(".codex").display());
+    assert!(command.starts_with("exec env ") && command.ends_with(&launcher),"{command}");
 }
 
 #[tokio::test]
@@ -571,6 +622,29 @@ async fn refused_preconditions_leave_the_terminal_owned_and_untouched() {
     let error = watcher.switch_mode(&registry,"cx-proof",false,known()).await.expect("Codex do Rust").unwrap_err();
     assert_eq!(error.code,"session_transfer_busy");
     untouched(&fx,&registry,&ready,&mut app,&mut tui);
+    finish(&mut [&mut app,&mut tui]);
+}
+
+/// O terminal só leitura (bwrap) não vai para sem terminal, onde a proteção não existe; nada morre.
+#[tokio::test]
+async fn a_read_only_terminal_refuses_to_go_headless_and_kills_nothing() {
+    let fx = fixture();
+    let server = fake_app_server(true).await;
+    let mut app = crate::runtime_open::with_app_server_argv(std::process::Command::new("sh").args(["-c","sleep 120; true","app-server",&server.endpoint])
+        .env("HANGAR_ORQ_READ_ONLY","1").spawn().unwrap(),&server.endpoint);
+    let mut tui = tui();
+    fx.put_sidecar("cx-proof",relaunch_meta(&fx,&server.endpoint,&app,&tui));
+    fx.panes(&["cx-proof"]);
+    let registry = relaunch_registry(&fx).await;
+    let watcher = fx.watcher();
+    registry.bind_watcher(watcher.clone());
+    watcher.round(&registry).await;
+    let before = fx.sidecar("cx-proof").unwrap();
+    let error = switch_until_settled(&watcher,&registry,||PermissionRead::Known("Full Access".into())).await;
+    assert_eq!(error.code,"erro_troca_modo");
+    assert!(error.message.contains("só leitura"),"{}",error.message);
+    untouched(&fx,&registry,&before,&mut app,&mut tui);
+    assert!(registry.ingress().enter("cx-proof",Duration::ZERO).await.is_ok(),"a porta reabriu");
     finish(&mut [&mut app,&mut tui]);
 }
 
@@ -1210,6 +1284,98 @@ async fn clear_of_a_codex_terminal_of_the_rust_stays_in_the_rust() {
     assert_ne!(response.text().await.unwrap(), "from-python");
     assert_eq!(python.hits_to("/api/sessions/cx-proof/input"), 0, "a fila do Codex com terminal é do Rust: o /clear nunca vai ao Python");
     finish(&mut [&mut app,&mut tui]);
+}
+
+/// Sidecar que aponta para uma transferência cujo registro sumiu ou não se lê é erro com código
+/// próprio, como o `RuntimeError` do `list_all` do Python; nunca o "ainda não tem app-server" calado.
+#[tokio::test]
+async fn a_missing_or_corrupt_transfer_record_is_a_visible_error() {
+    let fx = fixture();
+    let id = "44444444-4444-4444-8444-444444444444";
+    fx.put_sidecar("cx-proof",json!({"name":"cx-proof","provider":"codex","key":"k-t","endpoint":"ws://127.0.0.1:1","app_pid":7,
+        "thread_id":"t","transfer_id":id}));
+    let registry = registry().await;
+    let watcher = fx.watcher();
+    let code = |r:Option<Result<(),RuntimeError>>|r.map(|r|r.map_err(|e|e.code));
+    assert_eq!(code(watcher.adopt_now(&registry,"cx-proof").await),Some(Err("codex_transfer_record_missing".into())));
+    let records = fx.home.join(".hangar/conversation-transfers");
+    std::fs::create_dir_all(&records).unwrap();
+    std::fs::write(records.join(format!("{id}.json")),"{torto").unwrap();
+    assert_eq!(code(watcher.adopt_now(&registry,"cx-proof").await),Some(Err("codex_transfer_record_unreadable".into())));
+    std::fs::write(records.join(format!("{id}.json")),r#"{"phase":"prepared"}"#).unwrap();
+    assert_eq!(code(watcher.adopt_now(&registry,"cx-proof").await),Some(Err("codex_terminal_not_ready".into())),"em curso: espera");
+}
+
+/// O sidecar da sessão diz a vida dela; sem multiplexador.
+struct KeyProbe(std::sync::Mutex<String>);
+impl hangar_server::share::life::LifeProbe for KeyProbe {
+    fn birth<'a>(&'a self,_:&'a str) -> futures_util::future::BoxFuture<'a,Option<u64>> { Box::pin(async { None }) }
+    fn has_session<'a>(&'a self,_:&'a str) -> futures_util::future::BoxFuture<'a,Option<bool>> { Box::pin(async { Some(true) }) }
+    fn sidecar(&self,_:&str) -> Option<(String,bool)> { Some((self.0.lock().unwrap().clone(),false)) }
+    fn sidecar_exists(&self,_:&str) -> bool { true }
+}
+
+/// A troca de modo do Codex passa pela troca de vida, como o `_durante_troca` do Python: o
+/// convite da sessão segue a vida nova (também quando a troca falha, que pode ter mudado a vida).
+#[tokio::test]
+async fn the_codex_mode_switch_carries_the_invite_to_the_new_life() {
+    use hangar_server::share::{ShareState,life::{LifeFacts,Lives},pairs::PairStore,store::{Kind,ShareStore}};
+    let fx = fixture();
+    let registry = registry().await;
+    registry.bind_watcher(fx.watcher());
+    // Sem terminal parado e sem `cwd`: o Rust tenta abrir e falha, com resposta própria.
+    fx.put_sidecar("cx-h",json!({"name":"cx-h","provider":"codex","headless":true,"key":"k-h","thread_id":"t"}));
+    // Sem a fotografia do Python a varredura dos convites não revoga nada; só a troca move o convite.
+    let probe = Arc::new(KeyProbe(std::sync::Mutex::new("k-old".into())));
+    let facts = Arc::new(LifeFacts::default());
+    let share = Arc::new(ShareState { store:ShareStore::open(fx.root.join("shares.json"),Arc::new(||100.0)),
+        pairs:PairStore::open(fx.root.join("external_pairs.json")),lives:Lives::new(probe.clone(),facts),
+        tailscale:Arc::new(hangar_server::share::tunnel::Real),tunnel:Default::default() });
+    share.store.create_redeemed("cx-h",Some("k:k-old".into()),Kind::Share).unwrap();
+    let (_python, upstream) = crate::fake::spawn_fake().await;
+    let mut state = hangar_server::routes::AppState::new(crate::fake::config(upstream, "127.0.0.1"));
+    state.share = Some(share.clone());
+    assert!(state.state.runtime.set(registry).is_ok());
+    let server = crate::fake::spawn_state(state).await;
+    *probe.0.lock().unwrap() = "k-new".into();
+    let response = crate::fake::client().post(format!("http://{server}/api/sessions/cx-h/modo-execucao"))
+        .header("authorization", format!("Bearer {}", crate::fake::OWNER)).header("content-type", "application/json")
+        .body(json!({"terminal":true}).to_string()).send().await.unwrap();
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap();
+    assert_eq!(status,409,"a troca do Codex falhou aqui, no Rust: {body}");
+    let lives:Vec<Option<String>> = share.store.all().into_iter().filter(|s|s.session=="cx-h").map(|s|s.life).collect();
+    assert_eq!(lives,vec![Some("k:k-new".into())],"o convite foi para a vida nova");
+}
+
+/// Na subida o Rust abre sozinho o Codex sem terminal que é dele e tem o que fazer (fila
+/// pendente ou cano vivo), sem o Python pedir; o parado sem pendência
+/// fica fechado e o próximo envio o abre. Nada fica sem dono depois de o Rust voltar.
+#[tokio::test]
+async fn the_rust_boot_opens_its_codex_headless_with_pending_input() {
+    use hangar_server::runtime::queue::{State,Store};
+    crate::use_cano_bin();
+    let fx = fixture();
+    let registry = relaunch_registry(&fx).await;
+    let bin = fx.root.join("bin");
+    fake_headless_codex(&bin,&fx.root.join("codex-methods.jsonl"));
+    let rollout = fx.root.join("rollout.jsonl");
+    std::fs::write(&rollout,"{}\n").unwrap();
+    for (name,key) in [("cx-h","k-pending"),("cx-idle","k-idle")] {
+        fx.put_sidecar(name,json!({"name":name,"provider":"codex","headless":true,"key":key,"thread_id":"thread-1",
+            "rollout_path":rollout,"cwd":fx.root,"codex_home":fx.home.join(".codex"),"permission_mode":"Full Access","model":"gpt-test"}));
+    }
+    std::fs::create_dir_all(fx.queue.join("runtime")).unwrap();
+    let mut store = Store::open(&fx.queue_state("k-pending"),&fx.queue,State::new("k-pending",1,"cx-h",vec![])).unwrap();
+    store.exec(1,"append:e1",CLOCK,Action::Append { text:"oi".into(),delivered:false,ts:Some(1.0),pre_transcript:false,entry_id:Some("e1".into()) }).unwrap();
+    drop(store);
+    let watcher = fx.watcher();
+    registry.bind_watcher(watcher.clone());
+    watcher.register_codex_headless(&registry).await;
+    assert!(registry.owns_codex_headless("cx-h").await,"com mensagem esperando: aberto no Rust");
+    assert!(!registry.owns_codex_headless("cx-idle").await,"parado sem pendência fica fechado");
+    let generation = fx.queue_json("k-pending")["generation"].as_u64().unwrap();
+    registry.close_with_kill("k-pending",generation).await.unwrap();
 }
 
 #[tokio::test]

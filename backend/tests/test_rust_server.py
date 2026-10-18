@@ -50,6 +50,9 @@ def parent_gone():
 
 threading.Thread(target=parent_gone, daemon=True).start()
 mode = os.environ.get("FAKE_MODE", "ok")
+if mode == "cai_ate":       # cai nas FAKE_CRASHES primeiras subidas e depois fica
+    with open(os.environ["FAKE_LOG"]) as f:
+        mode = "cai" if sum(1 for _ in f) <= int(os.environ["FAKE_CRASHES"]) else "ok"
 if mode == "mudo":
     time.sleep(60)
     sys.exit(0)
@@ -302,6 +305,204 @@ def test_three_crashes_in_a_minute_hand_the_public_port_to_python(
     assert relog                                    # o diário voltou a ouvir o uvicorn
 
 
+def test_rust_back_after_give_up_takes_the_public_port_again(
+        fake_bin, tmp_path, monkeypatch, events, relog):
+    monkeypatch.setenv("FAKE_MODE", "cai_ate")
+    monkeypatch.setenv("FAKE_CRASHES", str(rust_server.MAX_CRASHES))
+    monkeypatch.setattr(rust_server, "RETRY_DELAYS", (0.5,))
+    app, port = _App(), _free_port()
+    server, internal, kw = _setup(app, port)
+
+    async def scenario():
+        task = asyncio.create_task(
+            rust_server.serve(server, [internal], fake_bin, kw, "tok", _bind(port)))
+        await _wait_get(port, "/", lambda b: b == b"python")
+        await _wait_get(port, "/", lambda b: b.startswith(b"{"))     # o Rust voltou à porta
+        server.should_exit = True
+        return await task
+
+    assert asyncio.run(scenario()) is True
+    spawns = _spawns(tmp_path)
+    assert len(spawns) == rust_server.MAX_CRASHES + 1
+    assert all(_dead(s["pid"]) for s in spawns)
+    assert app.startups == 1
+    names = [e[0] for e in events]
+    assert ("hangar_server.religar", "aviso", {"tentativa": 1}) in events
+    assert names.index("hangar_server.reserva") < names.index("hangar_server.voltou")
+
+
+async def _until(check, timeout=15.0):
+    deadline = time.monotonic() + timeout
+    while not check():
+        assert time.monotonic() < deadline, "condição não chegou"
+        await asyncio.sleep(0.05)
+
+
+def test_failed_retry_gives_the_port_back_to_python_and_the_wait_grows(
+        fake_bin, tmp_path, monkeypatch, events, relog):
+    monkeypatch.setenv("FAKE_MODE", "cai")
+    monkeypatch.setattr(rust_server, "RETRY_DELAYS", (0.3, 0.6))
+    app, port = _App(), _free_port()
+    server, internal, kw = _setup(app, port)
+    tries = lambda: [e[2]["tentativa"] for e in events if e[0] == "hangar_server.religar"]
+
+    async def scenario():
+        task = asyncio.create_task(
+            rust_server.serve(server, [internal], fake_bin, kw, "tok", _bind(port)))
+        await _until(lambda: tries() == [1])
+        await _wait_get(port, "/", lambda b: b == b"python")     # o Rust caiu de novo: o Python retomou
+        await _until(lambda: len(tries()) == 2)
+        server.should_exit = True
+        return await task
+
+    assert asyncio.run(scenario()) is True
+    assert tries() == [1, 2], "subir e cair em seguida não zera a espera"
+    assert len(_spawns(tmp_path)) >= 2 * rust_server.MAX_CRASHES
+    assert app.startups == 1
+
+
+def test_retry_count_resets_only_after_the_rust_stays_up(fake_bin, tmp_path, monkeypatch, events, relog):
+    monkeypatch.setenv("FAKE_MODE", "cai_ate")
+    monkeypatch.setenv("FAKE_CRASHES", str(rust_server.MAX_CRASHES))
+    monkeypatch.setattr(rust_server, "RETRY_DELAYS", (0.3,))
+    app, port = _App(), _free_port()
+    server, internal, kw = _setup(app, port)
+
+    async def scenario():
+        task = asyncio.create_task(
+            rust_server.serve(server, [internal], fake_bin, kw, "tok", _bind(port)))
+        await _wait_get(port, "/", lambda b: b == b"python")
+        await _wait_get(port, "/", lambda b: b.startswith(b"{"))
+        assert rust_server._supervisor.attempt == 1, "acabou de voltar: ainda conta a tentativa"
+        monkeypatch.setattr(rust_server, "CRASH_WINDOW", 0.3)
+        await _until(lambda: rust_server._supervisor.attempt == 0)
+        server.should_exit = True
+        return await task
+
+    assert asyncio.run(scenario()) is True
+
+
+def test_sessions_that_do_not_leave_python_keep_the_rust_down(fake_bin, tmp_path, monkeypatch, events, relog):
+    from app import runtime_coordinator
+    monkeypatch.setenv("FAKE_MODE", "cai_ate")
+    monkeypatch.setenv("FAKE_CRASHES", str(rust_server.MAX_CRASHES))
+    monkeypatch.setattr(rust_server, "RETRY_DELAYS", (0.2,))
+    handed = []
+    async def leave_python():
+        raise RuntimeError("fila da sessão em uso no Python")
+    async def enter_python(containment=None):
+        handed.append("python")
+    owner = runtime_coordinator.ensure()
+    monkeypatch.setattr(owner, "leave_python", leave_python)
+    monkeypatch.setattr(owner, "enter_python", enter_python)
+    app, port = _App(), _free_port()
+    server, internal, kw = _setup(app, port)
+    failed = lambda: sum(e[0] == "hangar_server.religar_falhou" for e in events)
+
+    async def scenario():
+        task = asyncio.create_task(
+            rust_server.serve(server, [internal], fake_bin, kw, "tok", _bind(port)))
+        await _until(lambda: failed() >= 2)
+        assert await asyncio.to_thread(_get, port, "/") == b"python"
+        server.should_exit = True
+        return await task
+
+    assert asyncio.run(scenario()) is True
+    assert len(_spawns(tmp_path)) == rust_server.MAX_CRASHES, "sessão presa no Python: o Rust não sobe"
+    assert len(handed) >= 3, "cada falha devolve as sessões ao Python"
+
+
+def test_stop_while_the_port_is_released_does_not_start_the_child(
+        fake_bin, tmp_path, monkeypatch, events, relog):
+    monkeypatch.setenv("FAKE_MODE", "cai")
+    monkeypatch.setattr(rust_server, "RETRY_DELAYS", (0.3,))
+    app, port = _App(), _free_port()
+    server, internal, kw = _setup(app, port)
+
+    class StopDuringRelease(rust_server.Server):
+        async def serve(self, sockets=None):
+            await super().serve(sockets=sockets)
+            server.should_exit = True                # o SIGTERM chegou enquanto a porta era solta
+    monkeypatch.setattr(rust_server, "Server", StopDuringRelease)
+
+    async def scenario():
+        task = asyncio.create_task(
+            rust_server.serve(server, [internal], fake_bin, kw, "tok", _bind(port)))
+        return await task
+
+    assert asyncio.run(scenario()) is True
+    assert len(_spawns(tmp_path)) == rust_server.MAX_CRASHES
+
+
+def test_same_binary_with_the_same_protocol_is_retried_only_after_it_changes(
+        fake_bin, tmp_path, monkeypatch, events, relog):
+    monkeypatch.setenv("FAKE_PROTOCOL", "999")
+    monkeypatch.setattr(rust_server, "RETRY_DELAYS", (0.2,))
+    app, port = _App(), _free_port()
+    server, internal, kw = _setup(app, port)
+
+    async def scenario():
+        task = asyncio.create_task(
+            rust_server.serve(server, [internal], fake_bin, kw, "tok", _bind(port)))
+        await _wait_get(port, "/", lambda b: b == b"python")
+        await asyncio.sleep(1.0)
+        assert len(_spawns(tmp_path)) == 1, "o mesmo binário falharia igual: a porta fica com o Python"
+        monkeypatch.setenv("FAKE_PROTOCOL", str(rust_server.RUST_SERVER_PROTOCOL))
+        fake_bin.write_text(fake_bin.read_text() + "\n# atualizado\n")       # binário trocado no mesmo caminho
+        await _wait_get(port, "/", lambda b: b.startswith(b"{"))
+        server.should_exit = True
+        return await task
+
+    assert asyncio.run(scenario()) is True
+    assert len(_spawns(tmp_path)) == 2
+
+
+class _Streaming(_App):
+    """Um SSE de verdade (`sse_starlette`, o dos `/events`), aberto até alguém o fechar."""
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "lifespan":
+            return await super().__call__(scope, receive, send)
+        from sse_starlette.sse import EventSourceResponse
+
+        async def events():
+            yield {"data": "python"}
+            await asyncio.Event().wait()
+        await EventSourceResponse(events())(scope, receive, send)
+
+
+def test_retry_closes_open_streams_without_an_asgi_error(fake_bin, tmp_path, monkeypatch, events, relog, capfd):
+    from sse_starlette.sse import AppStatus
+    monkeypatch.setattr(AppStatus, "should_exit", False)
+    monkeypatch.setattr(AppStatus, "enable_automatic_graceful_drain", True)
+    monkeypatch.setenv("FAKE_MODE", "cai_ate")
+    monkeypatch.setenv("FAKE_CRASHES", str(rust_server.MAX_CRASHES))
+    monkeypatch.setattr(rust_server, "RETRY_DELAYS", (1.0,))
+    app, port = _Streaming(), _free_port()
+    server, internal, kw = _setup(app, port)
+    kw["timeout_graceful_shutdown"] = 1
+
+    async def scenario():
+        task = asyncio.create_task(
+            rust_server.serve(server, [internal], fake_bin, kw, "tok", _bind(port)))
+        await _until(lambda: any(e[0] == "hangar_server.reserva" for e in events))
+        await asyncio.sleep(0.2)
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(b"GET /events HTTP/1.1\r\nhost: x\r\n\r\n")
+        await writer.drain()
+        assert b"200" in await reader.readline()
+        await _wait_get(port, "/", lambda b: b.startswith(b"{"))
+        writer.close()
+        server.should_exit = True
+        return await task
+
+    assert asyncio.run(scenario()) is True
+    # O uvicorn escreve o próprio log no stderr, fora do `logging` raiz.
+    assert "Exception in ASGI application" not in capfd.readouterr().err
+    from sse_starlette.sse import AppStatus
+    assert AppStatus.should_exit is False, "soltar a porta pública não encerra os SSE do processo"
+
+
 def test_rust_up_marks_costs_served_and_takeover_warms_python(fake_bin, tmp_path, events, monkeypatch):
     from app import costs_sources
     marks, schedules = [], []
@@ -539,7 +740,7 @@ def test_watcher_failure_puts_the_cause_in_the_diary(monkeypatch, events):
 def test_protocol_is_the_same_number_on_both_sides():
     lib = (Path(__file__).resolve().parents[2] / "crates/hangar-server/src/lib.rs").read_text()
     rust = int(re.search(r"pub const INTERNAL_PROTOCOL: u32 = (\d+);", lib).group(1))
-    assert rust == rust_server.RUST_SERVER_PROTOCOL == 75
+    assert rust == rust_server.RUST_SERVER_PROTOCOL == 82
 
 
 def _child_env(monkeypatch, tmp_path, host, port):

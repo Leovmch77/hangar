@@ -68,7 +68,8 @@ export class NewChatDraft {
   engineAccount = $state('');
   fastChoice = $state<'default' | 'priority' | null>(null);
   contextOn = $state(false);
-  permission = $state('bypassPermissions');
+  // Vazio = "Padrão": o campo não vai e o servidor usa o modo da conta (Claude) ou Full Access (Codex).
+  permission = $state('');
   // null = config do servidor ainda não lida: o corpo não manda o campo e vale o padrão do servidor.
   headless = $state<boolean | null>(null);
   executionError = $state('');
@@ -112,6 +113,8 @@ export class NewChatDraft {
   #providerPicked = false;
   // Só a escolha manual de CONTA desliga a troca automática por cota.
   #accountPicked = false;
+  // A sugestão de cota mostrou outra conta que não a ativa: ela vai, senão a sessão nasceria noutra.
+  #accountSuggested = false;
   // Sessão já criada cujo primeiro envio falhou: tentar de novo reenvia nela em vez de criar outra,
   // desde que nenhuma escolha tenha mudado desde então.
   // `uploaded`: anexo já enviado a esta sessão → caminho no servidor; o reenvio não duplica a cópia.
@@ -219,10 +222,10 @@ export class NewChatDraft {
     }
   }
 
-  // Permissão de cada provider como o nativo (create.rs set_provider); motor e janela são do provider anterior.
+  // Trocar de provider volta a permissão ao Padrão, como o nativo (create.rs set_provider); motor e janela são do provider anterior.
   #resetForProvider() {
     this.#permissionTouched = false;
-    this.permission = this.provider === 'codex' ? 'Full Access' : this.provider === 'claude' ? 'bypassPermissions' : '';
+    this.permission = '';
     this.engine = ''; this.engineAccount = ''; this.fastChoice = null; this.contextOn = false;
   }
 
@@ -402,6 +405,7 @@ export class NewChatDraft {
     const seq = ++this.#cfgSeq;
     this.#modelTouched = false;
     this.#accountPicked = false;
+    this.#accountSuggested = false;
     this.configsLoading = true;
     try {
       const list = await listClaudeConfigs();
@@ -416,6 +420,7 @@ export class NewChatDraft {
         if (seq !== this.#cfgSeq || modelGen !== this.#modSeq || this.#modelTouched || this.provider !== 'claude'
             || !this.configs.some((c) => c.path === path) || path === this.configDir) return;
         this.configDir = path;
+        this.#accountSuggested = true;
         void this.loadModels();
       }).catch(() => { /* sem leitura de cota, fica a conta ativa */ });
     } catch (e) {
@@ -575,7 +580,9 @@ export class NewChatDraft {
           name: sessionName, cwd: target, provider: this.provider,
           // Sonda falhada deixa o Claude por omissão, e isso não é escolha a lembrar.
           remember_provider: this.#providerPicked || Object.keys(this.providers).length > 0,
-          config_dir: claude ? this.configDir : null,
+          // D-003: a conta que ninguém escolheu não vai, e o servidor troca a que estiver a 95% ou mais;
+          // a troca automática da esgotada é essa mesma regra, então também não conta como escolha.
+          config_dir: claude && (this.#accountPicked || this.#accountSuggested) ? this.configDir : null,
           codex_account: codex ? this.codexAccount : undefined,
           engine: claude ? this.engine || null : null,
           ...(claude && this.engine && this.engineAccount ? { engine_account: this.engineAccount } : {}),
@@ -584,7 +591,7 @@ export class NewChatDraft {
           ...((claude || codex) && this.headless !== null ? { headless: this.headless } : {}),
           ...(claude && this.permission ? { permission_mode: this.permission } : {}),
           // O backend só aceita permissão no Codex sem terminal (api.py, _create_session_owned).
-          ...(codex && this.headless === true ? { permission_mode: this.permission || null } : {}),
+          ...(codex && this.headless === true && this.permission ? { permission_mode: this.permission } : {}),
           // Worktree existente já é o cwd: branch nova ou outra branch não se somam a ela.
           ...(this.existing ? {} : (worktreeChoiceOf(this) ?? {})),
         }).finally(stopProgress);

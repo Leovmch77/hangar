@@ -823,3 +823,127 @@ fn terminal_state_session_name_in_the_rule_reads_the_same() {
  }
  assert!(previews > 0, "alguma captura precisa ter prévia em voo");
 }
+
+// ── Seletor do `/model`: o golden do driver Python (`gen_model_picker.py`) ──────────────────────────
+fn picker_case(name: &str) -> serde_json::Value {
+ let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../backend/tests/fixtures/contract/golden/model_picker.json");
+ let data: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+ data["cases"].as_array().unwrap().iter().find(|case| case["name"] == name).unwrap_or_else(|| panic!("caso {name} fora do golden")).clone()
+}
+/// As teclas no nome do Python: o texto literal como veio, o `\r` como `Enter`.
+fn picker_keys(io: &FakeIo) -> Vec<String> {
+ io.writes().iter().map(|r| { let last = r.args.last().unwrap().clone(); if last == "\r" { "Enter".into() } else { last } }).collect()
+}
+fn picker_screens(case: &serde_json::Value) -> Vec<String> { case["panes"].as_array().unwrap().iter().map(|p| p.as_str().unwrap().to_owned()).collect() }
+/// Roda um caso do golden: as capturas do Python em sequência, as teclas e a resposta comparadas.
+async fn picker_replay(name: &str) {
+ let case = picker_case(name);
+ let io = Arc::new(FakeIo::new(picker_screens(&case)));
+ let request = &case["request"];
+ // O que a rota entrega ao driver; a validação em si tem teste próprio.
+ let raw = (request["model"].as_str().map(str::to_owned), request["effort"].as_str().map(str::to_owned));
+ let (model, effort) = hangar_server::model_picker::normalize(request["model"].as_str(), request["effort"].as_str()).unwrap_or(raw);
+ let out = hangar_server::model_picker::drive(&driver(io.clone(), Arc::new(Services::new())), model.as_deref(), effort.as_deref(), request["scope"] == "default").await;
+ let want: Vec<String> = case["keys"].as_array().unwrap().iter().map(|k| k.as_str().unwrap().to_owned()).collect();
+ assert_eq!(picker_keys(&io), want, "{name}: teclas");
+ match (&case["expect"]["ok"], out) {
+  (serde_json::Value::Null, Err(refusal)) => assert_eq!(refusal.detail, case["expect"]["error"]["detail"].as_str().unwrap(), "{name}"),
+  (serde_json::Value::Null, Ok(value)) => panic!("{name}: esperava recusa, veio {value}"),
+  (want, Ok(value)) => assert_eq!(&value, want, "{name}"),
+  (want, Err(refusal)) => panic!("{name}: esperava {want}, veio {refusal:?}"),
+ }
+}
+/// B12: menu aberto e spinner animando recusam sem tecla; marcador de turno parado não.
+#[tokio::test]
+async fn model_picker_b12_refuses_menu_and_working_session() {
+ for name in ["overlay_refuses", "spinner_live_refuses", "spinner_frozen_goes"] { picker_replay(name).await; }
+}
+/// B13: `/model`, Enter, espera o rodapé; 2º Enter só sem seletor; não abriu = Esc + 409.
+#[tokio::test]
+async fn model_picker_b13_opens_waits_and_aborts() {
+ for name in ["half_redraw_then_open", "partial_then_drawn"] { picker_replay(name).await; }
+}
+/// Seletor que não abriu: as teclas do golden, e a recusa com código e frase em português (o Python a dava
+/// em inglês e sem código).
+#[tokio::test]
+async fn model_picker_that_never_opens_is_refused_with_a_code() {
+ let case = picker_case("never_opens");
+ let io = Arc::new(FakeIo::new(picker_screens(&case)));
+ let out = hangar_server::model_picker::drive(&driver(io.clone(), Arc::new(Services::new())), Some("sonnet"), None, false).await;
+ let want: Vec<String> = case["keys"].as_array().unwrap().iter().map(|k| k.as_str().unwrap().to_owned()).collect();
+ assert_eq!(picker_keys(&io), want);
+ let refusal = out.unwrap_err();
+ assert_eq!((refusal.code, refusal.detail.as_str()), (Some("erro_seletor_modelo_nao_abriu"), "o seletor do /model não abriu no terminal da sessão"));
+}
+/// B14: navega pelo id antes da palavra-chave, só com setas; modelo ausente = Esc + 409.
+#[tokio::test]
+async fn model_picker_b14_navigates_by_id_with_arrows() {
+ for name in ["session_navigates_and_presses_s", "variant_1m", "absent_model"] { picker_replay(name).await; }
+}
+/// B15: Right até o alvo acima, relê uma vez; sem suporte, nenhuma tecla. O `effort_cycle_unavailable` do
+/// golden prende a volta do slider que o Python esperava e o Claude não dá: o caso novo está abaixo.
+#[tokio::test]
+async fn model_picker_b15_effort_moves_toward_the_target() {
+ for name in ["effort_with_right", "effort_rereads_once", "effort_not_supported", "model_and_effort"] { picker_replay(name).await; }
+}
+/// O slider do esforço com o marcador em `level`, a partir de uma captura real do golden.
+fn effort_pane(level: &str) -> String {
+ picker_screens(&picker_case("effort_with_right"))[1].replace("xHigh effort", &format!("{level} effort"))
+}
+async fn effort_drive(screens: Vec<String>, target: &str) -> (Vec<String>, Result<serde_json::Value, hangar_server::model_picker::Refusal>) {
+ let io = Arc::new(FakeIo::new(screens));
+ let out = hangar_server::model_picker::drive(&driver(io.clone(), Arc::new(Services::new())), None, Some(target), false).await;
+ (picker_keys(&io), out)
+}
+/// Alvo abaixo anda com Left (o slider não dá a volta: Right a partir de High iria a Max).
+#[tokio::test]
+async fn model_picker_effort_below_moves_left() {
+ let case = picker_screens(&picker_case("effort_with_right"));
+ let (keys, out) = effort_drive(vec![case[0].clone(), effort_pane("High"), effort_pane("Medium"), case[3].clone()], "medium").await;
+ assert_eq!(keys, ["/model", "Enter", "Left", "s"]);
+ assert!(out.is_ok(), "{out:?}");
+}
+/// O redesenho que atrasa um passo (marcador ainda no anterior) relê uma vez antes de dizer que parou.
+#[tokio::test]
+async fn model_picker_effort_rereads_a_late_redraw_before_refusing() {
+ let case = picker_screens(&picker_case("effort_with_right"));
+ let (keys, out) = effort_drive(vec![case[0].clone(), effort_pane("High"), effort_pane("High"), effort_pane("Medium"), case[3].clone()], "medium").await;
+ assert!(out.is_ok(), "{out:?}");
+ assert_eq!(keys, ["/model", "Enter", "Left", "s"]);
+}
+/// Marcador que não muda (Right no Max) ou que pula o alvo é recusa com código, com Esc e sem confirmar.
+#[tokio::test]
+async fn model_picker_effort_that_cannot_reach_the_target_is_refused() {
+ let idle = picker_screens(&picker_case("effort_with_right"))[0].clone();
+ for (start, after, target) in [("Max", "Max", "ultracode"), ("High", "Max", "xhigh"), ("Medium", "Medium", "low")] {
+  let (keys, out) = effort_drive(vec![idle.clone(), effort_pane(start), effort_pane(after)], target).await;
+  assert_eq!(out.unwrap_err().code, Some("erro_esforco_indisponivel"), "{start}→{target}");
+  assert_eq!(keys.iter().filter(|k| *k == "s").count(), 0, "{start}→{target}: não confirma");
+  assert!(keys.last().is_some_and(|k| k.contains('\u{1b}') || k == "Escape"), "{start}→{target}: fecha com Esc: {keys:?}");
+ }
+}
+/// B16: `s` na sessão, Enter no padrão (o modelo só de espaço também confirma).
+#[tokio::test]
+async fn model_picker_b16_confirms_by_scope() {
+ for name in ["default_presses_enter", "blank_model_presses_s", "model_normalized"] { picker_replay(name).await; }
+}
+/// B17: diálogo "Change effort level?" responde `pending_confirm`, sem tecla a mais.
+#[tokio::test]
+async fn model_picker_b17_pending_confirm() { picker_replay("pending_confirm").await; }
+/// B18: seletor ainda aberto depois de confirmar = Esc + 409.
+#[tokio::test]
+async fn model_picker_b18_still_open_escapes() { picker_replay("still_open_after_confirm").await; }
+/// B19: pediu a sessão e a linha diz padrão = 409, sem Esc.
+#[tokio::test]
+async fn model_picker_b19_session_switch_that_saved_default() { picker_replay("session_got_default").await; }
+/// B22: no psmux, as mesmas teclas pelo driver comum (Enter como tecla, Esc na sequência do psmux).
+#[tokio::test]
+async fn model_picker_b22_psmux_same_sequence() {
+ let io = Arc::new(FakeIo::new(picker_screens(&picker_case("never_opens"))));
+ let mut b = binding(); b.windows = true; b.pane = "=test:0.0".into();
+ let services = Arc::new(Services::new()); services.facts.lock().unwrap().binding = b.clone();
+ let driver = TerminalDriver::new(b, services, io.clone(), InputLimits { literal_settle: Duration::ZERO, multiline_settle: Duration::ZERO, slash_settle: Duration::ZERO, settle: Duration::ZERO, proof_attempts: 2, ready_attempts: 2, cleanup_attempts: 3 });
+ let out = hangar_server::model_picker::drive(&driver, Some("sonnet"), None, false).await;
+ assert_eq!(picker_keys(&io), ["/model", "Enter", "Enter", "\u{1b}[27;1;27;1;0;1_\u{1b}[27;1;27;0;0;1_"]);
+ assert_eq!(out.unwrap_err().code, Some("erro_seletor_modelo_nao_abriu"));
+}

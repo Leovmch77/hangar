@@ -359,24 +359,6 @@ def test_pi_pane_with_a_transcript_is_tracked(monkeypatch, tmp_path):
     assert pi[0].tracked is True
 
 
-def test_resume_refuses_a_pi_pane_instead_of_killing_it(monkeypatch, tmp_path):
-    # O botao "Retomar conversa" so aparece numa linha untracked — que agora inclui a sessao Pi sem
-    # transcript. O resume e Claude-only ponta a ponta: candidatos de ~/.claude/projects e relance
-    # com `claude --resume <uuid>` DEPOIS de tmux.kill_session. Num pane Pi isso ofereceria a
-    # conversa do agente ERRADO e mataria a sessao viva pra subir um claude no lugar.
-    _pane_pi_sem_transcript(monkeypatch, tmp_path)
-    mortes = []
-    monkeypatch.setattr(registry.tmux, "kill_session", lambda n: mortes.append(n))
-
-    reg = registry.SessionRegistry()
-    for chamada in (lambda: reg.resume_candidates("s-pi"),
-                    lambda: reg.resume("s-pi", "11111111-1111-1111-1111-111111111111")):
-        with pytest.raises(ValueError) as exc:
-            chamada()
-        assert "pi" in str(exc.value)
-    assert mortes == [], "o pane Pi nao pode ser morto pelo caminho de resume do Claude"
-
-
 # ---------------------------------------------------------------------------
 # create(provider="pi"): mesmo caminho tmux do Claude, transcript NAO pre-semeado.
 # ---------------------------------------------------------------------------
@@ -393,25 +375,6 @@ def _create_pi(tmp_path, monkeypatch, **kw):
     return info, ns, pt
 
 
-def test_create_pi_does_not_seed_a_claude_transcript_path(tmp_path, monkeypatch):
-    # O jsonl do Pi e <ts>_<uuid>.jsonl em ~/.pi/agent/sessions/<slug>/ e so nasce no 1o turno.
-    # Um path do layout do Claude aqui e um arquivo que NUNCA existe — e como o _jsonl_cache e de
-    # CLASSE (api.registry + sse._registry), ele ficaria grudado nesse fantasma.
-    registry.SessionRegistry._jsonl_cache.pop("s-pi", None)
-    info, ns, _ = _create_pi(tmp_path, monkeypatch)
-    assert info.provider == "pi"
-    assert info.jsonl is None
-    assert "s-pi" not in registry.SessionRegistry._jsonl_cache
-    # spawn_command do PiAdapter, agora alcancavel: `pi --session-id <uuid>` (o `exec` vem do tmux.py)
-    assert ns.call_args[0][2].startswith("pi --session-id ")
-
-
-def test_create_pi_skips_the_claude_trust_list(tmp_path, monkeypatch):
-    # _pretrust_cwd escreve hasTrustDialogAccepted no .claude.json, que o pi nem le.
-    _, _, pt = _create_pi(tmp_path, monkeypatch)
-    pt.assert_not_called()
-
-
 def _create_omp(tmp_path, monkeypatch, **kw):
     from unittest.mock import patch
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "omp"))
@@ -421,74 +384,6 @@ def _create_omp(tmp_path, monkeypatch, **kw):
          patch.object(registry, "_pretrust_cwd") as pt:
         info = reg.create("s-omp", "/home/u/p", provider="omp", **kw)
     return info, ns, pt
-
-
-def test_create_omp_lanca_session_por_caminho_sem_cache_de_jsonl(tmp_path, monkeypatch):
-    info, ns, pt = _create_omp(tmp_path, monkeypatch)
-    cmd = ns.call_args[0][2]
-    assert info.provider == "omp" and info.jsonl is None
-    assert "omp --session " in cmd and "--session-id" not in cmd and "CP_PI_SESSION=" in cmd
-    assert "s-omp" not in registry.SessionRegistry._jsonl_cache
-    pt.assert_not_called()
-
-
-def test_resume_omp_usa_r_com_caminho(tmp_path, monkeypatch):
-    from app.adapters.pi import sessions as s
-    sid = "01a067f7-6120-700b-b71d-6a6092e0c720"
-    d = tmp_path / "omp" / "sessions" / s.cwd_slug("/home/u/p"); d.mkdir(parents=True)
-    f = d / f"2026-09-03T15-51-00-640Z_{sid}.jsonl"; f.write_text("")
-    _, ns, _ = _create_omp(tmp_path, monkeypatch, resume_session_id=sid)
-    cmd = ns.call_args[0][2]
-    assert "omp -r " in cmd and str(f) in cmd
-
-
-def test_create_claude_still_seeds_the_same_path(tmp_path, monkeypatch):
-    # Nao-regressao do caminho de TODO usuario de hoje: byte a byte o mesmo jsonl no cache.
-    from unittest.mock import patch
-    reg = registry.SessionRegistry(projects_dir=tmp_path)
-    registry.SessionRegistry._jsonl_cache.pop("cc", None)
-    # O modo de permissão entra na criação (modo da conta, ou o padrão do app quando ela não
-    # define): fixado aqui pra não depender do settings.json de quem roda a suíte.
-    with patch.object(registry.tmux, "has_session", return_value=False), \
-         patch.object(registry.tmux, "new_session", return_value=True) as ns, \
-         patch.object(registry, "_pretrust_cwd") as pt, \
-         patch.object(registry.modo_permissao, "modo_da_conta", return_value="bypassPermissions"), \
-         patch.object(registry.uuid, "uuid4", return_value=_UUID_PI):
-        info = reg.create("cc", "/home/u/p")
-    esperado = str(tmp_path / registry.sanitize_cwd("/home/u/p") / f"{_UUID_PI}.jsonl")
-    assert info.jsonl == esperado
-    assert registry.SessionRegistry._jsonl_cache["cc"] == esperado
-    assert ns.call_args[0][2] == f"claude --session-id {_UUID_PI} --permission-mode bypassPermissions"
-    pt.assert_called_once_with("/home/u/p", None)
-
-
-def test_create_pi_resume_sobe_pi_e_nao_claude(tmp_path, monkeypatch):
-    # O que este teste protege NAO mudou: uma sessao Pi retomada nunca pode subir `claude --resume`,
-    # que leria o transcript de outro agente com cara de sessao Pi. O que mudou e a saida: antes a
-    # unica defesa era recusar; hoje o Pi tem via propria (`pi --session-id <id>` retoma quando o id
-    # ja existe), entao o certo e SUBIR O PI. A recusa antiga tornava esse branch inalcancavel.
-    from unittest.mock import patch
-    reg = registry.SessionRegistry(projects_dir=tmp_path)
-    with patch.object(registry.tmux, "has_session", return_value=False), \
-         patch.object(registry.tmux, "new_session", return_value=True) as ns:
-        reg.create("s-pi", "/home/u/p", provider="pi", resume_session_id=_UUID_PI)
-    cmd = ns.call_args[0][2]
-    assert cmd == f"pi --session-id {_UUID_PI}"
-    assert "claude" not in cmd
-
-
-def test_create_pi_refuses_an_engine(tmp_path, monkeypatch):
-    # `hangar-engine --exec` so exporta ANTHROPIC_*/CLAUDE_CODE_*, que o pi ignora -> a sessao subiria
-    # na conta do proprio pi PARECENDO estar no motor pedido.
-    from unittest.mock import patch
-    reg = registry.SessionRegistry(projects_dir=tmp_path)
-    with patch.object(registry.tmux, "has_session", return_value=False), \
-         patch.object(registry.tmux, "new_session", return_value=True) as ns, \
-         patch("app.engines.listar", return_value={"kimi": {}}):
-        with pytest.raises(ValueError) as exc:
-            reg.create("s-pi", "/home/u/p", provider="pi", engine="kimi")
-    assert "motor" in str(exc.value)
-    ns.assert_not_called()
 
 
 def test_session_file_accepts_a_fresh_ticket_before_the_file_exists(monkeypatch, tmp_path):

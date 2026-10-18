@@ -414,12 +414,9 @@ def esquecer(name: str) -> None:
         _toasts.pop(name, None)
         _confirmacoes.pop(name, None)
         _preenchido.pop(name, None)
-        _pressed.pop(name, None)
-        _cliques.pop(name, None)
     _eventos.pop(name, None)
     _band_wakers.pop(name, None)
     _toast_wakers.pop(name, None)
-    _press_wakers.pop(name, None)
     for chave in [c for c in list(_recusas) if c[0] == name]:
         _recusas.pop(chave, None)
     state_facts.notify(name)
@@ -581,7 +578,6 @@ _VAZIA_JSON = json.dumps({"above": None, "panes": []})
 # Quem espera algo da sessão: um Event por sessão, trocado a cada aviso, acorda todos de uma vez.
 # Guardado com o loop que o criou: Event usado em outro loop levanta RuntimeError.
 _band_wakers: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
-_press_wakers: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
 
 
 def _waker(tabela: dict, name: str) -> asyncio.Event:
@@ -702,77 +698,6 @@ async def wait_toasts(name: str, seen: int, timeout: float) -> tuple[int, list[d
     """Dorme até a sessão ter aviso vivo de número maior que `seen`, ou até `timeout`."""
     await _esperar_ate(_toast_wakers, name, lambda: toasts_after(name, seen)[1], timeout)
     return toasts_after(name, seen)
-
-
-async def esperar_sem_painel(name: str, painel: str, timeout: float) -> bool:
-    """O painel saiu da sessão (o plugin viu o `ui.close`) dentro de `timeout`?"""
-    def fechou():
-        return not any(p.get("id") == painel for p in band(name)[1]["panes"])
-    return bool(await _esperar_ate(_band_wakers, name, fechou, timeout))
-
-
-# Cliques que o plugin confirmou: o pedido de clique do app espera por eles.
-_pressed: dict[str, list[tuple[float, str, str]]] = {}
-# O clique do app em andamento, um por sessão: o que se espera (site, key, prazo), a tentativa, se o
-# plugin já casou o press com ela e o efeito (texto copiado, URL aberta). Fica aberto até a resposta
-# ir ao app; efeito que chega depois volta para o terminal.
-_cliques: dict[str, dict] = {}
-
-
-async def esperar_press(name: str, site: str, key: str, desde: float, timeout: float) -> bool:
-    """O plugin confirmou o press de `key` no site depois de `desde`?"""
-    def achou():
-        with _lock:
-            return any(t >= desde and r == site and k == key for t, r, k in _pressed.get(name, []))
-    return bool(await _esperar_ate(_press_wakers, name, achou, timeout))
-
-
-async def esperar_efeito(name: str, tentativa: str, timeout: float) -> tuple[str | None, str | None]:
-    """O que o clique do app fez nesta tentativa: (texto copiado, URL aberta). Volta assim que um
-    dos dois chega, ou vazio depois de `timeout`."""
-    def achou():
-        with _lock:
-            clique = _cliques.get(name)
-            if not clique or clique["tentativa"] != tentativa:
-                return None
-            efeito = (clique["copied"], clique["opened"])
-        return efeito if any(efeito) else None
-    return await _esperar_ate(_press_wakers, name, achou, timeout) or (None, None)
-
-
-def esperar_clique_do_app(name: str, site: str, key: str, prazo: float) -> str:
-    tentativa = secrets.token_hex(8)
-    with _lock:
-        _cliques[name] = {"site": site, "key": key, "prazo": time.monotonic() + prazo, "tentativa": tentativa,
-                          "casado": False, "copied": None, "opened": None}
-    return tentativa
-
-
-def encerrar_clique_do_app(name: str, tentativa: str) -> None:
-    with _lock:
-        if _cliques.get(name, {}).get("tentativa") == tentativa:
-            del _cliques[name]
-
-
-def _do_app(name: str, site: str, key: str) -> str | None:
-    """A tentativa do clique do app que este press é, uma vez só; None para press do terminal."""
-    with _lock:
-        clique = _cliques.get(name)
-        if (not clique or clique["casado"] or (clique["site"], clique["key"]) != (site, key)
-                or time.monotonic() > clique["prazo"]):
-            return None
-        clique["casado"] = True
-        return clique["tentativa"]
-
-
-def _guardar_efeito(campo: str, name: str, tentativa: str, valor: str) -> None:
-    with _lock:
-        clique = _cliques.get(name)
-        if not clique or clique["tentativa"] != tentativa:
-            # 409: o plugin segue com o `next` e a ação acontece no terminal, em vez de sumir.
-            raise HTTPException(409, detail="clique do app já respondido")
-        clique[campo] = valor
-    _acordar_todos(_press_wakers, name)
 
 
 # Trecho da âncora: o terminal corta a linha da faixa com reticências quando o pane é estreito.
@@ -1361,13 +1286,8 @@ class PressBody(BaseModel):
 
 @plugin_router.post("/pressed")
 async def pressed(body: PressBody):
-    """Um botão de mod foi pressionado no terminal: confirma o clique que o app pediu."""
+    """Um botão de mod foi pressionado no terminal. O clique do app é do Rust: aqui não há quem espere."""
     _entra(body)
-    with _lock:
-        fila = _pressed.setdefault(body.sessao, [])
-        fila.append((time.monotonic(), body.requestId, body.element))
-        del fila[:-20]
-    _acordar_todos(_press_wakers, body.sessao)
     return {"ok": True}
 
 
@@ -1380,18 +1300,17 @@ class CopiedBody(BaseModel):
 
 @plugin_router.post("/copied")
 async def copied(body: CopiedBody):
-    """Um mod copiou um texto num clique do app: vai ao app, que copia no aparelho de quem clicou."""
+    """Um mod copiou um texto num clique do app. O clique do app é do Rust: o 409 faz a cópia acontecer no
+    terminal, em vez de sumir."""
     _entra(body)
-    _guardar_efeito("copied", body.sessao, body.attempt, body.text)
-    return {"ok": True}
+    raise HTTPException(409, detail="clique do app já respondido")
 
 
 @plugin_router.post("/press-start")
 async def press_start(body: PressBody):
-    """O press que começou no terminal é o clique que o app pediu? Responde sim uma vez só."""
+    """O press que começou no terminal é o clique que o app pediu? Aqui nunca: o clique do app é do Rust."""
     _entra(body)
-    tentativa = _do_app(body.sessao, body.requestId, body.element)
-    return {"fromApp": tentativa is not None, "attempt": tentativa}
+    return {"fromApp": False, "attempt": None}
 
 
 class OpenedBody(BaseModel):
@@ -1407,8 +1326,7 @@ async def opened(body: OpenedBody):
     _entra(body)
     if not re.match(r"^https?://", body.url, re.IGNORECASE):
         raise HTTPException(400, detail="só http(s)")
-    _guardar_efeito("opened", body.sessao, body.attempt, body.url)
-    return {"ok": True}
+    raise HTTPException(409, detail="clique do app já respondido")
 
 
 # Pergunta de múltipla escolha que o hook de `tool.call` segura: o diálogo do terminal e o app

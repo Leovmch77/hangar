@@ -1782,8 +1782,8 @@ abaixo só aparecem no esquema com `generate-json-schema --experimental`; o Hang
   **Perfil por SESSÃO** (06/09/2026): o perfil de um pane omp viaja como `OMP_PROFILE` no
   ambiente dele — o wrapper (`omp.posix.sh`/`omp.fish`, `hangar_omp_perfil`) lê `--profile x`
   da linha ou a variável já exportada, monta o `--session` na raiz do perfil e passa `-e` pro
-  tmux (o pane nasce do servidor, não do shell); o app faz o mesmo pelo `env` do
-  `OmpAdapter.spawn_command(perfil=...)`. Do outro lado, `registry._omp_profile_of(pid)` lê a
+  tmux (o pane nasce do servidor, não do shell); o app faz o mesmo pelo `-e` do pane que o
+  Rust abre (`session_open/agents.rs`). Do outro lado, `registry._omp_profile_of(pid)` lê a
   variável do processo vivo (mesmo `/proc/<pid>/environ` de `CP_ENGINE`) e passa pra
   `transcript_path`/`localizar_na_raiz`, senão a varredura de `sessions/-/` caía na raiz do
   BACKEND. Entrada: `omp_profile` no `POST /api/sessions` (só com `provider=omp`, nome validado
@@ -1998,12 +1998,11 @@ abaixo só aparecem no esquema com `generate-json-schema --experimental`; o Hang
   - **Catálogo de modelos é `omp models --json`** — não há `--list-models`.
   - **Sem chip de cota:** `~/.omp/agent` não tem `auth.json` nem `models.json` (é SQLite:
     `agent.db`, `models.db`), e `cotas._chaves_do_pi` lê exatamente esses dois arquivos, do `~/.pi`.
-  - **No Windows a sessão omp depende SÓ do bilhete da extensão.** `_com_env` (`adapters/omp/
-    adapter.py`) prefixa `env CP_PI_SESSION=<uuid>` porque o tmux não repassa o ambiente de quem
-    chama — e `env` não existe lá, então o ramo `os.name == "nt"` devolve o comando cru. Bilhete
-    recusado = sessão sem transcript. O conserto existe e não foi feito por falta de medição
-    naquela máquina: `tmux new-session -e` funciona no psmux (é o que `tmux._e_config_dir` já usa),
-    então dá pra mandar a variável pelo `-e` em vez do prefixo.
+  - **`CP_PI_SESSION` e `OMP_PROFILE` vão pelo `-e` do `new-session`, em toda plataforma**
+    (`session_open/agents.rs`, 16/10/2026, S-58/S-73): o prefixo `env` que o Python usava não
+    existe no Windows, e lá o omp perdia o perfil e a reserva do bilhete. O Pi aberto pelo app
+    também exporta `CP_PI_SESSION`. A retomada do Arquivo ainda é do Python (`_com_env`, sem o
+    perfil e cru no Windows) até ir ao Rust. Sem medição na DELPHI-02.
   - **Subagente do omp não aparece no painel de Atividade.** `subagents.py` é Pi-puro por duas
     travas independentes: `_pi_agents_dir` exige que o transcript esteja sob `sessions_root("pi")`
     (o do omp está sob `~/.omp/agent`), e o leitor espera o layout `<stem>/<taskId>/run-<n>/

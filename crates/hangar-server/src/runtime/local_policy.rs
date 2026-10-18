@@ -354,7 +354,7 @@ fn default_effort(config_dir: &Value) -> Option<String> {
     settings.get("effortLevel").and_then(text).map(str::to_owned)
 }
 
-fn local_hhmm(secs: i64) -> Option<String> {
+pub(crate) fn local_hhmm(secs: i64) -> Option<String> {
     #[cfg(unix)]
     {
         // A crate `libc` não expõe `tzset`.
@@ -541,7 +541,7 @@ fn read_text(path: &Path) -> Result<Option<String>, RuntimeError> {
 
 /// Impressão do que o `claude -p` lê ao nascer: só o `mcpServers` do `.claude.json` e o
 /// `settings.json` inteiro. Ilegível é erro: "não li" não pode virar "mudou" nem "não mudou".
-fn config_stamp(config_dir: Option<&str>) -> Result<String, RuntimeError> {
+pub(crate) fn config_stamp(config_dir: Option<&str>) -> Result<String, RuntimeError> {
     let home = || std::env::home_dir().ok_or_else(|| error("policy_input"));
     let root = match config_dir {
         Some("~") => home()?,
@@ -580,13 +580,24 @@ type UnknownKey = (String, String, String);
 static UNKNOWN_COUNTS: LazyLock<std::sync::Mutex<std::collections::HashMap<UnknownKey, usize>>> = LazyLock::new(Default::default);
 
 /// Mesmo lugar do `log_paths.base()` do Python: o log é do Hangar da máquina, não da conta.
-fn log_base() -> Option<std::path::PathBuf> {
+pub(crate) fn log_base() -> Option<std::path::PathBuf> {
     if cfg!(windows) {
         let root = std::env::var_os("LOCALAPPDATA").filter(|dir| !dir.is_empty()).map(std::path::PathBuf::from)
             .or_else(|| std::env::home_dir().map(|home| home.join("AppData").join("Local")))?;
         return Some(root.join("hangar").join("logs"));
     }
     Some(std::env::home_dir()?.join(".hangar").join("logs"))
+}
+
+/// `log_base` pelo ambiente-base do registro (nos testes, a casa de teste, nunca o diário da máquina).
+pub(crate) fn log_base_in(env: &crate::accounts::environment::AccountEnvironment) -> Option<std::path::PathBuf> {
+    let home = Some(env.home.clone()).filter(|home| !home.as_os_str().is_empty());
+    if cfg!(windows) {
+        let root = env.base.get("LOCALAPPDATA").filter(|dir| !dir.is_empty()).map(std::path::PathBuf::from)
+            .or_else(|| home.map(|home| home.join("AppData").join("Local")))?;
+        return Some(root.join("hangar").join("logs"));
+    }
+    Some(home?.join(".hangar").join("logs"))
 }
 
 /// Só a pasta folha é `0700` (como o `mkdir(mode=…, parents=True)` do Python); as de cima seguem o umask.

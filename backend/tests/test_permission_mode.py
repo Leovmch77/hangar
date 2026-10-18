@@ -180,3 +180,28 @@ def test_session_non_plan_mode_le_a_memoria_pelo_session_id(tmp_path, monkeypatc
     monkeypatch.setattr(pm, "_ultimos_nao_plan", OrderedDict({"sid-1": "acceptEdits"}))
     assert pm.session_non_plan_mode(jsonl) == "acceptEdits"
     assert pm.session_non_plan_mode(None) is None
+
+
+def test_modo_de_abertura_le_o_registro_sem_atrapalhar_a_troca_do_rust(tmp_path, monkeypatch):
+    # No Windows, ler o registro no meio do tmp+rename do Rust faz a troca dele falhar: a leitura
+    # passa pelo `atomico.read`, que compartilha a exclusão.
+    from app import atomico
+    monkeypatch.setenv("HOME", str(tmp_path))
+    specs = tmp_path / ".hangar" / "session-specs"
+    specs.mkdir(parents=True)
+    (specs / f"{'a' * 32}.json").write_text(json.dumps({"conversation": "sid-1", "permission_mode": "auto"}))
+    lidos = []
+    real = atomico.read
+    monkeypatch.setattr(atomico, "read", lambda caminho: lidos.append(caminho) or real(caminho))
+    assert pm._launch_mode("sid-1") == "auto"
+    assert lidos == [specs / f"{'a' * 32}.json"]
+
+
+def test_modo_de_abertura_e_o_do_registro_mais_recente_da_conversa(tmp_path, monkeypatch):
+    # Fechar não apaga o registro e o Arquivo reabre a mesma conversa com outra chave: vale o mais novo.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    specs = tmp_path / ".hangar" / "session-specs"
+    specs.mkdir(parents=True)
+    for chave, modo, criado in [("a", "acceptEdits", 20.0), ("b", "plan", 30.0), *((str(i), "bypassPermissions", float(i)) for i in range(1, 9))]:
+        (specs / f"{chave * 32}.json").write_text(json.dumps({"conversation": "sid-1", "permission_mode": modo, "created_at": criado}))
+    assert pm._launch_mode("sid-1") == "acceptEdits"

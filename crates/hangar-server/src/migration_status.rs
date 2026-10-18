@@ -27,7 +27,7 @@ pub const AREAS: [&str; 22] = [
 ];
 
 /// Trabalho que o Python pede ao Rust por trás (porta privada e canal do runtime).
-pub const PRIVATE: [&str; 8] = ["send_headless", "send_terminal", "terminal_observe", "workspace_bridge", "list_bridge", "pages_bridge", "transcription_bridge", "dictation_bridge"];
+pub const PRIVATE: [&str; 7] = ["send_headless", "send_terminal", "terminal_observe", "workspace_bridge", "list_bridge", "transcription_bridge", "dictation_bridge"];
 
 const WINDOW_MINUTES: u64 = 10;
 const FACTS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -94,23 +94,19 @@ pub fn area_of(path: &str) -> usize {
     table.iter().find(|(prefixes, _)| prefixes.iter().any(|p| under(path, p))).map_or(area(fallback), |(_, a)| area(a))
 }
 
-/// Rotas do roteador que o Rust só atende para o Codex dele: no Claude o relançamento e o recarregar
-/// seguem do Python, e a tabela as anuncia assim.
-pub const CODEX_RELAUNCH: [&str; 2] = ["modo-execucao", "recarregar"];
-
 /// O Rust atende este pedido do dono sem repassar? Mesma decisão do `routes::router`: as rotas
 /// GET registradas lá, mais os `matches` de Git/arquivos e de worktrees que o `pass_any` consulta.
 pub fn rust_route(method: &Method, path: &str) -> bool {
     if crate::uploads::http::matches(method, path) { return true; }
     if crate::accounts::http::matches(method, path) { return true; }
     if *method == Method::GET {
-        if matches!(path, "/api/sessions" | "/api/sessions/events" | "/api/costs" | "/api/cotacao" | "/api/uso" | "/api/migration/status" | "/api/presence"
+        if matches!(path, "/api/sessions" | "/api/sessions/events" | "/api/sessions/creation-progress" | "/api/costs" | "/api/cotacao" | "/api/uso" | "/api/migration/status" | "/api/presence"
             | "/api/voice" | "/api/voice/settings" | "/api/voice/memory" | "/api/jev/aux/cliproxy" | "/api/jev/delivery") {
             return true;
         }
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
         // `term`: o painel abre no Rust; login de convidado e Connect passam pelo Python e voltam ao mesmo PTY.
-        if matches!(tail, Some("history" | "events" | "artifacts" | "cost" | "term" | "models" | "limits" | "commands" | "codex-permissions")) || tail.is_some_and(|t| t.starts_with("pages/")) {
+        if matches!(tail, Some("history" | "events" | "artifacts" | "cost" | "term" | "models" | "limits" | "commands" | "codex-permissions" | "conta")) || tail.is_some_and(|t| t.starts_with("pages/")) {
             return true;
         }
         if tail.is_some_and(|t| t == "subagents" || t.strip_prefix("subagents/").is_some_and(|id| !id.is_empty() && !id.contains('/'))) {
@@ -128,7 +124,7 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
     }
     // Interface dos mods: o Rust atende as sessões dele e repassa as outras (os contadores mostram).
     if *method == Method::POST {
-        if matches!(path, "/api/claude/defaults" | "/api/presence" | "/api/presence/heartbeat" | "/api/jev/aux/models" | "/api/mermaid") {
+        if matches!(path, "/api/sessions" | "/api/claude/defaults" | "/api/presence" | "/api/presence/heartbeat" | "/api/jev/aux/models" | "/api/mermaid") {
             return true;
         }
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);
@@ -147,10 +143,19 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
         .is_some_and(|id| !id.is_empty() && !id.contains('/')) {
         return true;
     }
-    // Rotas só do Codex e modos de permissão do Claude: o Rust atende as sessões dele. `CODEX_RELAUNCH`
-    // fica de fora: no Claude relançar e recarregar são do Python.
+    // Rotas só do Codex, modos de permissão do Claude e as reaberturas (troca de modo, recarregar, conta,
+    // conta ChatGPT fixa): o Rust atende as sessões dele.
     if *method == Method::POST && matches!(tail, Some("model" | "service-tier" | "codex/mode" | "codex/plan/implement" | "question/skip" | "codex-permissions"
-        | "permission-mode")) {
+        | "permission-mode" | "modo-execucao" | "recarregar" | "conta" | "engine/model" | "model-effort" | "bastao" | "resume")) {
+        return true;
+    }
+    // A pergunta lateral do Claude, com e sem terminal, e o histórico dela.
+    if matches!(*method, Method::POST | Method::GET) && tail == Some("btw") {
+        return true;
+    }
+    // Retomar do Arquivo: a abertura do Rust com a conversa que já existe.
+    if *method == Method::POST && path.strip_prefix("/api/archive/").and_then(|r| r.strip_suffix("/resume"))
+        .is_some_and(|r| r.split('/').count() == 2) {
         return true;
     }
     if *method == Method::GET && tail == Some("permission-modes") {
@@ -265,7 +270,6 @@ pub async fn count_bridge(req: Request, next: Next) -> Response {
         "/__hangar_server/terminal" => "terminal_observe",
         "/__hangar_server/workspace" => "workspace_bridge",
         "/__hangar_server/list" => "list_bridge",
-        "/__hangar_server/pages" => "pages_bridge",
         path if path.starts_with("/__hangar_server/transcription/") => "transcription_bridge",
         path if path.starts_with("/__hangar_server/dictation/") => "dictation_bridge",
         _ => "",
@@ -397,9 +401,10 @@ mod tests {
         assert!(rust_route(&Method::POST, "/api/sessions/a/share") && rust_route(&Method::DELETE, "/api/sessions/a/share/s1")
             && get("/api/share/prereqs") && rust_route(&Method::POST, "/api/share/reachability")
             && !rust_route(&Method::DELETE, "/api/sessions/a/share/s1/x"));
-        // O corte: relançar o Codex, modos do Claude, encerrar, broadcast e a ponte do plugin são do Rust.
+        // O corte: relançar e recarregar (Claude e Codex), trocar de conta, modos do Claude, encerrar, broadcast e
+        // a ponte do plugin são do Rust.
         let post = |p: &str| rust_route(&Method::POST, p);
-        assert!(!post("/api/sessions/a/modo-execucao") && !post("/api/sessions/a/recarregar"), "no Claude são do Python");
+        assert!(post("/api/sessions/a/modo-execucao") && post("/api/sessions/a/recarregar") && post("/api/sessions/a/conta") && get("/api/sessions/a/conta"));
         assert!(post("/api/sessions/a/permission-mode")
             && get("/api/sessions/a/permission-modes") && rust_route(&Method::DELETE, "/api/sessions/a") && post("/api/broadcast"));
         assert!(post("/api/sessions/a/subagents/x1/message") && !post("/api/sessions/a/subagents//message") && !get("/api/sessions/a/subagents/x1/message"));
@@ -420,24 +425,24 @@ mod tests {
     fn every_route_registered_in_the_router_is_known_to_the_table() {
         // O checkout do Windows pode trazer CRLF; o fim do roteador é procurado por "\n}\n".
         let source = include_str!("routes.rs").replace("\r\n", "\n");
-        // As rotas de sessão moram em `session_routes`, montadas pelas duas portas; o resto, em `router`.
+        // As rotas de sessão moram em `session_routes`, montadas pelas duas portas; o resto, em `public_routes`.
         let fn_body = |name: &str| {
             let body = &source[source.find(name).unwrap()..];
             body[..body.find("\n}\n").unwrap()].to_owned()
         };
-        let body = fn_body("fn router_with(") + "\n" + &fn_body("fn session_routes<");
+        let body = fn_body("fn public_routes(") + "\n" + &fn_body("fn session_routes<");
         let body = body.as_str();
         let (mut seen, mut api) = (0, 0);
         for line in body.lines().map(str::trim).filter(|l| l.starts_with(".route(\"")) {
             seen += 1;
             let path = line.split('"').nth(1).unwrap().replace("{name}", "x");
             if !path.starts_with("/api/") { continue; }
-            // Atendidas no Rust só para o Codex dele: anunciadas como Python.
-            if CODEX_RELAUNCH.iter().any(|tail| path.ends_with(&format!("/{tail}"))) { assert!(!rust_route(&Method::POST, &path)); continue; }
-            let method = if line.contains("post(") { Method::POST } else if line.contains("delete(") { Method::DELETE } else if line.contains("get(") { Method::GET }
-                else if line.contains("put(") { Method::PUT } else { panic!("método que o leitor não conhece: {line}") };
-            assert!(!line.contains(").get(") && !line.contains(").post(") && !line.contains(").put("), "dois métodos numa rota: {line}");
-            assert!(rust_route(&method, &path), "rota do roteador fora da tabela: {method} {path}");
+            // Uma rota pode juntar métodos (`get(…).post(…)`): cada um tem de estar na tabela.
+            let methods:Vec<Method> = [("get(",Method::GET),("post(",Method::POST),("delete(",Method::DELETE),("put(",Method::PUT),("patch(",Method::PATCH)]
+                .into_iter().filter(|(call,_)| line.contains(&format!("::{call}")) || line.contains(&format!(" {call}")) || line.contains(&format!(".{call}")) || line.contains(&format!("({call}")))
+                .map(|(_,method)| method).collect();
+            assert!(!methods.is_empty(), "método que o leitor não conhece: {line}");
+            for method in methods { assert!(rust_route(&method, &path), "rota do roteador fora da tabela: {method} {path}"); }
             api += 1;
         }
         // Rota quebrada em várias linhas escaparia do filtro acima: a contagem bruta a denuncia.

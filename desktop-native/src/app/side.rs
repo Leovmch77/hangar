@@ -619,7 +619,10 @@ impl Hangar {
             Reply::ProjectSaved(seq) => self.receive_project_saved(key, seq, result, window, cx),
             Reply::Reload => {
                 self.side.reloading.remove(&key);
-                let note = match result { Ok(_) => (tr("reload_sent"), false), Err(error) => (Self::failure(&error), true) };
+                let note = match result {
+                    Ok(value) => super::controls::reopen_warnings(&value).map_or_else(|| (tr("reload_sent"), false), |w| (w, true)),
+                    Err(error) => (Self::failure(&error), true),
+                };
                 self.action_feedback.insert(key, note);
             }
             other => self.receive_control(key, other, result, window, cx),

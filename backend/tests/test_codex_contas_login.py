@@ -31,16 +31,6 @@ def service():
     return CodexContasLogin()
 
 
-async def test_criacao_em_andamento_recusa_outra_e_libera_depois(contas, service):
-    _, work = contas
-    lease = service.reserve_creation(work)
-    with pytest.raises(accounts.AccountError) as error:
-        service.reserve_creation(work)
-    assert (error.value.status, error.value.code) == (409, "codex_account_creation_in_progress")
-    lease.release()
-    service.reserve_creation(work).release()
-
-
 def test_ambiente_da_secundaria_remove_identidade_externa_e_padrao_preserva(contas):
     default, work = contas
     base = {"OPENAI_API_KEY": "secret", "OPENAI_BASE_URL": "https://external.invalid",
@@ -56,17 +46,6 @@ def test_ambiente_da_secundaria_remove_identidade_externa_e_padrao_preserva(cont
     assert secondary["CODEX_HOME"] == str(work.home)
     assert "CODEX_CONFIG_HOME" not in secondary
     assert "CODEX_SQLITE_HOME" not in secondary
-
-
-async def test_duas_criacoes_podem_usar_a_mesma_conta(contas, service):
-    _, work = contas
-    first = service.reserve_creation(work)
-    first.mark_live("one")
-
-    second = service.reserve_creation(work)
-
-    second.release()
-    first.release()
 
 
 async def test_dispatch_considera_method_antes_de_id():

@@ -82,6 +82,12 @@ async fn owned(st: &Arc<AppState>, peer: SocketAddr, path: Result<Path<String>, 
     // O convidado da 8766 é atendido como o que chega pela ponte.
     let method = req.method().clone();
     let guest = |name: &str| who.as_ref().is_some_and(|c| c.grant().is_some() && c.can(name, &method));
+    // O Claude com terminal ainda sem ator é adotado aqui, como na escrita: sem isso o clique ia ao Python, que
+    // abria a sessão no Rust no meio dele.
+    if let Ok(Path(name)) = &path && (owner || guest(name)) && let Err(error) = adopt(st, name).await {
+        return Err(Box::new(reply(Some(req.headers()), StatusCode::SERVICE_UNAVAILABLE,
+            json!({"detail": {"code": error.code, "params": {}, "msg": error.message}}))));
+    }
     match (path, outside) {
         (Ok(Path(name)), _) if (owner || guest(&name)) && st.mods.owns(&name) => {
             let headers = req.headers().clone();
@@ -98,6 +104,12 @@ async fn owned(st: &Arc<AppState>, peer: SocketAddr, path: Result<Path<String>, 
         } => Err(Box::new(reply(Some(req.headers()), StatusCode::SERVICE_UNAVAILABLE, json!({"detail": no_answer().detail()})))),
         _ => Err(Box::new(pass(st, req, &fwd).await)),
     }
+}
+
+/// A sessão fora do `Mods` que é um Claude com terminal sem ator passa a ser do Rust.
+async fn adopt(st: &Arc<AppState>, name: &str) -> Result<(), crate::runtime::protocol::RuntimeError> {
+    if st.mods.owns(name) { return Ok(()); }
+    match st.state.runtime.get() { Some(runtime) => runtime.adopt_claude_terminal(name).await, None => Ok(()) }
 }
 
 /// Pedido que o Python devolveu pela ponte privada depois de autenticar quem não é o dono (convidado,
@@ -117,7 +129,7 @@ pub async fn bridge(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     if !matches!(op.as_str(), "press" | "close" | "show" | "input") {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    if !st.mods.owns(&name) {
+    if adopt(&st, &name).await.is_err() || !st.mods.owns(&name) {
         return StatusCode::NOT_FOUND.into_response();
     }
     req.extensions_mut().insert(Bridged);

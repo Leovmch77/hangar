@@ -3,31 +3,24 @@
 #
 # Mesmo papel do pi.posix.sh, com UMA diferença que muda a forma: o omp NÃO tem `--session-id`.
 # Quem escolhe a sessão é o CAMINHO do transcript (`--session <arquivo>`), então o wrapper monta o
-# caminho igual ao backend (`backend/app/adapters/omp/adapter.py` -> `pi/sessions.transcript_alvo`)
+# caminho igual ao servidor (`crates/hangar-server/src/session_open/agents.rs`, o pane novo do omp)
 # e exporta CP_PI_SESSION com o MESMO uuid do nome do arquivo — é por ele que o backend acha a
 # sessão em /proc/<pid>/environ quando o bilhete da extensão ainda não existe (registry:_pi_sid_of).
 #
 # Regras (idênticas às do pi):
-#  - flag que já gerencia a própria sessão (--session, --resume/-r, --continue/-c, --no-session,
-#    --session-dir) -> NÃO monta caminho nenhum (sobrepor `--session` a um `omp -c` abriria sessão
-#    FRESCA em vez de continuar), mas AINDA envolve em tmux quando interativo e fora dele: sessão
-#    retomada tem que continuar visível no app, e o rastreio não depende do uuid injetado — a
-#    hangar-state.ts publica o arquivo real por dentro do omp.
-#  - uso não interativo -> cru. Duas formas: (a) o PRIMEIRO argumento é um subcomando do omp
-#    (`omp models` lista modelos; `omp "models are slow"` continua sendo prompt inicial);
-#    (b) uma flag que imprime e sai (-p/--print, --mode, --alias, --export, --help/-h,
-#    --version/-v).
-#  - já em tmux ($TMUX) / stdin não é tty -> só o --session + o export.
-#  - fora do tmux + interativo -> cria sessão tmux com o BASENAME da pasta (sufixo -2/-3 se já
-#    existir) e roda o omp dentro dela.
-#
-# CP_PI_SESSION é EXPORTADO, nunca passado por `tmux -e`: um servidor tmux já rodando não entrega o
-# ambiente do cliente a um pane novo, então o export tem que acontecer DENTRO do processo do pane —
-# daí o `sh -c` do ramo que cria sessão (mesmo desenho do pi.posix.sh).
+#  - uso não interativo -> cru: (a) o PRIMEIRO argumento é subcomando do omp (`omp models` lista
+#    modelos; `omp "models are slow"` continua prompt); (b) flag que imprime e sai (-p/--print,
+#    --mode, --alias, --export, --help/-h, --version/-v).
+#  - flag que gerencia a própria sessão (--session, --resume/-r, --continue/-c, --no-session,
+#    --session-dir) -> cru.
+#  - fora do tmux + terminal -> `hangar-open omp …`: o lançador do Hangar abre a sessão (perfil por
+#    --profile ou OMP_PROFILE) e o terminal anexa nela. Argumento que o pedido não cobre, ou sem
+#    hangar-server, ou sem hangar-open -> sessão tmux com o nome da pasta.
+#  - já no tmux / stdin não é tty -> cru com o --session + o export.
 #
 # Escape hatch: `command omp ...` roda o binário cru, sem este wrapper.
 
-# Mesmo caminho que backend/app/adapters/pi/sessions.py:transcript_alvo monta pro `--session`:
+# Mesmo caminho que o session_open/agents.rs do servidor monta pro `--session`:
 # <raiz>/<slug do cwd>/<ts>_<id>.jsonl. O slug troca só o separador por '-' (acento e espaço passam).
 # Perfil pedido na linha (`--profile x` / `--profile=x`) ou já no ambiente (OMP_PROFILE). Vazio = sem perfil.
 hangar_omp_perfil() {
@@ -77,27 +70,22 @@ read|render|say|search|setup|share|shell|ssh|stats|tiny-models|token|ttsr|update
     # já nesta abertura (antes dependia de reiniciar o backend). Silencioso e fail-soft.
     command -v hangar-skills-sync >/dev/null 2>&1 && hangar-skills-sync
 
-    local own_session=0
+    # Flags que gerenciam a própria sessão: CLI cru (sobrepor `--session` a um `omp -c` abriria
+    # sessão FRESCA em vez de continuar).
     for a in "$@"; do
         case "$a" in
             --session|--session=*|--resume|--resume=*|-r|--continue|-c|--no-session|--session-dir|--session-dir=*)
-                own_session=1
-                break
+                command omp "$@"
+                return
                 ;;
         esac
     done
 
     # Perfil vai como OMP_PROFILE (o omp honra; é de onde o backend lê o perfil de um pane vivo) e
-    # muda a raiz que o hangar_omp_alvo monta. `-e` no tmux porque o pane nasce do SERVIDOR, não deste shell.
-    local perfil envp=()
+    # muda a raiz que o hangar_omp_alvo monta.
+    local perfil
     perfil=$(hangar_omp_perfil "$@")
-    if [ -n "$perfil" ]; then
-        export OMP_PROFILE="$perfil"
-        envp=(-e "OMP_PROFILE=$perfil")
-    fi
-
-    local id
-    id=$(uuidgen 2>/dev/null) || id=$(cat /proc/sys/kernel/random/uuid)
+    [ -n "$perfil" ] && export OMP_PROFILE="$perfil"
 
     # TMUX herdado pode estar MORTO (kitty single-instance cujo mestre nasceu num pane já fechado).
     # Valida o pane; stale -> limpa e segue pro caminho "fora do tmux".
@@ -107,49 +95,51 @@ read|render|say|search|setup|share|shell|ssh|stats|tiny-models|token|ttsr|update
         fi
     fi
 
-    if [ -n "${TMUX:-}" ] || [ ! -t 0 ]; then
-        if [ "$own_session" = 1 ]; then
-            command omp "$@"
-            return
+    # Fora do tmux e em terminal: a sessão nasce pelo lançador do Hangar (ver claude.posix.sh).
+    if [ -z "${TMUX:-}" ] && [ -t 0 ]; then
+        if command -v hangar-open >/dev/null 2>&1; then
+            local rc=0
+            hangar-open omp "$@" || rc=$?
+            [ "$rc" = 100 ] || return "$rc"
+        else
+            echo "hangar: hangar-open não encontrado; abrindo o omp sem o Hangar" >&2
         fi
-        export CP_PI_SESSION="$id"
-        command omp --session "$(hangar_omp_alvo "$id")" "$@"
-        return
-    fi
 
-    # fora do tmux + interativo: sessão tmux com o basename da pasta, único.
-    local base name i ascii
-    base=$(basename "$PWD")
-    # Acento vira o ASCII equivalente ANTES do filtro — mesma regra do backend (app/names.py).
-    if command -v iconv >/dev/null 2>&1; then
-        ascii=$(printf '%s' "$base" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null) \
-            && [ -n "$ascii" ] && base=$ascii
-    fi
-    base=$(printf '%s' "$base" | tr -c 'A-Za-z0-9_-' '-')
-    while [ "${base#-}" != "$base" ]; do base=${base#-}; done
-    while [ "${base%-}" != "$base" ]; do base=${base%-}; done
-    [ -n "$base" ] || base=session
-    name=$base; i=2
-    while tmux has-session -t "=$name" 2>/dev/null; do
-        name="$base-$i"; i=$((i + 1))
-    done
-
-    # `command -v systemd-run` diz que o BINARIO existe, nao que ele FUNCIONA (mesmo probe dos
-    # outros wrappers: gerenciador systemd do usuario pode recusar scope transiente).
-    local run=()
-    if command -v systemd-run >/dev/null 2>&1 && [ -n "${XDG_RUNTIME_DIR:-}" ] \
-       && systemd-run --user --scope --collect -q -- true >/dev/null 2>&1; then
-        run=(systemd-run --user --scope --collect -q --)
-    fi
-    # `sh -c` exporta CP_PI_SESSION DENTRO do pane antes do exec — ver o cabeçalho pra o porquê.
-    # $0 vira "_" (placeholder), $1 o uuid, $2 o caminho do transcript, o resto os args originais.
-    # CP_SESSION_NAME: carimbo de identidade pro hangar-send de dentro do pane (ver claude.posix.sh).
-    if [ "$own_session" = 1 ]; then
-        "${run[@]}" tmux new-session -s "$name" -c "$PWD" -e "CP_SESSION_NAME=$name" "${envp[@]}" \
-            sh -c 'exec omp "$@"' _ "$@"
-    else
+        # Sem o tmux o CLI ficaria invisível pro app: sessão com o nome da pasta, única.
+        # Acento -> ASCII antes do filtro, mesma regra do backend (app/names.py).
+        local base name i ascii run=()
+        base=$(basename "$PWD")
+        if command -v iconv >/dev/null 2>&1; then
+            ascii=$(printf '%s' "$base" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null) \
+                && [ -n "$ascii" ] && base=$ascii
+        fi
+        base=$(printf '%s' "$base" | tr -c 'A-Za-z0-9_-' '-')
+        while [ "${base#-}" != "$base" ]; do base=${base#-}; done
+        while [ "${base%-}" != "$base" ]; do base=${base%-}; done
+        [ -n "$base" ] || base=session
+        name=$base; i=2
+        while tmux has-session -t "=$name" 2>/dev/null; do
+            name="$base-$i"; i=$((i + 1))
+        done
+        # O probe confere que o systemd do usuário aceita scope transiente, não só que o binário existe.
+        if command -v systemd-run >/dev/null 2>&1 && [ -n "${XDG_RUNTIME_DIR:-}" ] \
+           && systemd-run --user --scope --collect -q -- true >/dev/null 2>&1; then
+            run=(systemd-run --user --scope --collect -q --)
+        fi
+        local id envp=()
+        id=$(uuidgen 2>/dev/null) || id=$(cat /proc/sys/kernel/random/uuid)
+        # O pane nasce do servidor tmux, não deste shell: perfil por `-e`, CP_PI_SESSION por export
+        # dentro do pane. CP_SESSION_NAME: identidade da sessão pro hangar-send de dentro do pane.
+        [ -n "$perfil" ] && envp=(-e "OMP_PROFILE=$perfil")
         "${run[@]}" tmux new-session -s "$name" -c "$PWD" -e "CP_SESSION_NAME=$name" "${envp[@]}" \
             sh -c 'export CP_PI_SESSION="$1"; alvo="$2"; shift 2; exec omp --session "$alvo" "$@"' \
             _ "$id" "$(hangar_omp_alvo "$id")" "$@"
+        return
     fi
+
+    # CLI cru com o caminho: já no tmux ou stdin sem tty.
+    local id
+    id=$(uuidgen 2>/dev/null) || id=$(cat /proc/sys/kernel/random/uuid)
+    export CP_PI_SESSION="$id"
+    command omp --session "$(hangar_omp_alvo "$id")" "$@"
 }

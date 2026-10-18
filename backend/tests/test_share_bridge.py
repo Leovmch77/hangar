@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from app import api, diag, list_bridge, mcp_server, registry, share_bridge
+from app import api, diag, list_bridge, registry, share_bridge
 from app.config import settings
 
 H = {"Authorization": "Bearer secret"}
@@ -170,7 +170,7 @@ def test_mode_change_holds_the_invite_and_moves_its_life(monkeypatch, bridge):
     async def troca():
         seen.append(("durante", "s" in share_bridge.changing_mode, list(bridge.calls)))
         return "feito"
-    assert asyncio.run(api._during_transfer_life("s", troca())) == "feito"
+    assert asyncio.run(api._durante_troca("s", troca())) == "feito"
     assert seen == [("durante", True, [("mode_change_begin", {"name": "s"})])]
     assert bridge.calls == [("mode_change_begin", {"name": "s"}), ("set_life", {"name": "s", "life": "k:novo"}),
                             ("mode_change_end", {"name": "s", "source_life": None})]
@@ -289,23 +289,6 @@ def test_end_external_pair_comes_from_rust(bridge):
     bridge.replies["end_pair"] = {"found": False, "errors": []}
     assert asyncio.run(api._end_external_pair("a", "srv::b")) is None
     assert bridge.calls[0] == ("end_pair", {"local": "a", "address": "ana::b"})
-
-
-def test_mcp_send_to_external_pair_goes_through_rust(monkeypatch, bridge):
-    bridge.replies["send"] = {"ok": True, "delivered": True}
-    monkeypatch.setattr(mcp_server, "_caller", lambda ctx: asyncio.sleep(0, ("eu", False)))
-    out = asyncio.run(mcp_server.send(None, "ana::b", "oi"))
-    assert out == {"alvo": "ana::b", "ok": True, "delivered": True}
-    assert bridge.calls == [("send", {"sender": "eu", "target": "ana::b", "text": "oi"})]
-
-
-def test_mcp_send_to_a_machine_of_mine_falls_to_the_peer(monkeypatch, bridge):
-    from app import peers
-    bridge.replies["send"] = share_bridge.ShareBridgeError("erro_par_inexistente", "este par externo não existe")
-    monkeypatch.setattr(mcp_server, "_caller", lambda ctx: asyncio.sleep(0, ("eu", False)))
-    monkeypatch.setattr(settings, "server_id", "casa")
-    monkeypatch.setattr(peers, "call", lambda srv, method, path, body: (200, {"ok": True}))
-    assert asyncio.run(mcp_server.send(None, "trabalho::b", "oi")) == {"alvo": "trabalho::b", "ok": True}
 
 
 def test_connect_owner_invite_goes_to_the_explicit_private_route(monkeypatch, client):

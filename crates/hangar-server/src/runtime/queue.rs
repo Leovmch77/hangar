@@ -278,7 +278,8 @@ pub enum Action {
 pub struct Store {
     state_path: PathBuf,
     projection_dir: PathBuf,
-    state: State,
+    /// Compartilhado com as leituras: a escrita troca o `Arc` inteiro, e a leitura não copia o estado.
+    state: Arc<State>,
     fenced: bool,
     recover_before_compact: bool,
     /// Projeção segurada pelo envio direto: a linha só aparece depois do `BeginDispatch`, já entregue.
@@ -382,7 +383,7 @@ impl Store {
             Err(error) => return Err(error),
         };
         let recover_before_compact=needs_terminal_recovery(&state);
-        let mut store = Self { state_path:state_path.into(), projection_dir:projection_dir.into(), state, fenced:false, recover_before_compact, held:false };
+        let mut store = Self { state_path:state_path.into(), projection_dir:projection_dir.into(), state:Arc::new(state), fenced:false, recover_before_compact, held:false };
         store.ensure_projection()?;
         Ok(store)
     }
@@ -412,7 +413,7 @@ impl Store {
     /// recusando, a próxima gravação falha de novo e bloqueia outra vez.
     pub fn unfence(&mut self) -> io::Result<()> {
         if self.fenced {
-            self.state = State::load(&std::fs::read(&self.state_path)?)?.0;
+            self.state = Arc::new(State::load(&std::fs::read(&self.state_path)?)?.0);
             self.recover_before_compact=needs_terminal_recovery(&self.state);
             self.ensure_projection()?;
             self.fenced = false;
@@ -462,7 +463,7 @@ impl Store {
             _ => None,
         };
         let targeted = target.is_some();
-        let mut state = self.state.clone();
+        let mut state = (*self.state).clone();
         if self.recover_before_compact && !readonly && !matches!(&action,Action::Recover) {
             apply(&mut state,Action::Recover,clock,call_id)?;
         }
@@ -491,7 +492,7 @@ impl Store {
             state.compact();
             self.fenced = true;
             atomic_write(&self.state_path, &serde_json::to_vec(&state)?)?;
-            self.state = state;
+            self.state = Arc::new(state);
             self.fenced = false;
             self.recover_before_compact=false;
             self.held = hold || binds && was_held;
@@ -573,7 +574,7 @@ fn waiting_index(state:&State,entry:&str)->Result<usize,&'static str> {
 
 /// As que esperam, na ordem de entrega, com o mesmo corte de idade do `Claim`: linha de vida anterior que a
 /// drenagem nunca levaria não segura comando nem Orientar.
-pub(crate) fn waiting_ids(state:&State,min_ts:f64)->Vec<String> {
+pub fn waiting_ids(state:&State,min_ts:f64)->Vec<String> {
     state.rows.iter().filter(|row|current(row,min_ts) && waiting_row(state,row)).map(|row|row_id(row).to_owned()).collect()
 }
 
@@ -1317,7 +1318,7 @@ pub(super) type BatchValidator = Box<dyn FnOnce(&mut Value)->io::Result<()> + Se
 enum QueueMessage {
     Exec { generation:u64, call_id:String, clock:ClockSample, action:Action, hold:bool, validate:Option<BatchValidator>, reply:oneshot::Sender<io::Result<Value>> },
     Stop,
-    Snapshot(oneshot::Sender<io::Result<State>>),
+    Snapshot(oneshot::Sender<io::Result<Arc<State>>>),
 }
 
 pub struct QueueActor {
@@ -1383,7 +1384,7 @@ impl QueueActor {
         response.await.map_err(|_|invalid("fila encerrada sem recibo"))?
     }
 
-    pub async fn snapshot(&self) -> io::Result<State> {
+    pub async fn snapshot(&self) -> io::Result<Arc<State>> {
         let (reply,response) = oneshot::channel();
         self.sender.send(QueueMessage::Snapshot(reply)).await.map_err(|_|invalid("fila encerrada"))?;
         response.await.map_err(|_|invalid("fila encerrada sem estado"))?
@@ -1406,6 +1407,19 @@ mod headless_delivery_tests {
         store.exec(1,&format!("append:{id}"),clock(ts),Action::Append { text:id.into(),delivered:false,ts:Some(ts),pre_transcript:false,entry_id:Some(id.into()) }).unwrap();
     }
     fn row(store:&Store,id:&str) -> Value { store.state().rows.iter().find(|r|r["id"] == id).unwrap().clone() }
+
+    /// A leitura da fila não copia o estado: duas leituras sem escrita entre elas são o mesmo; a escrita troca.
+    #[tokio::test]
+    async fn a_snapshot_shares_the_state_until_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = QueueActor::start(store(&dir),acquire_lease(&dir.path().join("lease")).unwrap());
+        let (a,b) = (queue.snapshot().await.unwrap(),queue.snapshot().await.unwrap());
+        assert!(std::sync::Arc::ptr_eq(&a,&b),"sem escrita, o mesmo estado");
+        queue.exec(1,"append:x",clock(1.0),Action::Append { text:"x".into(),delivered:false,ts:Some(1.0),pre_transcript:false,entry_id:Some("x".into()) }).await.unwrap();
+        let c = queue.snapshot().await.unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&a,&c) && c.rows.len() == a.rows.len() + 1,"a escrita troca, e a leitura velha fica como era");
+        queue.shutdown().await.unwrap();
+    }
 
     #[test]
     fn headless_claim_that_never_dispatched_goes_back_to_the_queue_on_recovery() {

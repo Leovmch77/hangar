@@ -83,61 +83,53 @@ def test_unassociated_proxy_accounts_have_visible_empty_error(cli, tmp_path, mon
     assert engine["cliproxy_error"]
 
 
-def test_incompatible_subagent_is_refused_before_creation(cli, tmp_path, monkeypatch):
-    from app import api
-    _fixed_engine(tmp_path, monkeypatch)
-    cfg = eng.listar()["proxy"]
-    eng.salvar("proxy", {**cfg, "subagent_model": "gpt-image-2"})
-    create = MagicMock()
-    monkeypatch.setattr(api.registry, "create", create)
-    response = cli.post("/api/sessions", headers=AUTH, json={
-        "name": "fixed", "cwd": str(tmp_path), "engine": "proxy", "engine_account": "default",
-        "model": "gpt-5.5", "headless": False})
-    assert response.status_code == 400, response.text
-    assert "subagentes" in response.text
-    create.assert_not_called()
-
-
-def test_fixed_session_model_effort_cannot_apply_bare_or_global_model(cli, monkeypatch):
+@pytest.mark.parametrize("route,body,code", [
+    ("model-effort", {"model": "gpt-5.5", "scope": "default"}, "model_effort_needs_rust_server"),
+    ("model-effort", {"effort": "high", "scope": "session"}, "model_effort_needs_rust_server"),
+    ("engine/model", {"model": "gpt-5.5[1m]"}, "session_open_needs_rust_server"),
+])
+def test_fixed_session_model_changes_reopen_in_rust(cli, tmp_path, monkeypatch, route, body, code):
+    # A conta ChatGPT fixa troca modelo e esforço reabrindo: nada é aplicado no pane nem no global.
     from app import api
     from app.models import SessionInfo
+    _fixed_engine(tmp_path, monkeypatch)
     monkeypatch.setattr(api, "_cached_info", AsyncMock(return_value=SessionInfo(
         name="fixed", engine="proxy", engine_account="default")))
     apply = MagicMock()
     monkeypatch.setattr(api.terminal, "set_model_effort", apply)
-    response = cli.post("/api/sessions/fixed/model-effort", headers=AUTH,
-                        json={"model": "gpt-5.5", "scope": "default"})
-    assert response.status_code == 409, response.text
+    monkeypatch.setattr(api.terminal, "set_engine_model", apply)
+    response = cli.post(f"/api/sessions/fixed/{route}", headers=AUTH, json=body)
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"]["code"] == code
     apply.assert_not_called()
 
 
-def test_fixed_effort_only_uses_reopen_path_without_global_write(cli, monkeypatch):
+def test_model_effort_of_any_claude_needs_the_rust_server(cli, monkeypatch):
+    # Trocar modelo e esforço é do Rust, com e sem terminal: sem ele, o código próprio e nenhuma tecla.
     from app import api
     from app.models import SessionInfo
-    monkeypatch.setattr(api, "_cached_info", AsyncMock(return_value=SessionInfo(
-        name="fixed", engine="proxy", engine_account="default")))
-    reopen = AsyncMock(return_value={"ok": True})
-    monkeypatch.setattr(api, "_trocar_conta", reopen)
-
-    async def during(name, coroutine):
-        return await coroutine
-
-    monkeypatch.setattr(api, "_durante_troca", during)
-    response = cli.post("/api/sessions/fixed/model-effort", headers=AUTH,
-                        json={"effort": "high", "scope": "session"})
-    assert response.status_code == 200, response.text
-    reopen.assert_awaited_once_with("fixed", None, engine_account="default", effort="high")
+    monkeypatch.setattr(api, "_cached_info", AsyncMock(return_value=SessionInfo(name="cc")))
+    apply = MagicMock()
+    monkeypatch.setattr(api.terminal, "set_model_effort", apply)
+    response = cli.post("/api/sessions/cc/model-effort", headers=AUTH, json={"model": "sonnet"})
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"]["code"] == "model_effort_needs_rust_server"
+    apply.assert_not_called()
 
 
-@pytest.mark.parametrize("field", ["_engine_catalog", "engine_account_home", "engine_account_base_url"])
-def test_internal_account_binding_cannot_be_supplied_in_creation_body(cli, monkeypatch, field):
+@pytest.mark.parametrize("info", [None, "pi", "omp", "kimi"])
+def test_model_effort_of_a_non_claude_session_stays_in_python(cli, monkeypatch, info):
+    # Sem entrada no Rust (Pi, omp, Kimi, ou nenhuma sessão), o Rust repassa e o Python atende como antes.
     from app import api
-    create = MagicMock()
-    monkeypatch.setattr(api.registry, "create", create)
-    response = cli.post("/api/sessions", headers=AUTH, json={
-        "name": "fixed", "cwd": "/tmp", "engine": "proxy", "engine_account": "default", field: "arbitrary"})
-    assert response.status_code == 422, response.text
-    create.assert_not_called()
+    from app.models import SessionInfo
+    monkeypatch.setattr(api, "_cached_info", AsyncMock(return_value=info and SessionInfo(name="p", provider=info)))
+    apply = MagicMock(return_value={"ok": True, "scope": "session", "result": None})
+    monkeypatch.setattr(api.terminal, "set_model_effort", apply)
+    monkeypatch.setattr(api, "_recusa_se_painel_aberto", lambda name: None)
+    response = cli.post("/api/sessions/p/model-effort", headers=AUTH, json={"model": "sonnet", "scope": "default"})
+    assert response.status_code == 200, response.text
+    apply.assert_called_once_with("p", "sonnet", None, "default")
+    assert cli.post("/api/sessions/p/model-effort", headers=AUTH, json={"model": "sonnet", "x": 1}).status_code == 422
 
 
 def test_selected_models_and_routes_never_fall_back(tmp_path, monkeypatch):
@@ -249,31 +241,6 @@ def test_model_options_return_base_models_only_for_fixed_account(cli, tmp_path, 
     assert response.status_code == 400
 
 
-@pytest.mark.parametrize("model,window", [("gpt-5.5[1m]", 1000000), ("gpt-5.5", 400000)])
-def test_fixed_context_toggle_reuses_model_route(cli, tmp_path, monkeypatch, model, window):
-    from app import api
-    from app.models import SessionInfo
-    _fixed_engine(tmp_path, monkeypatch)
-    monkeypatch.setattr(api, "_cached_info", AsyncMock(return_value=SessionInfo(
-        name="fixed", engine="proxy", engine_account="default")))
-    monkeypatch.setattr(api, "_engine_fast_selection", lambda name: ("fixed/gpt-5.5[1m]", "priority"))
-    reopen = AsyncMock(return_value={"ok": True})
-    monkeypatch.setattr(api, "_trocar_conta", reopen)
-    async def during(name, operation):
-        return await operation
-    monkeypatch.setattr(api, "_durante_troca", during)
-    response = cli.post("/api/sessions/fixed/engine/model", headers=AUTH, json={"model": model})
-    assert response.status_code == 200, response.text
-    assert response.json() == {"ok": True, "model": model}
-    assert reopen.await_count == 1
-    call = reopen.await_args
-    assert call is not None
-    assert call.args == ("fixed", None)
-    assert call.kwargs["model"] == model
-    assert call.kwargs["context_window"] == window
-    assert call.kwargs["engine_account"] == "default"
-
-
 @pytest.mark.parametrize("model,local_proxy,expected", [
     ("gpt-5.5", True, True), ("fixed/gpt-6.1-sol", True, True),
     ("gpt-image-2", True, False), ("k3", True, False),
@@ -302,20 +269,6 @@ def test_session_model_catalog_exposes_confirmed_proxy_fast(cli, tmp_path, monke
     assert response.json()["current"] == {"model": "gpt-5.5", "service_tier": tier}
 
 
-@pytest.mark.parametrize("tier", ["default", "priority"])
-def test_create_claude_proxy_forwards_fast(cli, tmp_path, monkeypatch, tier):
-    from app import api
-    from app.models import SessionInfo
-    _fixed_engine(tmp_path, monkeypatch)
-    create = MagicMock(return_value=SessionInfo(name="fixed", provider="claude", engine="proxy"))
-    monkeypatch.setattr(api.registry, "create", create)
-    response = cli.post("/api/sessions", headers=AUTH, json={
-        "name": "fixed", "cwd": str(tmp_path), "provider": "claude", "engine": "proxy",
-        "engine_account": "default", "model": "gpt-5.5", "service_tier": tier})
-    assert response.status_code == 200, response.text
-    assert create.call_args.kwargs["service_tier"] == tier
-
-
 def test_fast_blocks_incompatible_model_before_reopen(cli, tmp_path, monkeypatch):
     from app import api
     from app.models import SessionInfo
@@ -332,55 +285,6 @@ def test_fast_blocks_incompatible_model_before_reopen(cli, tmp_path, monkeypatch
     apply.assert_not_called()
 
 
-@pytest.mark.parametrize("model,window", [("gpt-5.5", 400000), ("gpt-5.5[1m]", 1000000)])
-def test_create_fixed_account_is_independent_of_claude_config(cli, tmp_path, monkeypatch, model, window):
-    from app import api
-    from app.models import SessionInfo
-    _fixed_engine(tmp_path, monkeypatch)
-    seen = []
-
-    def create(name, cwd, config_dir, **kwargs):
-        seen.append((config_dir, kwargs))
-        return SessionInfo(name=name, cwd=cwd, engine="proxy", engine_account="default",
-                           conta=f"codex:{(tmp_path / 'codex').resolve()}")
-
-    monkeypatch.setattr(api.registry, "create", create)
-    response = cli.post("/api/sessions", headers=AUTH, json={
-        "name": "fixed", "cwd": str(tmp_path), "provider": "claude", "engine": "proxy",
-        "engine_account": "default", "model": model, "headless": False})
-    assert response.status_code == 200, response.text
-    assert seen[0][0] is None
-    assert seen[0][1]["engine_account"] == "default"
-    assert seen[0][1]["model"] == model and seen[0][1]["context_window"] == window
-    assert response.json()["engine_account"] == "default" and response.json()["conta"].startswith("codex:")
-    seen.clear()
-    response = cli.post("/api/sessions", headers=AUTH, json={
-        "name": "invalid", "cwd": str(tmp_path), "provider": "codex", "engine": "proxy",
-        "engine_account": "default", "headless": False})
-    assert response.status_code == 400 and not seen
-
-
-@pytest.mark.parametrize("model", ["gpt-5.5", "gpt-5.5[1m]"])
-def test_archive_resume_keeps_explicit_account_and_base_model(cli, tmp_path, monkeypatch, model):
-    from app import api
-    from app.models import SessionInfo
-    _fixed_engine(tmp_path, monkeypatch)
-    sid = "11111111-1111-1111-1111-111111111111"
-    monkeypatch.setattr(api, "archive_cwd", lambda *a: str(tmp_path))
-    monkeypatch.setattr(api, "conta_de", lambda *a: None)
-    monkeypatch.setattr(api, "archive_jsonl", lambda *a: tmp_path / f"{sid}.jsonl")
-    monkeypatch.setattr(api, "_sessao_com_transcript", lambda *a: None)
-    monkeypatch.setattr(api, "_nome_ocupado", lambda *a: False)
-    create = MagicMock(return_value=SessionInfo(name="archived", provider="claude"))
-    monkeypatch.setattr(api.registry, "create", create)
-    response = cli.post(f"/api/archive/project/{sid}/resume", headers=AUTH, json={
-        "engine": "proxy", "engine_account": "default", "model": model})
-    assert response.status_code == 200, response.text
-    assert create.call_args.kwargs["engine_account"] == "default"
-    assert create.call_args.kwargs["model"] == model
-    assert create.call_args.kwargs["resume_session_id"] == sid
-
-
 def test_baton_forwards_account_to_shared_creation(tmp_path, monkeypatch):
     from app import api
     from app.models import SessionInfo
@@ -389,15 +293,12 @@ def test_baton_forwards_account_to_shared_creation(tmp_path, monkeypatch):
         name="origin", cwd=str(tmp_path), provider="claude")))
     monkeypatch.setattr(api, "_nome_ocupado", lambda *a: False)
     monkeypatch.setattr(api, "_bastao_preparar", lambda *a: ("text", tmp_path / "target.md", "kick", None))
-    create = AsyncMock(return_value=SessionInfo(name="target", provider="claude"))
-    monkeypatch.setattr(api, "create_session", create)
-    monkeypatch.setattr(api, "_passo", lambda *a, **k: None)
-    monkeypatch.setattr(api, "PromptQueue", lambda name: MagicMock())
-    monkeypatch.setattr(api, "threading", SimpleNamespace(Thread=MagicMock()))
+    create = AsyncMock(return_value=api.CreatedSessionInfo(name="target", provider="claude"))
+    monkeypatch.setattr(api, "_open_in_rust", create)
     asyncio.run(api._passar_bastao("origin", api.BastaoBody(
-        name="target", engine="proxy", engine_account="default", model="gpt-5.5")))
-    body = create.call_args.args[0]
-    assert body.engine_account == "default" and body.model == "gpt-5.5" and body.provider == "claude"
+        name="target", engine="proxy", engine_account="default", model="gpt-5.5"), SimpleNamespace(headers={})))
+    body = json.loads(create.call_args.args[0])
+    assert (body["engine_account"], body["model"], body["provider"]) == ("default", "gpt-5.5", "claude")
 
 
 def test_local_le_host_porta_e_primeira_chave(tmp_path):

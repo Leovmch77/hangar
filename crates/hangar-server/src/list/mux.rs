@@ -74,7 +74,9 @@ pub fn parse_list_panes(output: &str) -> (Vec<Pane>, usize) {
 
 /// Recusa que quer dizer "não há sessão", não "não sei" (`tmux.py:_run`, `absent`). Fica de fora o
 /// `invalid option: @cp_hidden`: é o formato recusado, e a lista seria desconhecida.
-fn is_absence(stderr: &str) -> bool {
+pub(crate) fn is_absence(stderr: &str) -> bool {
+    // O psmux põe o próprio nome na frente da mensagem.
+    let stderr = stderr.strip_prefix("psmux: ").unwrap_or(stderr);
     ["no server", "no sessions", "can't find session", "no such session"]
         .iter().any(|p| stderr.starts_with(p))
         || (stderr.starts_with("error connecting to ") && stderr.trim_end().ends_with("(No such file or directory)"))
@@ -103,6 +105,8 @@ impl Mux {
             .stdin(std::process::Stdio::null()).kill_on_drop(true);
         let out = match tokio::time::timeout(self.timeout, command.output()).await {
             Err(_) => return Err(unavailable("mux_timeout", None, None)),
+            // Sem o programa não há sessão de terminal nenhuma; quem só pergunta por nome lê assim.
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => return Err(unavailable("mux_missing", Some(&error), None)),
             Ok(Err(error)) => return Err(unavailable("mux_spawn_failed", Some(&error), None)),
             Ok(Ok(out)) => out,
         };
@@ -195,7 +199,14 @@ mod tests {
         let mux = Mux::with_program(&path, Duration::from_millis(200));
         assert_eq!(mux.list_panes().await, Err(MuxUnavailable { code: "mux_timeout" }));
         let missing = Mux::with_program("/nonexistent/tmux", Duration::from_secs(1));
-        assert_eq!(missing.list_panes().await, Err(MuxUnavailable { code: "mux_spawn_failed" }));
+        assert_eq!(missing.list_panes().await, Err(MuxUnavailable { code: "mux_missing" }));
+    }
+
+    /// Sem sessão, o psmux responde com o próprio nome na frente.
+    #[test]
+    fn the_psmux_absence_is_an_absence() {
+        assert!(is_absence("psmux: no server running on session 'default'\n"));
+        assert!(!is_absence("psmux: unknown command\n"));
     }
 
     #[cfg(unix)]

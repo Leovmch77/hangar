@@ -6,14 +6,12 @@ import os
 import re
 import secrets
 import shutil
-import sys
-import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, Optional
-from app import atomico, diag, shortcut_terminals, tmux
+from app import diag, shortcut_terminals, tmux
 from app import agentpane
 from app import permission_mode as modo_permissao
 from app.config import settings
@@ -176,13 +174,6 @@ def _encerrar_pares_externos(morta: str) -> None:
     share_bridge.session_died(morta)
 
 
-def _log_leave_warnings(name: str, warnings) -> None:
-    """Saída do grupo antigo na criação: os avisos não têm a quem voltar, mas não somem calados."""
-    if isinstance(warnings, list) and warnings:
-        # Só a contagem: o aviso pode trazer texto da outra máquina.
-        _log.warning("criação de %s: a saída do grupo antigo deixou %d aviso(s)", name, len(warnings))
-
-
 def _decorate_loop(info) -> None:
     """Decora loop_status/iter/max de UMA sessao a partir do sidecar (app.loop). Sem loop -> tudo None
     (sem badge). Module-level (nao closure) pra ser testavel isolado."""
@@ -304,18 +295,6 @@ def cwd_atual(meta: dict) -> str | None:
     return vivo if os.path.isdir(vivo) else cwd
 
 
-_pretrust_lock = threading.Lock()
-
-
-def _chave_trust(cwd: str, windows: bool = os.name == "nt") -> str:
-    """A chave que o Claude Code usa em `projects` do `.claude.json` para esta pasta.
-
-    No Windows ele normaliza o caminho pra barra NORMAL antes de indexar; gravar com contrabarra
-    escreve uma chave que ninguem le, e a sessao nova nascia presa no "trust this folder?" mesmo
-    com o pre-trust rodando."""
-    return cwd.replace("\\", "/") if windows else cwd
-
-
 def _claude_service_tier(engine: str | None, model: str | None, tier: str | None) -> str | None:
     if tier is None:
         return None
@@ -364,39 +343,6 @@ def _esperar_saida(pids: list[int], teto_s: float = 5.0) -> None:
             _log.warning("troca de modo: processo(s) %s seguem vivos apos %.0fs", pids, teto_s)
             return
         time.sleep(0.1)
-
-
-def _pretrust_cwd(cwd: str, config_dir: str | None) -> None:
-    """Marca `hasTrustDialogAccepted=True` pra `cwd` no .claude.json que a sessão nova vai LER —
-    quem responde qual é o arquivo é `tmux.claude_json_de`, o mesmo lugar que decide se o pane
-    recebe `CLAUDE_CONFIG_DIR` (duas cópias da regra é como o pre-trust escrevia no arquivo errado
-    e a sessão nascia presa no "trust this folder?" mesmo assim).
-    Pré-aprova o dialog que o Claude Code mostra no 1º acesso a uma
-    pasta nova. Read-modify-write atômico (tmp+replace) sob _pretrust_lock: dois create()
-    concorrentes (rodam em threads via to_thread) fariam read-modify-write no MESMO arquivo e
-    last-write-wins perderia uma entrada — mesmo padrão do _append_lock (pqueue) / _LOCK (pair).
-    ensure_ascii=False + indent=2: NÃO reserializa chaves com acento pra \\uXXXX nem colapsa o
-    arquivo pretty-printed do usuário (reescreve o dict inteiro; preserva o formato).
-    Best-effort — qualquer falha só deixa o dialog aparecer, como hoje.
-    JANELA RESIDUAL: o _lock é intra-processo; se o PRÓPRIO Claude Code CLI (processo externo)
-    reescrever o .claude.json entre nosso read e replace, essa escrita dele é perdida (last-write-
-    wins). Janela ~ms, o CLI escreve raro, e o guard 'já confiada -> return' limita a 1x/pasta ->
-    colisão rara e aceita; fechar exigiria flock que o CLI teria de respeitar (não verificável)."""
-    with _pretrust_lock:
-        try:
-            cfg = tmux.claude_json_de(config_dir)
-            data = json.loads(cfg.read_text(encoding="utf-8")) if cfg.exists() else {}
-            projects = data.setdefault("projects", {})
-            entry = projects.setdefault(_chave_trust(cwd), {})
-            if entry.get("hasTrustDialogAccepted") is True:
-                return  # já confiada -> não reescreve o arquivo (evita corrida à toa)
-            entry["hasTrustDialogAccepted"] = True
-            tmp = cfg.with_suffix(".json.cp-tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            atomico.substituir(tmp, cfg)
-        except Exception as e:
-            _log.warning("pretrust falhou pra %s: %r", cwd, e)
-
 
 
 def _newest_after_clear(projdir: Path, sid_jsonl: str, exclude: set[str]) -> str:
@@ -1005,8 +951,6 @@ def _claude_reading(info, pid: Optional[int]) -> tuple[Optional[dict], Optional[
 _STATUS_TTL = 20.0
 _STATUS_BUDGET = 2
 
-apos_saida_codex: Optional[Callable[[str], None]] = None
-apos_renomear_codex: Optional[Callable[[str, str], None]] = None
 
 
 class KillFailed(Exception):
@@ -1025,23 +969,12 @@ def _rename_pair_python(old: str, new: str) -> None:
         rename_pair(old, new)
 
 
-class GroupCleanupFailed(ValueError):
-    """O nome reusado ainda tem o grupo da sessão antiga e o Rust não o desfez: criar agora faria
-    a sessão nova nascer dentro dele."""
-    code = "erro_grupo_limpeza_falhou"
+class SessionOpenNeedsRust(Exception):
+    """Abrir e subir sessão é do Rust (abertura única); sem ele, não tem quem faça."""
+    code = "session_open_needs_rust_server"
 
-    def __init__(self, name: str):
-        super().__init__(f"o grupo da sessão antiga '{name}' não foi desfeito; tente de novo")
-        self.name = name
-
-
-def _retire_waiting_runtime(name: str) -> None:
-    """Vida antiga do mesmo nome, ainda esperando identidade no runtime, não segura o nome novo."""
-    from app import runtime_coordinator
-    from app.runtime_adapter import run_sync
-    owner = runtime_coordinator.current()
-    if owner is not None and owner.loop is not None and owner.managed_queue(name):
-        run_sync(lambda: owner.retire_waiting(name), owner.loop)
+    def __init__(self):
+        super().__init__("abrir e reabrir sessão precisam do servidor Rust, que não está rodando")
 
 
 class SessionRegistry:
@@ -2139,549 +2072,12 @@ class SessionRegistry:
         await decorate_access(infos + orqs + transfers)
         return infos + orqs + transfers
 
-    @diag.rastrear("sessao.criar")
-    def create(self, name: str, cwd: str, config_dir: str | None = None,
-               resume_session_id: str | None = None, provider: str = "claude",
-               engine: str | None = None, model: str | None = None,
-               effort: str | None = None, context_window: int | None = None,
-               permission_mode: str | None = None,
-               initial_prompt: str | None = None,
-               omp_profile: str | None = None,
-               codex_account: str | None = None,
-               read_only: bool = False,
-               headless: bool = False,
-               subagent_model: str | None = None,
-               jev: bool = False, transfer_id: str | None = None,
-               tool_output_token_limit: int | None = None,
-               transfer_rollout_path: str | None = None,
-               engine_account: str | None = None, engine_models: list[dict] | None = None,
-               service_tier: str | None = None,
-               claude_customizations: dict | None = None) -> SessionInfo:
-        if claude_customizations is not None and provider != "claude":
-            raise ValueError("plugins e skills por sessão só valem para Claude")
-        if service_tier is not None:
-            if service_tier not in ("default", "priority"):
-                raise ValueError("service_tier: use default ou priority")
-            if provider != "codex":
-                from app import cliproxy
-                if provider != "claude" or not cliproxy.supports_fast(engine, model):
-                    raise ValueError("service_tier exige Codex ou Claude com motor GPT no CLIProxyAPI local")
-        # Nome tmux nao aceita "."/":"/espaco -> sanitiza igual ao rename. Varias sessoes na MESMA
-        # pasta sao permitidas: cada uma tem nome unico + --session-id proprio -> jsonl proprio.
-        name = sanitize_session_name(name)
-        diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="validar")
-        if not name:
-            raise ValueError("nome invalido")
-        from app.conversation_transfer import require_available
-        require_available(name)
-        fixed_account = None
-        if engine_account is not None:
-            from app import cliproxy, engines
-            if provider != "claude" or not engine:
-                raise ValueError("conta ChatGPT exige Claude com motor CLIProxyAPI local")
-            fixed_account = cliproxy.account_for_engine(engines.listar().get(engine, {}), engine_account)
-            binding = cliproxy.engine_env(engine, model, context_window, engine_account,
-                                         home=fixed_account["home"], models=engine_models)
-            model = binding["ANTHROPIC_MODEL"]
-            context_window = int(binding["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]) if binding.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS") else None
-        if subagent_model is not None:
-            if provider != "claude" or engine:
-                raise ValueError("modelo dos subagentes so vale para claude sem motor")
-            model_args.validar("claude", subagent_model, None)
-        if provider == "claude" and permission_mode is None:
-            # "padrão" na tela vira o modo da conta AQUI, não lá no arranque: assim a sessão nasce
-            # no modo que o app mostra, na máquina que define `defaultMode` e na que não define.
-            permission_mode = modo_permissao.modo_da_conta(config_dir)
-        if transfer_rollout_path is not None and transfer_id is None:
-            raise ValueError("session_transfer_invalid_record")
-        if transfer_id is not None:
-            from app.conversation_transfer import load_transfer, TransferPhase
-            from app.conversation_history import source_rows, verify_boundary
-            record = load_transfer(transfer_id)
-            target = record.destination_meta if record else None
-            if (provider != "codex" or record is None or record.phase != TransferPhase.COMPLETE
-                    or not target or target.get("thread_id") != resume_session_id
-                    or target.get("codex_account") != (codex_account or "default")):
-                raise ValueError("session_transfer_invalid_record")
-            source_rows(record.source)
-            transfer_rollout_path = transfer_rollout_path or target["rollout_path"]
-            verify_boundary(record, transfer_rollout_path)
-            if tool_output_token_limit != target.get("tool_output_token_limit"):
-                raise ValueError("session_transfer_invalid_record")
-            model = model if model is not None else target.get("model")
-            effort = effort if effort is not None else target.get("effort")
-            permission_mode = permission_mode if permission_mode is not None else target.get("permission_mode")
-        self._leave_old_group(name)
-        if headless:
-            if provider not in ("claude", "codex"):
-                raise ValueError("sessao sem terminal so vale para provider claude ou codex")
-            if read_only or initial_prompt:
-                raise ValueError("sessao sem terminal nao aceita read_only nem prompt inicial")
-            if provider == "codex":
-                if engine:
-                    raise ValueError("motor so vale para provider claude")
-                return self._create_codex_headless(name, cwd, resume_session_id, model, effort,
-                                                   permission_mode, codex_account, jev,
-                                                   transfer_id, tool_output_token_limit, transfer_rollout_path,
-                                                   service_tier=service_tier)
-            return self._create_headless(name, cwd, config_dir, resume_session_id, engine, model,
-                                         effort, context_window, permission_mode, subagent_model,
-                                         jev, engine_account,
-                                         fixed_account["credential_id"] if fixed_account else None,
-                                         fixed_account["base_url"] if fixed_account else None,
-                                         service_tier=service_tier, claude_customizations=claude_customizations)
-        claude_settings = None
-        codex_home = None
-        if provider == "codex":
-            try:
-                account = codex_contas.resolve_account(codex_account or "default")
-            except codex_contas.AccountError as exc:
-                raise ValueError(f"{exc.code}: {exc.params}") from None
-            codex_home = str(account.home.expanduser().absolute())
-        elif codex_account is not None:
-            raise ValueError("codex_account so vale para provider codex")
-        protected_prefix = []
-        if read_only:
-            from app.orq_readonly import prepare
-            protected_prefix = prepare(cwd, runtime_dirs=(config_dir or "", codex_home or ""))
-        if omp_profile:
-            if provider != "omp":
-                raise ValueError("perfil so vale para provider omp")
-            # A MESMA regra de nome do omp (resolve_omp_directories): o valor vai pro ambiente do pane.
-            from app.omp_plugin_sync import InventoryError, resolve_omp_directories
-            try:
-                resolve_omp_directories(Path.home(), {"OMP_PROFILE": omp_profile}, Path.home())
-            except InventoryError as e:
-                raise ValueError(str(e)) from None
-        # Motor de modelo: valida ANTES de criar o pane. Motor inexistente com env vazio faria a
-        # sessão subir na conta Anthropic ACHANDO que é o motor pedido — falha silenciosa.
-        if engine:
-            from app import engines
-            if engine not in engines.listar():
-                raise ValueError(f"motor '{engine}' nao existe")
-        # Pi anda no MESMO caminho tmux do Claude, mas duas coisas daqui pra baixo sao Claude puro e
-        # recusam alto em vez de "quase funcionar":
-        #  - motor: o `hangar-engine --exec` so exporta ANTHROPIC_* / CLAUDE_CODE_*, que o pi ignora ->
-        #    a sessao subiria na conta do proprio pi PARECENDO estar no motor pedido.
-        # Resume do Pi passou a existir (branch `elif provider == "pi"` la embaixo, com
-        # `pi --session-id <id>`); a recusa que morava aqui tornava aquele branch INALCANCAVEL.
-        if provider in ("pi", "omp") and engine:
-            raise ValueError("motor so vale para provider claude")
-        # Kimi anda no MESMO caminho tmux do Pi. Motor segue Claude-puro (hangar-engine so exporta
-        # ANTHROPIC_*). Resume existe: `kimi --session <id>` (diferente do Pi, que nao tinha flag).
-        if provider == "kimi" and engine:
-            raise ValueError("motor so vale para provider claude")
-        # Codex idem: o `hangar-engine --exec` so exporta ANTHROPIC_*/CLAUDE_CODE_*, que o codex
-        # ignora — a sessao subiria na conta do proprio Codex PARECENDO estar no motor pedido.
-        if provider == "codex":
-            if engine:
-                raise ValueError("motor so vale para provider claude")
-            _exigir_lancador_codex()
-        # Skill instalada no Claude vale JA nesta sessao. pi, kimi e codex leem so as pastas deles;
-        # quem materializa as skills do Claude la e a ponte, e ela era refeita apenas na subida do
-        # backend — instalar uma skill exigia reiniciar o servico. Claude e omp ficam de fora
-        # porque os dois descobrem as fontes sozinhos. Fail-soft: criar sessao nunca depende disto.
-        if provider in ("pi", "kimi"):
-            try:
-                from app import skill_bridge
-                # Silencioso no caso comum (nada mudou) e falante quando MEXEU: sem a segunda
-                # metade, "a ponte rodou e achou pouco" e "a ponte nem rodou" voltam a ser o mesmo
-                # silencio no diario — que foi a duvida que sobrou quando 67 skills sumiram.
-                stats = skill_bridge.rebuild(log=lambda _m: None)
-                mexeu = {n: s for n, s in stats.items()
-                         if any(s.get(k) for k in ("criados", "trocados", "removidos", "erro"))}
-                if mexeu:
-                    _log.info("ponte de skills antes de criar %s: %s", name, mexeu)
-            except Exception:                          # noqa: BLE001
-                _log.warning("ponte de skills falhou antes de criar %s", name, exc_info=True)
-        # Unicidade contra tmux (Claude) E sidecars Codex: sem o segundo check, um nome de sessao
-        # Codex reusado aqui geraria DOIS SessionInfo com o mesmo name no list() (front keyed por
-        # nome) e o kill(name) cairia no branch Codex (checado 1o) -> fecharia o client Codex sem
-        # matar o pane tmux (pane orfao inkillavel).
-        if tmux.has_session(name) or codex_sessions.exists(name) or headless_sessions.exists(name):
-            diag.registrar("sessao.criar_recusada", "aviso", sessao=name, provider=provider,
-                           detalhe="nome_ja_em_uso")
-            raise ValueError("ja existe uma sessao com esse nome")
-        diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="preparar_comando")
-        # resume_session_id (retomar conversa MORTA do Arquivo): reusa o uuid existente e sobe com
-        # `--resume` em vez de `--session-id` -> o claude CONTINUA aquele jsonl (nao comeca um novo).
-        # Mesmo uuid ja validado no endpoint, mas revalida aqui tambem (vai direto pro comando do shell).
-        # Os quatro providers retomam por aqui, cada um com o comando DELE: `claude --resume`,
-        # `pi --session-id`, `kimi --session`, e o lancador com `codex resume`.
-        if resume_session_id is not None:
-            if provider == "kimi":
-                # Sid do Kimi e `session_<uuid>` (nao uuid puro) e o resume e `--session`, nao
-                # --resume. Validacao propria: vai direto pro comando do shell.
-                if not re.fullmatch(r"session_[0-9a-fA-F-]{36}", resume_session_id):
-                    raise ValueError("session_id invalido")
-                sid = resume_session_id
-                # args_de("kimi", None, None) == []: a escolha na abertura nao cobre o Kimi (e
-                # qualquer escolha pra ele e recusada pela validacao na api), e com ausencia o
-                # join_cmd e byte por byte o f-string de antes (no POSIX ele E o shlex.join).
-                cmd = tmux.join_cmd(["kimi", "--session", sid]
-                                 + model_args.args_de(provider, model, effort))
-            elif provider == "codex":
-                # O id da conversa Codex e o uuid do fim do nome do rollout (o mesmo que o Arquivo
-                # lista). Vai pro lancador, que abre a TUI com `codex resume <id>` — o historico ja
-                # esta no rollout, entao a sessao nova nasce com a conversa inteira.
-                # O MESMO criterio que a rota do Arquivo usa (uma definicao só de id de conversa).
-                from app.archive_providers import UUID_RE
-                if not UUID_RE.match(resume_session_id):
-                    raise ValueError("session_id invalido")
-                sid = resume_session_id
-                from app.adapters.codex.lancador import comando_do_lancador
-                cmd = tmux.join_cmd(comando_do_lancador(cwd, thread_id=sid,
-                                                       codex_home=codex_home,
-                                                       codex_account=account.id,
-                                                       model=model, effort=effort,
-                                                       tool_output_token_limit=tool_output_token_limit,
-                                                       **({"service_tier": service_tier} if service_tier is not None else {})))
-            elif provider == "omp":
-                # Retoma por CAMINHO: o id interno do omp nao e o do nome do arquivo, e spawn e
-                # resume sao verbos diferentes — reusar o spawn abriria conversa nova.
-                try:
-                    uuid.UUID(resume_session_id)
-                except (ValueError, AttributeError, TypeError):
-                    raise ValueError("session_id invalido")
-                sid = resume_session_id
-                from app.adapters import get_adapter
-                cmd = tmux.join_cmd(get_adapter("omp").resume_command(cwd, sid, model, effort, omp_profile))
-            elif provider == "pi":
-                # `pi --session-id <id>` RETOMA quando o id ja existe ("creating it if missing", no
-                # --help do 0.82.1) -> o comando do resume e o mesmo do spawn, so com o id antigo.
-                # Sem este ramo o Pi caia no `claude --resume` abaixo e o pane subia o agente errado.
-                try:
-                    uuid.UUID(resume_session_id)
-                except (ValueError, AttributeError, TypeError):
-                    raise ValueError("session_id invalido")
-                sid = resume_session_id
-                from app.adapters import get_adapter
-                cmd = tmux.join_cmd(get_adapter("pi").spawn_command(cwd, sid, model, effort, None))
-            else:
-                try:
-                    uuid.UUID(resume_session_id)
-                except (ValueError, AttributeError, TypeError):
-                    raise ValueError("session_id invalido")
-                sid = resume_session_id
-                # Retomada de conversa MORTA (vinda do Arquivo): nao existe sessao antiga nem pid
-                # pra consultar. A escolha que vale e a que este create() recebeu.
-                # permission_mode NÃO entra no resume (a sessão retoma no estado dela).
-                claude_settings = session_customizations.prepare(
-                    sid, cwd, tmux.config_dir_de(config_dir), claude_customizations, resume=True)
-                from app.adapters.claude import terminal_command
-                cmd = tmux.join_cmd(terminal_command(
-                    cwd, sid, model, effort, claude_settings=claude_settings, resume=True))
-        else:
-            sid = str(uuid.uuid4())
-            if provider == "claude":
-                claude_settings = session_customizations.prepare(
-                    sid, cwd, tmux.config_dir_de(config_dir), claude_customizations, resume=False)
-            # spawn_command vem do Adapter do provider (import local: get_adapter->ClaudeAdapter nao
-            # importa registry, mas evita qualquer ciclo se um adapter futuro vier a importar daqui).
-            from app.adapters import get_adapter
-            # initial_prompt so vai pro Codex: e a TUI dele que abre a thread, entao o 1o prompt tem
-            # que estar no comando do pane. Os outros providers recebem prompt inicial por /input,
-            # e aceitar o argumento neles seria escolha que some calada.
-            extra = {"initial_prompt": initial_prompt} if provider == "codex" else {}
-            if claude_settings is not None:
-                extra["claude_settings"] = claude_settings
-            if provider == "codex":
-                extra["codex_home"] = codex_home
-                extra["codex_account"] = account.id
-                if service_tier is not None:
-                    extra["service_tier"] = service_tier
-            if provider == "omp" and omp_profile:
-                extra["perfil"] = omp_profile
-            cmd = tmux.join_cmd(get_adapter(provider).spawn_command(
-                cwd, sid, model, effort, permission_mode, **extra))
-            if provider == "claude" and permission_mode:
-                modo_permissao.remember_launch_mode(sid, permission_mode)
-        if engine:
-            # `hangar-engine --exec` aplica o env DENTRO do pane (os.execvpe). Não usamos `tmux -e` porque
-            # a key ficaria em /proc/<pid>/cmdline, legível por qualquer usuário da máquina. Depois do
-            # exec o cmdline é o do claude, então a resolução de transcript por --session-id/--resume
-            # continua funcionando.
-            #
-            # Modelo e janela entram NO PREFIXO, não só no comando: o env que o hangar-engine aplica
-            # exporta o mesmo modelo em cinco chaves e a janela em outra — a flag sozinha ganharia só
-            # de ANTHROPIC_MODEL (ver engines.env_de). A janela vem do catálogo do provedor, resolvida
-            # no backend (api.create_session); quem passa por aqui sem ela (ex: resume do Arquivo)
-            # simplesmente não exporta a var — o CLI usa o default dele.
-            _exigir_cp_engine()
-            pre = ["hangar-engine", "--exec", engine]
-            if engine_account is not None:
-                pre += ["--account", engine_account, "--account-home", fixed_account["home"],
-                        "--account-base-url", fixed_account["base_url"]]
-            if model:
-                pre += ["--model", model]
-                if context_window:
-                    pre += ["--context", str(context_window)]
-            if service_tier is not None:
-                pre += ["--service-tier", service_tier]
-            cmd = tmux.join_cmd(pre + ["--"]) + " " + cmd
-        base = (Path(config_dir) / "projects") if config_dir else self.projects_dir
-        # Pi tem layout PROPRIO (~/.pi/agent/sessions/<slug>/<ts>_<uuid>.jsonl) e o arquivo so nasce
-        # quando a TUI grava o 1o turno -> nao ha path pra pre-semear. jsonl=None e cache INTOCADO
-        # (ver o final do metodo): o _jsonl_cache e de CLASSE, compartilhado com o sse, e um path do
-        # layout do Claude ali seria um arquivo que nunca existe, devolvido por resolve() pra sempre.
-        # Quem liga o pane ao transcript e o bilhete que a extensao escreve (ver pi_session_file).
-        # Kimi idem (sessions/<wd>/session_<uuid>/agents/main/wire.jsonl, sessao so no 1o prompt);
-        # quem liga e o bilhete do hook (ver kimi_session_file).
-        # Codex pelo mesmo motivo: o rollout so existe depois que a TUI abre a thread, e o caminho
-        # dele nao se deriva de cwd+id (vem do thread/start). Devolver um path do layout do Claude
-        # aqui envenenaria o _jsonl_cache, que e de CLASSE e compartilhado com o SSE.
-        jsonl = None if provider in ("pi", "omp", "kimi", "codex") else str(base / sanitize_cwd(cwd) / f"{sid}.jsonl")
-        # Pré-confia a pasta no .claude.json: sem isto, uma sessão criada pelo app numa pasta NOVA
-        # nasce presa no "trust this folder?" do Claude Code (invisível/ininteragível pelo chat até
-        # aceitar na TUI). Só é o 1º acesso à pasta — depois o próprio Claude Code grava. Best-effort.
-        # Pi não lê o .claude.json e tem o próprio fluxo de confiança -> escrever ali só sujaria a
-        # lista de pastas confiadas do Claude com pasta que ele talvez nunca abra.
-        # Kimi tem trust PROPRIO (medido: pasta nova trava no "Trust this folder?" do boot) ->
-        # pré-confia no formato dele (~/.kimi-code/workspace-trust), nao no do Claude.
-        # A conta Codex secundaria pre-confia pelo endpoint de preparo chamado DENTRO do launcher:
-        # assim termina a sincronizacao antes de qualquer escrita no config e antes da TUI. A
-        # padrao nao tem esse preparo e continua pre-confiando aqui, antes de criar o pane.
-        diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="confiar_pasta")
-        if provider == "kimi":
-            from app.adapters.kimi import sessions as kimi_sessions
-            kimi_sessions.pretrust_cwd(cwd)
-        elif provider == "codex" and account.is_default and transfer_id is None:
-            codex_sessions.pretrust_cwd(cwd, codex_home=codex_home)
-        elif provider not in ("pi", "omp", "codex"):
-            _pretrust_cwd(cwd, config_dir)
-        if protected_prefix:
-            cmd = tmux.join_cmd([*protected_prefix, "/bin/sh", "-c", cmd])
-        diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="criar_terminal")
-        self._forget(name, required=True)
-        # Sessao NOVA = sid novo = transcript fresco. A fila duravel e keyed pelo NOME (sobrevive ao
-        # fim da sessao antiga), entao entradas remanescentes de uma sessao morta de mesmo nome
-        # fantasmariam aqui via merged_history. Limpa ANTES do pane: depois dele o runtime ja adota
-        # a sessao nova, e a limpeza esbarrava na posse em transferencia.
-        _retire_waiting_runtime(name)
-        PromptQueue(name).clear()
-        env_pane = _env_sessao(subagent_model, jev, provider, nome=name, claude_settings=claude_settings)
-        if transfer_id is not None:
-            key = uuid.uuid4().hex
-            codex_sessions.save(name, sid, transfer_rollout_path, cwd, model=model, effort=effort,
-                                codex_home=codex_home, codex_account=account.id, key=key,
-                                transfer_id=transfer_id, tool_output_token_limit=tool_output_token_limit,
-                                permission_mode=permission_mode, previous_non_plan=target.get("previous_non_plan"),
-                                launching=True)
-            env_pane.setdefault("env", {})["CP_SESSION_KEY"] = key
-        if not tmux.new_session(name, cwd, cmd, config_dir, provider=provider, **env_pane):
-            if transfer_id is not None and not tmux.has_session(name):
-                current = codex_sessions.load(name)
-                if current and current.get("key") == key and current.get("launching"):
-                    codex_sessions.delete(name)
-            diag.registrar("sessao.criar_recusada", "erro", sessao=name, provider=provider,
-                           detalhe="terminal_nao_criado")
-            raise ValueError("falha ao criar sessao no tmux")
-        diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="limpar_estado_anterior")
-        # Mesmo motivo da fila, pro vinculo 'then' (feature #12): nome reusado nao deve herdar um encadeamento
-        # de uma sessao antiga e ja morta.
-        ThenLink(name).clear()
-        # E pro PAREAMENTO, pelo mesmo motivo: o kill() ja tira a sessao do grupo, mas quem morre
-        # FORA dele (pane fechado na mao, maquina reiniciada) deixa o sidecar keyed pelo nome no
-        # disco — e a sessao nova de mesmo nome nascia dentro de um grupo que nao existe mais.
-        # Nome reusado não herda o par externo da sessão antiga.
-        _encerrar_pares_externos(name)
-        _log_leave_warnings(name, self._clear_pair(name))
-        # Fixa o jsonl FRESCO no cache na hora: resolve() devolve este uuid mesmo antes do claude
-        # escrever o arquivo, evitando o fallback newest-by-mtime pescar um jsonl ja existente da pasta.
-        # Pi (jsonl=None) nao entra no cache — nao ha path a fixar, e a resolucao dele nem passa por aqui.
-        if jsonl is not None:
-            self._seed(name, jsonl)
-        diag.registrar("sessao.criada", sessao=name, provider=provider, etapa="terminal_criado")
-        return SessionInfo(name=name, cwd=cwd, jsonl=jsonl, tracked=jsonl is not None,
-                           provider=provider, engine=engine, engine_account=engine_account,
-                           conta=fixed_account["credential_id"] if fixed_account else None,
-                           codex_home=codex_home)
-
-    def _create_headless(self, name: str, cwd: str, config_dir: str | None,
-                         resume_session_id: str | None, engine: str | None, model: str | None,
-                         effort: str | None, context_window: int | None,
-                         permission_mode: str | None, subagent_model: str | None = None,
-                         jev: bool = False, engine_account: str | None = None,
-                         engine_credential_id: str | None = None,
-                         engine_account_base_url: str | None = None,
-                         service_tier: str | None = None,
-                         claude_customizations: dict | None = None) -> SessionInfo:
-        """Sessão Claude SEM terminal: criar é gravar o sidecar. O processo `claude` sobe no
-        primeiro prompt (e de novo, com --resume, depois de um restart do backend) — abrir a
-        sessão não custa um processo, e nada aqui depende de tmux."""
-        from app.adapters import get_adapter, CLAUDE_HEADLESS
-        if engine:
-            from app import engines
-            if engine not in engines.listar():
-                raise ValueError(f"motor '{engine}' nao existe")
-            _exigir_cp_engine()
-        if tmux.has_session(name) or codex_sessions.exists(name) or headless_sessions.exists(name):
-            diag.registrar("sessao.criar_recusada", "aviso", sessao=name, provider="claude",
-                           detalhe="nome_ja_em_uso")
-            raise ValueError("ja existe uma sessao com esse nome")
-        if resume_session_id is not None:
-            try:
-                uuid.UUID(resume_session_id)
-            except (ValueError, AttributeError, TypeError):
-                raise ValueError("session_id invalido")
-            sid = resume_session_id
-        else:
-            sid = str(uuid.uuid4())
-        model_args.validar("claude", model, effort, permission_mode)
-        claude_settings = session_customizations.prepare(
-            sid, cwd, tmux.config_dir_de(config_dir), claude_customizations,
-            resume=resume_session_id is not None)
-        diag.registrar("sessao.criar_etapa", sessao=name, provider="claude", etapa="confiar_pasta")
-        _pretrust_cwd(cwd, config_dir)
-        self._forget(name, required=True)
-        # Antes do sidecar: depois dele o runtime pode adotar a sessão nova no meio da limpeza.
-        _retire_waiting_runtime(name)
-        PromptQueue(name).clear()
-        # Nascer JÁ no plano deixaria a sessão sem modo de base: é ele que diz pra onde
-        # "Implementar o plano" volta e se o plano precisa perguntar por ferramenta.
-        anterior = modo_permissao.modo_da_conta(config_dir) if permission_mode == "plan" else None
-        meta = headless_sessions.save(name, cwd, sid, config_dir=config_dir, engine=engine,
-                                      model=model, effort=effort, context_window=context_window,
-                                      permission_mode=permission_mode, previous_non_plan=anterior,
-                                      subagent_model=subagent_model, jev=jev,
-                                      engine_account=engine_account,
-                                      engine_credential_id=engine_credential_id,
-                                      engine_account_base_url=engine_account_base_url,
-                                      service_tier=service_tier, claude_settings=claude_settings)
-        ThenLink(name).clear()
-        # Nome reusado não herda o par externo da sessão antiga.
-        _encerrar_pares_externos(name)
-        _log_leave_warnings(name, self._clear_pair(name))
-        jsonl = get_adapter(CLAUDE_HEADLESS).transcript_path_de(meta)
-        self._seed(name, jsonl)
-        diag.registrar("sessao.criada", sessao=name, provider="claude", etapa="sidecar_gravado")
-        return SessionInfo(name=name, cwd=cwd, jsonl=jsonl, tracked=True, provider="claude",
-                           headless=True, engine=engine, engine_account=engine_account,
-                           conta=engine_credential_id if engine_account else None)
-
-    def _create_codex_headless(self, name: str, cwd: str, resume_thread_id: str | None,
-                               model: str | None, effort: str | None, permission_mode: str | None,
-                               codex_account: str | None, jev: bool = False,
-                               transfer_id: str | None = None,
-                               tool_output_token_limit: int | None = None,
-                               transfer_rollout_path: str | None = None,
-                               service_tier: str | None = None) -> SessionInfo:
-        """Sessão Codex SEM terminal: grava o sidecar; o app-server sobe no cano logo em seguida
-        pelo `watch_sessions` do adapter (aquece na criação, não no primeiro prompt)."""
-        from app.adapters.codex import sem_terminal
-        try:
-            account = codex_contas.resolve_account(codex_account or "default")
-        except codex_contas.AccountError as exc:
-            raise ValueError(f"{exc.code}: {exc.params}") from None
-        codex_home = str(account.home.expanduser().absolute())
-        if tmux.has_session(name) or codex_sessions.exists(name) or headless_sessions.exists(name):
-            diag.registrar("sessao.criar_recusada", "aviso", sessao=name, provider="codex",
-                           detalhe="nome_ja_em_uso")
-            raise ValueError("ja existe uma sessao com esse nome")
-        model_args.validar("codex", model, effort)
-        if permission_mode is not None and not any(
-                m[0].lower() == permission_mode.strip().lower() for m in sem_terminal.MODOS):
-            raise ValueError("permission_mode: use um de " + ", ".join(m[0] for m in sem_terminal.MODOS))
-        diag.registrar("sessao.criar_etapa", sessao=name, provider="codex", etapa="confiar_pasta")
-        if transfer_id is None:
-            codex_sessions.pretrust_cwd(cwd, codex_home=codex_home)
-        self._forget(name, required=True)
-        target = {}
-        if transfer_id:
-            from app.conversation_transfer import load_transfer
-            target = load_transfer(transfer_id).destination_meta
-        rollout = transfer_rollout_path or target.get("rollout_path") or (sem_terminal.rollout_de(resume_thread_id, codex_home) if resume_thread_id else "")
-        # Antes do sidecar: depois dele o runtime pode adotar a sessão nova no meio da limpeza.
-        _retire_waiting_runtime(name)
-        PromptQueue(name).clear()
-        codex_sessions.save(name, resume_thread_id, rollout, cwd, model=model, effort=effort,
-                            codex_home=codex_home, codex_account=codex_account,
-                            headless=True, key=sem_terminal.nova_chave(), permission_mode=permission_mode,
-                            jev=jev, transfer_id=transfer_id,
-                            tool_output_token_limit=tool_output_token_limit,
-                            previous_non_plan=target.get("previous_non_plan"), service_tier=service_tier)
-        ThenLink(name).clear()
-        # Nome reusado não herda o par externo da sessão antiga.
-        _encerrar_pares_externos(name)
-        _log_leave_warnings(name, self._clear_pair(name))
-        diag.registrar("sessao.criada", sessao=name, provider="codex", etapa="sidecar_gravado")
-        return SessionInfo(name=name, cwd=cwd, jsonl=rollout or None, tracked=True, provider="codex",
-                           headless=True, conta=f"codex:{codex_home}", codex_home=codex_home)
-
     # ── Troca terminal ⇄ sem terminal (mesma conversa) ──────────────────────────────────────
     # É troca, não cópia: o antigo morre antes do novo nascer, e fila, `then` e pareamento ficam
     # (são da sessão, não do transporte). Quem garante que a sessão está ociosa é a API.
 
-    def para_terminal(self, name: str, *, engine_models: list[dict] | None = None) -> SessionInfo:
-        """Sessão sem terminal vira pane tmux com `claude --resume`. Falhando o pane, o sidecar
-        volta e quem chama religa o processo — a sessão nunca fica sem nenhum dos dois."""
-        from app.adapters import get_adapter, CLAUDE_HEADLESS
-        meta = headless_sessions.load(name)
-        if meta is None:
-            raise ValueError("sessao sem terminal nao encontrada")
-        hl = get_adapter(CLAUDE_HEADLESS)
-        jsonl = hl.transcript_path_de(meta)
-        escolha = meta
-        if not meta.get("engine"):
-            # O processo sabe o modelo e o esforço em uso; o sidecar só guarda o que foi pedido.
-            vivo_m, vivo_e = hl.escolhas(name)
-            escolha = {**meta, "model": vivo_m or meta.get("model"),
-                       "effort": _esforco_de_abertura(vivo_e) or meta.get("effort")}
-        # Comando inteiro ANTES de matar: validação que estoura depois deixaria a sessão sem nada.
-        cmd = self._comando_terminal(escolha, resume=Path(jsonl).exists(), engine_models=engine_models)
-        headless_sessions.marcar_troca(name)
-        headless_sessions.delete(name)
-        try:
-            hl.close_sync(name, meta)
-        except Exception:
-            headless_sessions.restaurar(meta, preserve_process=True)
-            raise
-        cano_pid = (meta.get("cano") or {}).get("pid")
-        _esperar_saida([int(cano_pid)] if cano_pid else [])
-        self._forget(name)
-        if not tmux.new_session(name, meta["cwd"], cmd, meta.get("config_dir"), provider="claude",
-                                **_env_sessao(meta.get("subagent_model"), bool(meta.get("jev")), nome=name,
-                                              claude_settings=meta.get("claude_settings"))):
-            headless_sessions.restaurar(meta)
-            raise ValueError("falha ao criar o terminal; a sessao segue sem terminal")
-        self._seed(name, jsonl)
-        return SessionInfo(name=name, cwd=meta["cwd"], jsonl=jsonl, tracked=True,
-                           provider="claude", engine=meta.get("engine"),
-                           engine_account=meta.get("engine_account"),
-                           conta=meta.get("engine_credential_id"))
-
-    def wait_for_claude(self, name: str, meta: dict, timeout: float = 20.0) -> None:
-        from app.terminal_input import _wait_input_ready
-        service_tier = _claude_service_tier(meta.get("engine"), meta.get("model"), meta.get("service_tier"))
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            procinfo._invalidar_children_map()
-            pane = self._pane_of(name)
-            provider, agent = agente_do_pane((pane or {}).get("pid"))
-            if provider == "claude" and agent and procinfo.pid_vivo(agent):
-                if _session_id_from_cmdline(_cmdline(agent)) == meta["session_id"]:
-                    expected_config = Path(meta.get("config_dir") or Path.home() / ".claude").resolve()
-                    actual_config = Path(_config_dir_of(agent) or Path.home() / ".claude").resolve()
-                    if (_engine_of(agent) != meta.get("engine") or actual_config != expected_config
-                            or procinfo._env_var_of(agent, "CP_ENGINE_SERVICE_TIER") != service_tier
-                            or procinfo._env_var_of(agent, "CP_ENGINE_ACCOUNT") != meta.get("engine_account")
-                            or (meta.get("engine_account") and procinfo._env_var_of(agent, "CP_ENGINE_CREDENTIAL_ID")
-                                != meta.get("engine_credential_id"))
-                            or (meta.get("engine_account_base_url") and procinfo._env_var_of(agent, "CP_ENGINE_ACCOUNT_BASE_URL")
-                                != meta["engine_account_base_url"])):
-                        raise ValueError("o Claude reabriu com uma identidade diferente da escolhida")
-                    if not _wait_input_ready(name, timeout=max(0.0, deadline - time.monotonic())):
-                        raise ValueError("o terminal não ficou pronto; confira login, confiança ou pergunta pendente")
-                    if not procinfo.pid_vivo(agent):
-                        raise ValueError("o Claude saiu durante a reabertura")
-                    return
-            if not tmux.has_session(name):
-                raise ValueError("o terminal encerrou antes de retomar o Claude")
-            time.sleep(0.25)
-        raise ValueError("o Claude não retomou a conversa e a identidade escolhidas no prazo")
-
     @staticmethod
-    def _comando_terminal(meta: dict, *, resume: bool, engine_models: list[dict] | None = None) -> str:
+    def _comando_terminal(meta: dict, *, resume: bool) -> str:
         sid = meta["session_id"]
         uuid.UUID(sid)
         # Modo de permissão vai junto: sem a flag a TUI nasce no defaultMode da conta.
@@ -2697,7 +2093,7 @@ class SessionRegistry:
             from app import cliproxy, engines
             binding = cliproxy.engine_env(meta["engine"], model, meta.get("context_window"), meta["engine_account"],
                                           home=(meta.get("engine_credential_id") or "").removeprefix("codex:"),
-                                          expected_base=meta.get("engine_account_base_url"), models=engine_models)
+                                          expected_base=meta.get("engine_account_base_url"))
             model = binding["ANTHROPIC_MODEL"]
         service_tier = _claude_service_tier(meta.get("engine"), model, meta.get("service_tier"))
         from app.adapters.claude import terminal_command
@@ -2731,18 +2127,15 @@ class SessionRegistry:
             cmd = tmux.join_cmd([*prefix, "/bin/sh", "-c", cmd])
         return cmd
 
-    def para_headless(self, name: str, permission_mode: str | None, *, transfer_meta: dict | None = None,
-                      for_account_move: bool = False, target_config_dir: str | None = None) -> dict:
-        """Pane tmux vira sessão sem terminal. Devolve o sidecar gravado; subir o processo é da
-        API (async). `permission_mode` é o que o rodapé mostra agora (lido por quem chama).
-        `target_config_dir` é a conta onde o terminal reabre: só com ela uma sessão read-only
-        estaciona, porque o `para_terminal` refaz a proteção nessa conta."""
+    def para_headless(self, name: str, permission_mode: str | None, *, transfer_meta: dict) -> dict:
+        """A origem com terminal da transferência para o Codex sai do pane e fica como sidecar sem
+        processo. Devolve o sidecar gravado. `permission_mode` é o que o rodapé mostra agora."""
         if codex_sessions.exists(name) or headless_sessions.exists(name):
             raise ValueError("so sessao Claude no terminal pode ficar sem terminal")
         pane = self._pane_of(name)
         if pane is None:
             raise ValueError("sessao nao encontrada")
-        read_only = self._refuse_non_claude_resume(pane, read_only_ok=target_config_dir is not None)
+        self._refuse_non_claude_resume(pane)
         cwd, pid = pane["cwd"], pane.get("pid")
         jsonl, tracked = self.resolve_tracked(name, cwd)
         if not jsonl or not tracked:
@@ -2756,13 +2149,6 @@ class SessionRegistry:
         if claude_settings is None:
             claude_settings = session_customizations.stored_settings(sid)
         cdir = _config_dir_of(ag) if ag else None
-        origin_prefix: list[str] = []
-        if read_only:
-            from app.orq_readonly import prepare
-            # Antes do kill: sem bwrap utilizável na conta destino, a sessão não pode morrer. O
-            # prefixo da origem é do pane de volta, se o sidecar não gravar.
-            prepare(cwd, runtime_dirs=(target_config_dir,))
-            origin_prefix = prepare(cwd, runtime_dirs=(str(cdir) if cdir else "",))
         motor = _engine_of(ag) if ag else None
         engine_account = procinfo._env_var_of(ag, "CP_ENGINE_ACCOUNT") if ag and motor else None
         engine_credential_id = procinfo._env_var_of(ag, "CP_ENGINE_CREDENTIAL_ID") if engine_account else None
@@ -2775,7 +2161,7 @@ class SessionRegistry:
         jev = _jev_do_processo(ag)
         if motor:
             from app import engines
-            if motor not in engines.listar() and not for_account_move:
+            if motor not in engines.listar():
                 if engine_account:
                     raise ValueError("motor da conta ChatGPT fixa indisponível")
                 # Mesmo fallback do resume(): escolha de motor apagado não vale na conta Anthropic.
@@ -2790,19 +2176,16 @@ class SessionRegistry:
             # só aparecem no que a statusline recebeu. Com `[1m]` no id, a janela vai junto.
             vivo_m, vivo_e = _escolhas_status(sid)
             modelo, esforco = vivo_m or modelo, _esforco_de_abertura(vivo_e) or esforco
-        if engine_account and not for_account_move:
+        if engine_account:
             from app import cliproxy
             binding = cliproxy.engine_env(motor, modelo, None, engine_account,
                                           home=(engine_credential_id or "").removeprefix("codex:"),
                                           expected_base=engine_account_base_url)
             modelo = binding["ANTHROPIC_MODEL"]
-        if not for_account_move:
-            service_tier = _claude_service_tier(motor, modelo, service_tier)
-        elif service_tier not in (None, "default", "priority"):
-            raise ValueError("service_tier: use default ou priority")
+        service_tier = _claude_service_tier(motor, modelo, service_tier)
         model_args.validar("claude", modelo, esforco, permission_mode)
-        if transfer_meta and (sid != transfer_meta["session_id"] or cwd != transfer_meta["cwd"]
-                              or pid != transfer_meta.get("pane_pid")):
+        if (sid != transfer_meta["session_id"] or cwd != transfer_meta["cwd"]
+                or pid != transfer_meta.get("pane_pid")):
             raise ValueError("session_transfer_source_changed")
         filhos = _descendant_pids(pid) if pid else []
         headless_sessions.marcar_troca(name)
@@ -2812,11 +2195,9 @@ class SessionRegistry:
         _esperar_saida(filhos)
         self._forget(name)
         try:
-            from app import runtime_coordinator
-            coordinator = runtime_coordinator.current()
-            owner_key = coordinator.slot(name).binding.key if coordinator is not None and coordinator.managed_queue(name) else None
+            # A chave é a da transferência: com a outra, `key` ia duas vezes e a chamada nem rodava.
             meta = headless_sessions.save(name, cwd, sid, config_dir=str(cdir) if cdir else None,
-                                          key=owner_key,
+                                          key=transfer_meta["key"], transfer_id=transfer_meta["transfer_id"],
                                           engine=motor, model=modelo, effort=esforco,
                                           engine_account=engine_account,
                                           engine_credential_id=engine_credential_id,
@@ -2824,9 +2205,7 @@ class SessionRegistry:
                                           service_tier=service_tier,
                                           context_window=int(janela) if janela and janela.isdigit() else None,
                                           permission_mode=permission_mode, subagent_model=subagente,
-                                          claude_settings=claude_settings, jev=jev, read_only=read_only,
-                                          **({"key": transfer_meta["key"], "transfer_id": transfer_meta["transfer_id"]}
-                                             if transfer_meta else {}),
+                                          claude_settings=claude_settings, jev=jev,
                                           previous_non_plan=((modo_permissao.session_non_plan_mode(jsonl)
                                               or modo_permissao.modo_da_conta(str(cdir) if cdir else None))
                                               if permission_mode == "plan" else None))
@@ -2838,8 +2217,6 @@ class SessionRegistry:
                     "claude_settings": claude_settings}
             try:
                 cmd = self._comando_terminal(meta, resume=Path(jsonl).exists())
-                if read_only:
-                    cmd = tmux.join_cmd([*origin_prefix, "/bin/sh", "-c", cmd])
                 reaberto = tmux.new_session(name, cwd, cmd, meta["config_dir"], provider="claude",
                                             **_env_sessao(subagente, jev, nome=name, claude_settings=claude_settings))
                 if reaberto:
@@ -2993,7 +2370,6 @@ class SessionRegistry:
             if not current or stale_process:
                 headless_sessions.restaurar(restored)
             hl = get_adapter(CLAUDE_HEADLESS)
-            hl._subidas.pop(record.name, None)
             from app import runtime_coordinator
             coordinator = runtime_coordinator.current()
             if (coordinator is not None and getattr(coordinator, "transport", None) is not None
@@ -3016,7 +2392,9 @@ class SessionRegistry:
         else:
             from app.conversation_transfer import _processes, _process_identity, _runtime_path, _write_json
             command = self._comando_terminal(meta, resume=True)
-            env = _env_sessao(meta.get("subagent_model"), bool(meta.get("jev")), nome=record.name)["env"]
+            # As escolhas de plugins e skills vão também no ambiente, onde a próxima reabertura as acha.
+            env = _env_sessao(meta.get("subagent_model"), bool(meta.get("jev")), nome=record.name,
+                              claude_settings=meta.get("claude_settings"))["env"]
             env["CP_SESSION_KEY"] = meta["key"]
             if await asyncio.to_thread(tmux.has_session, record.name):
                 pid = await asyncio.to_thread(tmux.pane_pid, record.name)
@@ -3108,8 +2486,6 @@ class SessionRegistry:
         # senão o par ficaria pareado com um fantasma e o unpair simétrico quebrava. Sob o lock do
         # módulo pair (rename_pair): sem ele, um unpair concorrente podia ser ressuscitado.
         _rename_pair_python(old, new)
-        if apos_renomear_codex:
-            apos_renomear_codex(old, new)
         # L71 da revisao final: o shell escondido e keyed por NOME (`term-<nome>`) e NAO acompanha o
         # rename sozinho -- ele ficava orfa pra sempre, invisivel no app (marcado @cp_hidden) e fora
         # do alcance do `kill()`, que so procura `term-<nome NOVO>`. Pior: a aba Shell do nome novo
@@ -3161,8 +2537,6 @@ class SessionRegistry:
             shortcut_terminals.close_all(name)
             self._forget_local(name)
             ThenLink(name).clear()
-            if apos_saida_codex:
-                apos_saida_codex(name)
             return []
 
         # Levanta KillFailed quando a sessao SOBREVIVE. Antes o retorno do tmux era descartado e a
@@ -3208,8 +2582,6 @@ class SessionRegistry:
             PromptQueue(name).clear()
             ThenLink(name).clear()
             warnings = self._clear_pair(name)
-            if apos_saida_codex:
-                apos_saida_codex(name)
             return warnings
         # Limpa o sidecar do AskUserQuestion ANTES de matar (precisa do processo vivo pra resolver o
         # jsonl), best-effort: cleanup nunca bloqueia/quebra o kill. Senao um stale reabriria o stepper
@@ -3255,24 +2627,6 @@ class SessionRegistry:
             # fora do kill), e a falha aparecia no log como se fosse de um encerramento.
             _log.warning("_clear_pair(%s): falha ao sair do grupo de pareamento: %r", name, e)
         return []
-
-    @staticmethod
-    def _leave_old_group(name: str) -> None:
-        """Nome reusado no modo Rust: o grupo da sessão antiga sai antes de qualquer efeito da
-        criação. Sem limpeza e com o sidecar ainda lá, a criação é recusada."""
-        from app import groups_bridge
-        if not groups_bridge.rust_owns_groups():
-            return
-        if tmux.has_session(name) or codex_sessions.exists(name) or headless_sessions.exists(name):
-            return   # nome em uso: o ramo da criação recusa, e o grupo é de quem está viva
-        try:
-            out = groups_bridge.call("group.leave", name=name)
-            _log_leave_warnings(name, out.get("warnings"))
-        except groups_bridge.GroupsBridgeError as e:
-            if PairLink(name).path.exists():
-                _log.warning("criação de %s recusada: grupo antigo não desfeito (%s)", name, e.code)
-                raise GroupCleanupFailed(name) from e
-            _log.warning("criação de %s: ponte de grupos falhou sem grupo a desfazer (%s)", name, e.code)
 
     def sweep_pairs(self, list_fn: Callable[[], list[SessionInfo]], agora: float | None = None) -> None:
         """Lista que falha levanta antes de varrer: vazia por erro dissolveria grupos vivos. Sem
@@ -3327,28 +2681,14 @@ class SessionRegistry:
     def _pane_of(self, name: str) -> Optional[dict]:
         return next((p for p in tmux.list_panes_active() if p["name"] == name), None)
 
-    def _first_user_text(self, jsonl: str, max_lines: int = 60) -> str:
-        # Preview do candidato = 1a msg de usuario da conversa (identifica "qual conversa e essa"). Le so
-        # as primeiras linhas; import local pra evitar ciclo (transcript -> models -> ...).
-        from app.transcript import parse_line
-        try:
-            with open(jsonl, encoding="utf-8", errors="replace") as fh:
-                for _, line in zip(range(max_lines), fh):
-                    for ev in parse_line(line):
-                        if ev.kind == "user_msg" and ev.text:
-                            return ev.text[:100]
-        except OSError:
-            pass
-        return ""
-
     @staticmethod
-    def _refuse_non_claude_resume(pane: dict, *, read_only_ok: bool = False) -> bool:
-        """Devolve se o pane roda sob a proteção read-only; só quem a refaz passa `read_only_ok`."""
+    def _refuse_non_claude_resume(pane: dict) -> bool:
+        """Recusa o pane read-only (retomar removeria a proteção) e o que não é Claude."""
         read_only = bool(pane.get("pid")) and any(
                 "HANGAR_ORQ_READ_ONLY" in _cmdline(pid)
                 or procinfo._env_var_of(pid, "HANGAR_ORQ_READ_ONLY") == "1"
                 for pid in _descendant_pids(pane["pid"]))
-        if read_only and not read_only_ok:
+        if read_only:
             raise ValueError("sessão read-only: recrie com --read-only; retomar aqui removeria a proteção")
         # O resume e Claude-only de ponta a ponta: os candidatos saem de ~/.claude/projects e o
         # relance e `claude --resume <uuid>` DEPOIS de matar o pane. Numa sessao Pi sem transcript
@@ -3363,165 +2703,10 @@ class SessionRegistry:
             raise ValueError(
                 f"retomar so vale pra sessao Claude (esta e {prov}); "
                 f"feche o pane e abra de novo pelo wrapper `{prov}`")
-        if read_only_ok and not read_only and sys.platform == "linux":
-            # Quem refaz a proteção reabre sem ela quando a leitura diz "não": leitura que falhou
-            # não pode valer como "não".
-            agent = _pid_do_agente(pane.get("pid"))
-            if agent is None or not procinfo._environ_legivel(agent):
-                raise ValueError("não consegui confirmar se a sessão roda protegida (read-only); nada foi encerrado")
         return read_only
 
-    def resume_candidates(self, name: str) -> tuple[str, bool, list[dict]]:
-        # (cwd, ambiguo, candidatos). ambiguo = ha OUTRA sessao tmux no mesmo cwd -> o "mais recente por
-        # mtime" pode ser de outra sessao (a UI pede confirmacao). candidatos = ate 6 jsonls recentes do
-        # cwd, cada um com preview + se ja esta em uso por outra sessao viva.
-        pane = self._pane_of(name)
-        if pane is None:
-            raise ValueError("sessao nao encontrada")
-        self._refuse_non_claude_resume(pane)
-        cwd = pane["cwd"]
-        ag = _pid_do_agente(pane.get("pid"))
-        cdir = _config_dir_of(ag) if ag else None
-        proj = ((cdir / "projects") if cdir else self.projects_dir) / sanitize_cwd(cwd)
-        files = sorted(conversation_files(proj),
-                       key=lambda f: (f.stat().st_mtime if f.exists() else 0.0), reverse=True)[:6] \
-            if proj.is_dir() else []
-        taken = {os.path.realpath(s.jsonl) for s in self.list() if s.jsonl and s.name != name}
-        cands = [{
-            "session_id": f.stem,
-            "mtime": _jsonl_mtime(str(f)),
-            "preview": self._first_user_text(str(f)),
-            "in_use": os.path.realpath(str(f)) in taken,
-        } for f in files]
-        return cwd, self._cwd_has_siblings(cwd), cands
-
-    def resume(self, name: str, session_id: str) -> SessionInfo:
-        # Relança o pane com `claude --resume <session_id>`, continuando a conversa. Valida o uuid (vai
-        # DIRETO pro comando do shell -> barra injecao) e exige o .jsonl existir (nao resume fantasma).
-        try:
-            uuid.UUID(session_id)
-        except (ValueError, AttributeError, TypeError):
-            raise ValueError("session_id invalido")
-        pane = self._pane_of(name)
-        if pane is None:
-            raise ValueError("sessao nao encontrada")
-        # Tambem AQUI, e nao so no resume_candidates: com session_id vindo do corpo o endpoint pula
-        # a listagem de candidatos e cai direto no relance (que mata o pane).
-        self._refuse_non_claude_resume(pane)
-        cwd = pane["cwd"]
-        # Aberta no terminal, o pid do pane é o shell: conta, motor e modelo moram no `claude` filho.
-        ag = _pid_do_agente(pane.get("pid"))
-        cdir = _config_dir_of(ag) if ag else None
-        # Motor da sessão que está morrendo. Sem reaplicar, uma sessão Kimi ressuscita na conta
-        # Anthropic continuando um transcript de Kimi — calado. Tem que ler ANTES do kill_session: o
-        # /proc do pane some com ele.
-        motor = _engine_of(ag) if ag else None
-        engine_account = procinfo._env_var_of(ag, "CP_ENGINE_ACCOUNT") if ag and motor else None
-        engine_credential_id = procinfo._env_var_of(ag, "CP_ENGINE_CREDENTIAL_ID") if engine_account else None
-        engine_account_base_url = procinfo._env_var_of(ag, "CP_ENGINE_ACCOUNT_BASE_URL") if engine_account else None
-        service_tier = procinfo._env_var_of(ag, "CP_ENGINE_SERVICE_TIER") if ag and motor else None
-        motor_sumiu = False
-        if motor:
-            from app import engines
-            if motor not in engines.listar():
-                if engine_account:
-                    raise ValueError("motor da conta ChatGPT fixa indisponível")
-                # Motor apagado no app depois de a sessão nascer: melhor voltar na conta Anthropic (o
-                # badge mostra isso) do que recusar o resume e deixar a sessão inacessível. Nesse
-                # fallback a escolha lida abaixo é DO MOTOR — reaplicá-la na conta Anthropic criaria
-                # uma sessão inviável (id que ela não conhece). Descartar modelo, esforço e janela:
-                # resume pelado, como antes desta branch.
-                motor_sumiu = True
-                motor = None
-        # Modelo/esforço com que a sessão SUBIU, lidos do cmdline do processo que está morrendo.
-        # Sem reaplicar, `claude --resume <sid>` pelado volta pro modelo do motor — a escolha some
-        # sem aviso. Mesma regra do motor: ler ANTES do kill_session, o /proc do pane some com ele.
-        modelo, esforco = procinfo._model_of(ag) if ag else (None, None)
-        # A janela mora no MESMO /proc/<pid>/environ — lê-la junto de motor/modelo, nunca depois
-        # do kill (B2 da revisão final: o kill derruba o processo e a leitura pós-kill devolve
-        # nada, e a sessão ressuscitava sem --context, calado).
-        janela = procinfo._env_var_of(ag, "CLAUDE_CODE_MAX_CONTEXT_TOKENS") if ag else None
-        if engine_account:
-            from app import cliproxy
-            binding = cliproxy.engine_env(motor, modelo, None, engine_account,
-                                          home=(engine_credential_id or "").removeprefix("codex:"),
-                                          expected_base=engine_account_base_url)
-            modelo = binding["ANTHROPIC_MODEL"]
-        if motor_sumiu:
-            modelo = esforco = janela = service_tier = None
-        if modelo and not motor:
-            from app import default_model
-            if not default_model.anthropic(modelo):
-                model_args.validar("claude", modelo, None)  # malformado: recusa antes do kill
-                _log.warning("resume %s: modelo %r não é da Anthropic; volta no padrão da conta", name, modelo)
-                modelo = None
-        service_tier = _claude_service_tier(motor, modelo, service_tier)
-        # Sem motor, a variável veio do `-e` da criação e sumiria no relançamento; com motor, é dele.
-        subagente = (procinfo._env_var_of(ag, "CLAUDE_CODE_SUBAGENT_MODEL")
-                     if ag and not motor and not motor_sumiu else None)
-        # Junto do resto que sai do /proc: depois do `kill_session` lá embaixo não há mais processo
-        # de onde ler, e a sessão ressuscitada nasceria com o Jev desligado sem ninguém pedir.
-        jev = _jev_do_processo(ag)
-        proj = ((cdir / "projects") if cdir else self.projects_dir) / sanitize_cwd(cwd)
-        jsonl = proj / f"{session_id}.jsonl"
-        if not jsonl.exists():
-            raise ValueError("transcript nao encontrado")
-        # COMANDO INTEIRO ANTES DO KILL. `args_de` valida e estoura ValueError; montar depois de
-        # matar o pane trocava "resume falhou" por "sessao destruida e nao relancada" — e o gatilho
-        # e real: o settings.json das contas traz `"model": "opus[1m]"`, que o proprio Claude Code
-        # anexa ao nome. Nada aqui toca o tmux.
-        # "claude" literal: esta funcao ja recusa provider nao-Claude acima
-        # (_refuse_non_claude_resume), e nao ha variavel `provider` neste escopo.
-        current_jsonl, current_tracked = self.resolve_tracked(name, cwd, pid=pane.get("pid"))
-        current_sid = Path(current_jsonl).stem if current_jsonl and current_tracked else None
-        process_settings = session_customizations.from_environment(
-            procinfo._env_var_of(ag, session_customizations.SESSION_SETTINGS_ENV) if ag else None)
-        claude_settings = session_customizations.resume_settings(session_id, current_sid, process_settings)
-        from app.adapters.claude import terminal_command
-        argv = terminal_command(cwd, session_id, modelo, esforco,
-                                claude_settings=claude_settings, resume=True)
-        cmd = tmux.join_cmd(argv)
-        if motor:
-            # Prefixo remontado JUNTO com a escolha: preservar so a flag deixaria a sessao
-            # ressuscitada com a flag num modelo e o AMBIENTE noutro (as cinco chaves ANTHROPIC_*,
-            # o SUBAGENT_MODEL e a janela voltariam pro modelo do motor).
-            # Antes do kill, junto com o resto da montagem do comando — o comentario acima explica
-            # por que NADA aqui pode tocar o tmux antes de o comando inteiro estar pronto: recusar
-            # depois do kill trocaria "resume recusado" por "sessao destruida e nao relancada".
-            _exigir_cp_engine()
-            pre = ["hangar-engine", "--exec", motor]
-            if engine_account:
-                pre += ["--account", engine_account, "--account-home",
-                        binding["CP_ENGINE_CREDENTIAL_ID"].removeprefix("codex:"),
-                        "--account-base-url", binding["CP_ENGINE_ACCOUNT_BASE_URL"]]
-            if modelo:
-                pre += ["--model", modelo]
-                if janela:
-                    pre += ["--context", janela]
-            if service_tier is not None:
-                env = {**os.environ, "CLAUDE_CONFIG_DIR": str(cdir or Path.home() / ".claude")}
-                engines.service_tier_settings(argv, env, service_tier, cwd=cwd)
-                pre += ["--service-tier", service_tier]
-            cmd = tmux.join_cmd(pre + ["--"]) + " " + cmd
-        tmux.kill_session(name)
-        self._forget(name)
-        env_pane = _env_sessao(subagente, jev, nome=name, claude_settings=claude_settings)
-        if not tmux.new_session(name, cwd, cmd, str(cdir) if cdir else None, **env_pane):
-            raise ValueError("falha ao relançar a sessao")
-        if service_tier is not None:
-            self.wait_for_claude(name, {
-                "session_id": session_id, "config_dir": str(cdir) if cdir else None,
-                "engine": motor, "model": modelo, "service_tier": service_tier,
-                "engine_account": engine_account, "engine_credential_id": engine_credential_id,
-                "engine_account_base_url": engine_account_base_url,
-            })
-        # Fixa o transcript resumido no cache: resolve() ja o devolveria (o --resume esta no cmdline),
-        # mas semear evita a janela onde o pane ainda esta subindo e cairia no fallback por mtime.
-        self._jsonl_cache[name] = str(jsonl)
-        return SessionInfo(name=name, cwd=cwd, jsonl=str(jsonl), tracked=True, engine=motor,
-                           engine_account=engine_account, conta=engine_credential_id)
 
 
 from app.runtime_adapter import registry_method as _runtime_registry_method
-for _method_name in ("kill", "rename", "para_terminal", "para_headless"):
+for _method_name in ("kill", "rename", "para_headless"):
     setattr(SessionRegistry, _method_name, _runtime_registry_method(getattr(SessionRegistry, _method_name)))

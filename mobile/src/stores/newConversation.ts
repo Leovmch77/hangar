@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import {
   basename, createSessionForServer, fetchSessionsForServer, getCreationProgress, getHistory,
-  sanitizeSessionName, sendInputForServer, transitionFirstConversation, uploadFileForServer,
+  sanitizeSessionName, sendInputForServer, transitionFirstConversation, uniqueSessionName, uploadFileForServer,
 } from '@hangar/core';
 import type {
   ChatEvent, CreateSessionBody, FirstConversationAttempt, FirstConversationEvent, Server, SessionInfo,
@@ -68,6 +68,7 @@ const KEY = (serverId: string) => `create.attempt.v1:${serverId}`;
 const PHASES = new Set(['draft', 'creating', 'create_unknown', 'created', 'sending', 'send_unknown', 'sent']);
 // Promessas em voo por servidor: dois toques (ou remontagem) no meio do GET/POST recebem a mesma.
 const inFlight = new Map<string, Promise<void>>();
+const refusedNames = new Map<string, Set<string>>();
 
 export const useNewConversation = create<State>(() => ({ attempts: {}, issues: {}, busy: {} }));
 
@@ -125,13 +126,15 @@ function newId(): string {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function stableName(cwd: string, id: string): string {
-  const clean = basename(cwd).replace(/[^A-Za-z0-9_-]/g, '-').replace(/^-+|-+$/g, '') || 'sessao';
-  return `${clean}-${id.slice(-4)}`;
+// Nome de quem deixou o campo em branco, pela regra das outras telas e do servidor (pasta, depois pasta-2). A lista
+// só evita um nome já visível: o backend arbitra. `known` diz se ela respondeu.
+export async function autoSessionName(server: Server, cwd: string, refused: Iterable<string> = []): Promise<{ name: string; known: boolean }> {
+  let taken = new Set<string>();
+  let known = true;
+  try { taken = new Set((await fetchSessionsForServer(server)).map((s) => s.name)); } catch { known = false; }
+  for (const name of refused) taken.add(name);
+  return { name: uniqueSessionName(basename(cwd), taken), known };
 }
-
-// Nome que a sessão recebe quando a pessoa deixa o campo em branco.
-export const defaultSessionName = (cwd: string) => stableName(cwd, newId());
 
 // Processo reaberto: creating/sending não voltam a disparar POST, viram incertos.
 export function restoreAttempt(serverId: string): FirstConversationAttempt | null {
@@ -162,7 +165,7 @@ export function restoreAttempt(serverId: string): FirstConversationAttempt | nul
   return attempt;
 }
 
-async function runCreate(serverId: string, input: NewConversationInput): Promise<void> {
+async function runCreate(serverId: string, input: NewConversationInput, retried = false): Promise<void> {
   const current = useNewConversation.getState().attempts[serverId] ?? restoreAttempt(serverId);
   if (!current && prefs.getString(KEY(serverId)) !== undefined) return;
   if (current && current.phase !== 'draft') return;
@@ -172,14 +175,9 @@ async function runCreate(serverId: string, input: NewConversationInput): Promise
 
   // Nome escolhido pela pessoa não ganha sufixo: conflito volta como 409 e ela decide.
   const explicit = input.body.name?.trim();
-  let id = newId();
-  if (!explicit) {
-    // O backend ainda arbitra o conflito; a lista só evita um nome já visível.
-    let taken = new Set<string>();
-    try { taken = new Set((await fetchSessionsForServer(server)).map((s) => s.name)); } catch { /* backend decide */ }
-    while (taken.has(stableName(input.body.cwd, id))) id = newId();
-  }
-  const finalName = explicit || stableName(input.body.cwd, id);
+  const id = newId();
+  // Nome automático já recusado não volta: sem a lista, o mesmo nome seria recusado a cada envio.
+  const finalName = explicit || (await autoSessionName(server, input.body.cwd, refusedNames.get(serverId) ?? [])).name;
   // Branch nova sem nome digitado segue o nome final da sessão, só conhecido aqui, com a limpeza que o
   // backend faz no nome: o digitado pode ter espaço e acento.
   const draft: FirstConversationAttempt = Object.assign({
@@ -198,9 +196,15 @@ async function runCreate(serverId: string, input: NewConversationInput): Promise
     session = await createSessionForServer(server, creating.body);
   } catch (cause) {
     const status = statusOf(cause);
-    // 4xx definitivo não criou nada; 409, 408, 5xx e rede podem ter criado.
-    const rejected = status !== null && status >= 400 && status < 500 && status !== 408 && status !== 409;
+    // 4xx definitivo não criou nada; 409, 408, 5xx e rede podem ter criado. Nome em uso é recusa:
+    // a sessão com esse nome é outra, e recuperá-la pelo nome mandaria a mensagem para a conversa errada.
+    const nameInUse = (cause as { code?: unknown } | null)?.code === 'erro_nome_em_uso';
+    if (nameInUse && !explicit) refusedNames.set(serverId, new Set([...(refusedNames.get(serverId) ?? []), finalName]));
+    const rejected = nameInUse
+      || (status !== null && status >= 400 && status < 500 && status !== 408 && status !== 409);
     if (!apply(creating, { type: rejected ? 'create_rejected' : 'create_unknown' })) return;
+    // Nome automático em uso (lista fora do ar, ou outra tela criou no meio): uma tentativa com o próximo.
+    if (nameInUse && !explicit && !retried) return runCreate(serverId, input, true);
     setIssue(serverId, rejected
       ? { kind: 'rejected', message: messageOf(cause) }
       : status === 409
@@ -446,5 +450,6 @@ export function discardAttempt(serverId: string, attemptId: string): void {
 
 export function _resetNewConversationForTests(): void {
   inFlight.clear();
+  refusedNames.clear();
   useNewConversation.setState({ attempts: {}, issues: {}, busy: {} });
 }

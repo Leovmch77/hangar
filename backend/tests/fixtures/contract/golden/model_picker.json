@@ -1,0 +1,527 @@
+{
+ "origin": {
+  "commit": "5b8fa0478b5bf1e790e830568d2f4e5e67db3365",
+  "command": "uv run python tests/fixtures/contract/gen_model_picker.py"
+ },
+ "cases": [
+  {
+   "name": "session_navigates_and_presses_s",
+   "request": {
+    "model": "sonnet",
+    "effort": null,
+    "scope": "session"
+   },
+   "panes": [
+    "assistant: pronto\n❯ \n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "❯ \n  ⎿  Set model to Sonnet 4.6 for this session only with xhigh effort\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "Down",
+    "s"
+   ],
+   "expect": {
+    "ok": {
+     "ok": true,
+     "scope": "session",
+     "result": "Set model to Sonnet 4.6 for this session only with xhigh effort"
+    }
+   }
+  },
+  {
+   "name": "default_presses_enter",
+   "request": {
+    "model": "opus",
+    "effort": null,
+    "scope": "default"
+   },
+   "panes": [
+    "assistant: pronto\n❯ \n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "❯ \n  ⎿  Set model to Opus 4.8 and saved as your default for new sessions\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "Enter"
+   ],
+   "expect": {
+    "ok": {
+     "ok": true,
+     "scope": "default",
+     "result": "Set model to Opus 4.8 and saved as your default for new sessions"
+    }
+   }
+  },
+  {
+   "name": "effort_with_right",
+   "request": {
+    "model": null,
+    "effort": "max",
+    "scope": "session"
+   },
+   "panes": [
+    "assistant: pronto\n❯ \n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ Max effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "❯ \n  ⎿  Set model to Opus 4.8 for this session only with max effort\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "Right",
+    "s"
+   ],
+   "expect": {
+    "ok": {
+     "ok": true,
+     "scope": "session",
+     "result": "Set model to Opus 4.8 for this session only with max effort"
+    }
+   }
+  },
+  {
+   "name": "effort_cycle_unavailable",
+   "request": {
+    "model": null,
+    "effort": "ultracode",
+    "scope": "session"
+   },
+   "panes": [
+    "assistant: pronto\n❯ \n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ High effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ Max effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ Low effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ Medium effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ High effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "❯ \n  ⎿  Set model to Opus 4.8 for this session only with max effort\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "Right",
+    "Right",
+    "Right",
+    "Right",
+    "s"
+   ],
+   "expect": {
+    "ok": {
+     "ok": true,
+     "scope": "session",
+     "result": "Set model to Opus 4.8 for this session only with max effort"
+    }
+   }
+  },
+  {
+   "name": "effort_rereads_once",
+   "request": {
+    "model": null,
+    "effort": "max",
+    "scope": "session"
+   },
+   "panes": [
+    "assistant: pronto\n❯ \n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   \n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ Max effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "❯ \n  ⎿  Set model to Opus 4.8 for this session only with max effort\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "Right",
+    "s"
+   ],
+   "expect": {
+    "ok": {
+     "ok": true,
+     "scope": "session",
+     "result": "Set model to Opus 4.8 for this session only with max effort"
+    }
+   }
+  },
+  {
+   "name": "effort_not_supported",
+   "request": {
+    "model": null,
+    "effort": "high",
+    "scope": "session"
+   },
+   "panes": [
+    "assistant: pronto\n❯ \n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n     2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ❯ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ○ Effort not supported for Haiku\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "❯ \n  ⎿  Set model to Haiku 4.5 for this session only\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "s"
+   ],
+   "expect": {
+    "ok": {
+     "ok": true,
+     "scope": "session",
+     "result": "Set model to Haiku 4.5 for this session only"
+    }
+   }
+  },
+  {
+   "name": "model_and_effort",
+   "request": {
+    "model": "opus",
+    "effort": "max",
+    "scope": "session"
+   },
+   "panes": [
+    "assistant: pronto\n❯ \n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ Max effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "❯ \n  ⎿  Set model to Opus 4.8 for this session only with max effort\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "Right",
+    "s"
+   ],
+   "expect": {
+    "ok": {
+     "ok": true,
+     "scope": "session",
+     "result": "Set model to Opus 4.8 for this session only with max effort"
+    }
+   }
+  },
+  {
+   "name": "pending_confirm",
+   "request": {
+    "model": null,
+    "effort": "max",
+    "scope": "session"
+   },
+   "panes": [
+    "assistant: pronto\n❯ \n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ Max effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "   Change effort level?\n   Your next response will be slower and use more tokens\n\n   This conversation is cached for the current effort level. Switching to max means the\n   full history gets re-read on your next message.\n\n   ❯ 1. Yes, switch to max\n     2. No, go back\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "Right",
+    "s"
+   ],
+   "expect": {
+    "ok": {
+     "ok": true,
+     "scope": "session",
+     "pending_confirm": "max",
+     "result": null
+    }
+   }
+  },
+  {
+   "name": "never_opens",
+   "request": {
+    "model": "sonnet",
+    "effort": null,
+    "scope": "session"
+   },
+   "panes": [
+    "assistant: pronto\n❯ \n",
+    "❯ \nsem picker aqui\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "Enter",
+    "Escape"
+   ],
+   "expect": {
+    "error": {
+     "status": 409,
+     "detail": "model picker did not open"
+    }
+   }
+  },
+  {
+   "name": "half_redraw_then_open",
+   "request": {
+    "model": "opus",
+    "effort": null,
+    "scope": "session"
+   },
+   "panes": [
+    "assistant: pronto\n❯ \n",
+    "❯ \n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "❯ \n  ⎿  Set model to Opus 4.8 for this session only with max effort\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "s"
+   ],
+   "expect": {
+    "ok": {
+     "ok": true,
+     "scope": "session",
+     "result": "Set model to Opus 4.8 for this session only with max effort"
+    }
+   }
+  },
+  {
+   "name": "partial_then_drawn",
+   "request": {
+    "model": "opus",
+    "effort": null,
+    "scope": "session"
+   },
+   "panes": [
+    "assistant: pronto\n❯ \n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "❯ \n  ⎿  Set model to Opus 4.8 for this session only with max effort\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "s"
+   ],
+   "expect": {
+    "ok": {
+     "ok": true,
+     "scope": "session",
+     "result": "Set model to Opus 4.8 for this session only with max effort"
+    }
+   }
+  },
+  {
+   "name": "absent_model",
+   "request": {
+    "model": "gpt",
+    "effort": null,
+    "scope": "session"
+   },
+   "panes": [
+    "assistant: pronto\n❯ \n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "Escape"
+   ],
+   "expect": {
+    "error": {
+     "status": 409,
+     "detail": "cannot navigate model picker: target model 'gpt' not in picker"
+    }
+   }
+  },
+  {
+   "name": "variant_1m",
+   "request": {
+    "model": "opus[1m]",
+    "effort": null,
+    "scope": "session"
+   },
+   "panes": [
+    "assistant: pronto\n❯ \n",
+    "   Select model\n   Switch between Claude models.\n\n     1. Default (recommended)  Sonnet 5 · Efficient for routine tasks\n     2. Sonnet                 Sonnet 5 · Efficient for routine tasks\n     3. Fable                  Fable 5 · Most capable\n   ❯ 4. Opus                   Opus 5 · Best for everyday, complex tasks\n     5. Haiku                  Haiku 4.5 · Fastest for quick answers\n     6. Opus (1M context) ✔    Opus 5 with 1M context · Best for everyday, complex tasks\n\n   ◉ High effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "   Select model\n   Switch between Claude models.\n\n     1. Default (recommended)  Sonnet 5 · Efficient for routine tasks\n     2. Sonnet                 Sonnet 5 · Efficient for routine tasks\n     3. Fable                  Fable 5 · Most capable\n   ❯ 4. Opus                   Opus 5 · Best for everyday, complex tasks\n     5. Haiku                  Haiku 4.5 · Fastest for quick answers\n     6. Opus (1M context) ✔    Opus 5 with 1M context · Best for everyday, complex tasks\n\n   ◉ High effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "❯ \n  ⎿  Set model to Opus 5 (1M context) for this session only\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "Down",
+    "Down",
+    "s"
+   ],
+   "expect": {
+    "ok": {
+     "ok": true,
+     "scope": "session",
+     "result": "Set model to Opus 5 (1M context) for this session only"
+    }
+   }
+  },
+  {
+   "name": "still_open_after_confirm",
+   "request": {
+    "model": null,
+    "effort": "max",
+    "scope": "session"
+   },
+   "panes": [
+    "assistant: pronto\n❯ \n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ Max effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "Right",
+    "s",
+    "Escape"
+   ],
+   "expect": {
+    "error": {
+     "status": 409,
+     "detail": "model picker did not close after confirm"
+    }
+   }
+  },
+  {
+   "name": "session_got_default",
+   "request": {
+    "model": "sonnet",
+    "effort": null,
+    "scope": "session"
+   },
+   "panes": [
+    "assistant: pronto\n❯ \n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "❯ \n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "Down",
+    "s"
+   ],
+   "expect": {
+    "error": {
+     "status": 409,
+     "detail": "expected session-only switch, got: Set model to Sonnet 4.6 and saved as your default for new sessions"
+    }
+   }
+  },
+  {
+   "name": "overlay_refuses",
+   "request": {
+    "model": "sonnet",
+    "effort": null,
+    "scope": "session"
+   },
+   "panes": [
+    "algo\n   ↑/↓ to navigate · Enter to select\n"
+   ],
+   "keys": [],
+   "expect": {
+    "error": {
+     "status": 409,
+     "detail": "ha um menu aberto no terminal da sessao"
+    }
+   }
+  },
+  {
+   "name": "spinner_live_refuses",
+   "request": {
+    "model": "sonnet",
+    "effort": null,
+    "scope": "session"
+   },
+   "panes": [
+    "✻ Crunched for 24s\n❯ \n",
+    "✻ Crunched for 26s\n❯ \n"
+   ],
+   "keys": [],
+   "expect": {
+    "error": {
+     "status": 409,
+     "detail": "a sessao esta trabalhando — espere ela terminar"
+    }
+   }
+  },
+  {
+   "name": "spinner_frozen_goes",
+   "request": {
+    "model": "opus",
+    "effort": null,
+    "scope": "session"
+   },
+   "panes": [
+    "✻ Crunched for 24s\n❯ \n",
+    "✻ Crunched for 24s\n❯ \n",
+    "   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 5 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus (1M context) ✔    Opus 5 with 1M context · Best for everyday, complex tasks\n     3. Fable                  Fable 5 · Most capable for your hardest and longest-running tasks\n     4. Sonnet                 Sonnet 5 · Efficient for routine tasks\n     5. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ● High effort (default) ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 5 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus (1M context) ✔    Opus 5 with 1M context · Best for everyday, complex tasks\n     3. Fable                  Fable 5 · Most capable for your hardest and longest-running tasks\n     4. Sonnet                 Sonnet 5 · Efficient for routine tasks\n     5. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ● High effort (default) ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "❯ \n  ⎿  Set model to Opus 5 for this session only with high effort\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "s"
+   ],
+   "expect": {
+    "ok": {
+     "ok": true,
+     "scope": "session",
+     "result": "Set model to Opus 5 for this session only with high effort"
+    }
+   }
+  },
+  {
+   "name": "blank_model_presses_s",
+   "request": {
+    "model": "  ",
+    "effort": null,
+    "scope": "session"
+   },
+   "panes": [
+    "assistant: pronto\n❯ \n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "❯ \n  ⎿  Set model to Opus 4.8 for this session only with max effort\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "s"
+   ],
+   "expect": {
+    "ok": {
+     "ok": true,
+     "scope": "session",
+     "result": "Set model to Opus 4.8 for this session only with max effort"
+    }
+   }
+  },
+  {
+   "name": "model_normalized",
+   "request": {
+    "model": " OPUS ",
+    "effort": null,
+    "scope": "session"
+   },
+   "panes": [
+    "assistant: pronto\n❯ \n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "\n❯ /model\n  ⎿  Kept model as Opus 4.8\n\n❯ /model\n  ⎿  Set model to Sonnet 4.6 and saved as your default for new sessions\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n   Select model\n   Switch between Claude models. Your pick becomes the default for new sessions. For\n   other/previous model names, specify with --model.\n\n     1. Default (recommended)  Opus 4.8 with 1M context · Best for everyday, complex tasks\n   ❯ 2. Opus ✔                 Opus 4.8 with 1M context · Best for everyday, complex tasks\n     3. Sonnet                 Sonnet 4.6 · Efficient for routine tasks\n   ↓ 4. Haiku                  Haiku 4.5 · Fastest for quick answers\n\n   ◉ xHigh effort ←/→ to adjust\n\n   Enter to set as default · s to use this session only · Esc to cancel\n",
+    "❯ \n  ⎿  Set model to Opus 4.8 for this session only with max effort\n"
+   ],
+   "keys": [
+    "/model",
+    "Enter",
+    "s"
+   ],
+   "expect": {
+    "ok": {
+     "ok": true,
+     "scope": "session",
+     "result": "Set model to Opus 4.8 for this session only with max effort"
+    }
+   }
+  }
+ ]
+}

@@ -27,12 +27,16 @@ pub struct PolicyClient {
     diag:crate::diag::DiagClient,
     /// Só testes: ambiente-base da subida do Codex por registro. `None` = o do processo, lido a cada subida.
     codex_env:Option<Arc<crate::accounts::environment::AccountEnvironment>>,
+    /// Ponte do plugin que o Claude subido aqui recebe no ambiente; sem ela, sobe sem a ponte.
+    plugin_bridge:Option<crate::session_open::claude::PluginBridge>,
 }
 
 impl PolicyClient {
     pub fn new(upstream:std::net::SocketAddr,secret:String) -> Self {
-        Self { diag:crate::diag::DiagClient::new(upstream,secret),accounts:None,codex_env:None }
+        Self { diag:crate::diag::DiagClient::new(upstream,secret),accounts:None,codex_env:None,plugin_bridge:None }
     }
+    pub fn with_plugin_bridge(mut self,bridge:crate::session_open::claude::PluginBridge) -> Self { self.plugin_bridge = Some(bridge); self }
+    pub(super) fn plugin_bridge(&self) -> Option<crate::session_open::claude::PluginBridge> { self.plugin_bridge.clone() }
     pub(super) fn diag(&self) -> crate::diag::DiagClient { self.diag.clone() }
     pub fn with_accounts(mut self,accounts:crate::accounts::AccountService) -> Self { self.accounts = Some(accounts); self }
     #[doc(hidden)]
@@ -127,7 +131,7 @@ impl RuntimeEngine {
             store.forget(key).map_err(crate::interactions::runtime_error)?;
             next = next.with_interactions(key.clone(),store.clone())?;
         }
-        (next.launch,next.policy,next.publisher,next.revision,next.live) = (self.launch.clone(),self.policy.clone(),self.publisher.clone(),self.revision.clone(),self.live.clone());
+        (next.launch,next.policy,next.publisher,next.revision,next.live,next.lifecycle) = (self.launch.clone(),self.policy.clone(),self.publisher.clone(),self.revision.clone(),self.live.clone(),self.lifecycle.clone());
         Ok(next)
     }
     fn problem(&self) -> Option<String> { match &self.core { Core::Codex(core)=>core.problem().map(str::to_owned),Core::Claude(_)=>None } }
@@ -141,6 +145,10 @@ impl RuntimeEngine {
     }
     fn set_problem(&mut self,code:&str,detail:Option<String>) -> Vec<Effect> {
         match &mut self.core { Core::Codex(core)=>core.set_problem(code,detail),Core::Claude(_)=>Vec::new() }
+    }
+    /// O problema que vem de fora do ator (`Message::Problem`), nos dois provedores.
+    fn show_problem(&mut self,code:&str,detail:Option<String>) -> Vec<Effect> {
+        match &mut self.core { Core::Codex(core)=>core.set_problem(code,detail),Core::Claude(core)=>core.set_problem(code,detail) }
     }
     pub fn with_interactions(mut self,key:String,store:Arc<crate::interactions::InteractionStore>) -> Result<Self,RuntimeError> {
         match &mut self.core {
@@ -175,6 +183,9 @@ impl RuntimeEngine {
     pub fn mods_life(&self) -> u64 { self.mods_life }
     fn mods_call(&mut self,token:u64,call:ModsCall,left_s:f64,clock:ClockSample) -> Result<Vec<Effect>,ModsError> {
         match &mut self.core { Core::Claude(core)=>core.mods_call(token,call,left_s,clock),Core::Codex(_)=>Err(crate::mods::model::missing()) }
+    }
+    fn park_idle(&self,now:f64) -> Option<f64> {
+        match &self.core { Core::Claude(core)=>core.park_idle(now),Core::Codex(_)=>None }
     }
     fn view(&self) -> Value {
         match &self.core { Core::Claude(core)=>core.view(),Core::Codex(core)=> {
@@ -385,6 +396,8 @@ enum Message {
     Stop { response:oneshot::Sender<Result<(),RuntimeError>>,kill:bool },
     LifecycleReady {proof:ModeProof,response:oneshot::Sender<Result<(),RuntimeError>>},
     HoldTurns(oneshot::Sender<Result<TurnHold,RuntimeError>>),
+    /// Problema que o motor não vê (a troca por limite que não aconteceu); sai no próximo turno bom.
+    Problem { code:String,detail:Option<String> },
 }
 
 /// Recusa da `hold_turns`: turno em voo, pedido do app-server pendente ou fila já despachando.
@@ -440,6 +453,9 @@ impl RuntimeHandle {
     pub async fn drain(&self) -> Result<Value,RuntimeError> {
         let (send,receive) = oneshot::channel(); self.sender.send(Message::Drain(send)).await.map_err(|_|self.gone("runtime_closed"))?;
         receive.await.map_err(|_|self.gone("runtime_closed"))?
+    }
+    pub async fn show_problem(&self,code:&str,detail:Option<String>) -> Result<(),RuntimeError> {
+        self.sender.send(Message::Problem { code:code.to_owned(),detail }).await.map_err(|_|self.gone("runtime_closed"))
     }
     pub async fn confirm(&self) -> Result<Value,RuntimeError> {
         let (send,receive) = oneshot::channel(); self.sender.send(Message::Confirm(send)).await.map_err(|_|self.gone("runtime_closed"))?;
@@ -1129,6 +1145,12 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     if let Some(policy) = &engine.policy { policy.diag.report(event.event(),session,&code,event.reason()); }
                 }
                 Effect::Stop { .. } => { closed.store(true,Ordering::Release); },
+                Effect::UsageLimit { limit } => {
+                    if let Some(registry) = engine.lifecycle.as_ref().and_then(std::sync::Weak::upgrade) { 
+                        registry.usage_limit(super::gateway::LimitHit { name:target.name.clone(),provider:target.provider.clone(),
+                            account:target.metadata["config_dir"].as_str().filter(|dir|!dir.is_empty()).map(str::to_owned),limit });
+                    }
+                },
                 Effect::ReserveAsyncAnswer { operation_id,reservation,command } => {
                     let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
                     jobs.spawn(async move {
@@ -1196,7 +1218,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
             }
         }
         // Resposta reservada apta sai antes da mensagem comum: ela responde a uma pergunta já feita.
-        let deliverable = if target.provider=="claude" {claude_delivery_allowed(&target,&engine.view(),error.is_some())} else {engine.view()["deliverable"]==true};
+        let limit_held = || engine.lifecycle.as_ref().and_then(std::sync::Weak::upgrade).is_some_and(|registry|registry.limit_held(&target.name));
+        let deliverable = if target.provider=="claude" {claude_delivery_allowed(&target,&engine.view(),error.is_some()) && !limit_held()} else {engine.view()["deliverable"]==true};
         let reserved = if target.metadata["lifecycle_pending"]==true { None } else { engine.ready_async_answer_entry() };
         if drain_requested && !drain_active && turn_hold.is_none() && !closed.load(Ordering::Acquire) && (deliverable || reserved.is_some())
             && !roots.values().any(|root|(root.preparing || root.defer_for_batch && root.result.is_none() && root.error.is_none()) && matches!(root.command.kind,OperationKind::Input | OperationKind::Steer)) {
@@ -1319,6 +1342,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                             Job::Root { id,result }
                         });
                     }
+                    Message::Problem { code,detail } => { effects.extend(engine.show_problem(&code,detail)); }
                     Message::Mods { call,deadline,response } => {
                         effects.extend(take_mods(&mut engine,&mut mods_waiters,&mut mods_token,call,deadline,response,clock(start)));
                     }
@@ -1348,6 +1372,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     }
                     Message::View(response) => {
                         let mut view=engine.view();
+                        view["park_idle_s"]=json!(engine.park_idle(clock(start).monotonic_s));
                         if sid_transition || target.metadata["lifecycle_pending"]==true {view["deliverable"]=json!(false);view["lifecycle_pending"]=json!(true);}
                         let _=response.send(view);
                     }

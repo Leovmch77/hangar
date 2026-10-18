@@ -61,6 +61,9 @@ OPENROUTER_JEV_MODEL = "~typesafe/jev-latest"
 JEV_TIMEOUT_S = 5
 # A hung backend cannot hang the session that called orq.
 SEND_TIMEOUT_S = 30
+# Opening waits like the screens (hangar-send gives the POST 120 s) plus the lookups before it:
+# giving up earlier aborted the launch with the session still being born.
+OPEN_TIMEOUT_S = 150
 SEND_TRIES = 3   # failed wakes of the batch or final step before it counts as failed
 # Calibrated on real arbiter messages: changing a word or a threshold means measuring again.
 DISCARD_P = 0.85  # p of "nothing" (the choice's winner) needed to drop
@@ -2213,9 +2216,9 @@ def prove_born(name: str, row: dict) -> str | None:
 def hangar_new(name: str, cwd: str, flags: list[str]) -> None:
     cmd = [os.environ.get("ORQ_SEND", "hangar-send"), "--new", name, cwd, *flags]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=SEND_TIMEOUT_S)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=OPEN_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        raise OrqError(f"hangar-send --new {name} did not answer in {SEND_TIMEOUT_S}s") from None
+        raise OrqError(f"hangar-send --new {name} did not answer in {OPEN_TIMEOUT_S}s") from None
     if r.returncode != 0:
         raise OrqError(f"hangar-send --new {name} failed (rc={r.returncode}): "
                        f"{(r.stderr or r.stdout).strip()[:300]}")

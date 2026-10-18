@@ -1092,6 +1092,11 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                            codigo=getattr(exc, "code", type(exc).__name__))
             await queue.put(("__error__", exc))
 
+    async def dono_pump(left):
+        # Estado aberto com o Python dono: o Rust que volta assume, e o cliente reconecta nele.
+        await left.wait()
+        await queue.put(("__error__", RustStateChannelError("state_owner_changed")))
+
     def _fontes_do_estado(prov, rust):
         """Tarefas do estado ao vivo por chave: as do Python, o canal do hub, ou nada (conexão interna
         de sessão do Rust, que é o próprio hub). `rust` vem de quem montou o `broker`: reler o modo
@@ -1102,6 +1107,10 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         else:
             fontes = {"state": asyncio.create_task(pump("state", _monitor_de(prov))),
                       "preview": asyncio.create_task(preview_pump(broker))}
+            from app import runtime_coordinator
+            left = getattr(runtime_coordinator.current(), "python_left", None)
+            if left is not None and prov in ("claude", CLAUDE_HEADLESS, "codex"):    # os que o Rust assume
+                fontes["dono"] = asyncio.create_task(dono_pump(left))
         # Com o Rust dono não há quem publique aqui: Claude com terminal nunca publicou, e o resto é do hub.
         if not rust:
             fontes["pensamento"] = asyncio.create_task(em_voo_pump("pensamento", fonte_pensamento(name)))

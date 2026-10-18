@@ -24,10 +24,10 @@ pub type ModsAnchor=Arc<std::sync::Mutex<Option<String>>>;
 /// o executor devolve o teclado ao prompt e escreve. `clear_wait`: quanto a trava do `/clear` espera a
 /// conversa nova antes de conferir se ele foi aplicado. `give_up_after`: quanto a entrega incerta espera a
 /// prova antes de ser desistida sozinha (com o Claude parado).
-pub struct TerminalOptions { pub lifecycle:Option<std::sync::Weak<super::gateway::RuntimeRegistry>>,pub permissions:Option<Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>>,pub interactions:Option<Arc<InteractionStore>>,pub plugin:Option<Arc<crate::plugin::Store>>,pub mode_facts:Option<crate::terminal_facts::ModeReader>,pub terms:Option<Arc<crate::term::Terms>>,pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration,pub give_up_after:Duration,pub status:Option<StatusSender>,pub turn_start_wait:Duration }
+pub struct TerminalOptions { pub lifecycle:Option<std::sync::Weak<super::gateway::RuntimeRegistry>>,pub permissions:Option<Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>>,pub interactions:Option<Arc<InteractionStore>>,pub plugin:Option<Arc<crate::plugin::Store>>,pub mode_facts:Option<crate::terminal_facts::ModeReader>,pub terms:Option<Arc<crate::term::Terms>>,pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration,pub anchor:ModsAnchor,pub focus_return:Duration,pub clear_wait:Duration,pub give_up_after:Duration,pub status:Option<StatusSender>,pub turn_start_wait:Duration,pub start_grace:Duration }
 impl Default for TerminalOptions {
     fn default()->Self {Self {lifecycle:None,permissions:None,interactions:None,plugin:None,mode_facts:None,terms:None,io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1),stall_notice:Duration::from_secs(30),
-        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT,give_up_after:GIVE_UP_AFTER,status:None,turn_start_wait:TURN_START_WAIT}}
+        anchor:ModsAnchor::default(),focus_return:FOCUS_RETURN,clear_wait:CLEAR_APPLY_WAIT,give_up_after:GIVE_UP_AFTER,status:None,turn_start_wait:TURN_START_WAIT,start_grace:START_GRACE}}
 }
 /// Quanto uma linha espera, desde a primeira vez que viu o foco num mod, antes de o executor devolver o
 /// teclado ao prompt. Cobre quem acabou de levar o foco a um painel no terminal, sem deixar a mensagem do
@@ -266,6 +266,8 @@ struct Executor {
     /// trata a sessão como trabalhando, para a próxima não cair no mesmo turno.
     turn_wait:Option<tokio::time::Instant>,
     diag:crate::diag::DiagClient,
+    /// Se esta vida já provou a conversa: até lá, com o agente novo, sem a prova é o Claude subindo.
+    conversation_proved:bool,
 }
 /// Leitura do tamanho do transcript enquanto uma entrega espera confirmação: só `stat`.
 const CONFIRM_POLL:Duration=Duration::from_millis(50);
@@ -289,6 +291,8 @@ fn stalled_code(result:&RuntimeReply)->Option<&str> {
 const MAX_LOAN_S:u64=120;
 /// O `clear_wait` padrão: o transcript novo do `/clear` nasce em menos de um segundo.
 const CLEAR_APPLY_WAIT:Duration=Duration::from_secs(10);
+/// Vida nova sem a conversa provada ainda (o Claude subindo): espera assim, sem erro, até este prazo.
+const START_GRACE:Duration=Duration::from_secs(60);
 /// O `give_up_after` padrão: a prova chega em segundos; minutos sem ela, com o Claude parado, é perda.
 const GIVE_UP_AFTER:Duration=Duration::from_secs(180);
 /// Quanto o aviso de `/clear` não aplicado fica na vista.
@@ -345,7 +349,7 @@ impl TerminalActor {
         let status=options.status.clone();
         if let Some(sender)=&status { sender.send_replace(Default::default()); }
         let executor=Executor {batch_blocked:false,target,queue:Arc::new(queue),local,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,mode_unproved:false,modes_cache:None,uncertain_since:None,loan:None,stall:None,hold:None,hold_checked:false,focus_refused:false,parked:VecDeque::new(),away:None,clear_watch:None,clear_notice:None,footer_misses:None,reconciliation:None,confirm_until:None,confirm_seen:None,
-            unproved_since:None,no_safe_delivery:false,heal_requested:None,turn_wait:None,diag:policy.diag()};
+            unproved_since:None,no_safe_delivery:false,heal_requested:None,turn_wait:None,diag:policy.diag(),conversation_proved:false};
         let run=executor.run(receiver,closed.clone());
         let task=tokio::spawn(async move {
             let mut guard=terminal_status::PanicMark(status);
@@ -470,7 +474,7 @@ impl Executor {
             state["clear_barrier"]=json!({"generation":self.target.generation,"conversation":self.target.binding.conversation,"operation_id":clear.id,"since":since,"raised":raised});
             self.action(Action::SetRuntimeState {state}).await?;
         }
-        if self.cleared(&self.queue.snapshot().await.map_err(|_|error("queue_io"))?) {self.clear_watch=Some(tokio::time::Instant::now()+self.options.clear_wait);}
+        if self.cleared(&*self.queue.snapshot().await.map_err(|_|error("queue_io"))?) {self.clear_watch=Some(tokio::time::Instant::now()+self.options.clear_wait);}
         if let Some(sender)=&self.options.status { terminal_status::publish_snapshot(sender,&self.snapshot().await?); }
         let mut timer=tokio::time::interval(self.options.tick.max(Duration::from_millis(1))); timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -907,6 +911,31 @@ impl Executor {
         Ok(result)
     }
 
+    /// O seletor do `/model` (`model_picker::drive`), com o payload já validado pela rota. Fica no diário
+    /// como a troca de modo: o mesmo ID repetido responde o que ficou, sem digitar de novo.
+    async fn model_effort(&mut self,id:&str,payload:Value)->Result<RuntimeReply,RuntimeError> {
+        let original=json!({"operation_id":id,"kind":"set_model_effort","payload":payload});
+        let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
+        if state.generation!=self.target.generation {return Err(error("runtime_generation"));}
+        if let Some(old)=state.operations.get(id) {
+            if old.payload!=original {return Err(error("operation_payload"));}
+            return serde_json::from_value(old.result.clone()).or_else(|_|Ok(reply(id,Disposition::Unknown,json!({"detail":"resultado incerto; confira o terminal da sessão","error_code":"recovered_operation"}))));
+        }
+        // O código que o app já conhece da recusa do empréstimo do Python.
+        if self.loaned() || self.held() || self.cleared(&state) {
+            return Err(RuntimeError::new("erro_opcao_nao_convergiu","o terminal da sessão está ocupado com outra operação; tente de novo"));
+        }
+        let driver=TerminalDriver::new(self.target.binding.clone(),self.services(id,id,""),self.options.io.clone(),self.options.limits.clone());
+        self.action(Action::Prepare {id:id.into(),payload:original,entry_id:None}).await?;
+        self.action(Action::BeginDispatch {id:id.into(),wire_id:format!("model:{}:{id}",self.target.generation),staged:false}).await?;
+        let result=match crate::model_picker::drive(&driver,payload["model"].as_str(),payload["effort"].as_str(),payload["scope"]=="default").await {
+            Ok(value)=>reply(id,Disposition::Accepted,value),
+            Err(refusal)=>reply(id,if refusal.uncertain {Disposition::Unknown} else {Disposition::Rejected},json!({"detail":refusal.detail,"error_code":refusal.code})),
+        };
+        self.action(Action::Finish {id:id.into(),status:status(result.disposition),result:serde_json::to_value(&result).unwrap()}).await?;
+        Ok(result)
+    }
+
     /// `steer`: o "Orientar" de uma entrada, que passa pelo turno em curso em vez de esperar o Claude parar.
     async fn execute(&mut self,id:&str,kind:&str,payload:Value,entry:Option<String>,steer:bool)->Result<RuntimeReply,RuntimeError> {
         if !valid_operation_id(id) {return Err(error("operation_id"));}
@@ -921,7 +950,8 @@ impl Executor {
             // Os motivos do `_motivo_ocupada` do Python, com a frase que o app já conhece.
             if facts.open_question {return Err(error("erro_sessao_esperando_resposta"));}
             if !facts.idle {return Err(error("erro_sessao_trabalhando"));}
-            if state.rows.iter().any(|row|row["delivered"]==false) {return Err(error("erro_fila_pendente"));}
+            // Na troca por limite a fila foi segurada para ir com a conversa à conta nova.
+            if payload["queued_ok"]!=true && state.rows.iter().any(|row|row["delivered"]==false) {return Err(error("erro_fila_pendente"));}
             return Ok(reply(id,Disposition::Accepted,json!({"idle":true,"conversation":self.target.binding.conversation})));
         }
         if kind=="heal_guard" {
@@ -929,6 +959,7 @@ impl Executor {
             return Ok(reply(id,Disposition::Accepted,json!({"idle":true,"conversation":self.target.binding.conversation})));
         }
         if matches!(kind,"permission_modes"|"set_permission_mode") {return self.permission(id,kind,payload).await;}
+        if kind=="set_model_effort" {return self.model_effort(id,payload).await;}
         validate(kind,&payload)?;
         let requested=json!({"operation_id":id,"kind":kind,"payload":payload});
         let mut original=requested.clone();
@@ -1159,7 +1190,7 @@ impl Executor {
             && !matches!(result.payload["stage"].as_str(),Some("validate"|"identity"|"ready")) {self.footer_misses=None;}
         let clear_raised=slash && is_clear(text) && clear_may_have_run(result.disposition,&result.payload);
         if clear_raised {
-            let mut state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?.runtime_state;
+            let mut state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?.runtime_state.clone();
             state["preserve_binding"]=json!(true);
             state["clear_barrier"]=json!({"generation":self.target.generation,"conversation":self.target.binding.conversation,"operation_id":id,"since":dispatched_at,"raised":sample().epoch_s});
             self.action(Action::SetRuntimeState {state}).await?;
@@ -1280,6 +1311,9 @@ impl Executor {
     async fn drain_once(&mut self,mut entry:Option<String>,steer:bool)->Result<Value,RuntimeError> {
         if self.batch_blocked && entry.is_none() {return Ok(json!({"drained":0,"batch_too_large":true}));}
         if self.loaned() {return Ok(json!({"drained":0,"keyboard_loan":true}));}
+        if self.options.lifecycle.as_ref().and_then(std::sync::Weak::upgrade).is_some_and(|registry|registry.limit_held(&self.target.name)) {
+            return Ok(json!({"drained":0,"limit_held":true}));
+        }
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
         if state.terminal_write_blocked(&self.target.binding.conversation) {return Ok(json!({"drained":0}));}
         if self.cleared(&state) && !self.expire_clear().await {return Ok(json!({"drained":0,"preserve_binding":true}));}
@@ -1292,7 +1326,14 @@ impl Executor {
         if self.stall.as_ref().is_some_and(|s|!state.rows.iter().any(|r|r["delivered"]==false && r["id"]==s.row.as_str()))
             && self.stall.take().is_some_and(|s|s.surfaced) {self.publish().await?;}
         let services=self.services("maintenance","maintenance","");
-        let facts=services.facts(&self.target.binding).await.map_err(|_|error("terminal_facts"))?;
+        let facts=match services.facts(&self.target.binding).await {
+            Ok(facts)=>{self.conversation_proved=true;facts},
+            // O Claude Code só registra e abre a conversa depois de subir: a entrada espera, sem erro na sessão.
+            // O prazo conta da idade do processo do agente: sessão adotada com o Claude de pé há tempo não espera.
+            Err(failure) if failure.0=="terminal_conversation_unavailable" && !self.conversation_proved
+                && sample().epoch_s-self.target.metadata.agent_birth<self.options.start_grace.as_secs_f64()=>return Ok(json!({"drained":0,"starting":true})),
+            Err(_)=>return Err(error("terminal_facts")),
+        };
         // O composer legível e sem pergunta é o que libera a escrita; o turno é conferido logo abaixo.
         self.deliverable=facts.binding==self.target.binding && facts.ready && !facts.open_question;
         // Composer que não se lê (o desenho mudou): não digita às cegas, mas a série de espera aparece na vista.
@@ -1366,6 +1407,8 @@ impl Executor {
         };
         let Some(row)=rows.as_array().and_then(|r|r.first())else{return Ok(json!({"drained":0}));};
         let row_id=row["id"].as_str().ok_or_else(||error("queue_row"))?.to_string();
+        // A sessão voltou a receber mensagem: o aviso da troca por limite que não aconteceu já passou.
+        if let Some(sender)=&self.options.status {terminal_status::publish_limit(sender,None);}
         let attempt=format!("queue:{}:{}",row_id,self.sequence.fetch_add(1,Ordering::Relaxed));
         let outcome=self.execute(&attempt,"input",json!({"text":row["text"],"pre_transcript":row["pre_transcript"]==true}),Some(row_id),steer).await?;
         if directed && self.batch_blocked {self.batch_blocked=false;self.publish().await?;}
@@ -1461,7 +1504,7 @@ impl Executor {
         let current=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
         let legacy=if self.cleared(&current) {Vec::new()} else {super::queue::legacy_rows(&current)};
         for row in legacy {
-            let used=self.queue.snapshot().await.map_err(|_|error("queue_io"))?.used_occurrences;
+            let used=self.queue.snapshot().await.map_err(|_|error("queue_io"))?.used_occurrences.clone();
             let (Some(entry_id),Some((occurrence,normalized_text)))=(row["id"].as_str().map(str::to_owned),self.receipt.match_legacy(&row,&used)) else {continue;};
             // Falha numa legada não desfaz as despachadas já confirmadas: fica para a próxima rodada.
             match self.action(Action::ConfirmLegacy {entry_id,occurrence,normalized_text}).await {
@@ -1621,7 +1664,7 @@ impl Executor {
                 self.clear_watch=Some(now+self.options.clear_wait); return false;
             }
         }
-        let mut runtime=match self.queue.snapshot().await {Ok(state)=>state.runtime_state,Err(_)=>{self.clear_watch=Some(now+self.options.clear_wait); return false;}};
+        let mut runtime=match self.queue.snapshot().await {Ok(state)=>state.runtime_state.clone(),Err(_)=>{self.clear_watch=Some(now+self.options.clear_wait); return false;}};
         if let Some(fields)=runtime.as_object_mut() {fields.remove("clear_barrier"); fields.remove("preserve_binding");}
         if let Err(failure)=self.action(Action::SetRuntimeState {state:runtime}).await {
             tracing::warn!(key=%self.target.key,session=%self.target.name,code=%failure.code,"trava do /clear não saiu do diário; tenta de novo");

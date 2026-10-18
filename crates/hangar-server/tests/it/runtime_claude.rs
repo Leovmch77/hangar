@@ -185,6 +185,52 @@ fn interrupt_denies_all_pending_first() {
     assert_eq!(frames[2]["request"]["subtype"],"interrupt");
 }
 
+/// `_pode_estacionar` do Python: o tempo parado conta do último evento da CLI ou comando nosso, e qualquer
+/// coisa em aberto (turno, permissão, pergunta, subida, esforço pendente, trabalho de fundo, processo morto) impede.
+#[test]
+fn park_idle_counts_from_the_last_activity_and_only_with_nothing_open() {
+    const PARK:f64 = 65.0 * 60.0;
+    let ready = || engine(json!({"name":"session","session_id":"sid","initialized":true,"permission_mode":"manual"}));
+    let mut session = ready();
+    assert_eq!(session.park_idle(10.0 + PARK),Some(PARK),"parada desde a abertura");
+    session.command(command(OperationKind::Input,json!({"text":"oi"})),clock(100.0)).unwrap();
+    assert_eq!(session.park_idle(100.0 + PARK),None,"turno em curso");
+    line(&mut session,json!({"type":"result","subtype":"success","result":"ok"}),300.0);
+    assert_eq!(session.park_idle(300.0 + PARK - 1.0),Some(PARK - 1.0),"o fim do turno é atividade");
+    line(&mut session,json!({"type":"rate_limit_event","rate_limit_info":{}}),400.0);
+    assert_eq!(session.park_idle(400.0 + PARK),Some(PARK),"qualquer evento da CLI é atividade");
+    line(&mut session,json!({"type":"keep_alive"}),500.0);
+    line(&mut session,json!({"type":"cano_stderr","linha":"aviso"}),600.0);
+    assert_eq!(session.park_idle(400.0 + PARK),Some(PARK),"keep_alive e stderr do cano não são atividade");
+
+    let mut permission = ready();
+    line(&mut permission,json!({"type":"control_request","request_id":"p","request":{"subtype":"can_use_tool","tool_name":"Edit","input":{}}}),10.0);
+    assert_eq!(permission.view()["pending"].as_array().unwrap().len(),1,"a permissão ficou em aberto");
+    assert_eq!(permission.park_idle(10.0 + PARK * 2.0),None,"permissão em aberto");
+
+    let mut question = ready();
+    line(&mut question,json!({"type":"control_request","request_id":"q","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[]}}}),10.0);
+    assert_eq!(question.park_idle(10.0 + PARK * 2.0),None,"pergunta em aberto");
+
+    let starting = engine(json!({"name":"session","session_id":"sid"}));
+    assert_eq!(starting.park_idle(10.0 + PARK * 2.0),None,"subida sem initialize");
+
+    let effort = engine(json!({"name":"session","session_id":"sid","initialized":true,"effort_intent":{"operation_id":"e","value":"high","status":"prepared"}}));
+    assert_eq!(effort.park_idle(10.0 + PARK * 2.0),None,"esforço pendente");
+    for status in ["rejected","unknown"] {
+        let settled = engine(json!({"name":"session","session_id":"sid","initialized":true,"effort_intent":{"operation_id":"e","value":"high","status":status}}));
+        assert_eq!(settled.park_idle(10.0 + PARK),Some(PARK),"esforço {status} não está pendente");
+    }
+
+    let mut background = ready();
+    line(&mut background,json!({"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"t1","task_type":"local_bash","description":"build"}]}),10.0);
+    assert_eq!(background.park_idle(10.0 + PARK * 2.0),None,"trabalho de fundo vivo");
+
+    let mut dead = ready();
+    line(&mut dead,json!({"type":"cano_saiu","code":0}),10.0);
+    assert_eq!(dead.park_idle(10.0 + PARK * 2.0),None,"processo já morto não tem o que estacionar");
+}
+
 #[test]
 fn subagent_does_not_close_parent() {
     let mut engine = engine(json!({"name":"session","initialized":true}));
@@ -712,4 +758,68 @@ fn relaunch_helper_failure_says_its_kind_before_exiting() {
         assert_eq!(gone.status.code(), Some(126));
         assert!(String::from_utf8_lossy(&gone.stderr).contains("NotFound"), "{}", String::from_utf8_lossy(&gone.stderr));
     }
+}
+
+fn usage_limits(effects:&[Effect]) -> Vec<UsageLimit> {
+    effects.iter().filter_map(|e|match e { Effect::UsageLimit { limit }=>Some(limit.clone()),_=>None }).collect()
+}
+
+fn feed(engine:&mut ClaudeEngine,lines:&str,seconds:f64) -> Vec<Effect> {
+    lines.lines().flat_map(|l|line(engine,serde_json::from_str(l).unwrap(),seconds)).collect()
+}
+
+#[test]
+fn usage_limit_ends_the_turn_with_its_window_and_reset() {
+    let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+    let effects = feed(&mut engine,include_str!("fixtures/usage_limit/claude_stream_five_hour.jsonl"),11.0);
+    assert_eq!(usage_limits(&effects),vec![UsageLimit { window:"five_hour".into(),resets_at:Some(1791577800.0) }]);
+}
+
+#[test]
+fn throttle_and_other_turn_errors_are_not_a_usage_limit() {
+    for lines in [
+        // `error:"rate_limit"` sem `usage_limit_reached` nem cota recusada: aperto temporário do servidor.
+        concat!(r#"{"type":"assistant","error":"rate_limit","is_api_error_message":true,"api_error_status":429,"message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: rate limited"}]}}"#,"\n",
+                r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"API Error: rate limited"}"#),
+        r#"{"type":"result","subtype":"error_max_turns","is_error":true,"result":"limite"}"#,
+    ] {
+        let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+        let effects = feed(&mut engine,lines,11.0);
+        assert!(usage_limits(&effects).is_empty(),"{lines}");
+    }
+}
+
+#[test]
+fn old_cli_rate_limit_counts_only_with_a_current_rejected_quota() {
+    let reset = 1_800_000_000.0 + 3600.0;
+    for (reset,expected) in [(reset,true),(1_700_000_000.0,false)] {
+        let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+        let lines = format!("{}\n{}\n{}",
+            json!({"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":reset,"rateLimitType":"seven_day"}}),
+            json!({"type":"assistant","error":"rate_limit","message":{"model":"<synthetic>","content":[{"type":"text","text":"You've hit your weekly limit"}]}}),
+            json!({"type":"result","subtype":"success","is_error":true,"result":"You've hit your weekly limit"}));
+        let found = usage_limits(&feed(&mut engine,&lines,11.0));
+        assert_eq!(found.len() == 1,expected,"reset={reset}: {found:?}");
+        if expected { assert_eq!(found[0],UsageLimit { window:"seven_day".into(),resets_at:Some(reset) }); }
+    }
+    // CLI de hoje com outro `api_error`: a cota recusada que sobrou não transforma o erro em limite.
+    let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+    let lines = format!("{}\n{}\n{}",
+        json!({"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":reset,"rateLimitType":"seven_day"}}),
+        json!({"type":"assistant","error":"rate_limit","api_error":"overloaded","message":{"model":"<synthetic>","content":[]}}),
+        json!({"type":"result","subtype":"success","is_error":true,"api_error":"overloaded","result":"overloaded"}));
+    assert!(usage_limits(&feed(&mut engine,&lines,11.0)).is_empty());
+}
+
+/// A abertura que sobe e responde o `initialize` limpa a queda gravada da vida anterior, na tela e
+/// no arquivo da sessão, como o `open_succeeded` do Python; não espera o primeiro turno.
+#[test]
+fn a_good_open_clears_the_persisted_problem() {
+    let mut engine = ClaudeEngine::new(json!({"name":"session","session_id":"sid",
+        "problema":["headless_processo_caiu","Error: not logged in\nrc=3"]}),2,clock(20.0));
+    let effects = engine.start_initialize("init".into()).unwrap();
+    let request_id = writes(&effects)[0]["request_id"].clone();
+    let effects = line(&mut engine,json!({"type":"control_response","response":{"request_id":request_id,"subtype":"success","response":{"commands":[]}}}),21.0);
+    assert!(engine.view()["public_state"]["problema"].is_null(),"{}",engine.view()["public_state"]);
+    assert_eq!(persisted_problem(&effects),Some(Value::Null),"o arquivo da sessão perde a queda antiga");
 }

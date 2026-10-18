@@ -9,7 +9,6 @@ from fastapi.testclient import TestClient
 from app.auth import require_auth
 from app.config import settings
 from app import pair, tmux
-from app import codex_contas
 from app import registry as registry_mod
 from app.registry import SessionRegistry
 from app.transcribe import Transcription, DICTATION_LIMITS, FILE_LIMITS
@@ -77,7 +76,6 @@ def test_rejects_wrong_cookie(client):
 # ---------------------------------------------------------------------------
 from unittest.mock import ANY, patch
 from app.models import SessionInfo
-import codex_contas_apoio
 
 
 @pytest.fixture
@@ -755,7 +753,9 @@ def test_codex_service_tier_requires_auth_and_codex(api_client):
     fake.set_service_tier = AsyncMock()
     with patch("app.api._provider_of", return_value="claude"), patch("app.api.get_adapter", return_value=fake):
         assert api_client.post("/api/sessions/cc/service-tier", json={"service_tier": "priority"}).status_code == 401
-        assert api_client.post("/api/sessions/cc/service-tier", headers=_h(), json={"service_tier": "priority"}).status_code == 400
+        # O Fast do Claude reabre a sessão: é do Rust, e sem ele a rota diz isso.
+        response = api_client.post("/api/sessions/cc/service-tier", headers=_h(), json={"service_tier": "priority"})
+        assert (response.status_code, response.json()["detail"]["code"]) == (503, "session_open_needs_rust_server")
     fake.set_service_tier.assert_not_awaited()
 
 
@@ -1056,211 +1056,18 @@ def test_clear_then_link_route(api_client, _tmp_chain_dir):
     assert ThenLink("a").get() is None
 
 
-def test_create_rejects_unknown_config_dir(api_client, monkeypatch):
-    from app.config import ConfigDirInfo
-    monkeypatch.setattr(api_mod, "list_config_dirs",
-                        lambda: [ConfigDirInfo(path="/h/.claude-work", label="work", active=True)])
-    r = api_client.post("/api/sessions", headers=_h(),
-                        json={"name": "x", "cwd": "/tmp", "config_dir": "/h/.evil"})
-    assert r.status_code == 400
 
 
-# ---------------------------------------------------------------------------
-# Task 6: POST /api/sessions ramifica por `provider` (default "claude" preserva o caminho de
-# hoje). Codex e async (create_codex, mocado -- nao spawna o app-server real); Claude continua
-# indo pro registry.create sincrono (agora via asyncio.to_thread, ver docstring do endpoint).
-# ---------------------------------------------------------------------------
-def test_create_default_provider_routes_to_claude_create(api_client, monkeypatch):
-    monkeypatch.setattr(api_mod, "_session_provider_catalog", AsyncMock(return_value={
-        "claude": {"disponivel": True, "default": True}, "codex": {"disponivel": True, "default": False}}))
-    with patch("app.api.registry.create",
-              return_value=SessionInfo(name="x", cwd="/tmp", provider="claude")) as cr:
-        r = api_client.post("/api/sessions", headers=_h(), json={"name": "x", "cwd": "/tmp"})
-    assert r.status_code == 200
-    assert r.json()["provider"] == "claude"
-    cr.assert_called_once_with("x", "/tmp", None, provider="claude", engine=None,
-                               model=None, effort=None, context_window=None)
-
-
-def test_create_explicit_claude_provider_routes_to_claude_create(api_client):
-    with patch("app.api.registry.create",
-              return_value=SessionInfo(name="x", cwd="/tmp", provider="claude")) as cr:
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "x", "cwd": "/tmp", "provider": "claude"})
-    assert r.status_code == 200
-    cr.assert_called_once_with("x", "/tmp", None, provider="claude", engine=None,
-                               model=None, effort=None, context_window=None)
-
-
-def test_create_codex_provider_routes_to_create_normal(api_client):
-    # Desde o lancador unico o Codex nao tem mais caminho de criacao proprio: ele passa pelo MESMO
-    # registry.create dos outros, com o provider chegando la (senao o pane subiria claude).
-    with patch("app.api.registry.create",
-               return_value=SessionInfo(name="cx", cwd="/tmp", provider="codex", jsonl=None)) as cr:
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "cx", "cwd": "/tmp", "provider": "codex"})
-    assert r.status_code == 200
-    assert r.json()["provider"] == "codex"
-    # jsonl vazio como no Pi/Kimi: o rollout so existe depois que a TUI abre a thread.
-    assert r.json()["jsonl"] is None
-    cr.assert_called_once_with("cx", "/tmp", None, provider="codex", engine=None,
-                               model=None, effort=None, context_window=None)
-
-
-def test_create_codex_descarta_snapshot_da_sessao_anterior(api_client, monkeypatch):
-    from app import api as api_mod
-    old = SessionInfo(name="cx", provider="claude", jsonl="/antiga.jsonl")
-    new = SessionInfo(name="cx", provider="codex", tracked=False, jsonl=None)
-    monkeypatch.setattr(api_mod, "_list_snap", {"snap": (api_mod.time.monotonic(), [old])})
-    with patch.object(api_mod.registry, "create", return_value=new), \
-         patch.object(api_mod.registry, "list", return_value=[new]):
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "cx", "cwd": "/tmp", "provider": "codex"})
-        assert r.status_code == 200
-        assert api_mod._cached_info_sync("cx").provider == "codex"
-
-
-def test_create_codex_forwards_wrapper_initial_prompt(api_client):
-    # O prompt inicial vai no COMANDO do pane (a TUI e quem abre a thread), entao ele precisa
-    # atravessar ate o create.
-    with patch("app.api.registry.create",
-               return_value=SessionInfo(name="cx", cwd="/tmp", provider="codex")) as cr:
-        r = api_client.post("/api/sessions", headers=_h(), json={
-            "name": "cx", "cwd": "/tmp", "provider": "codex",
-            "initial_prompt": "revise este projeto",
-        })
-    assert r.status_code == 200
-    assert cr.call_args.kwargs["initial_prompt"] == "revise este projeto"
-
-
-@pytest.mark.parametrize("tier", ["fast", "", True, 1, ["priority"]])
-def test_create_rejects_invalid_service_tier(api_client, tier):
-    with patch("app.api.registry.create") as create:
-        response = api_client.post("/api/sessions", headers=_h(), json={
-            "name": "cx", "cwd": "/tmp", "provider": "codex", "service_tier": tier})
-    assert response.status_code == 422
-    create.assert_not_called()
-
-
-@pytest.mark.parametrize("provider", ["claude", "pi", "kimi", "omp"])
-def test_create_service_tier_only_accepts_codex(api_client, provider):
-    with patch("app.api.registry.create") as create:
-        response = api_client.post("/api/sessions", headers=_h(), json={
-            "name": "cx", "cwd": "/tmp", "provider": provider, "service_tier": "default"})
-    assert response.status_code == 400
-    assert response.json()["detail"]["code"] == "erro_criacao_sessao"
-    create.assert_not_called()
-
-
-@pytest.mark.parametrize("tier", ["priority", "default"])
-@pytest.mark.parametrize("headless", [False, True])
-def test_create_forwards_service_tier_before_codex_warmup(api_client, tier, headless):
-    from unittest.mock import AsyncMock
-    account = codex_contas.Account("work", Path("/tmp/codex-work"), False)
-    info = SessionInfo(name="cx", cwd="/tmp", provider="codex", headless=headless)
-    with patch("app.api._resolve_codex_account", return_value=account), \
-         patch("app.api._codex_require_idle_preparation"), \
-         patch("app.api._codex_service", return_value=None), \
-         patch("app.api.codex_models.checar_escolha") as check, \
-         patch("app.api.registry.create", return_value=info) as create, \
-         patch("app.api._aquecer_codex_sem_terminal", new_callable=AsyncMock) as warm:
-        # Sem codex_account: os clientes antigos continuam sem keyword codex_home.
-        response = api_client.post("/api/sessions", headers=_h(), json={
-            "name": "cx", "cwd": "/tmp", "provider": "codex", "headless": headless,
-            "model": "native-model", "service_tier": tier})
-    assert response.status_code == 200
-    check.assert_called_once_with("native-model", None, service_tier=tier)
-    assert create.call_args.kwargs["service_tier"] == tier
-    if not headless:
-        warm.assert_not_called()
-
-
-@pytest.mark.parametrize("tier,status", [("priority", 502), ("default", 200), (None, 200)])
-def test_create_priority_cannot_skip_unavailable_catalog(api_client, tier, status):
-    body = {"name": "cx", "cwd": "/tmp", "provider": "codex", "headless": False, "model": "native-model"}
-    if tier is not None:
-        body["service_tier"] = tier
-    with patch("app.api.codex_models.checar_escolha", side_effect=api_mod.codex_models.CodexIndisponivel("offline")), \
-         patch("app.api.registry.create", return_value=SessionInfo(name="cx", provider="codex")) as create:
-        response = api_client.post("/api/sessions", headers=_h(), json=body)
-    assert response.status_code == status
-    assert create.called == (status == 200)
-    if status == 502:
-        assert response.json()["detail"]["code"] == "erro_codex_catalogo_invalido"
-    elif tier is None:
-        assert "service_tier" not in create.call_args.kwargs
-
-
-def test_create_priority_without_announced_service_is_rejected(api_client, monkeypatch):
-    monkeypatch.setattr(api_mod.codex_models, "listar", lambda **options: [{
-        "id": "native-model", "efforts": [], "service_tiers": [], "additional_speed_tiers": ["fast"]}])
-    def refused(operation, payload):
-        assert operation == "validate_model"
-        assert payload["model"] == "native-model"
-        raise api_mod.dictation_bridge.BridgeError(400, "dictation_model_unavailable", "service_tier priority indisponível para native-model")
-    monkeypatch.setattr(api_mod.dictation_bridge, "request", refused)
-    with patch("app.api.registry.create") as create:
-        response = api_client.post("/api/sessions", headers=_h(), json={
-            "name": "cx", "cwd": "/tmp", "provider": "codex", "model": "native-model", "service_tier": "priority"})
-    assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "erro_codex_escolha_invalida"
-    create.assert_not_called()
-
-
-def test_create_pi_provider_routes_to_claude_create_with_provider(api_client):
-    # Pi usa o MESMO registry.create (pane tmux); o provider TEM que chegar la, senao o create
-    # spawnaria claude e pre-semearia um transcript do layout errado.
-    with patch("app.api.registry.create",
-              return_value=SessionInfo(name="p", cwd="/tmp", provider="pi", jsonl=None)) as cr:
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "p", "cwd": "/tmp", "provider": "pi"})
-    assert r.status_code == 200
-    assert r.json()["provider"] == "pi"
-    assert r.json()["jsonl"] is None
-    cr.assert_called_once_with("p", "/tmp", None, provider="pi", engine=None,
-                               model=None, effort=None, context_window=None)
-
-
-def test_create_pi_with_engine_is_refused(api_client):
-    # Motor so faz sentido no Claude: o env do hangar-engine e Anthropic-only.
-    with patch("app.api.registry.create") as cr:
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "p", "cwd": "/tmp", "provider": "pi", "engine": "kimi"})
-    assert r.status_code == 400
-    cr.assert_not_called()
-
-
-def test_create_omp_provider_routes_to_claude_create_with_provider(api_client):
-    # omp e o fork do Pi: MESMO registry.create, so o provider muda o comando do pane.
-    with patch("app.api.registry.create",
-              return_value=SessionInfo(name="o", cwd="/tmp", provider="omp", jsonl=None)) as cr:
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "o", "cwd": "/tmp", "provider": "omp"})
-    assert r.status_code == 200
-    assert r.json()["provider"] == "omp"
-    assert r.json()["jsonl"] is None
-    cr.assert_called_once_with("o", "/tmp", None, provider="omp", engine=None,
-                               model=None, effort=None, context_window=None)
-
-
-def test_create_omp_with_engine_is_refused(api_client):
-    # Motor so faz sentido no Claude: o env do hangar-engine e Anthropic-only.
-    with patch("app.api.registry.create") as cr:
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "o", "cwd": "/tmp", "provider": "omp", "engine": "x"})
-    assert r.status_code == 400
-    cr.assert_not_called()
-
-
-def test_create_rejects_unknown_provider(api_client):
-    with patch("app.api.registry.create") as cr:
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "x", "cwd": "/tmp", "provider": "gemini"})
-    assert r.status_code == 400
-    # B3 do parecer task 11: provider fora da lista nao pode reusar o codigo do /api/model-options
-    # (que orienta so claude/pi) — a criacao aceita codex/kimi e o texto tem que ser generico.
-    assert r.json()["detail"]["code"] == "erro_provider_sessao_invalido"
-    cr.assert_not_called()
+@pytest.mark.parametrize("headless, named", [(None, True), (True, True), (None, False)])
+def test_create_claude_needs_rust(api_client, headless, named):
+    # Claude, com e sem terminal, abre no Rust: sem ele a abertura recusa antes de qualquer efeito.
+    # Sem nome também: o comando de terminal lê este código para abrir na máquina.
+    body = {"cwd": "/tmp", "provider": "claude"} | ({"name": "x"} if named else {})
+    if headless is not None:
+        body["headless"] = headless
+    r = api_client.post("/api/sessions", headers=_h(), json=body)
+    assert r.status_code == 503
+    assert r.json()["detail"]["code"] == "session_open_needs_rust_server"
 
 
 def test_rename_falha_usa_a_mesma_chave_da_sidebar(api_client):
@@ -1286,24 +1093,6 @@ def test_rename_codex_sem_terminal_nao_exige_tmux(api_client):
     has_tmux.assert_not_called()
 
 
-def test_create_sem_terminal_sobe_o_processo_na_criacao(api_client):
-    from app.models import SessionInfo
-    info = SessionInfo(name="hl", cwd="/tmp", jsonl="/tmp/x.jsonl", tracked=True, provider="claude", headless=True)
-    adapter = MagicMock()
-    with patch("app.api.registry.create", return_value=info), \
-         patch("app.api.get_adapter", return_value=adapter):
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "hl", "cwd": "/tmp", "provider": "claude", "headless": True})
-    assert r.status_code == 200
-    adapter.acordar.assert_called_once_with("hl")
-
-
-def test_create_codex_conflict_maps_to_409(api_client):
-    fake = MagicMock(side_effect=ValueError("ja existe uma sessao com esse nome"))
-    with patch("app.api.registry.create", fake):
-        r = api_client.post("/api/sessions", headers=_h(),
-                            json={"name": "cx", "cwd": "/tmp", "provider": "codex"})
-    assert r.status_code == 409
 
 
 # ---------------------------------------------------------------------------
@@ -2080,177 +1869,9 @@ def test_push_settings_route(api_client, monkeypatch, tmp_path):
 _SID = "11111111-1111-1111-1111-111111111111"
 
 
-def test_resume_archived_route_derives_name_from_cwd(api_client):
-    with patch("app.api.archive_cwd", return_value="/home/u/my-proj"), \
-         patch.object(tmux, "has_session", return_value=False), \
-         patch("app.api.registry.create",
-               return_value=SessionInfo(name="my-proj", cwd="/home/u/my-proj")) as create:
-        r = api_client.post(f"/api/archive/-home-u-my-proj/{_SID}/resume", headers=_h())
-    assert r.status_code == 200
-    assert r.json()["name"] == "my-proj"
-    create.assert_called_once_with("my-proj", "/home/u/my-proj", config_dir=None, provider="claude",
-                                  resume_session_id=_SID, engine=None)
-
-
-def test_resume_archived_route_suffixes_on_name_collision(api_client):
-    # ja existe uma sessao tmux "my-proj" viva -> mesmo esquema de sufixo -2/-3... do CreateSessionSheet.
-    with patch("app.api.archive_cwd", return_value="/home/u/my-proj"), \
-         patch.object(tmux, "has_session", side_effect=[True, False]), \
-         patch("app.api.registry.create",
-               return_value=SessionInfo(name="my-proj-2", cwd="/home/u/my-proj")) as create:
-        r = api_client.post(f"/api/archive/-home-u-my-proj/{_SID}/resume", headers=_h())
-    assert r.status_code == 200
-    create.assert_called_once_with("my-proj-2", "/home/u/my-proj", config_dir=None, provider="claude",
-                                  resume_session_id=_SID, engine=None)
-
-
-def test_resume_archived_route_volta_com_o_nome_pedido(api_client):
-    with patch("app.api.archive_cwd", return_value="/home/u/my-proj"), \
-         patch.object(tmux, "has_session", return_value=False), \
-         patch("app.api.registry.create",
-               return_value=SessionInfo(name="auditoria-migracao", cwd="/home/u/my-proj")) as create:
-        r = api_client.post(f"/api/archive/-home-u-my-proj/{_SID}/resume", json={"name": "auditoria-migracao"}, headers=_h())
-    assert r.status_code == 200
-    assert create.call_args.args[0] == "auditoria-migracao"
-
-
-def test_resume_archived_route_422_when_cwd_missing(api_client):
-    with patch("app.api.archive_cwd", return_value=None):
-        r = api_client.post(f"/api/archive/-home-u-my-proj/{_SID}/resume", headers=_h())
-    assert r.status_code == 422
-
-
-def test_resume_archived_409_when_transcript_already_live(api_client, tmp_path):
-    jsonl = tmp_path / f"{_SID}.jsonl"
-    jsonl.write_text("{}\n")
-    viva = SessionInfo(name="ja-aberta", cwd="/home/u/my-proj", jsonl=str(jsonl))
-    with patch("app.api.archive_cwd", return_value="/home/u/my-proj"), \
-         patch("app.api.archive_jsonl", return_value=jsonl), \
-         patch("app.api.registry.list", return_value=[viva]), \
-         patch("app.api.registry.create") as create, \
-         patch("app.api.move_conversation") as mover:
-        r = api_client.post(f"/api/archive/-home-u-my-proj/{_SID}/resume", headers=_h())
-    assert r.status_code == 409
-    detail = r.json()["detail"]
-    assert detail["code"] == "erro_conversa_viva"
-    assert detail["params"]["sessao"] == "ja-aberta"
-    create.assert_not_called()
-    mover.assert_not_called()
-
-
-def test_resume_archived_route_404_when_transcript_missing(api_client):
-    with patch("app.api.archive_cwd", side_effect=FileNotFoundError()):
-        r = api_client.post(f"/api/archive/-home-u-my-proj/{_SID}/resume", headers=_h())
-    assert r.status_code == 404
-
-
 # --- Retomar conversa CODEX do Arquivo (ticket 08) ---
 # A rota recusava com 409. O id da conversa e o uuid do fim do nome do rollout, e e ele que o
 # `codex resume` recebe — o mesmo id que o Arquivo ja usa pra listar e abrir a conversa.
-
-def test_resume_archived_codex_cria_sessao_ligada_a_conversa(api_client):
-    origem = codex_contas.Account("default", Path("/tmp/codex"), True)
-    with patch("app.api.archive_cwd", return_value="/home/u/my-proj"), \
-         patch("app.api.archive_jsonl", return_value=Path("/tmp/codex/sessions/rollout.jsonl")), \
-         patch("app.api.codex_accounts.account_for_rollout", return_value=origem), \
-         patch.object(tmux, "has_session", return_value=False), \
-         patch("app.api.codex_sessions.exists", return_value=False), \
-         patch("app.api.registry.create",
-               return_value=SessionInfo(name="my-proj", cwd="/home/u/my-proj",
-                                        provider="codex")) as create:
-        r = api_client.post(f"/api/archive/codex/{_SID}/resume", headers=_h(),
-                            json={"provider": "codex"})
-    assert r.status_code == 200
-    assert r.json()["provider"] == "codex"
-    create.assert_called_once_with("my-proj", "/home/u/my-proj", config_dir=None, provider="codex",
-                                   resume_session_id=_SID, engine=None, codex_account="default")
-
-
-def test_resume_archived_codex_desvia_de_nome_de_sessao_codex_viva(api_client):
-    """A sessao Codex viva nao esta no tmux com aquele nome — esta no sidecar. Olhando so o tmux, o
-    conflito estourava la dentro do create, com a mensagem de outro assunto."""
-    origem = codex_contas.Account("default", Path("/tmp/codex"), True)
-    with patch("app.api.archive_cwd", return_value="/home/u/my-proj"), \
-         patch("app.api.archive_jsonl", return_value=Path("/tmp/codex/sessions/rollout.jsonl")), \
-         patch("app.api.codex_accounts.account_for_rollout", return_value=origem), \
-         patch("app.api.registry.list", return_value=[]), \
-         patch.object(tmux, "has_session", return_value=False), \
-         patch("app.api.codex_sessions.exists", side_effect=lambda name: name == "my-proj"), \
-         patch("app.api.registry.create",
-               return_value=SessionInfo(name="my-proj-2", cwd="/home/u/my-proj")) as create:
-        r = api_client.post(f"/api/archive/codex/{_SID}/resume", headers=_h(),
-                            json={"provider": "codex"})
-    assert r.status_code == 200
-    assert create.call_args[0][0] == "my-proj-2"
-
-
-def test_resume_archived_codex_encaminha_a_conta_da_origem(api_client, monkeypatch, tmp_path):
-    monkeypatch.setattr(__import__("pathlib").Path, "home",
-                        classmethod(lambda cls: tmp_path))
-    monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", tmp_path / ".codex")
-    work = codex_contas_apoio.create_account("work")
-    sid = "cccccccc-cccc-cccc-cccc-cccccccccccc"
-    path = work.home / "sessions" / "2026" / "09" / "09"
-    path.mkdir(parents=True)
-    (path / f"rollout-2026-09-09T10-00-00-{sid}.jsonl").write_text(json.dumps({
-        "type": "session_meta", "payload": {"session_id": sid, "cwd": "/home/u/my-proj"},
-    }) + "\n", encoding="utf-8")
-    with patch.object(tmux, "has_session", return_value=False), \
-         patch("app.api.codex_sessions.exists", return_value=False), \
-         patch("app.api.registry.create",
-               return_value=SessionInfo(name="my-proj", cwd="/home/u/my-proj",
-                                        provider="codex")) as create:
-        response = api_client.post(f"/api/archive/codex/{sid}/resume", headers=_h(),
-                                   json={"provider": "codex"})
-    assert response.status_code == 200, response.text
-    assert create.call_args.kwargs["codex_account"] == "work"
-
-
-def test_resume_archived_codex_recusa_conta_diferente_da_origem(api_client, monkeypatch, tmp_path):
-    monkeypatch.setattr(__import__("pathlib").Path, "home",
-                        classmethod(lambda cls: tmp_path))
-    monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", tmp_path / ".codex")
-    work = codex_contas_apoio.create_account("work")
-    other = codex_contas_apoio.create_account("other")
-    sid = "dddddddd-dddd-dddd-dddd-dddddddddddd"
-    path = work.home / "sessions" / "2026" / "09" / "09"
-    path.mkdir(parents=True)
-    (path / f"rollout-2026-09-09T10-00-00-{sid}.jsonl").write_text(json.dumps({
-        "type": "session_meta", "payload": {"session_id": sid, "cwd": "/home/u/my-proj"},
-    }) + "\n", encoding="utf-8")
-    with patch("app.api.registry.create") as create:
-        response = api_client.post(f"/api/archive/codex/{sid}/resume", headers=_h(),
-                                   json={"provider": "codex", "codex_account": other.id})
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "codex_account_archive_mismatch"
-    create.assert_not_called()
-
-
-def test_resume_archived_codex_recusa_nome_de_rollout_sem_id(api_client):
-    """Nome fora do padrao nao tem id pra retomar, e "caminho invalido" mandaria procurar defeito no
-    lugar errado."""
-    r = api_client.post("/api/archive/codex/rollout-sem-uuid/resume", headers=_h(),
-                        json={"provider": "codex"})
-    assert r.status_code == 400
-    assert r.json()["detail"]["code"] == "erro_rollout_sem_id"
-
-
-def test_resume_archived_codex_id_com_36_chars_fora_do_formato_tambem_e_recusado(api_client):
-    """Uma definição mais frouxa de "id válido" aqui do que a que o Arquivo usa deixava um id de 36
-    caracteres passar por esta guarda e falhar mais adiante como "caminho inválido" — a mensagem que
-    explica o problema não aparecia justo no caso em que ela é útil."""
-    r = api_client.post(f"/api/archive/codex/{'-' * 36}/resume", headers=_h(),
-                        json={"provider": "codex"})
-    assert r.status_code == 400
-    assert r.json()["detail"]["code"] == "erro_rollout_sem_id"
-
-
-def test_resume_archived_codex_404_em_conversa_inexistente(api_client):
-    with patch("app.api.archive_cwd", side_effect=FileNotFoundError()):
-        r = api_client.post(f"/api/archive/codex/{_SID}/resume", headers=_h(),
-                            json={"provider": "codex"})
-    assert r.status_code == 404
-
 
 # ---------------------------------------------------------------------------
 # /answer: fallback por texto quando o drive da TUI falha (DriveError)

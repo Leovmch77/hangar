@@ -44,11 +44,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   push no `.github/workflows/server.yml` de lá, nunca recua, e o download usa o manifesto lido na
   escolha; sem ler a lista, para no commit do binário. Só binário de commit fora de `origin/<branch>`
   cai no commit mais novo com o mesmo número. A tela conta as mudanças até esse commit e também oferece atualizar quando o binário
-  instalado não é o publicado (código em dia, binário que saiu depois). Atrás do topo, a tela avisa que a versão mais nova ainda não tem binário e é
+  instalado não é o publicado (código em dia, binário que saiu depois). Atrás do topo, a tela avisa que aguarda o build do servidor Rust e é
   compilada aqui (também no Reiniciar); checkout já à frente com binário de outro contrato também
-  avisa. Sem Rust (`CP_RUST_SERVER=0`), sem release própria da branch (404) ou sem build deste
-  sistema no manifesto: topo, como antes, calado. Sem como conferir (rede, git, commit ilegível):
-  topo com aviso na tela, e o auto-update espera; ele só avança com o topo inteiro publicado.
+  avisa. Sem Rust (`CP_RUST_SERVER=0`) ou sem release própria de branch fora da main (404): topo,
+  como antes, calado. Sem como conferir (rede, git, 404 na release da main, sem build deste
+  sistema no manifesto, commit ilegível): o checkout só avança no contrato que já tem, com aviso
+  na tela (checkout sem contrato vai ao topo), e o auto-update espera; ele só avança com o topo
+  inteiro publicado.
   Evidência em [Atualizar para no binário publicado](#atualizar-para-no-binário-publicado-06102026).
 - **O app nativo segue o canal do servidor desta máquina.** `pre_voo.alvo` fora da main → release
   `native-<branch>`, que o `native.yml` publica a cada push no canal `beta` (mesma limpeza de nome no
@@ -609,6 +611,13 @@ Build de UM sistema que falha: no manifesto antigo ele sai da lista e o asset ve
 commit conhecido, então esse sistema vai ao topo, como antes. O manifesto por sistema
 (`platforms.<sistema>` com `commit` e `protocol`) resolve: a escolha usa a entrada do próprio
 sistema, e o `commit` do topo só vale quando a chave `platforms` não existe.
+
+15/10/2026: os casos "sem como conferir" iam ao topo. Reproduzido em teste (checkout e binário no
+35, topo no 36): com o `server-latest.json` respondendo 404, sem build deste sistema no
+manifesto, sem rede ou com o commit do binário ausente, o checkout terminava no 36 com o binário
+35. O 404 na main não é "sem release": o `gh release upload --clobber` do `server.yml` apaga o
+manifesto antes de subir o novo, e cada sistema que publica regrava. Agora o contrato que vale
+nesses casos é o do checkout: trocar dele sem binário conferido é o que deixa o Python sozinho.
 
 **Commit exato, não o mesmo contrato (16/10/2026).** No notebook do Jefferson o Atualizar das 17:41
 levou o checkout a `2970723f` enquanto o build do `server.yml` de `cb6daadbb`, que trazia a correção

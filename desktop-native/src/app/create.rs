@@ -512,6 +512,8 @@ pub(in crate::app) struct NewSession {
     model_choice_touched: bool,
     /// A conta escolhida à mão no menu da tela sem sessão: a troca por cota esgotada não passa por cima dela.
     account_touched: bool,
+    /// A sugestão de cota mostrou outra conta que não a ativa: ela vai no pedido, senão a sessão nasceria noutra.
+    account_suggested: bool,
     effort: String,
     service_tier: Option<String>,
     permission: String,
@@ -635,8 +637,8 @@ impl NewSession {
             config: None, config_pick: None, customizations: Default::default(), customizations_search,
             customizations_focus: cx.focus_handle().tab_stop(true), codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true, headless_owner: None, headless_touched: false, headless_saving: false,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
-            step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, account_touched: false, effort: String::new(), service_tier: None,
-            permission: "bypassPermissions".into(), saved_default: None, permission_touched: false, subagent: String::new(), engine: String::new(), engine_account: String::new(), engine_account_pick: None, model_pick: None, effort_pick: None,
+            step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, account_touched: false, account_suggested: false, effort: String::new(), service_tier: None,
+            permission: String::new(), saved_default: None, permission_touched: false, subagent: String::new(), engine: String::new(), engine_account: String::new(), engine_account_pick: None, model_pick: None, effort_pick: None,
             permission_pick: None, subagent_pick: None, engine_pick: None, engines: Remote::default(), jev: Remote::default(), jev_on: false,
             more: false, omp, quotas: Remote::default(), reopen_config: None, reopen_default: false, asking: false, confirming: false, keep_transcripts: true, account_busy: false, account_seq: 0, account_name,
             notice: None, created_path: None, context_seq: 0, context_busy: false, context_on: None, context_want: None, context_error: None,
@@ -906,7 +908,7 @@ impl NewSession {
 
     fn load_configs(&mut self, cx: &mut Context<Self>) {
         let seq = self.configs.start();
-        (self.model_choice_touched, self.account_touched) = (false, false);
+        (self.model_choice_touched, self.account_touched, self.account_suggested) = (false, false, false);
         self.request(cx, move |api, send| Box::pin(async move { send(CreateReply::Configs(seq, api.server_read(&["claude-configs"], &[], 15).await)).await }));
     }
 
@@ -1016,7 +1018,8 @@ impl NewSession {
         (self.provider, self.error) = (provider, None);
         self.model.clear();
         self.effort.clear();
-        self.permission = match provider { "codex" => "Full Access".into(), "claude" => "bypassPermissions".into(), _ => String::new() };
+        // Vazio = "Padrão": o campo não vai e o servidor usa o modo da conta (Claude) ou Full Access (Codex).
+        self.permission.clear();
         self.permission_touched = false;
         if provider == "codex" { self.load_codex(cx); self.load_context(cx); } else { self.drop_context(); self.drop_codex(); }
         self.build_engine_account_pick(window, cx);
@@ -1159,7 +1162,7 @@ impl NewSession {
         }
         match provider {
             "claude" => {
-                body["config_dir"] = json!(self.config);
+                body["config_dir"] = self.requested_config();
                 body["engine"] = text(&self.engine);
                 if self.proxy_accounts().is_some() { body["engine_account"] = json!(self.engine_account); }
                 if !self.permission.is_empty() { body["permission_mode"] = json!(self.permission); }
@@ -1174,7 +1177,7 @@ impl NewSession {
         if let Some(tier) = self.service_tier_for_creation() { body["service_tier"] = json!(tier); }
         if matches!(provider, "claude" | "codex") && !self.headless_inherited() {
             body["headless"] = json!(self.headless);
-            if provider == "codex" && self.headless { body["permission_mode"] = text(&self.permission); }
+            if provider == "codex" && self.headless && !self.permission.is_empty() { body["permission_mode"] = json!(self.permission); }
         }
         // O bastão não leva o Jev (o interruptor nem aparece) e vai por rota própria, que monta, grava e manda o resumo.
         let baton = self.baton.as_ref().map(|b| b.name.clone());
@@ -1184,7 +1187,7 @@ impl NewSession {
             let claude = provider == "claude";
             let omp = self.omp.read(cx).value().trim().to_owned();
             body = json!({"name": name, "cwd": cwd, "provider": provider, "model": text(&self.model), "effort": text(&self.effort),
-                "config_dir": if claude { json!(self.config) } else { Value::Null },
+                "config_dir": if claude { self.requested_config() } else { Value::Null },
                 "engine": if claude { text(&self.engine) } else { Value::Null },
                 "permission_mode": if claude { text(&self.permission) } else { Value::Null },
                 "omp_profile": if provider == "omp" { text(&omp) } else { Value::Null },
@@ -1373,7 +1376,7 @@ impl NewSession {
                     || self.provider != "claude" || !self.engine.is_empty() || self.target().is_some() { return None; }
                 let path = result.ok().and_then(|v| v.get("path").and_then(Value::as_str).map(str::to_owned));
                 if let Some(path) = path.filter(|p| self.accounts().any(|c| &c.path == p) && self.config.as_ref() != Some(p)) {
-                    self.config = Some(path);
+                    (self.config, self.account_suggested) = (Some(path), true);
                     self.build_config_pick(window, cx);
                     self.load_models(window, cx);
                 }

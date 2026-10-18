@@ -3,10 +3,9 @@
 Existe separado do `adapter.py` porque TRES processos diferentes precisam concordar nisto e nenhum
 deles pode pagar o preco de importar o adapter (asyncio, websockets, parser do transcript):
 
-- o backend, que cria a sessao (`registry.create` -> `CodexAdapter.spawn_command`);
-- `scripts/hangar-codex-tui`, o lancador, que roda no pane a cada abertura de sessao;
-- `scripts/hangar-codex`, o wrapper do `codex` do shell, que precisa criar a sessao mesmo com o
-  backend desligado.
+- o backend, na retomada do Arquivo e na transferência (`registry.create`, `adopt_imported`); a
+  sessão nova abre no Rust (`session_open/codex.rs`, mesma ordem de flags);
+- `scripts/hangar-codex-tui`, o lancador, que roda no pane a cada abertura de sessao.
 
 Divergir aqui nao daria erro nenhum — daria uma TUI com permissao diferente da que o resto do
 sistema supoe, calada. Modulo so de stdlib, de proposito: o wrapper roda no `python3` do sistema.

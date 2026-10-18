@@ -592,7 +592,7 @@ mod tests {
     async fn terminal_status_monitor_reads_initial_state_and_ignores_other_sessions() {
         let registry = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "test".into(), "instance".into()));
         let sender = registry.terminal_status_sender("a");
-        let initial = RuntimeView { error: Some("queue_io".into()), message: Some("fila indisponível".into()), input_stalled: None };
+        let initial = RuntimeView { error: Some("queue_io".into()), message: Some("fila indisponível".into()), input_stalled: None, limit: None };
         sender.send_replace(initial.clone());
         let view = Arc::new(Mutex::new(RuntimeView::default()));
         let wake = Arc::new(Notify::new());

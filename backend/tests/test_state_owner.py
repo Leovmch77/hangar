@@ -425,6 +425,26 @@ async def test_claude_headless_python_mode_runs_python_state(headless, monkeypat
         await _coleta(sse.merged_events("h", str(jsonl), provider="claude", side=True), lambda v: False, limite=2.0)
 
 
+async def test_python_state_stream_closes_when_the_rust_comes_back(headless, monkeypatch):
+    # Conexão aberta pela 8768 com o Python dono do estado: o Rust de volta assume, e ela não
+    # segue raspando o pane nem lendo o cliente que o Python soltou. Fecha, e o app reconecta.
+    adapter, jsonl = headless
+    async def calado():
+        await asyncio.Event().wait()
+        yield
+    monkeypatch.setattr(adapter, "state_monitor", lambda name, sid_get, **kw: calado())
+    dono = _Dono("python")
+    dono.python_left = asyncio.Event()
+    monkeypatch.setattr(runtime_coordinator, "_current", dono)
+    asyncio.get_running_loop().call_later(0.3, dono.python_left.set)
+    try:
+        await _coleta(sse.merged_events("h", str(jsonl), provider="claude"), lambda v: False, limite=3.0)
+        closed = None
+    except Exception as exc:
+        closed = exc
+    assert isinstance(closed, sse.RustStateChannelError) and closed.code == "state_owner_changed", repr(closed)
+
+
 async def test_claude_headless_guest_reads_six_from_rust_channel(headless):
     _adapter, jsonl = headless
     async with _CanalRust(_HEADLESS_EVENTS):
