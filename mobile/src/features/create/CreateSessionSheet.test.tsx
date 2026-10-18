@@ -1858,8 +1858,33 @@ describe('CreateSessionSheet Codex', () => {
         expect(calls.create).toHaveBeenCalledTimes(1);
         const body = calls.create.mock.calls[0][1];
         expect(body).toMatchObject({ cwd: '/repo/hangar', provider: 'claude' });
-        expect(body.name).toMatch(/^hangar-[a-z0-9]{4}$/);
+        expect(body.name).toBe('hangar');
         expect(calls.send).not.toHaveBeenCalled();
+        expect(calls.replace).toHaveBeenCalledWith('/s/server-b/nova');
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('sem nome digitado, a sessão segue a pasta como no servidor: a pasta já em uso vira pasta-2', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      calls.sessions.mockResolvedValue([{ name: 'hangar', cwd: '/repo/hangar' }]);
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        await act(async () => button(container, 'criar_criar')!.click());
+        await act(async () => Promise.resolve());
+        expect(calls.create.mock.calls[0][1].name).toBe('hangar-2');
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('nome automático que o servidor diz em uso tenta uma vez com o próximo, sem abrir a sessão antiga', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      calls.create.mockRejectedValueOnce(Object.assign(new Error('nome em uso'), { status: 409, code: 'erro_nome_em_uso' }));
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        await act(async () => button(container, 'criar_criar')!.click());
+        for (let i = 0; i < 5; i++) await act(async () => Promise.resolve());
+        expect(calls.create.mock.calls.map((call) => call[1].name)).toEqual(['hangar', 'hangar-2']);
         expect(calls.replace).toHaveBeenCalledWith('/s/server-b/nova');
       } finally { act(() => root.unmount()); }
     });

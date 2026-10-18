@@ -14,7 +14,7 @@ import { semEsforco } from '../pills/pills';
 import { SettingsList } from '../../ui/SettingsList';
 import { useServers } from '../../stores/servers';
 import { readProject, rememberProject } from '../../stores/createPreferences';
-import { defaultSessionName, type NewConversationInput } from '../../stores/newConversation';
+import { autoSessionName, type NewConversationInput } from '../../stores/newConversation';
 import { CwdPicker } from './CwdPicker';
 import { loadErrorText } from './loadError';
 import { useCanceledLoadRetry } from './useCanceledLoadRetry';
@@ -839,31 +839,46 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
 
   const blocked = contextBusy || retomando || !!retomavel || (!!picked && !codexReady);
   const canCreate = !!body && !blocked && !creating;
-  // Sem primeira mensagem: cria e abre a conversa vazia, como o formulário do PWA. O nome sorteado vale
+  // Sem primeira mensagem: cria e abre a conversa vazia, como o formulário do PWA. O nome escolhido vale
   // para a mesma pasta e nome digitado: repetir depois de uma falha de rede não abre uma segunda sessão.
   const createInFlight = useRef(false);
-  const attemptName = useRef<{ key: string; name: string } | null>(null);
+  const attemptName = useRef<{ key: string; name: string; known: boolean } | null>(null);
   const createSession = async () => {
     if (!body || !canCreate || createInFlight.current) return;
     createInFlight.current = true;
     setCreating(true);
     setError('');
     const key = `${body.cwd}\n${name.trim()}`;
+    const typed = name.trim();
     const previous = attemptName.current;
     const retry = previous?.key === key;
-    const finalName = retry ? previous.name : name.trim() || defaultSessionName(body.cwd);
-    attemptName.current = { key, name: finalName };
+    let chosen = retry ? previous : typed ? { name: typed, known: true } : await autoSessionName(active, body.cwd);
     // Quem cancelou já saiu: a sessão nasceu e fica na lista, sem puxar a pessoa de volta.
     const open = (session: string) => { if (mounted.current) router.replace(`/s/${active.id}/${session}` as never); };
     try {
-      const session = await createSessionForServer(active, { ...body, name: finalName,
-        ...(body.new_branch && !body.branch?.trim() ? { branch: sanitizeSessionName(finalName) } : {}) });
-      open(session.name);
+      for (let first = true; ; first = false) {
+        attemptName.current = { key, ...chosen };
+        try {
+          const session = await createSessionForServer(active, { ...body, name: chosen.name,
+            ...(body.new_branch && !body.branch?.trim() ? { branch: sanitizeSessionName(chosen.name) } : {}) });
+          open(session.name);
+          return;
+        } catch (cause: unknown) {
+          // Nome automático em uso (lista fora do ar, ou outra tela criou no meio): uma tentativa com o próximo.
+          if (!typed && !retry && first && (cause as { code?: unknown } | null)?.code === 'erro_nome_em_uso') {
+            chosen = await autoSessionName(active, body.cwd, [chosen.name]);
+            continue;
+          }
+          throw cause;
+        }
+      }
     } catch (cause: unknown) {
+      const finalName = chosen.name;
       // A resposta pode ter se perdido com a sessão já criada: a lista do servidor decide. Recusa
-      // definitiva (4xx) não criou nada; 409 só conta como "nasceu" na repetição da mesma tentativa.
+      // definitiva (4xx) não criou nada; 409 só conta como "nasceu" na repetição da mesma tentativa, e
+      // no nome automático só se ele estava livre na lista: senão a sessão com esse nome pode ser outra.
       const status = (cause as { status?: unknown } | null)?.status;
-      const lost = typeof status !== 'number' || status >= 500 || status === 408 || (status === 409 && retry);
+      const lost = typeof status !== 'number' || status >= 500 || status === 408 || (status === 409 && retry && chosen.known);
       const exists = !lost ? false : await fetchSessionsForServer(active)
         .then((list) => list.some((session) => session.name === finalName), () => null);
       if (exists) open(finalName);
