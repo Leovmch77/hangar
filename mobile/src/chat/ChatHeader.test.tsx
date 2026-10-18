@@ -15,8 +15,8 @@ const store = vi.hoisted(() => ({ rows: [] as AggSession[] }));
 vi.mock('../stores/sessions', () => ({ useSessions: (pick: (s: typeof store) => unknown) => pick(store) }));
 vi.mock('react-native', async (original) => {
   const native = await original<typeof import('react-native')>();
-  return { ...native, View: ({ testID, accessibilityElementsHidden, ...props }: import('react-native').ViewProps) =>
-    createElement(native.View, { ...props, ...{ 'data-testid': testID, 'aria-hidden': accessibilityElementsHidden } }) };
+  return { ...native, View: ({ testID, accessibilityElementsHidden, importantForAccessibility, ...props }: import('react-native').ViewProps) =>
+    createElement(native.View, { ...props, ...{ 'data-testid': testID, 'aria-hidden': accessibilityElementsHidden, 'data-important-for-accessibility': importantForAccessibility } }) };
 });
 vi.mock('react-native-svg', async (original) => ({
   ...await original<typeof import('react-native-svg')>(),
@@ -61,6 +61,24 @@ const session: AggSession = { name: 'mobile-menu', serverId: 'casa', serverLabel
 const avatar = () => host.querySelector<HTMLElement>('[data-testid="session-avatar"]');
 const title = () => host.querySelector<HTMLButtonElement>('button[aria-label^="mobile-menu,"]');
 const homeButton = () => host.querySelector(`[aria-label="${m.chat_ir_inicio()}"]`) as HTMLElement | null;
+
+it.each(['/home/u/hangar-voz', undefined])('ícone decorativo identifica o servidor no subtítulo com pasta %s', (cwd) => {
+  store.rows = [{ ...session, cwd }];
+  render();
+  const icon = host.querySelector('[data-symbol="desktopcomputer"]');
+  expect(icon).not.toBeNull();
+  const mark = icon!.parentElement!;
+  expect(mark.getAttribute('aria-hidden')).toBe('true');
+  expect(mark.getAttribute('data-important-for-accessibility')).toBe('no');
+  expect(mark.nextElementSibling?.textContent).toBe('casa');
+  if (cwd) expect(mark.previousElementSibling?.textContent).toBe('hangar-voz @ ');
+  expect(title()?.getAttribute('aria-label')?.split('casa')).toHaveLength(2);
+});
+
+it('sem servidor conhecido não desenha o computador', () => {
+  render();
+  expect(host.querySelector('[data-symbol="desktopcomputer"]')).toBeNull();
+});
 
 it('mostra a casa ao lado do voltar e leva ao Início', () => {
   const onHome = vi.fn();

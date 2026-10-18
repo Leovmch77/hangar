@@ -10,6 +10,7 @@ import { WorkingMark } from '../ui/WorkingMark';
 import { LiveVoiceChatButton } from '../features/voice/LiveVoiceChatButton';
 import { useSessions } from '../stores/sessions';
 import { useServers } from '../stores/servers';
+import { SPACE } from '../theme/scale';
 
 const PILL: Record<State, keyof ThemeTokens['pill']> = {
   working: 'working',
@@ -81,15 +82,23 @@ export function ChatHeader({
               {name}
             </Text>
             {destino || aviso ? (
-              <Text style={[styles.destino, { color: theme.tokens.text.muted }]} numberOfLines={1}>
-                {aviso ? (
-                  <Text testID="chat-state-word" style={[styles.aviso, state === 'awaiting_input' && { color: theme.tokens.status.warning }]}>
-                    {aviso}
-                  </Text>
-                ) : null}
-                {aviso && destino ? ' · ' : ''}
-                {destino}
-              </Text>
+              <View style={styles.subtitle}>
+                {aviso || pasta ? <Text style={[styles.destino, { color: theme.tokens.text.muted }]} numberOfLines={1}>
+                  {aviso ? (
+                    <Text testID="chat-state-word" style={[styles.aviso, state === 'awaiting_input' && { color: theme.tokens.status.warning }]}>
+                      {aviso}
+                    </Text>
+                  ) : null}
+                  {aviso && destino ? ' · ' : ''}
+                  {pasta}{pasta && serverLabel ? ' @ ' : ''}
+                </Text> : null}
+                {serverLabel ? <>
+                  <View style={styles.serverIcon} accessibilityElementsHidden importantForAccessibility="no">
+                    <Icon name="Monitor" size={SPACE[3]} color={theme.tokens.text.muted} />
+                  </View>
+                  <Text style={[styles.destino, { color: theme.tokens.text.muted }]} numberOfLines={1}>{serverLabel}</Text>
+                </> : null}
+              </View>
             ) : null}
           </View>
         </Pressable>
@@ -151,7 +160,10 @@ const styles = StyleSheet.create((theme) => ({
   },
   destino: {
     fontSize: theme.base.text.xxs,
+    flexShrink: 1,
   },
+  subtitle: { flexDirection: 'row', alignItems: 'center', minWidth: 0 },
+  serverIcon: { flexShrink: 0, marginRight: theme.base.space[0.5] },
   tocado: {
     backgroundColor: theme.tokens.bg.hover,
   },

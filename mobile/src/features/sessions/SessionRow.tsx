@@ -9,6 +9,7 @@ import { SessionAvatar } from './SessionAvatar';
 import { HeadlessSignal } from './HeadlessSignal';
 import { Icon } from '../../ui/Icon';
 import { superficie } from '../../theme/superficie';
+import { SPACE } from '../../theme/scale';
 import { useWorktreeStatus } from '../worktrees/worktreeStatus';
 import * as m from '../../paraglide/messages';
 
@@ -219,6 +220,9 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
         {meta.length || engineLabel || mostrarServidor || branchWt || account || temGit ? (
           <View style={styles.metaRow}>
             {mostrarServidor ? <>
+              <View style={styles.serverIcon} accessibilityElementsHidden importantForAccessibility="no">
+                <Icon name="Monitor" size={SPACE[3]} color={muted} />
+              </View>
               <Text style={[styles.meta, styles.metaRest, { color: s.serverColor }]} numberOfLines={1}>{s.serverLabel}</Text>
               {meta.length || engineLabel || branchWt ? <Text style={[styles.meta, styles.metaSeparator, { color: s.serverColor }]}>{' · '}</Text> : null}
             </> : null}
@@ -231,7 +235,7 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
             {meta.length ? <Text style={[styles.meta, styles.metaRest, { color: muted }]} numberOfLines={1}>{engineLabel ? ' · ' : ''}{meta.join(' · ')}</Text> : null}
             {branchWt ? <>
               {meta.length || engineLabel ? <Text style={[styles.meta, styles.metaSeparator, { color: muted }]}>{' · '}</Text> : null}
-              <Icon name="GitBranch" size={12} color={muted} />
+              <Icon name="GitBranch" size={SPACE[3]} color={muted} />
               <Text style={[styles.meta, styles.metaRest, styles.branchWt, { color: muted }]} numberOfLines={1}>{branchWt}</Text>
             </> : null}
             {temGit ? (
@@ -304,6 +308,7 @@ const styles = StyleSheet.create((theme) => ({
   tempo: { marginLeft: 'auto', paddingLeft: theme.base.space[1], flexShrink: 0, fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
   sub: { fontSize: theme.base.text.sm, lineHeight: 20 },
   metaRow: { flexDirection: 'row', alignItems: 'center', minWidth: 0 },
+  serverIcon: { flexShrink: 0, marginRight: theme.base.space[1] },
   engine: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], minWidth: 0, flexShrink: 0 },
   engineText: { fontWeight: theme.base.weight.semibold, flexShrink: 0 },
   metaRest: { flexShrink: 1 },

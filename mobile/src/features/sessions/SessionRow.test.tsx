@@ -20,8 +20,8 @@ vi.mock('react-native', async (original) => {
   const native = await original<typeof import('react-native')>();
   return {
     ...native,
-    View: ({ testID, accessibilityElementsHidden, ...props }: import('react-native').ViewProps) =>
-      createElement(native.View, { ...props, ...{ 'data-testid': testID, 'aria-hidden': accessibilityElementsHidden } }),
+    View: ({ testID, accessibilityElementsHidden, importantForAccessibility, ...props }: import('react-native').ViewProps) =>
+      createElement(native.View, { ...props, ...{ 'data-testid': testID, 'aria-hidden': accessibilityElementsHidden, 'data-important-for-accessibility': importantForAccessibility } }),
     // O DOM não compõe linhas nativas; preserva o contrato de truncamento recebido pelo Text.
     Text: (props: import('react-native').TextProps) =>
       createElement(native.Text, { ...props, ...{ 'data-number-of-lines': props.numberOfLines } }),
@@ -33,6 +33,7 @@ vi.mock('expo-haptics', () => ({ impactAsync: () => Promise.resolve(), ImpactFee
 
 vi.mock('react-native-svg', async (original) => ({
   ...await original<typeof import('react-native-svg')>(),
+  Svg: ({ children, ...props }: { children?: ReactNode }) => createElement('svg', props, children),
   default: ({ children, ...props }: { children?: ReactNode }) => createElement('svg', props, children),
   Path: (props: { d: string }) => createElement('path', props),
 }));
@@ -90,6 +91,39 @@ async function render(session: AggSession, extra: Record<string, unknown> = {}) 
 
 describe('SessionRow', () => {
   afterEach(() => { Platform.OS = 'android'; });
+
+  it.each([false, true])('ícone de computador antecede o servidor sem mudar sua cor ou anúncio (compact=%s)', async (compact) => {
+    const session: AggSession = { ...base, name: 'api', worktree: true, worktree_path: '/repo/api', branch: 'fix/api' };
+    for (const os of ['ios', 'android'] as const) {
+      Platform.OS = os;
+      const { container, root } = await render(session, { compact, mostrarServidor: true });
+      try {
+        const server = Array.from(container.querySelectorAll('span')).find(el => el.textContent === base.serverLabel)!;
+        const mark = server.previousElementSibling!;
+        expect(mark).not.toBeNull();
+        expect(mark.querySelector(os === 'ios' ? '[data-symbol="desktopcomputer"]' : 'svg')).not.toBeNull();
+        expect(mark.getAttribute('aria-hidden')).toBe('true');
+        expect(mark.getAttribute('data-important-for-accessibility')).toBe('no');
+        const probe = document.createElement('span');
+        probe.style.color = base.serverColor;
+        expect(server.style.color).toBe(probe.style.color);
+        expect(container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label')?.split(base.serverLabel)).toHaveLength(2);
+        if (os === 'android') {
+          const monitor = mark.querySelector('svg')!;
+          const branch = Array.from(server.parentElement!.querySelectorAll('svg')).at(-1)!;
+          expect(monitor.getAttribute('width')).toBe('12');
+          expect(monitor.getAttribute('stroke')).toBe(useUnistyles().theme.tokens.text.muted);
+          expect(monitor.getAttribute('width')).toBe(branch.getAttribute('width'));
+          expect(monitor.getAttribute('stroke')).toBe(branch.getAttribute('stroke'));
+        }
+      } finally { act(() => root.unmount()); }
+      const hidden = await render(session, { compact });
+      try {
+        expect(hidden.container.textContent).not.toContain(base.serverLabel);
+        expect(hidden.container.querySelector('[data-symbol="desktopcomputer"]')).toBeNull();
+      } finally { act(() => hidden.root.unmount()); }
+    }
+  });
 
   it.each([false, true])('sinal de sessão sem terminal acompanha o nome e o rótulo acessível (compact=%s)', async (compact) => {
     for (const headless of [true, false, undefined]) {
