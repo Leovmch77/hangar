@@ -524,9 +524,9 @@ fn materialize(fixture: &Value, root: &std::path::Path) {
         write(std::path::Path::new(&place(path)), place(&text).as_bytes());
     }
     let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
     for program in ["claude", "codex", "pi", "omp", "kimi", "hangar-codex-tui", "hangar-engine", "bwrap"] {
-        write(&bin.join(program), b"#!/bin/sh\nexit 1\n");
-        std::fs::set_permissions(bin.join(program), std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::write_test_executable(&bin.join(program), b"#!/bin/sh\nexit 1\n");
     }
     // O catálogo do Codex que o harness deu à ponte vira o `model/list` de um app-server falso; sem
     // ele no cenário o `codex` segue saindo com erro (catálogo fora do ar).
@@ -564,8 +564,7 @@ fn materialize(fixture: &Value, root: &std::path::Path) {
         }
     }
     write(&bin.join("panes.txt"), panes.as_bytes());
-    write(&bin.join("tmux"), b"#!/bin/sh\n[ \"$1\" = list-panes ] || exit 1\ncat \"$(dirname \"$0\")/panes.txt\"\n");
-    std::fs::set_permissions(bin.join("tmux"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::write_test_executable(&bin.join("tmux"), b"#!/bin/sh\n[ \"$1\" = list-panes ] || exit 1\ncat \"$(dirname \"$0\")/panes.txt\"\n");
     // As cotas que o harness deu ao Python vinham do Rust: o cache dele em disco. Conta fora da
     // padrão só é fonte de cota com a marca do Hangar.
     let now = crate::accounts::quotas::now();
@@ -1551,12 +1550,10 @@ fn a_name_being_opened_is_in_use_until_the_open_ends() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_silent_multiplexer_does_not_free_the_name() {
-    use std::os::unix::fs::PermissionsExt;
     let runtime = test_runtime();
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(home.path().join("bin")).unwrap();
-    std::fs::write(home.path().join("bin/tmux"), "#!/bin/sh\necho 'lost server' >&2\nexit 2\n").unwrap();
-    std::fs::set_permissions(home.path().join("bin/tmux"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::write_test_executable(&home.path().join("bin/tmux"), "#!/bin/sh\necho 'lost server' >&2\nexit 2\n");
     let error = local_facts(home.path(), &runtime).name_in_use("s1").unwrap_err();
     assert_eq!((error.status, error.code), (503, Some("erro_mux_indisponivel")));
 }
@@ -1829,12 +1826,10 @@ fn an_unwritten_record_fails_the_open_before_the_pane() {
 #[test]
 fn the_account_guard_covers_the_preparation() {
     let (raw, _dir, _root) = run_contract_with("create_claude_terminal_hangar_account", |_| {}, |root| {
-        use std::os::unix::fs::PermissionsExt;
         let script = concat!("#!/bin/sh\nheld=0\nfor f in \"$HOME\"/.hangar/account-locks/*.lock; do\n",
             "  [ -e \"$f\" ] && ! flock -n -x \"$f\" true && held=1\ndone\n",
             "[ $held = 1 ] || { echo 'hangar-conta: a guarda da conta estava livre' >&2; exit 1; }\n");
-        std::fs::write(root.join("bin/hangar-conta"), script).unwrap();
-        std::fs::set_permissions(root.join("bin/hangar-conta"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::write_test_executable(&root.join("bin/hangar-conta"), script);
     });
     assert_eq!(raw["steps"][0]["status"], 200, "{}", raw["steps"][0]["body"]);
 }
@@ -1857,10 +1852,8 @@ fn an_uncertain_terminal_keeps_the_worktree() {
 #[test]
 fn read_only_is_refused_before_the_worktree() {
     let (raw, _dir, root) = run_contract_with("create_worktree_new_branch", |s| s["steps"][0]["json"]["read_only"] = json!(true), |root| {
-        use std::os::unix::fs::PermissionsExt;
         let hook = root.join("home/pessoal/repo/.git/hooks/post-checkout");
-        std::fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", root.join("checked-out").display())).unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::write_test_executable(&hook, format!("#!/bin/sh\ntouch {}\n", root.join("checked-out").display()));
     });
     assert_eq!((raw["steps"][0]["status"].clone(), raw["steps"][0]["body"]["detail"]["code"].clone()),
         (json!(400), json!("erro_criacao_sessao")), "{}", raw["steps"][0]["body"]);
@@ -1985,10 +1978,8 @@ fn unreadable_sidecars_are_errors_not_absent() {
 fn local_facts(home: &std::path::Path, runtime: &tokio::runtime::Runtime) -> facts::LocalFacts {
     #[cfg(unix)]
     if home.is_dir() && !home.join("bin/tmux").exists() {
-        use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(home.join("bin")).unwrap();
-        std::fs::write(home.join("bin/tmux"), "#!/bin/sh\necho 'no server running on /tmp/tmux-teste/default' >&2\nexit 1\n").unwrap();
-        std::fs::set_permissions(home.join("bin/tmux"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::write_test_executable(&home.join("bin/tmux"), "#!/bin/sh\necho 'no server running on /tmp/tmux-teste/default' >&2\nexit 1\n");
     }
     let env = [("HOME", home), ("PATH", &home.join("bin"))].map(|(k, v)| (k.to_owned(), v.to_string_lossy().into_owned()));
     facts::LocalFacts::new(crate::accounts::environment::AccountEnvironment::from_map(env.into_iter().collect()), runtime.handle().clone())
@@ -2013,8 +2004,7 @@ fn installed_clis_come_from_the_login_shell_path() {
     exec(login.join("codex"), 0o644);
     exec(bin.join("kimi"), 0o755);
     let shell = home.path().join("login-shell");
-    std::fs::write(&shell, format!("#!/bin/sh\necho x >> {}\necho {}\n", home.path().join("calls").display(), login.display())).unwrap();
-    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::write_test_executable(&shell, format!("#!/bin/sh\necho x >> {}\necho {}\n", home.path().join("calls").display(), login.display()));
     let env: std::collections::BTreeMap<String, String> = [("HOME", home.path()), ("PATH", &bin), ("SHELL", &shell)]
         .map(|(k, v)| (k.to_owned(), v.to_string_lossy().into_owned())).into_iter().collect();
     assert_eq!(facts::installed_providers(&env), vec![AgentProvider::Pi], "PATH do login, e o `codex` sem permissão não conta");

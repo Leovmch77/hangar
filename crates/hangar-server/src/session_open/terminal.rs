@@ -410,9 +410,8 @@ pub(crate) mod tests {
     fn the_read_only_agent_replaces_the_shell_inside_the_sandbox() {
         let dir = tempfile::tempdir().unwrap();
         let (dash, bwrap) = (dir.path().join("dash"), dir.path().join("bwrap"));
-        std::fs::write(&dash, "#!/bin/bash\nshift\neval \"$1\"\n").unwrap();
-        std::fs::write(&bwrap, format!("#!/bin/bash\nshift\nexec '{}' \"$@\"\n", dash.display())).unwrap();
-        for file in [&dash, &bwrap] { std::fs::set_permissions(file, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap(); }
+        crate::write_test_executable(&dash, "#!/bin/bash\nshift\neval \"$1\"\n");
+        crate::write_test_executable(&bwrap, format!("#!/bin/bash\nshift\nexec '{}' \"$@\"\n", dash.display()));
         let argv = sandboxed(&[bwrap.to_string_lossy().into_owned()], &["sleep".into(), "30".into()], false);
         let mut child = std::process::Command::new(&argv[0]).args(&argv[1..]).spawn().unwrap();
         let comm = || std::fs::read_to_string(format!("/proc/{}/comm", child.id())).unwrap_or_default().trim().to_owned();
@@ -518,15 +517,12 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (marker, ran) = (dir.path().join("shell-do-usuario"), dir.path().join("rodou"));
         let shell = dir.path().join("fakeshell");
-        std::fs::write(&shell, format!("#!/bin/sh\ntouch '{}'\nexec /bin/sh \"$@\"\n", marker.display())).unwrap();
+        crate::write_test_executable(&shell, format!("#!/bin/sh\ntouch '{}'\nexec /bin/sh \"$@\"\n", marker.display()));
         let conf = dir.path().join("tmux.conf");
         std::fs::write(&conf, format!("set -g default-shell '{}'\n", shell.display())).unwrap();
         let program = dir.path().join("tmux");
         let socket = format!("hangar-shell-{}", std::process::id());
-        std::fs::write(&program, format!("#!/bin/sh\nexec tmux -L {socket} -f '{}' \"$@\"\n", conf.display())).unwrap();
-        for file in [&shell, &program] {
-            std::fs::set_permissions(file, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        }
+        crate::write_test_executable(&program, format!("#!/bin/sh\nexec tmux -L {socket} -f '{}' \"$@\"\n", conf.display()));
         let env = TerminalEnv { program: program.to_string_lossy().into_owned(), ..machine() };
         let mut pane = claude(Vec::new(), None);
         pane.cwd = dir.path().to_string_lossy().into_owned();
@@ -631,11 +627,9 @@ pub(crate) mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_failed_mux_command_goes_to_the_diary() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let tmux = dir.path().join("tmux");
-        std::fs::write(&tmux, "#!/bin/sh\ncase \"$1\" in new-session) echo segredo >&2; exit 1;; has-session) echo \"can't find session: x\" >&2; exit 1;; esac\n").unwrap();
-        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::write_test_executable(&tmux, "#!/bin/sh\ncase \"$1\" in new-session) echo segredo >&2; exit 1;; has-session) echo \"can't find session: x\" >&2; exit 1;; esac\n");
         let diary = dir.path().join("diario");
         let mux = ProcessMux { diary: Some(diary.clone()), ..ProcessMux::default() };
         let tmux = tmux.to_string_lossy().into_owned();

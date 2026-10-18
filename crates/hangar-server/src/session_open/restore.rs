@@ -685,8 +685,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("tmux");
         let socket = format!("hangar-restore-agent-{}", std::process::id());
-        std::fs::write(&program, format!("#!/bin/sh\nSHELL=/bin/sh exec tmux -L {socket} -f /dev/null \"$@\"\n")).unwrap();
-        std::fs::set_permissions(&program, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        crate::write_test_executable(&program, format!("#!/bin/sh\nSHELL=/bin/sh exec tmux -L {socket} -f /dev/null \"$@\"\n"));
         let run = |args: &[&str]| std::process::Command::new(&program).args(args).status().unwrap().success();
         // Em argumentos separados o tmux roda direto, como o lançamento: o `/bin/sh -c` do comando único fica
         // de pai no dash e se troca no bash.
