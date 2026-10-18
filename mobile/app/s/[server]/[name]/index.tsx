@@ -66,8 +66,12 @@ export default function ChatScreen() {
   const settingsSequence = useRef(0);
   const [settingsRequest, setSettingsRequest] = useState<{ route: string; which: 'mode' | 'account'; n: number } | null>(null);
   const openSettings = useCallback((which: 'mode' | 'account') => {
+    if (which === 'account' && useSessions.getState().rows.find(row => row.serverId === serverId && row.name === name)?.provider === 'claude') {
+      router.push(`/s/${encodeURIComponent(serverId)}/${encodeURIComponent(name)}/account` as never);
+      return;
+    }
     setSettingsRequest({ route: rota, which, n: ++settingsSequence.current });
-  }, [rota]);
+  }, [rota, router, serverId, name]);
   const consumeSettingsRequest = useCallback((n: number) => {
     setSettingsRequest(current => current?.n === n ? null : current);
   }, []);

@@ -29,8 +29,8 @@ vi.mock('../stores/chat', async () => {
 });
 vi.mock('react-native', async original => {
   const actual = await original<typeof import('react-native')>();
-  return { ...actual, Alert: { alert: boundary.alert },
-    Pressable: ({ accessibilityState, ...props }: Record<string, unknown>) => createElement(actual.Pressable, props),
+  return { ...actual, View: ({ accessibilityValue, ...props }: Record<string, any>) => createElement(actual.View, { ...props, 'aria-valuenow': accessibilityValue?.now }), Alert: { alert: boundary.alert },
+    Pressable: ({ accessibilityState, accessibilityValue, ...props }: Record<string, any>) => createElement(actual.Pressable, { ...props, 'aria-valuetext': accessibilityValue?.text }),
     ScrollView: ({ contentInsetAdjustmentBehavior, contentContainerStyle, ...props }: Record<string, unknown>) => createElement(actual.View, props),
     Text: ({ selectable, ...props }: Record<string, unknown>) => createElement(actual.Text, props),
   };
@@ -75,6 +75,8 @@ const credentials = engineAccounts.slice(0, 6).map((a, i) => ({
   login: { estado: i === 5 ? 'indisponivel' : 'ok', loggedIn: i === 4 ? false : true },
   cota: { estado: i === 1 ? 'indisponivel' : 'lida', janelas: [{ rotulo: '5h', pct: i === 2 ? 99 : i === 3 ? 95 : 17 }] },
 }));
+const claudeCredential = (path: string, name: string) => ({ id: `claude:${path}`, tipo: 'claude', nome: name, nome_natural: name,
+  path, ativa: false, usos: ['claude_code'], login: { estado: 'ok', loggedIn: true } });
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -113,7 +115,8 @@ beforeEach(() => {
   sessionReply = async () => json([source]);
   postReply = async () => json({ ok: true, config_dir: targets[0].path });
   engineReply = async () => json({ motores: { 'local-gpt': { cliproxy_accounts: engineAccounts } }, arquivo_corrompido: false, arquivo_caminho: '/engines.json' });
-  credentialsReply = async () => json(credentials);
+  credentialsReply = async () => json([...credentials, ...targets.map(t => claudeCredential(t.path, t.label)),
+    claudeCredential('/home/u/.claude-alpha', 'alpha'), claudeCredential('/home/u/.claude-low', 'low')]);
   network = vi.fn((url: string, init?: RequestInit) => {
     if (url === `https://replacement.test/api/sessions/${source.name}/conta`) return init?.method === 'POST' ? postReply() : listReply();
     if (url === `${own.baseUrl}/api/engines`) return engineReply();
@@ -130,6 +133,64 @@ afterEach(() => {
   act(() => { roots.splice(0).forEach(root => root.unmount()); });
   vi.unstubAllGlobals();
   _limparEsfriamentoParaTestes(); _resetRotasForTests();
+});
+
+describe('Contas com identificação e cota completa', () => {
+  it('destino sem login confirmado fica selecionável com aviso e no fim', async () => {
+    credentialsReply = async () => json([claudeCredential('/home/u/.claude-full', 'full')]);
+    const { container } = await mount();
+    expect(button(container, 'beta')).not.toBeNull();
+    expect(button(container, 'beta')!.disabled).toBe(false);
+    expect(container.textContent!.indexOf('.claude-full')).toBeLessThan(container.textContent!.indexOf('.claude-beta'));
+    await click(container, 'beta');
+    expect(boundary.alert).toHaveBeenCalledTimes(1);
+    expect(posts()).toHaveLength(0);
+  });
+  const credential = (folder: string, pct: number, extra = {}) => ({
+    id: `claude:/home/u/${folder}`, tipo: 'claude', nome: 'Ricardo e Brendon', nome_natural: folder,
+    path: `/home/u/${folder}`, ativa: false, usos: ['claude_code'],
+    login: { estado: 'ok', loggedIn: true, email: 'same@test', plano: 'Max' },
+    cota: { estado: 'lida', janelas: [{ rotulo: '5h', pct, reset_ts: 1800000000 }, { rotulo: '7d', pct: 12, reset_ts: 1800086400 }] },
+    ...extra,
+  });
+  it('ordena pela pior janela e distingue homônimas pela pasta, sem descartar nenhuma', async () => {
+    listReply = async () => json([
+      { path: '/home/u/.claude-02-200', label: 'Ricardo e Brendon', pct: 80, full: false, low: false },
+      { path: '/home/u/.claude-claude-200-2', label: 'Ricardo e Brendon', pct: 30, full: false, low: false },
+    ]);
+    credentialsReply = async () => json([credential('.claude-02-200', 80), credential('.claude-claude-200-2', 30)]);
+    const { container } = await mount();
+    const content = container.textContent!;
+    expect(content).toContain('same@test');
+    expect(content).toContain('Max');
+    expect(content.indexOf('.claude-claude-200-2')).toBeLessThan(content.indexOf('.claude-02-200'));
+    const spoken = container.querySelector('button')?.getAttribute('aria-valuetext');
+    expect(spoken).toContain('.claude-claude-200-2');
+    expect(spoken).toContain('5h 30%');
+    expect(spoken).toContain('7d 12%');
+    expect([...container.querySelectorAll('[role="progressbar"]')].map(e => e.getAttribute('aria-valuenow'))).toEqual(['30', '12', '80', '12']);
+  });
+  it('esconde só login comprovadamente ausente e conserva login que não pôde conferir', async () => {
+    listReply = async () => json(['backup', 'uncertain', 'valid'].map((id) => ({ path: `/home/u/.claude-${id}`, label: id, pct: null, full: false, low: false })));
+    credentialsReply = async () => json([
+      credential('.claude-backup', 0, { login: { estado: 'ok', loggedIn: false } }),
+      credential('.claude-uncertain', 0, { login: { estado: 'indisponivel', loggedIn: null, motivo: 'prazo' }, cota: { estado: 'indisponivel', motivo: 'http-429', janelas: [] } }),
+      credential('.claude-valid', 0),
+    ]);
+    const { container } = await mount();
+    expect(button(container, 'backup')).toBeNull();
+    expect(container.textContent).toContain('.claude-uncertain');
+    expect(container.textContent).toContain(m.cota_causa_limite());
+    expect(button(container, 'uncertain')!.disabled).toBe(false);
+  });
+  it('marca a atual no topo com nome amigável e suas duas janelas', async () => {
+    credentialsReply = async () => json([credential('.claude-alpha', 90, { nome: 'Conta atual' })]);
+    const { container } = await mount();
+    expect(container.textContent).toContain('Conta atual');
+    expect(container.textContent!.indexOf('Conta atual')).toBeLessThan(container.textContent!.indexOf('beta'));
+    expect([...container.querySelectorAll('[role="progressbar"]')].map(e => e.getAttribute('aria-valuenow'))).toContain('90');
+    expect(container.textContent).toContain(m.mobile_accounts_quota_reset({ when: 'whatever' }).split('whatever')[0]);
+  });
 });
 
 describe('C3 vida da sessão', () => {
@@ -235,6 +296,7 @@ describe('C1 transição real do transcript', () => {
     it.each(['before', 'after'])(`${pathsCase.os}: preserva sucesso com lista chegando %s do POST`, async when => {
       setSession({ ...source, jsonl: pathsCase.from });
       listReply = async () => json([{ ...targets[0], path: pathsCase.dir }]);
+      credentialsReply = async () => json([claudeCredential(pathsCase.dir, 'beta')]);
       const pending = deferred<Response>(); postReply = () => pending.promise;
       const { container } = await mount();
       await click(container, 'beta'); await act(async () => confirm()());
@@ -364,7 +426,7 @@ describe('F4 identidade e proteção', () => {
   it.each(['codex', 'pi', 'omp', 'kimi'] as const)('provider %s mostra só conta atual sem destinos nem POST', async provider => {
     setSession({ ...source, provider, conta: provider === 'codex' ? 'codex:/home/u/.codex-main' : null });
     const { container } = await mount();
-    expect(container.textContent).toContain(m.cota_conta_ativa());
+    expect(container.textContent).toContain(m.mobile_account_current());
     expect(container.textContent).toContain(provider === 'codex' ? 'main' : m.native_invalid_response());
     expect(button(container, 'beta')).toBeNull();
     expect(network).not.toHaveBeenCalled();
@@ -490,12 +552,12 @@ describe('F3 motor GPT', () => {
     expect(container.textContent).toContain(m.mobile_session_account_success({ conta: 'local-gpt · two' }));
   });
 
-  it('bloqueia 99%, login desconectado e indisponível; avisa em 95%', async () => {
+  it('bloqueia 99%, oculta login desconectado e permite login incerto; avisa em 95%', async () => {
     const { container } = await mount();
     expect(button(container, 'ChatGPT full')).not.toBeNull();
-    for (const label of ['ChatGPT full', 'ChatGPT off', 'ChatGPT unavailable']) {
-      expect(button(container, label)!.disabled).toBe(true);
-    }
+    expect(button(container, 'ChatGPT full')!.disabled).toBe(true);
+    expect(button(container, 'ChatGPT off')).toBeNull();
+    expect(button(container, 'ChatGPT unavailable')!.disabled).toBe(false);
     await click(container, 'ChatGPT low');
     expect(boundary.alert).toHaveBeenCalledTimes(1);
     expect(boundary.alert.mock.calls[0][1]).toContain(m.conta_confirmar_acabando({ conta: 'ChatGPT low', pct: 95 }));
@@ -604,7 +666,7 @@ describe('F2 troca Anthropic', () => {
 describe('F1 leitura', () => {
   it('mostra conta da conversa e lê destinos no servidor da rota, sem mudar o ativo', async () => {
     const { container } = await mount();
-    expect(container.textContent).toContain(m.cota_conta_ativa());
+    expect(container.textContent).toContain(m.mobile_account_current());
     expect(container.textContent).toContain('alpha');
     expect(button(container, 'beta')).not.toBeNull();
     expect(container.textContent).toContain(m.conta_cota_sem_leitura());
