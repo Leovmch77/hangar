@@ -48,8 +48,16 @@ o hook `eas-build-post-install` compila as duas antes do bundle; sem a do core o
 
 O Release do GitHub e os builds EAS `preview` recebem o canal `preview`; EAS `production` usa `production`.
 Instale primeiro um binário novo com `expo-updates`; o app já instalado sem ele não recebe OTA.
+Publique a partir de uma árvore com uma instalação só, a mesma do workflow Mobile OTA:
+`rm -rf mobile/node_modules` e, na raiz, `npm ci --workspace=@hangar/core --workspace=mobile`.
+A instalação de desenvolvimento (`npm install` em `mobile/`, que os testes usam) somada à da raiz
+põe duas cópias do React no bundle, e a OTA quebra ao abrir. O aparelho marca essa atualização
+como falha, fica na anterior sem aviso e não a tenta de novo; o `metro.config.js` recusa esse
+arranjo (`scripts/single-react.cjs`).
+Compile as traduções em `mobile/`: `npm run i18n:compile:core && npm run i18n:compile`.
 Publique em `mobile/`: `eas update --channel preview --message "Descrição da correção" --environment preview` (troque ambos para `production` no outro canal).
-Compile antes as traduções: `npm run i18n:compile:core && npm run i18n:compile`.
+Uma OTA que o aparelho baixa a cada abertura (`Update available` no logcat de `dev.expo.updates`) e
+nunca aplica falhou ao abrir: publique de novo, depois de corrigir, que ela ganha outro ID.
 Ao abrir, o app baixa em segundo plano, sem segurar a tela; a correção entra no próximo início completo (feche e abra de novo).
 O runtime é uma versão nativa explícita em `expo.runtimeVersion` (`native-2`, no formato `native-N`), independente de `expo.version` e do `VERSION` da raiz (ambos continuam em `0.1.0`).
 Mudança de plugin, SDK, dependência ou configuração nativa exige incrementar `native-N` e gerar/instalar um binário novo antes de publicar OTA para esse runtime.

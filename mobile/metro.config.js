@@ -2,6 +2,8 @@
 const path = require('node:path');
 const { getDefaultConfig } = require('expo/metro-config');
 const { generateTerminalDocument, watchTerminalDocument } = require('./scripts/build-terminal-document.cjs');
+const { assertSingleReact } = require('./scripts/single-react.cjs');
+assertSingleReact(__dirname);
 generateTerminalDocument();
 if (process.env.NODE_ENV !== 'production') {
   const observer = watchTerminalDocument();
