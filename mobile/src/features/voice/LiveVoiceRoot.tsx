@@ -1,10 +1,17 @@
 import { useEffect } from 'react';
 import { AppState, View } from 'react-native';
 import { useGlobalSearchParams, useRouter, useSegments } from 'expo-router';
+import { useShallow } from 'zustand/shallow';
 import { useServers } from '../../stores/servers';
 import { LiveVoiceButton } from './LiveVoiceButton';
-import { LiveVoiceSheet } from './LiveVoiceSheet';
+import { LiveVoiceSheet, type LiveVoiceLevels } from './LiveVoiceSheet';
 import { useLiveVoice, type LiveVoiceDestination } from './liveVoiceStore';
+import { WorkingMarkPaused } from '../../ui/WorkingMark';
+
+const levels: LiveVoiceLevels = {
+  get: () => useLiveVoice.getState().view.levels,
+  subscribe: listener => useLiveVoice.subscribe(listener),
+};
 
 const first = (value: string | string[] | undefined) => Array.isArray(value) ? value[0] : value;
 
@@ -15,7 +22,8 @@ export function LiveVoiceRoot() {
   const params = useGlobalSearchParams<{ server?: string | string[]; name?: string | string[] }>();
   const servers = useServers(state => state.servers);
   const open = useLiveVoice(state => state.open);
-  const view = useLiveVoice(state => state.view);
+  // Sem os níveis: eles mudam 10 vezes por segundo e só as barras os leem.
+  const view = useLiveVoice(useShallow(state => { const { levels: _, ...rest } = state.view; return rest; }));
   const server = useLiveVoice(state => state.server);
   const serverId = first(params.server);
   const name = first(params.name);
@@ -61,10 +69,13 @@ export function LiveVoiceRoot() {
   const hasCall = view.phase === 'connecting' || view.phase === 'live' || !!view.error;
   return <>
     {!topBarRoute && !open && hasCall ? <View pointerEvents="box-none" style={{ position: 'absolute', right: 16, bottom: 32 }}>
-      <LiveVoiceButton phase={view.phase} muted={view.muted} error={!!view.error} visible
-        onPress={() => useLiveVoice.setState({ open: true })} />
+      {/* Os painéis da sessão sobem como folha nativa por cima da raiz e cobrem o botão. */}
+      <WorkingMarkPaused.Provider value={sessionRoute && !chatRoute}>
+        <LiveVoiceButton phase={view.phase} muted={view.muted} error={!!view.error} visible
+          onPress={() => useLiveVoice.setState({ open: true })} />
+      </WorkingMarkPaused.Provider>
     </View> : null}
-    <LiveVoiceSheet open={open} view={view} serverId={server?.id ?? null}
+    <LiveVoiceSheet open={open} view={view} levels={levels} serverId={server?.id ?? null}
       servers={servers.filter(s => !s.invite && !s.inviteEnded && !s.removed && !s.disabled && !!s.token)}
       onSelectServer={store.selectServer} onDismiss={store.dismiss}
       onStart={() => { void store.start(); }} onStop={() => { void store.stop(); }} onToggleMute={store.toggleMute}

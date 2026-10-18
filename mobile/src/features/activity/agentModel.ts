@@ -18,10 +18,14 @@ export function agentIdentities(events: ChatEvent[]): Map<string, string> {
 export function matchAgentSubagent(subs: SubagentRun[], agent: Pick<AgentRun, 'id' | 'prompt'>, ids: Map<string, string>): SubagentRun | undefined {
   const id = ids.get(agent.id);
   if (id) return subs.find(sub => sub.agentId === id);
-  if (!agent.prompt) return undefined;
-  const full = normalize(agent.prompt);
-  return subs.find(sub => sub.prompt && normalize(sub.prompt) === full)
-    ?? subs.find(sub => sub.prompt && normalize(sub.prompt).startsWith(full.slice(0, 400)));
+  const full = normalize(agent.prompt ?? '');
+  if (!full) return undefined;
+  // Agentes paralelos costumam partir do mesmo roteiro: mais de um candidato não diz qual é qual.
+  const only = (test: (prompt: string) => boolean) => {
+    const found = subs.filter(sub => sub.prompt && test(normalize(sub.prompt)));
+    return found.length === 1 ? found[0] : undefined;
+  };
+  return only(prompt => prompt === full) ?? only(prompt => prompt.startsWith(full.slice(0, 400)));
 }
 
 export function agentModel(agent: AgentRun, sub: SubagentRun | undefined): string | undefined {

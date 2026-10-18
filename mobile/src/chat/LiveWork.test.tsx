@@ -6,7 +6,7 @@ import type { AgentRun, ChatEvent, SubagentRun } from '@hangar/core';
 import { AgentesRodando } from './LiveWork';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-const api = vi.hoisted(() => ({ getSubagents: vi.fn() }));
+const api = vi.hoisted(() => ({ getSubagents: vi.fn(), registrarDiag: vi.fn() }));
 const route = vi.hoisted(() => ({ focused: true }));
 const server = vi.hoisted(() => ({ id: 'a', label: 'A', baseUrl: 'https://a.test', token: 'token-a' }));
 vi.mock('@hangar/core', async (original) => ({ ...await original<typeof import('@hangar/core')>(), ...api }));
@@ -98,6 +98,17 @@ it('atualiza modelo, mostra erro sem apagar o conhecido e pausa fora de foco', a
   await render();
   expect(el.textContent).toContain('gpt-6-astra');
   expect(el.querySelector('[role="alert"]')).toBeNull();
+});
+
+it('falha da consulta registra a causa original uma vez e mostra o aviso com tentar de novo', async () => {
+  api.getSubagents.mockRejectedValue(new Error('HTTP 503 upstream'));
+  const { el } = await mount();
+  await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+  expect(api.getSubagents.mock.calls.length).toBeGreaterThan(1);
+  expect(api.registrarDiag).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+    evento: 'activity.subagents_failed', nivel: 'erro', detalhe: 'HTTP 503 upstream' }));
+  expect(el.querySelector('[role="alert"]')).not.toBeNull();
+  expect([...el.querySelectorAll('button')].some(node => !node.textContent?.includes('Conferir tela'))).toBe(true);
 });
 
 it('permite tentar de novo após timeout e ignora a resposta atrasada anterior', async () => {

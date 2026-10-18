@@ -14,10 +14,12 @@ const harness = vi.hoisted(() => ({
   replace: vi.fn(), push: vi.fn(), start: vi.fn(), stop: vi.fn(), setRoute: vi.fn(), foreground: vi.fn(),
   loadSettings: vi.fn(), openFor: vi.fn(), selectServer: vi.fn(), reconcile: vi.fn(), dismissed: vi.fn(), ensureActive: vi.fn(),
   navigate: null as ((destination: LiveVoiceDestination) => void) | null,
+  sheetRenders: 0,
+  focused: true,
 }));
 vi.mock('expo-router', () => {
   const router = { replace: harness.replace, push: harness.push };
-  return { useRouter: () => router, useSegments: () => harness.segments, useGlobalSearchParams: () => harness.params };
+  return { useRouter: () => router, useSegments: () => harness.segments, useGlobalSearchParams: () => harness.params, useIsFocused: () => harness.focused };
 });
 vi.mock('../../stores/servers', async () => {
   const { create } = await import('zustand');
@@ -36,12 +38,18 @@ vi.mock('./liveVoiceStore', async () => {
     },
   })) };
 });
-vi.mock('./LiveVoiceSheet', () => ({ LiveVoiceSheet: ({ open, onStop, servers, serverId, onSelectServer }: LiveVoiceSheetProps) => open
+vi.mock('./LiveVoiceSheet', () => ({ LiveVoiceSheet: ({ open, onStop, servers, serverId, onSelectServer }: LiveVoiceSheetProps) => (harness.sheetRenders++, open)
   ? <><button aria-label="stop-call" onClick={onStop} />
     {(servers ?? []).map(server => <button key={server.id} aria-label={`voice-${server.id}`}
       aria-pressed={server.id === serverId} onClick={() => onSelectServer(server.id)}>{server.label}</button>)}</> : null }));
-vi.mock('./LiveVoiceButton', () => ({ LiveVoiceButton: ({ visible, onPress, error }: { visible: boolean; onPress(): void; error: boolean }) => visible
-  ? <button aria-label="open-call" data-error={error} onClick={onPress} /> : null }));
+vi.mock('./LiveVoiceButton', async () => {
+  const { useContext } = await import('react');
+  const { WorkingMarkPaused } = await import('../../ui/WorkingMark');
+  return { LiveVoiceButton: function MockButton({ visible, onPress, error }: { visible: boolean; onPress(): void; error: boolean }) {
+    const paused = useContext(WorkingMarkPaused);
+    return visible ? <button aria-label="open-call" data-error={error} data-paused={String(paused)} onClick={onPress} /> : null;
+  } };
+});
 
 import { useServers } from '../../stores/servers';
 import { useLiveVoice } from './liveVoiceStore';
@@ -71,6 +79,7 @@ beforeEach(() => {
   harness.params = { server: a.id, name: 'session / a' };
   harness.segments = ['s', '[server]', '[name]'];
   harness.navigate = null;
+  harness.focused = true;
   act(() => {
     useServers.setState({ servers: [a, b], activeId: b.id });
     useLiveVoice.setState({ open: false, view: idle(), chatControls: null, settingsByServer: {} });
@@ -80,6 +89,16 @@ afterEach(async () => {
   await act(async () => { for (const root of roots) root.unmount(); });
   roots.clear();
   vi.restoreAllMocks();
+});
+
+test('nível de áudio a 10 Hz não redesenha a folha da chamada', async () => {
+  act(() => useLiveVoice.setState({ view: { ...idle(), phase: 'live', serverLabel: a.label } }));
+  await mount(<LiveVoiceRoot />);
+  const before = harness.sheetRenders;
+  for (let i = 1; i <= 5; i++) {
+    act(() => useLiveVoice.setState(state => ({ view: { ...state.view, levels: { input: i / 10, output: 0 } } })));
+  }
+  expect(harness.sheetRenders).toBe(before);
 });
 
 test('seleção da voz recebe só próprios habilitados e usa setter sem alterar servidor global', async () => {
@@ -159,6 +178,25 @@ test('fora das telas com botão no topo, a chamada aberta ganha o botão flutuan
   await act(async () => button(container, 'open-call').click());
   expect(useLiveVoice.getState().open).toBe(true);
   expect(button(container, 'open-call')).toBeNull();
+});
+
+test('barras do botão da conversa param quando outra tela cobre a conversa', async () => {
+  act(() => useLiveVoice.setState({ view: { ...idle(), phase: 'live', serverLabel: a.label } }));
+  const { container, root } = await mount(<LiveVoiceChatButton serverId={a.id} name="session-a" />);
+  expect(button(container, 'open-call').getAttribute('data-paused')).toBe('false');
+  harness.focused = false;
+  await act(async () => root.render(<LiveVoiceChatButton serverId={a.id} name="session-a" />));
+  expect(button(container, 'open-call').getAttribute('data-paused')).toBe('true');
+});
+
+test('botão flutuante para as barras sob o painel da sessão, que abre como folha por cima dele', async () => {
+  act(() => useLiveVoice.setState({ view: { ...idle(), phase: 'live', serverLabel: a.label } }));
+  harness.segments = ['config'];
+  const { container, root } = await mount(<LiveVoiceRoot />);
+  expect(button(container, 'open-call').getAttribute('data-paused')).toBe('false');
+  harness.segments = ['s', '[server]', '[name]', 'activity'];
+  await act(async () => root.render(<LiveVoiceRoot />));
+  expect(button(container, 'open-call').getAttribute('data-paused')).toBe('true');
 });
 
 test('botão da conversa usa A com B ativo; falha de settings continua visível e convite não liga', async () => {

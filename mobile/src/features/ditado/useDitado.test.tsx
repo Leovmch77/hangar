@@ -52,6 +52,9 @@ vi.mock('expo-audio', () => ({
   setAudioModeAsync: setAudioMode,
 }));
 
+const toastAviso = vi.hoisted(() => vi.fn());
+vi.mock('../../ui/Toast', () => ({ toast: { aviso: toastAviso } }));
+
 vi.mock('react-native', async () => {
   const actual = (await vi.importActual<typeof import('../../__mocks__/react-native')>('../../__mocks__/react-native')) as Record<string, unknown>;
   return {
@@ -678,6 +681,14 @@ describe('useDitado — medidor e segundo plano', () => {
     await act(async () => { changeAppState('background'); });
     expect(fakeRec.stop).toHaveBeenCalledTimes(1);
     expect(onFim.mock.calls[0]?.[1]).toBe('escondeu');
+    expect(recordDiagnostic).toHaveBeenCalledWith({ evento: 'dictation.background_unavailable', nivel: 'aviso',
+      codigo: 'notifications_denied' }, undefined);
+    expect(toastAviso).toHaveBeenCalledExactlyOnceWith(m.composer_ditado_so_na_frente());
+    // Segunda gravação ainda sem permissão: o aviso não se repete.
+    vi.mocked(requestNotificationPermissionsAsync).mockResolvedValueOnce({ granted: false } as never);
+    await act(async () => { changeAppState('active'); await h.getHook().iniciar(); });
+    await act(async () => { await h.getHook().parar('botao'); });
+    expect(toastAviso).toHaveBeenCalledOnce();
     await h.unmount();
   });
 
@@ -713,12 +724,31 @@ describe('useDitado — medidor e segundo plano', () => {
       await act(async () => { await h.getHook().iniciar(); });
       expect(fakeRec.record).toHaveBeenCalledWith({ forDuration: 180 });
       await act(async () => { changeAppState('background'); });
-      // Evento de conclusão do nativo (teto ou botão na notificação), sem tick JS.
+      // Timers JS suspensos: só o relógio de parede anda, e o nativo termina um pouco antes do teto JS.
+      vi.setSystemTime(Date.now() + 179_700);
       await act(async () => { emitRecordingStatus(); });
       expect(h.getHook().gravando).toBe(false);
       expect(onFim).toHaveBeenCalledTimes(1);
-      // O fim nativo chega antes do relógio JS bater o teto: o motivo vem do evento, não do relógio.
       expect(onFim.mock.calls[0]?.[1]).toBe('teto');
+      await h.unmount();
+    } finally {
+      useDitadoEstiloStore.setState({ ceilingMs: old.ceilingMs, refreshCeiling: old.refreshCeiling });
+    }
+  });
+
+  it('fim nativo bem antes do teto é interrupção e não teto', async () => {
+    const onFim = vi.fn();
+    const h = mountHook({ onFim });
+    const old = useDitadoEstiloStore.getState();
+    useDitadoEstiloStore.setState({ ceilingMs: 180_000, refreshCeiling: async () => {} });
+    try {
+      await h.mount({ onFim });
+      await act(async () => { await h.getHook().iniciar(); });
+      await act(async () => { changeAppState('background'); });
+      vi.setSystemTime(Date.now() + 10_000);
+      await act(async () => { emitRecordingStatus(); });
+      expect(onFim).toHaveBeenCalledTimes(1);
+      expect(onFim.mock.calls[0]?.[1]).toBe('escondeu');
       await h.unmount();
     } finally {
       useDitadoEstiloStore.setState({ ceilingMs: old.ceilingMs, refreshCeiling: old.refreshCeiling });

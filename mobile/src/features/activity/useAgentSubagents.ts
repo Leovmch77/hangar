@@ -1,7 +1,7 @@
 import { useCallback, useState } from 'react';
 import { AppState } from 'react-native';
 import { useFocusEffect } from 'expo-router';
-import { getSubagents, type SubagentRun } from '@hangar/core';
+import { getSubagents, registrarDiag, type SubagentRun } from '@hangar/core';
 import { useServers } from '../../stores/servers';
 import { ActivityTimeout, useActivityRequest } from './useActivityRequest';
 import * as m from '../../paraglide/messages';
@@ -24,6 +24,8 @@ export function useAgentSubagents(serverId: string | undefined, name: string | u
     let stopped = false;
     let busy = false;
     let timedOut = false;
+    // A consulta repete a cada 5 s: a mesma falha vai ao diário uma vez.
+    let logged = '';
     const refresh = async () => {
       if (stopped || busy || timedOut || AppState.currentState !== 'active') return;
       busy = true;
@@ -36,6 +38,11 @@ export function useAgentSubagents(serverId: string | undefined, name: string | u
         });
       } catch (error) {
         timedOut = error instanceof ActivityTimeout;
+        const detail = error instanceof Error ? error.message : String(error);
+        if (!timedOut && detail !== logged) {
+          logged = detail;
+          registrarDiag({ evento: 'activity.subagents_failed', nivel: 'erro', codigo: 'subagents_read_failed', detalhe: detail });
+        }
         if (!stopped) setSnapshot(current => ({ key, subs: current.key === key ? current.subs : EMPTY,
           error: error instanceof ActivityTimeout ? error.message : m.atividade_erro_subagentes() }));
       } finally {
