@@ -116,7 +116,8 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
   const cwd = cwdParts(s.cwd);
   const loop = loopBadge(s.loop_status, s.loop_iter, s.loop_max);
   const pendingQuestions = s.pending_questions ?? 0;
-  const sub = s.question ?? (s.state === 'working' ? s.label : null) ?? null;
+  const reply = s.state === 'idle' ? s.last_reply : null;
+  const sub = s.question ?? (s.state === 'working' ? s.label : reply) ?? null;
   const peers = s.pair_peers ?? [];
   // o rótulo do grupo (ex.: o ticket) diz mais que o nome do par; sem ele, o par ou o tamanho
   const pairLabel = peers.length ? (s.pair_task ?? (peers.length === 1 ? peers[0] : String(peers.length + 1))) : null;
@@ -203,12 +204,13 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
           {fora ? <Chip tone="accent" icon={s.guest_kind === 'share' ? 'Link' : 'Eye'}>{m.pair_from_owner({ dono: fora.owner })}</Chip> : null}
           <Text style={[styles.tempo, { color: muted }]} numberOfLines={1}>{relativeTime(s.last_activity)}</Text>
         </View>
-        {/* O que a sessão está fazendo: a pergunta (cor de input) ou a atividade (itálico). */}
         {sub ? (
           <Text
-            style={[styles.sub, s.question ? { color: theme.tokens.pill.input.fg } : { color: theme.tokens.text.secondary, fontStyle: 'italic' }]}
+            style={[styles.sub, s.question ? { color: theme.tokens.pill.input.fg }
+              : s.state === 'working' ? { color: theme.tokens.text.secondary, fontStyle: 'italic' } : { color: muted }]}
             numberOfLines={1}
           >
+            {reply && !s.question ? '◆ ' : ''}
             {sub}
           </Text>
         ) : null}
