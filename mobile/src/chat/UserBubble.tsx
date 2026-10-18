@@ -1,4 +1,4 @@
-import { memo, useState, type ReactNode } from 'react';
+import { memo, useMemo, useState, type ReactNode } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { ImageThumb, type MediaItem } from './ImageThumb';
@@ -26,6 +26,8 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, serverId
 }) {
   const { theme } = useUnistyles();
   const server = useServers((s) => s.servers.find((x) => x.id === serverId) ?? null);
+  // Mesmo objeto entre renders: o `FileCard` é memo e o `run` dele depende dos headers.
+  const authHeaders = useMemo(() => (server ? fileAuthHeader(server) : undefined), [server]);
   const voice = parseRealtimeDelegation(text);
   const [showOriginal, setShowOriginal] = useState(false);
   const [acoes, setAcoes] = useState(false);
@@ -107,7 +109,7 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, serverId
     </>, caption || body);
     // Anexo que não é foto (`📎 arquivo:`): o card de download, embaixo das miniaturas.
     const cards = parsed?.files.map((f) => (
-      <FileCard key={f} uri={uploadUrlNative(sessionName!, f, server)} headers={fileAuthHeader(server)} name={f} />
+      <FileCard key={f} uri={uploadUrlNative(sessionName!, f, server)} headers={authHeaders} name={f} />
     )) ?? [];
     // galeria vazia = foto única absorvida como anexo real: mostra só a legenda, ou o texto original
     if (galeria.length === 0 && cards.length === 0) {
