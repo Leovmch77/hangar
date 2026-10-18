@@ -51,14 +51,14 @@ export function WorkflowDetailView({ detail, loading, onAgent, erro, onTentar }:
     <ScrollView contentContainerStyle={styles.body}>
       <View style={styles.metrics}>
         <Text style={[styles.metric, { color: theme.tokens.text.muted }]}>
-          <Text style={{ color: theme.tokens.text.primary, fontWeight: '600' }}>{detail.agents.length}</Text> {m.atividade_agentes()}
+          <Text style={{ color: theme.tokens.text.primary, fontWeight: theme.base.weight.semibold }}>{detail.agents.length}</Text> {m.atividade_agentes()}
         </Text>
         <Text style={[styles.metric, { color: theme.tokens.text.muted }]}>
-          <Text style={{ color: theme.tokens.text.primary, fontWeight: '600' }}>{fmtTokens(detail.totalTokens)}</Text> {m.ctx_tokens()}
+          <Text style={{ color: theme.tokens.text.primary, fontWeight: theme.base.weight.semibold }}>{fmtTokens(detail.totalTokens)}</Text> {m.ctx_tokens()}
         </Text>
         {detail.phases.length ? (
           <Text style={[styles.metric, { color: theme.tokens.text.muted }]}>
-            <Text style={{ color: theme.tokens.text.primary, fontWeight: '600' }}>{detail.phases.length}</Text> {m.atividade_fases_curto()}
+            <Text style={{ color: theme.tokens.text.primary, fontWeight: theme.base.weight.semibold }}>{detail.phases.length}</Text> {m.atividade_fases_curto()}
           </Text>
         ) : null}
         {detail.durationMs ? <Text style={[styles.metric, { color: theme.tokens.text.muted }]}>{fmtDur(detail.durationMs)}</Text> : null}
@@ -103,13 +103,14 @@ const styles = StyleSheet.create((theme) => ({
   empty: { fontSize: theme.base.text.sm, textAlign: 'center', paddingVertical: theme.base.space[4] },
   metrics: { flexDirection: 'row', gap: theme.base.space[3], flexWrap: 'wrap' },
   metric: { fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
-  sectionLabel: { fontSize: theme.base.text.xs, textTransform: 'uppercase', letterSpacing: 0.6, fontWeight: '600' },
-  agent: { paddingVertical: theme.base.space[2], borderBottomWidth: 1, gap: 2 },
+  sectionLabel: { fontSize: theme.base.text.xs, textTransform: 'uppercase', letterSpacing: 0.6, fontWeight: theme.base.weight.semibold },
+  agent: { paddingVertical: theme.base.space[2], borderBottomWidth: 1, gap: theme.base.space[0.5] },
   agentTop: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
   state: { width: 18, textAlign: 'center', fontSize: theme.base.text.sm },
-  agentLabel: { flex: 1, fontSize: theme.base.text.sm, fontWeight: '500', minWidth: 0 },
+  agentLabel: { flex: 1, fontSize: theme.base.text.sm, fontWeight: theme.base.weight.medium, minWidth: 0 },
   chevron: { fontSize: theme.base.text.base },
-  agentMeta: { paddingLeft: 18 + 8 },
+  // alinha com o rótulo: gap de agentTop + largura de state
+  agentMeta: { paddingLeft: theme.base.space[2] + 18 },
   metaTxt: { fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
   summary: { gap: theme.base.space[1], paddingTop: theme.base.space[2] },
 }));

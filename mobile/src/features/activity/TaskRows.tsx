@@ -55,7 +55,7 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.base.text.xs,
     textTransform: 'uppercase',
     letterSpacing: 0.6,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   row: {
     flexDirection: 'row',

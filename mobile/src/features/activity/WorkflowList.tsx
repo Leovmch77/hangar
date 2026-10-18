@@ -58,7 +58,7 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.base.text.xs,
     textTransform: 'uppercase',
     letterSpacing: 0.6,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   card: {
     flexDirection: 'row',
@@ -71,22 +71,22 @@ const styles = StyleSheet.create((theme) => ({
   icon: {
     width: 28,
     height: 28,
-    borderRadius: 14,
+    borderRadius: theme.base.radius.full,
     alignItems: 'center',
     justifyContent: 'center',
   },
   iconText: {
     fontSize: theme.base.text.xs,
-    fontWeight: '700',
+    fontWeight: theme.base.weight.bold,
   },
   body: {
     flex: 1,
-    gap: 2,
+    gap: theme.base.space[0.5],
     minWidth: 0,
   },
   name: {
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   meta: {
     fontSize: theme.base.text.xs,
@@ -99,7 +99,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   badgeText: {
     fontSize: theme.base.text.xxxs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   chevron: {
     fontSize: theme.base.text.lg,
