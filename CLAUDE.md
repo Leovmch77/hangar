@@ -401,6 +401,10 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   (`orq_timeline.py`). O `ChatEvent` leva `orq` (texto cru mantido); o painel é um `GET` por
   execução em `/api/sessions/{name}/orq/panel`, fora do alcance do convidado e sem escrita, e o
   Time lê o estado da lista de sessões. O `orq.py` só grava o que não dá para derivar.
+- **O feed de `GET /api/orq/{id}/conductor` é do Rust; o watchdog continua compartilhado no Python.**
+  O fato interno valida a pasta e calcula `units`/`watchdog` sem importar a API nem chamar o Rust.
+  A porta do Connect só repassa; sem Rust, responde `orq_conductor_need_rust_server`. Lista, timeline
+  e lançamento de orquestração continuam no Python. [Contrato](docs/decisoes/plataforma.md#feed-do-condutor-no-rust-watchdog-compartilhado-no-python).
 - **Worktrees mescladas usam a origem e a base publicada.** Base explícita vence; sem ela,
   referência nomeada de criação no reflog, com fallback para a branch principal. Base local usa
   seu upstream ou o único remoto correspondente. Ambiguidade e falha de leitura impedem marcar

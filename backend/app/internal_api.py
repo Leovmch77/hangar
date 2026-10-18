@@ -424,3 +424,17 @@ async def side_events(name: str, provider: str, jsonl: str, app: int = 0):
     return EventSourceResponse(
         merged_events(name, jsonl, provider=provider, count_app=bool(app), side=True),
         send_timeout=30)
+
+
+@router.get("/orq/{exec_id}/conductor-facts")
+async def orq_conductor_facts(exec_id: str) -> dict:
+    """Uma leitura factual: caminho validado e watchdog compartilhado com a lista."""
+    from app import orq, orq_conductor
+
+    def read():
+        directory = orq.exec_dir(orq.raiz_padrao(), exec_id)
+        if directory is None or not directory.is_dir():
+            raise HTTPException(404, detail=erro("erro_nao_encontrado", "execução não encontrada"))
+        return {"path": str(directory), "watchdog": orq_conductor.watchdog(directory, orq_conductor.units())}
+
+    return await internal_thread(read)

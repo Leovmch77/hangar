@@ -27,6 +27,8 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
         Owned::Catalog
     } else if method == Method::GET && path == "/api/jev/delivery" {
         Owned::JevDelivery
+    } else if crate::orq_conductor::matches(method, &path) {
+        Owned::Conductor
     } else if method == Method::GET && crate::commands::matches(&path) {
         Owned::Commands
     } else if method == Method::POST && path == crate::mermaid::PATH {
@@ -53,6 +55,7 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
     match owned {
         Owned::JevDelivery => crate::session_write::delivery_timing::availability_reply(&st).await,
         Owned::Catalog => crate::claude_customizations::public_catalog(&st, req).await,
+        Owned::Conductor => crate::orq_conductor::serve(&st, req).await,
         Owned::Commands => crate::commands::serve(&st, req).await,
         Owned::Mermaid => crate::mermaid::serve(&st, req).await,
         Owned::Worktrees => crate::worktree_routes::public(st, req).await,
@@ -89,4 +92,4 @@ fn live_resume(method: &Method, path: &str) -> Option<String> {
 }
 
 /// As rotas do Rust que aceitam o repasse.
-enum Owned { Catalog, Commands, Mermaid, Plans, Worktrees, JevDelivery, ArchiveResume(String, String), Resume(String) }
+enum Owned { Conductor, Catalog, Commands, Mermaid, Plans, Worktrees, JevDelivery, ArchiveResume(String, String), Resume(String) }

@@ -4,6 +4,7 @@ pub mod artifacts;
 pub mod auth;
 pub mod config;
 pub mod commands;
+pub mod orq_conductor;
 pub mod claude_customizations;
 pub mod jev_aux;
 pub mod claude_defaults;
@@ -64,7 +65,7 @@ mod warn_limit;
 
 /// Versão do contrato com o Python (rotas `/internal`, eventos do side-events, ambiente). O
 /// Python (`RUST_SERVER_PROTOCOL`) recusa um binário de outra versão e atende sozinho.
-pub const INTERNAL_PROTOCOL: u32 = 82;
+pub const INTERNAL_PROTOCOL: u32 = 83;
 
 /// Todo socket TCP do servidor, aceito ou aberto. Sem isso o Nagle segura o último pedaço de uma
 /// resposta em pedaços até o ACK atrasado do outro lado; o asyncio do Python já liga sozinho.
