@@ -3,8 +3,8 @@
 //! fora do ar. Subcomando do `hangar-server` porque ele já está instalado em toda máquina.
 //!
 //!   hangar-server resolve [PEDIDO]  resolve nesta máquina e imprime o spec, sem efeito nenhum
-//!   hangar-server open [PEDIDO]     pede ao servidor; fora do ar, abre aqui a sessão com terminal (e o
-//!                                   Claude e o Codex sem terminal; o servidor adota quando voltar)
+//!   hangar-server open [PEDIDO]     pede ao servidor; fora do ar, abre aqui só a sessão com terminal
+//!                                   (o servidor adota quando voltar); sem terminal, só resolve
 //!
 //! Token, porta e as opções `CP_*` vêm do `backend/.env` da cópia do Hangar: a de onde o binário mora
 //! (checkout) ou a que o servidor anotou ao subir (`~/.hangar/backend-dir`, para o `~/.hangar/bin`).
@@ -131,9 +131,11 @@ fn server_env(caller: impl Iterator<Item = (String, String)>, server: &BTreeMap<
 
 enum Ask { Answered(u16, String), Down(String), Uncertain(String) }
 
+// Acima dos 180 s que a abertura no servidor pode levar: a resposta dele chega antes da desistência.
+const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(190);
+
 async fn ask_server(base: &str, token: &str, body: &[u8]) -> Ask {
-    // O mesmo prazo das telas: a criação pode preparar conta e worktree.
-    let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(120)).build() {
+    let client = match reqwest::Client::builder().timeout(OPEN_TIMEOUT).build() {
         Ok(client) => client,
         Err(error) => return Ask::Uncertain(error.to_string()),
     };
@@ -182,7 +184,14 @@ pub fn publish_backend_dir(home: &std::path::Path, backend: &std::path::Path) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{Ask, answer};
+    use super::{Ask, OPEN_TIMEOUT, answer};
+
+    /// A abertura no servidor pode levar até 180 s (bastão com resumo pelo modelo): desistir antes vira erro
+    /// falso, e tentar de novo abre uma segunda sessão `-2`.
+    #[test]
+    fn the_command_waits_longer_than_the_server_open() {
+        assert!(OPEN_TIMEOUT > std::time::Duration::from_secs(180), "{OPEN_TIMEOUT:?}");
+    }
 
     /// O Hangar no modo Python (Rust caído) não abre: o comando abre na máquina, como com ele fora (D-013).
     #[test]
