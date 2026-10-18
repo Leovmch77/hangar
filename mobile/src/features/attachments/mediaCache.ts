@@ -1,7 +1,6 @@
 import { Platform, Share } from 'react-native';
 import { Directory, File, Paths } from 'expo-file-system';
 import { startActivityAsync } from 'expo-intent-launcher';
-import { Asset, requestPermissionsAsync } from 'expo-media-library';
 import * as m from '../../paraglide/messages';
 
 const FLAG_GRANT_READ_URI_PERMISSION = 1;
@@ -98,6 +97,8 @@ export async function saveImage(uri: string, headers: Record<string, string> | u
     await Share.share({ url: f.uri });
     return false;
   }
+  // Carregado só aqui: é o único uso, e só no Android.
+  const { Asset, requestPermissionsAsync } = await import('expo-media-library');
   const perm = await requestPermissionsAsync(true);
   if (!perm.granted) throw new Error(m.composer_sem_acesso_fotos());
   await Asset.create(f.uri);
