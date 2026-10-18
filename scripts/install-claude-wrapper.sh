@@ -164,6 +164,10 @@ echo "  installed engine helper -> $HOME/.local/bin/hangar-engine"
 chmod +x "$SCRIPT_DIR/hangar-skills-sync"
 ln -sfn "$SCRIPT_DIR/hangar-skills-sync" "$HOME/.local/bin/hangar-skills-sync"
 echo "  installed skills sync -> $HOME/.local/bin/hangar-skills-sync"
+# Chamado pelos wrappers de claude/pi/omp/kimi fora do tmux: abre a sessão pelo `hangar-server open`.
+chmod +x "$SCRIPT_DIR/hangar-open"
+ln -sfn "$SCRIPT_DIR/hangar-open" "$HOME/.local/bin/hangar-open"
+echo "  installed session opener -> $HOME/.local/bin/hangar-open"
 
 # Helper de contas (claude-conta). Symlink absoluto, mesma regra dos dois acima: descoberta do
 # backend/.env preservada de qualquer cwd e atualização automática depois de git pull.

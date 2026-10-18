@@ -7,13 +7,10 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch
 
 from app import engines as eng
-from app import tmux
 from app.api import app
 from app.config import settings
-from app.models import SessionInfo
 
 TOKEN = "secret-de-teste"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -197,28 +194,7 @@ def test_modelos_recusa_nome_junto_com_api_key_de_terceiro(cli):
 # POST /api/archive/.../resume só tinham cobertura por curl manual — cobrindo aqui.
 # ---------------------------------------------------------------------------
 
-def test_create_sessao_com_motor_desconhecido_e_400(cli):
-    r = cli.post("/api/sessions", json={"name": "x", "cwd": "/tmp", "engine": "fantasma"}, headers=AUTH)
-    assert r.status_code == 400
-    assert r.json()["detail"]["code"] == "erro_motor_invalido"
-
-
-def test_create_sessao_com_motor_e_provider_codex_e_400(cli):
-    cli.put("/api/engines/kimi", json=_kimi(), headers=AUTH)
-    r = cli.post("/api/sessions",
-                 json={"name": "x", "cwd": "/tmp", "provider": "codex", "engine": "kimi"}, headers=AUTH)
-    assert r.status_code == 400
-    assert r.json()["detail"]["code"] == "erro_motor_sem_claude"
-
-
-def test_create_sessao_com_motor_valido_repassa_a_keyword(cli):
-    cli.put("/api/engines/kimi", json=_kimi(), headers=AUTH)
-    with patch("app.api.registry.create",
-              return_value=SessionInfo(name="x", cwd="/tmp", engine="kimi")) as cr:
-        r = cli.post("/api/sessions", json={"name": "x", "cwd": "/tmp", "engine": "kimi"}, headers=AUTH)
-    assert r.status_code == 200
-    cr.assert_called_once_with("x", "/tmp", None, provider="claude", engine="kimi",
-                               model=None, effort=None, context_window=None)
+# Sem terminal: Claude com terminal (e o motor dele) nasce no Rust.
 
 
 # ---------------------------------------------------------------------------
@@ -246,25 +222,6 @@ def test_modelos_recusa_key_salva_com_crlf_hand_editada(cli):
 
 
 _SID = "11111111-1111-1111-1111-111111111111"
-
-
-def test_resume_arquivo_com_motor_desconhecido_e_400(cli):
-    with patch("app.api.archive_cwd", return_value="/home/u/proj"):
-        r = cli.post(f"/api/archive/proj/{_SID}/resume", json={"engine": "fantasma"}, headers=AUTH)
-    assert r.status_code == 400
-    assert "motor" in r.json()["detail"]["msg"]
-
-
-def test_resume_arquivo_com_motor_valido_repassa(cli):
-    cli.put("/api/engines/kimi", json=_kimi(), headers=AUTH)
-    with patch("app.api.archive_cwd", return_value="/home/u/proj"), \
-         patch.object(tmux, "has_session", return_value=False), \
-         patch("app.api.registry.create",
-              return_value=SessionInfo(name="proj", cwd="/home/u/proj", engine="kimi")) as cr:
-        r = cli.post(f"/api/archive/proj/{_SID}/resume", json={"engine": "kimi"}, headers=AUTH)
-    assert r.status_code == 200
-    cr.assert_called_once_with("proj", "/home/u/proj", config_dir=None, provider="claude",
-                               resume_session_id=_SID, engine="kimi")
 
 
 def test_put_com_string_vazia_LIMPA_o_campo(cli):

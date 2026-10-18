@@ -1,5 +1,4 @@
 import asyncio
-import os
 import pytest
 
 from app.adapters import get_adapter
@@ -12,65 +11,8 @@ def test_omp_e_registrado_e_herda_do_pi():
     assert isinstance(a, OmpAdapter) and isinstance(a, PiAdapter)
     assert a.provider == "omp"
     for m in ("transcript_stream", "state_monitor", "drain", "send_prompt",
-              "deliverable", "spawn_command", "transcript_path", "resume_command"):
+              "deliverable", "spawn_command", "transcript_path"):
         assert callable(getattr(a, m)), m
-
-
-def test_spawn_usa_session_com_caminho_e_nunca_session_id(monkeypatch, tmp_path):
-    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path))
-    cmd = OmpAdapter().spawn_command("/w", "abc", "opencode-go/deepseek-v4-flash", "low", None)
-    assert "--session-id" not in cmd
-    i = cmd.index("--session")
-    assert cmd[i + 1].startswith(str(tmp_path / "sessions")) and cmd[i + 1].endswith("_abc.jsonl")
-    assert cmd[i + 2:] == ["--model", "opencode-go/deepseek-v4-flash", "--thinking", "low"]
-    esperado = [] if os.name == "nt" else ["env", "CP_PI_SESSION=abc"]
-    assert cmd[:cmd.index("omp")] == esperado
-
-
-def test_spawn_com_perfil_monta_a_raiz_do_perfil_e_exporta_omp_profile(monkeypatch, tmp_path):
-    from pathlib import Path
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    for key in ("OMP_PROFILE", "PI_PROFILE", "PI_CODING_AGENT_DIR"):
-        monkeypatch.delenv(key, raising=False)
-    cmd = OmpAdapter().spawn_command("/w", "abc", None, None, None, perfil="trabalho")
-    i = cmd.index("--session")
-    assert cmd[i + 1].startswith(str(tmp_path / ".omp" / "profiles" / "trabalho" / "agent" / "sessions"))
-    if os.name != "nt":
-        assert cmd[:cmd.index("omp")] == ["env", "CP_PI_SESSION=abc", "OMP_PROFILE=trabalho"]
-    # Sem perfil nada muda: nem a variável entra no comando.
-    sem = OmpAdapter().spawn_command("/w", "abc", None, None, None)
-    assert "OMP_PROFILE=trabalho" not in sem
-    assert sem[sem.index("--session") + 1].startswith(str(tmp_path / ".omp" / "agent" / "sessions"))
-
-
-def test_resume_com_perfil_procura_o_transcript_na_raiz_do_perfil(monkeypatch, tmp_path):
-    from pathlib import Path
-    from app.adapters.pi import sessions as s
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    for key in ("OMP_PROFILE", "PI_PROFILE", "PI_CODING_AGENT_DIR"):
-        monkeypatch.delenv(key, raising=False)
-    d = tmp_path / ".omp" / "profiles" / "trabalho" / "agent" / "sessions" / s.cwd_slug("/w")
-    d.mkdir(parents=True)
-    f = d / "2026-09-06T15-51-00-640Z_abc.jsonl"
-    f.write_text("")
-    cmd = OmpAdapter().resume_command("/w", "abc", None, None, perfil="trabalho")
-    assert cmd[cmd.index("omp"):] == ["omp", "-r", str(f)]
-    with pytest.raises(ValueError):
-        OmpAdapter().resume_command("/w", "abc", None, None)
-
-
-def test_resume_usa_r_com_o_caminho_existente_e_o_mesmo_env(monkeypatch, tmp_path):
-    from app.adapters.pi import sessions as s
-    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path))
-    d = tmp_path / "sessions" / s.cwd_slug("/w")
-    d.mkdir(parents=True)
-    f = d / "2026-09-03T15-51-00-640Z_abc.jsonl"
-    f.write_text("")
-    cmd = OmpAdapter().resume_command("/w", "abc", None, None)
-    assert cmd[cmd.index("omp"):] == ["omp", "-r", str(f)]
-    assert ("CP_PI_SESSION=abc" in cmd) == (os.name != "nt")
-    with pytest.raises(ValueError):
-        OmpAdapter().resume_command("/w", "nao-existe", None, None)
 
 
 def test_drain_e_send_prompt_passam_o_provider_da_instancia(monkeypatch):
@@ -105,3 +47,9 @@ def test_argv0_omp_vira_provider_omp():
     from app.registry import _provider_do_argv
     assert _provider_do_argv(["omp"]) == "omp"
     assert _provider_do_argv(["pi"]) == "pi"
+
+
+def test_omp_nao_herda_o_spawn_do_pi():
+    # Sessão nova do omp abre no Rust; herdar o `pi --session-id` subiria o agente errado.
+    with pytest.raises(NotImplementedError):
+        OmpAdapter().spawn_command("/w", "abc")

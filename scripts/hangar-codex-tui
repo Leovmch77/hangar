@@ -80,6 +80,8 @@ def _preparar_conta_codex(account_id: str, cwd: str) -> dict:
 _ESPERA_THREAD = 60.0
 # Quantas vezes o app-server pode ser ressubido em 5 min antes de assumir crash em laço.
 _QUEDAS_MAX = 3
+# ponytail: janela fixa; TUI que demora mais que isso para sair depois do servidor ainda conta como queda.
+_FIM_DA_SESSAO = 1.5
 # Quanto do stderr do app-server sai na tela quando ele morre na largada. E a cauda, porque a
 # ultima linha e que costuma dizer o motivo.
 _ERRO_MAX = 2000
@@ -812,6 +814,8 @@ def main() -> int:
                                 codex_home=str(codex_home),
                                 codex_account=args.codex_account,
                                 tool_output_token_limit=args.tool_output_token_limit,
+                                # A chave do spec que o Rust pôs no pane: o registro da sessão é por ela.
+                                key=os.environ.get("CP_SESSION_KEY") or None,
                                 service_tier=args.service_tier, **mode_record)
         elif thread_id != previous_thread and thread is not None:
             if args.transfer_id:
@@ -896,6 +900,13 @@ def main() -> int:
         desisti = False
         while tui.poll() is None:
             if servidor.poll() is not None and not desisti:
+                # Fechar o terminal derruba os dois quase juntos: a TUI saindo logo depois é o fim
+                # da sessão, não queda do servidor.
+                try:
+                    tui.wait(timeout=_FIM_DA_SESSAO)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
                 quedas = [t for t in quedas if time.monotonic() - t < 300] + [time.monotonic()]
                 if len(quedas) > _QUEDAS_MAX:
                     # A TUI fica: o pane ainda mostra o scrollback e este aviso. Matar a TUI

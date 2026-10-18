@@ -125,6 +125,15 @@ instalados assim e sem push da Apple.
 
 ## Verificação
 
+Erros fatais de JavaScript são gravados de forma síncrona no aparelho antes do tratamento
+original do React Native. Na próxima abertura, o aviso aponta para **Ajustes > Sobre > Último
+erro**, com cópia e compartilhamento do relatório. Mensagens desconhecidas e valores variáveis
+são ocultados para não guardar conversa ou credenciais. O relatório conserva rota sem parâmetros,
+pilha recebida do runtime, componentes e identificação da atualização; uma pilha ofuscada de
+Release precisa do source map do mesmo bundle/OTA para chegar às linhas de origem.
+O diário do servidor próprio recebe um resumo na reabertura e só confirma o envio após o aceite
+do servidor. O relatório completo continua no aparelho, inclusive sem rede.
+
 `npm run typecheck` e `npm test` (em `mobile/`) rodam sob a trava `/tmp/hangar-verificacao.lock`,
 compartilhada com as outras sessões da máquina. No repositório, testes e typecheck só rodam
 quando pedidos; não contorne a trava.

@@ -159,7 +159,8 @@ impl SweepEnv for AppEnv {
         Box::pin(async move {
             // O retrato, não a descoberta: as linhas de transferência e as `orq` vêm dos fatos.
             let produced = self.st.list.snapshot().await.map_err(|e| e.code.to_owned())?;
-            live_names_of(&produced)
+            // A sessão que o restore ainda vai reabrir não morreu: o grupo dela fica.
+            live_names_of(&produced).map(|mut names| { names.extend(crate::session_open::restore::held()); names })
         })
     }
 

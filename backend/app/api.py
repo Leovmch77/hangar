@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime
-from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Literal, Optional
@@ -25,9 +25,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.requests import ClientDisconnect
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictBool, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sse_starlette.sse import EventSourceResponse
-from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, closed_names, diag, harness_api,
+from app import (agentes_sync, atomico, atualizacoes, atualizar, closed_names, diag, harness_api,
                  loop_monitor, pensamento_pt, permission_mode, plugin_bridge, procinfo, quem_chama, tmux,
                  uds_messaging)
 from app import groups_bridge, internal_api, list_bridge, migration_status, share_bridge, update_channel
@@ -63,7 +63,7 @@ from app.models import (SessionInfo, CreatedSessionInfo, ChatEvent, CostReport, 
                         RunInfo, Runner, CustomRunnersBody, ProjectStatus, ShortcutShellBody, RunCodeBody,
                         ProjectShortcutsBody, ShortcutAnswerBody, session_key)
 from app import uso_report
-from app.pqueue import (PromptQueue, _saida_local, _transcript_start_ts, committed_user_lines,
+from app.pqueue import (PromptQueue, _transcript_start_ts, committed_user_lines,
                         fila_interna_pendente, linha_mais_parecida)
 from app.prune import prune_loop as _prune_loop
 from app.chain import ThenLink
@@ -96,7 +96,7 @@ from app import contas, default_model, engine_probe, engines, procinfo
 from app.costs import report as costs_report, usd_brl as _usd_brl, PERIODOS as _COST_PERIODOS
 from app import costs_sources, pricing
 from app.git_ops import (
-    list_branches, switch_branch, create_worktree, remove_worktree, git_action, git_log, assign_lanes, changed_files, file_diff, discard_file, commit_files, commit_file_diff, commit_diff, revert_commit, cherry_pick, reset_to, create_branch_at, create_tag, diff_vs_worktree, branches_containing, commit, last_commit_message, push as push_branch, sequencer_state, GitError, branch_of, git_summary,
+    list_branches, switch_branch, create_worktree, git_action, git_log, assign_lanes, changed_files, file_diff, discard_file, commit_files, commit_file_diff, commit_diff, revert_commit, cherry_pick, reset_to, create_branch_at, create_tag, diff_vs_worktree, branches_containing, commit, last_commit_message, push as push_branch, sequencer_state, GitError, branch_of, git_summary,
     folder_status, folder_fetch, folder_pull, folder_switch, folder_create_branch,
 )
 from app import loop as loop_mod
@@ -106,9 +106,8 @@ from app import runner
 from app import project_shortcuts
 from app import projects
 from app import archive_providers
-from app.archive import (ArchiveEntry, ArchiveFolder, archive_cwd, archive_jsonl, conta_de,
-                         list_conversations, list_folders, list_recent, move_conversation,
-                         tail_events)
+from app.archive import (ArchiveEntry, ArchiveFolder, archive_cwd, archive_jsonl,
+                         list_conversations, list_folders, list_recent, tail_events)
 from app.search import SearchHit, search, extract_terms, search_terms, build_ask_prompt
 from app.askquestion import clear_pending_askq, read_pending_askq
 from app import pair
@@ -128,74 +127,6 @@ from app.deploy import deploy_router
 from app import desktop_palette
 
 _log = logging.getLogger("hangar")
-
-
-_codex_live_leases: dict[str, dict] = {}
-
-
-def _codex_lease_released(name: str) -> None:
-    state = _codex_live_leases.pop(name, None)
-    if state is not None:
-        state["lease"].release()
-
-
-def _codex_lease_renamed(old: str, new: str) -> None:
-    state = _codex_live_leases.pop(old, None)
-    if state is not None:
-        state["renaming"] = True
-        state["revision"] = state.get("revision", 0) + 1
-        state["name"] = new
-        _codex_live_leases[new] = state
-
-
-def _codex_lease_rename_finished(name: str) -> None:
-    state = _codex_live_leases.get(name)
-    if state is not None:
-        state["renaming"] = False
-        state["revision"] = state.get("revision", 0) + 1
-
-
-async def _watch_codex_lease(state: dict) -> None:
-    def session_alive(name):
-        state["lease"].retire_birth()
-        return tmux.has_session(name)
-
-    try:
-        while True:
-            if state.get("renaming"):
-                await asyncio.sleep(0.05)
-                continue
-            name = state["name"]
-            revision = state.get("revision", 0)
-            try:
-                alive = await asyncio.to_thread(session_alive, name)
-            except Exception:
-                alive = True
-            if (state["name"] != name or state.get("revision", 0) != revision
-                    or state.get("renaming")):
-                continue
-            if not alive:
-                break
-            await asyncio.sleep(1)
-    finally:
-        current = _codex_live_leases.get(state["name"])
-        if current is state:
-            _codex_live_leases.pop(state["name"], None)
-        state["lease"].release()
-
-
-async def _hold_codex_lease(name: str, lease) -> None:
-    from app.account_lifecycle import complete_on_cancel
-    await complete_on_cancel(asyncio.to_thread(lease.mark_live, name))
-    state = {"name": name, "lease": lease, "renaming": False, "revision": 0}
-    _codex_live_leases[name] = state
-    task = asyncio.create_task(_watch_codex_lease(state), name=f"codex-lease-{name}")
-    tasks = getattr(app.state, "codex_creation_tasks", None)
-    if tasks is None:
-        tasks = set()
-        app.state.codex_creation_tasks = tasks
-    tasks.add(task)
-    task.add_done_callback(tasks.discard)
 
 
 def _codex_service():
@@ -415,7 +346,6 @@ async def _lifespan(app: FastAPI):
     app.state.codex_contas_login = codex_contas_login
     # Referência guardada: task sem dono pode ser coletada no meio.
     app.state.codex_auth_aquecer = asyncio.create_task(codex_contas_login.aquecer())
-    app.state.codex_creation_tasks = set()
     omp_sync = PluginSyncLoop(
         PluginSynchronizer(home=Path.home(), claude_dir=_backend_config_base()),
         enabled=settings.omp_plugin_sync_enabled,
@@ -424,14 +354,12 @@ async def _lifespan(app: FastAPI):
     )
     app.state.omp_plugin_sync = omp_sync
     await omp_sync.start()
-    from app import mcp_server
     # Em tarefa: o download dos binários na primeira vez não pode segurar a subida. Criada colada no
     # `try`: falha no meio da subida não pode deixar o frpc e o Caddy sem quem os pare.
     from app import connect as connect_mod
     connect_task = asyncio.create_task(connect_mod.start(), name="connect-start")
     try:
-        async with mcp_server.lifespan():
-            yield
+        yield
     finally:
         diag.registrar("backend.encerrando")
         await runtime.shutdown()
@@ -447,11 +375,6 @@ async def _lifespan(app: FastAPI):
         codex_warm_task.cancel()
         app.state.codex_auth_aquecer.cancel()
         await asyncio.gather(codex_warm_task, app.state.codex_auth_aquecer, return_exceptions=True)
-        creation_tasks = list(getattr(app.state, "codex_creation_tasks", ()))
-        for creation_task in creation_tasks:
-            creation_task.cancel()
-        if creation_tasks:
-            await asyncio.gather(*creation_tasks, return_exceptions=True)
         try:
             await integracao_codex.fechar()
         except Exception:
@@ -516,9 +439,12 @@ async def _codex_rust_port(name: str, request: Request):
         # Idem para a ponte do Claude: mesmo critério de provedor das rotas (`info.provider`).
         # O painel da fila (`queue/...`) é do Rust também: o Python só repassa.
         rota = route.split("?")[0]
-        if reply is None and (rota in {"input", "answer", "select", "select/submit", "permission-mode", "permission-modes"} or rota.startswith("queue/")) \
-                and getattr(await _cached_info(name), "provider", "claude") == "claude":
-            reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body)
+        # A pergunta lateral vai sempre: a rota do Rust decide provedor e sessão.
+        if reply is None and (rota == "btw" or (rota in {"input", "answer", "select", "select/submit", "permission-mode", "permission-modes", "model-effort"} or rota.startswith("queue/"))
+                and getattr(await _cached_info(name), "provider", "claude") == "claude"):
+            # O fork sem terminal tem 180 s; o prazo padrão da ponte cortaria a resposta.
+            prazo = (200,) if rota == "btw" else ()
+            reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body, *prazo)
         if reply:
             raise _RustReply(*reply)
 
@@ -600,6 +526,15 @@ async def _mux_indisponivel(request: Request, exc: tmux.MuxIndisponivel):
         content={"detail": erro("erro_mux_indisponivel",
                                 "o tmux não respondeu — a lista de sessões está indisponível",
                                 detalhe=str(exc))})
+
+
+@app.exception_handler(registry_mod.SessionOpenNeedsRust)
+async def _abrir_precisa_do_rust(request: Request, exc: Exception):
+    """Abrir Claude com terminal é do Rust: no modo `python` do Supervisor a recusa tem código e frase."""
+    diag.registrar("sessao.criar_recusada", "erro", codigo=registry_mod.SessionOpenNeedsRust.code,
+                   detalhe=f"{request.method} {request.url.path}")
+    return JSONResponse(status_code=503, content={"detail": erro(
+        registry_mod.SessionOpenNeedsRust.code, "abrir e reabrir sessão precisam do servidor Rust, que não está rodando")})
 
 
 @app.exception_handler(list_bridge.ListBridgeError)
@@ -685,6 +620,8 @@ async def _jev_aux_pelo_rust(request: Request, call_next):
 _PLANOS_LEITURA = re.compile(r"^/api/sessions/[^/]+/(plan|plans|plan-preview)$")
 _PLANOS_ESCRITA = re.compile(r"^/api/sessions/[^/]+/plan-(pin|step|archive)$")
 _CATALOGO = "/api/claude/customizations"
+# Retomar (Arquivo e sessão viva): a abertura e a reabertura são do Rust.
+_RETOMAR = re.compile(r"^/api/(archive/[^/]+/[^/]+|sessions/[^/]+)/resume$")
 
 
 @app.middleware("http")
@@ -696,6 +633,9 @@ async def _planos_pelo_rust(request: Request, call_next):
         if guest_of(request) is not None or guest_users.current.get() is not None:
             return JSONResponse({"detail": erro("erro_fora_da_pasta", "a seleção de plugins pertence ao dono")}, status_code=403)
         return await _repasse_ao_rust(request, erro("claude_customizations_unavailable", "a seleção de plugins e skills precisa do servidor Rust"),
+                                      "/__hangar_server/forwarded")
+    if metodo == "POST" and _RETOMAR.match(path):
+        return await _repasse_ao_rust(request, erro(registry_mod.SessionOpenNeedsRust.code, "abrir e reabrir sessão precisam do servidor Rust, que não está rodando"),
                                       "/__hangar_server/forwarded")
     padrao = _PLANOS_ESCRITA if metodo == "POST" else _PLANOS_LEITURA if metodo == "GET" else None
     if padrao is None or not padrao.match(path):
@@ -806,8 +746,6 @@ app.include_router(share_bridge.router)
 app.include_router(migration_status.router)
 app.include_router(internal_api.router)
 registry = SessionRegistry()
-registry_mod.apos_saida_codex = _codex_lease_released
-registry_mod.apos_renomear_codex = _codex_lease_renamed
 terminal = TerminalInput()
 
 # Teto de mensagem: o _BodySizeLimitMiddleware ignora scope != http de propósito (api.py:83), então
@@ -1398,6 +1336,8 @@ def _drenar(name: str, jsonl: str, provider: str) -> int:
         chave = "codex"
     elif _headless(name):
         chave = CLAUDE_HEADLESS
+    elif provider == "claude" and coordinator is not None and coordinator.mode in {"pending", "rust"} and coordinator.rust_owns("claude", False):
+        return 0    # a fila do Claude com terminal é do Rust: quem drena é o Monitor dele, e a trava é dele
     else:
         return drain(name, jsonl, provider)
     loop = _loop_servidor
@@ -1887,72 +1827,6 @@ class _StrictBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class ClaudeCustomizationBody(_StrictBody):
-    plugins: dict[str, StrictBool] = Field(default_factory=dict)
-    skills: dict[str, StrictBool] = Field(default_factory=dict)
-    blocked_skills: list[str] = Field(default_factory=list)
-
-
-class CreateBody(_StrictBody):
-    _engine_catalog: list[dict] | None = PrivateAttr(default=None)
-    name: str = Field(min_length=1)
-    cwd: str = Field(min_length=1)
-    branch: str | None = Field(default=None, min_length=1)
-    # Com `new_branch`, `branch` é o nome da branch NOVA e `base` a de partida (None = a atual).
-    new_branch: bool = Field(default=False, strict=True)
-    base: str | None = Field(default=None, min_length=1)
-    config_dir: str | None = None
-    # O campo omitido é resolvido pelo servidor antes de validar as opções do provedor.
-    provider: str = "claude"
-    # Somente a abertura humana muda o padrão; criação automatizada pode escolher outro provedor.
-    remember_provider: bool = Field(default=False, strict=True)
-    # Conta Codex escolhida pelo usuário. Ausente mantém a conta padrão para clientes antigos.
-    codex_account: str | None = None
-    # Wrapper interativo do Codex pode iniciar a TUI ja com um prompt. Nao e argv arbitrario:
-    # evita que um cliente remoto injete flags que afrouxem sandbox/aprovacoes do backend.
-    initial_prompt: str | None = None
-    # Motor de modelo (nome no engines.json). None = conta Anthropic, comportamento de hoje.
-    engine: str | None = None
-    engine_account: str | None = None
-    # Escolhidos na tela de abertura. None = padrão do binário (comportamento de hoje). Validado
-    # aqui, nunca no front: o valor entra num comando de shell.
-    model: str | None = None
-    effort: str | None = None
-    service_tier: Literal["default", "priority"] | None = None
-    # Modo de permissão do Claude Code. None = padrão da conta (comportamento de hoje).
-    permission_mode: str | None = None
-    # CLAUDE_CODE_SUBAGENT_MODEL. Só claude sem motor: o motor exporta o dele e ganharia calado.
-    subagent_model: str | None = None
-    claude_customizations: ClaudeCustomizationBody | None = None
-    # Jev (typesafe.ai) no `hangar-preview objetivo`. Escolha da ABERTURA: ligado, a sessão nasce
-    # com a chave no ambiente; desligado, só com o marcador, e o verbo recusa. É o que
-    # permite rodar a mesma tarefa com e sem, sem apagar a configuração.
-    # AUSENTE (None) ≠ `false`: quem não disse nada herda o `jev_padrao` do servidor, e é assim que
-    # a escolha feita uma vez vale pros três caminhos de criação. `false` explícito continua
-    # desligando aquela sessão mesmo com o padrão ligado.
-    jev: bool | None = Field(default=None, strict=True)
-    # Perfil do omp (`omp --profile x`): login, sessões e config em ~/.omp/profiles/x/agent.
-    # None = sem perfil. Só vale com provider omp; o nome é validado no registry.
-    omp_profile: str | None = None
-
-    read_only: bool = Field(default=False, strict=True)
-    # Claude ou Codex SEM terminal roda atrás do cano, sem tmux. O que depende de pane
-    # (painel de terminal, espelho) não existe.
-    headless: bool | None = Field(default=None, strict=True)
-    # Sessão que pediu a criação (MCP `new_session`, `hangar-send --new`). O que vier omitido
-    # (modo de permissão, sem terminal) herda dela; sem ela, vale o padrão do servidor.
-    creator: str | None = Field(default=None, min_length=1)
-
-
-def _jev_efetivo(pedido: bool | None) -> bool:
-    """Jev desta sessão: o que o chamador pediu, ou o padrão do servidor quando ele não disse nada.
-
-    Um lugar só porque os três caminhos de criação (folha, `hangar-send --new`, MCP `new_session`)
-    desembocam todos no `create_session` — resolver em cada um faria o padrão valer em dois e
-    faltar no terceiro sem ninguém perceber."""
-    return bool(runtime_config.get("jev_padrao")) if pedido is None else pedido
-
-
 class TtsBody(_StrictBody):
     # max_length: sem teto, um corpo de 100 MB era parseado INTEIRO antes do 413 do preparo/teto
     # de caracteres poder recusar. 200_000 e bem acima do teto real (_TTS_TETO) — so evita o corpo
@@ -2047,10 +1921,6 @@ class SelectBody(_StrictBody):
     interaction_id: str | None = None    # do cliente; quem confere é o Rust
 
 
-class BtwBody(_StrictBody):
-    question: str = Field(min_length=1, max_length=4000)
-
-
 class KeyBody(_StrictBody):
     key: str  # nome da tecla de navegacao (allowlist em TerminalInput._NAV_KEYS)
 
@@ -2061,13 +1931,6 @@ class TermInputBody(_StrictBody):
     text: str | None = None
     key: str | None = None
 
-
-class ModelEffortBody(_StrictBody):
-    # ambos opcionais: so esforco (sem modelo) ainda dirige o picker do /model, deixando o
-    # modelo na linha atual. scope: 'session' (aperta `s`) ou 'default' (aperta Enter).
-    model: str | None = None
-    effort: str | None = None
-    scope: Literal["session", "default"] = "session"
 
 
 @app.get("/api/whoami", dependencies=[Depends(require_auth)])
@@ -2235,44 +2098,6 @@ def uso_endpoint(period: str = "all", conta: list[str] = Query([]), projeto: lis
         return _aquecendo(e)
 
 
-# Passo em curso de cada criação, pelo nome da sessão nova: a tela de criar consulta enquanto
-# espera, e quem olha sabe que não travou.
-_criacao_passo: dict[str, dict] = {}
-
-
-def _passo(nome: str, passo: str, **params) -> None:
-    _criacao_passo[sanitize_session_name(nome)] = {"step": passo, "params": params}
-
-
-@contextmanager
-def _acompanhar_criacao(nome: str):
-    """Só quem abriu o registro o apaga: o bastão chama o create_session por dentro e ainda tem
-    passo depois dele."""
-    chave = sanitize_session_name(nome)
-    dono = chave not in _criacao_passo
-    if dono:
-        _criacao_passo[chave] = {"step": "preparando", "params": {}}
-    try:
-        yield
-    finally:
-        if dono:
-            _criacao_passo.pop(chave, None)
-
-
-@app.get("/api/sessions/creation-progress", dependencies=[Depends(require_auth)])
-async def creation_progress(name: str):
-    return _criacao_passo.get(sanitize_session_name(name)) or {"step": None, "params": {}}
-
-
-async def _kill_unclaimed(name: str) -> None:
-    try:
-        await asyncio.to_thread(registry.kill, name)
-    except Exception:
-        _log.exception("[guests] sessao %s sem dono nao encerrou", name)
-    finally:
-        await asyncio.to_thread(_invalidate_lists)
-
-
 def _codex_as_claude_mode(name: str) -> str | None:
     """Modo do Claude equivalente ao da sessão Codex `name` (None se não for Codex)."""
     from app.adapters.codex import sessions as codex_sessions
@@ -2286,152 +2111,35 @@ def _codex_as_claude_mode(name: str) -> str | None:
     return "acceptEdits" if sandbox == "workspace-write" else "manual"
 
 
-def _creator_permission_mode(name: str, jsonl: str | None) -> str | None:
-    """Modo fora de `plan` da sessão Claude `name`, no nome que o `--permission-mode` aceita."""
-    meta = headless_sessions.load(name)
-    modo = None
-    if meta:
-        modo = meta.get("permission_mode")
-        if modo == "plan":
-            modo = meta.get("previous_non_plan")
-    modo = modo or permission_mode.session_non_plan_mode(jsonl or _jsonl_atual(name))
-    modo = "manual" if modo == "default" else modo
-    return modo if modo in model_args.MODOS_PERMISSAO_CLAUDE and modo != "plan" else None
-
-
-async def _inherit_from_creator(body: CreateBody) -> tuple[CreateBody, str | None, list[str]]:
-    """Preenche o que veio omitido com o da sessão criadora; devolve também `"inherited"` quando a
-    conta veio dela e os avisos do que não deu para herdar. O modo conta porque o primeiro recado
-    de uma criadora em bypass para uma irmã em Manual fica retido no receptor (`mode-mismatch`)."""
-    # Convidado não herda a conta nem o modo de uma sessão do dono.
-    if not body.creator or guest_users.current.get() is not None:
-        return body, None, []
-    info = await _cached_info(body.creator)
-    if info is None:
-        return body, None, [f"sessão criadora '{body.creator}' não encontrada; nada foi herdado"]
-    update: dict = {}
-    avisos: list[str] = []
-    account_source = None
-    # Perfil do omp já define a conta.
-    # Codex não tem conta Claude: a nova fica na padrão, como quando a criadora não é identificada.
-    if (body.config_dir is None and body.provider in ("claude", "pi", "omp") and not body.omp_profile
-            and info.provider != "codex"):
-        cfg, confiavel = await asyncio.to_thread(_caller_config_dir, info.name)
-        if not confiavel:
-            # Criar assim nasceria na conta padrão, calado: gasta a cota de quem ninguém escolheu.
-            raise HTTPException(409, detail=erro(
-                "erro_conta_criadora", f"não consegui confirmar a conta da sessão '{info.name}' — "
-                "escolha a conta (`conta` no MCP, `--conta` no hangar-send)"))
-        account_source = "inherited"
-        if cfg:
-            update["config_dir"] = str(cfg)
-    if body.headless is None and body.provider in ("claude", "codex") and not body.read_only:
-        update["headless"] = bool(info.headless)
-    if body.permission_mode is None and body.provider == "claude" and info.provider in ("claude", "codex"):
-        modo = await (asyncio.to_thread(_codex_as_claude_mode, info.name) if info.provider == "codex"
-                      else asyncio.to_thread(_creator_permission_mode, info.name, info.jsonl))
-        if modo:
-            update["permission_mode"] = modo
-        else:
-            avisos.append(f"não consegui ler o modo de permissão de '{info.name}'; vale o padrão da conta")
-    return (body.model_copy(update=update) if update else body), account_source, avisos
-
-
-def _create_error_code(e: ValueError) -> str:
-    if isinstance(e, registry_mod.GroupCleanupFailed):
-        return e.code
-    return "erro_nome_em_uso" if "ja existe uma sessao" in str(e) else "erro_criacao_sessao"
+async def _open_in_rust(raw: bytes, request: Request | None) -> CreatedSessionInfo | None:
+    """Claude com terminal abre no Rust. O que entra pela 8765 ele decide antes de repassar; à ponte,
+    num sentido, só vai o que entrou direto aqui: o Connect (8768), inclusive o bastão por ela. O
+    pedido vai cru: quem valida é o Rust. `None`: o pedido não é do Rust e segue aqui."""
+    from app import runtime_coordinator
+    port = (request.scope.get("server") or (None, None))[1] if request is not None else None
+    if port != CONNECT_PORT or port == settings.port:
+        return None
+    guest = guest_users.current.get()
+    payload = b'{"request":' + raw + b',"guest":' + json.dumps(guest.id if guest is not None else None).encode() + b"}"
+    # O prazo da criação, que prepara conta e worktree. O nome na rota é só rótulo: a ponte lê o pedido.
+    answer = await asyncio.to_thread(runtime_coordinator.rust_claude, "_", "open", "POST", payload, 180)
+    if answer is None:
+        return None
+    status, raw = answer
+    data = json.loads(raw)
+    if status >= 400:
+        raise HTTPException(status, detail=data["detail"])
+    # O dono da sessão do convidado o Rust já gravou no `guests.json`.
+    return CreatedSessionInfo(**data["info"])
 
 
 @app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=CreatedSessionInfo)
-async def create_session(body: CreateBody) -> CreatedSessionInfo:
-    if "provider" not in body.model_fields_set:
-        provider = await _default_session_provider(body.config_dir, body.engine, body.codex_account,
-                                                   body.omp_profile, body.subagent_model)
-        body = body.model_copy(update={"provider": provider})
-    explicit_account = body.config_dir is not None
-    body, account_source, avisos_extra = await _inherit_from_creator(body)
-    # Convidado fica na conta Codex padrão: as outras contas são do dono.
-    if body.provider == "codex" and body.codex_account is None and guest_users.current.get() is None:
-        connected = await _connected_codex_accounts()
-        if connected and not any(account.is_default for account in connected):
-            body = body.model_copy(update={"codex_account": connected[0].id})
-            avisos_extra.append(f"A conta Codex padrão não está conectada; a sessão usa a conta {connected[0].id}.")
-    if not explicit_account and body.provider == "claude" and not body.engine:
-        # Sem conta pedida, a herdada ou a padrão só vale se não estiver acabando; senão nasce na de
-        # mais folga, e a resposta diz que trocou.
-        from app import cotas
-        # cotas_claude() consulta a ponte do Rust por HTTP síncrono: fica fora do event loop.
-        config_dir, aviso = await asyncio.to_thread(
-            lambda: cotas.conta_com_cota(body.config_dir, cotas.cotas_claude()))
-        if aviso:
-            _log.warning("create_session %s: %s", body.name, aviso)
-            body = body.model_copy(update={"config_dir": config_dir})
-            avisos_extra.append(aviso)
-            account_source = "quota"
-    if body.provider == "claude" and not body.engine and (
-            body.config_dir is None or body.config_dir in {c.path for c in list_config_dirs()}):
-        cfg = Path(body.config_dir) if body.config_dir else None
-        removidos, falhas = await asyncio.to_thread(default_model.drop_foreign, cfg)
-        for valor in removidos:
-            _log.warning("create_session %s: modelo padrão %r não é da Anthropic; removido do settings.json",
-                         body.name, valor)
-            avisos_extra.append(f"O modelo padrão '{valor}' do settings.json não é da Anthropic "
-                                "(provavelmente veio de um /model numa sessão de motor) e foi removido.")
-        avisos_extra += [f"Não consegui tirar do settings.json um modelo que não é da Anthropic: {f}"
-                         for f in falhas]
-    with _acompanhar_criacao(body.name):
-        worktree: dict = {}
-        try:
-            info = await _criar_sessao(body, worktree)
-            if body.branch is not None:
-                # O cwd da worktree vem do dict: `_criar_sessao` pode trabalhar numa cópia do body.
-                cwd = worktree.get("cwd", body.cwd)
-                is_wt = Path(cwd, ".git").is_file()
-                info = info.model_copy(update={"cwd": cwd, "branch": body.branch, "worktree": is_wt,
-                                               "worktree_path": cwd if is_wt else None})
-            guest = guest_users.current.get()
-            if guest is not None:
-                try:
-                    await asyncio.to_thread(guest_users.claim, info.name, guest.id)
-                except Exception:
-                    # Sem o dono registrado a sessão ficaria à vista do dono e sumida para o convidado.
-                    _log.exception("[guests] claim de %s falhou; encerrando a sessao", info.name)
-                    await _kill_unclaimed(info.name)
-                    raise
-                info = info.model_copy(update={"owner": guest.name})
-            if avisos_extra:
-                info = info.model_copy(update={"avisos": [*info.avisos, *avisos_extra]})
-            info = CreatedSessionInfo(**info.model_dump(), config_dir=body.config_dir,
-                                      account_source=account_source)
-            if (guest is None and body.remember_provider
-                    and runtime_config.get("last_session_provider") != info.provider):
-                try:
-                    await asyncio.to_thread(runtime_config.aplicar, {"last_session_provider": info.provider})
-                except Exception as exc:  # noqa: BLE001 — a sessão já existe; falhar aqui faria o cliente recriá-la
-                    _log.warning("não consegui lembrar o provedor da sessão %s: %s", info.name, exc)
-                    info = info.model_copy(update={"avisos": [*info.avisos,
-                        f"A sessão foi criada, mas não consegui lembrar o provedor: {exc}"]})
-            return info
-        except BaseException:
-            if worktree.get("path") and not worktree.get("session_created"):
-                try:
-                    await asyncio.shield(asyncio.to_thread(_undo_worktree, worktree))
-                except GitError as exc:
-                    raise HTTPException(500, detail=erro("erro_criacao_sessao",
-                                                          f"falha ao desfazer a worktree: {exc.detail}")) from exc
-            raise
-
-
-def _undo_worktree(worktree: dict) -> None:
-    """Desfaz a worktree que o próprio pedido criou. Força: os arquivos de config copiados podem
-    não estar ignorados na base. A branch nova vai junto, senão a nova tentativa daria 409."""
-    remove_worktree(worktree["source"], worktree["path"], force=True)
-    branch = worktree.get("new_branch")
-    if branch:
-        deleted = git_ops._run(worktree["source"], "branch", "-D", branch)
-        if deleted.returncode != 0:
-            raise GitError(500, git_ops._scrub(deleted.stderr.strip()) or "não consegui apagar a branch")
+async def create_session(request: Request) -> CreatedSessionInfo:
+    opened = await _open_in_rust(await request.body(), request)
+    if opened is not None:
+        return opened
+    # Toda abertura é do Rust (`_open_in_rust` para o que entrou aqui pelo Connect): sem ele, recusa.
+    raise registry_mod.SessionOpenNeedsRust()
 
 
 def _allowed_scan_root(path: str) -> Path:
@@ -2441,344 +2149,6 @@ def _allowed_scan_root(path: str) -> Path:
         raise FsError(403, "root not allowed")
     scan_dir(str(root), str(target))
     return root
-
-
-async def _criar_sessao(body: CreateBody, worktree: dict):
-    from app.account_lifecycle import complete_on_cancel
-    return await complete_on_cancel(_create_session_owned(body, worktree))
-
-
-async def _create_session_owned(body: CreateBody, worktree: dict):
-    if body.headless is None:
-        body = body.model_copy(update={"headless": not body.read_only and body.provider in ("claude", "codex")
-                                      and bool(runtime_config.get("headless_default"))})
-    # Handler async por causa da trava de conta mais abaixo. Todo provider passa pelo MESMO
-    # registry.create — o Codex tambem, desde que o lancador unico virou o comando do pane dele.
-    # registry.create e SINCRONO e spawna um
-    # subprocess tmux (bloqueante) -> rodar direto aqui travaria o event loop / o SSE de outras
-    # sessoes; vai pro threadpool via asyncio.to_thread, igual aos outros handlers async deste
-    # arquivo que chamam registry.list()/save_upload (menor risco de regressao: comportamento e
-    # exceções do create() Claude ficam IDENTICOS, so a chamada muda de sync p/ thread).
-    # Pi entra pelo MESMO registry.create do Claude (pane tmux + spawn_command do PiAdapter); o que
-    # muda la dentro e so o transcript, que nao e pre-semeado (layout proprio, arquivo so no 1o turno).
-    # Validar provider, config_dir e engine ANTES de qualquer efeito no disco: um pedido que vai
-    # ser rejeitado aqui não pode ter reconciliado a conta (deriva movida, memória criada) à toa.
-    if body.provider not in ("claude", "codex", "pi", "kimi", "omp"):
-        raise HTTPException(400, detail=erro("erro_provider_sessao_invalido", "provider invalido"))
-    if body.claude_customizations is not None:
-        if body.provider != "claude":
-            raise HTTPException(400, detail=erro("claude_customizations_invalid",
-                                                 "plugins e skills por sessão só valem para Claude"))
-        if guest_users.current.get() is not None:
-            raise HTTPException(403, detail=erro("claude_customizations_owner_only",
-                                                 "a seleção de plugins pertence ao dono"))
-    if body.service_tier is not None and body.provider != "codex":
-        if body.provider != "claude" or not await asyncio.to_thread(cliproxy.supports_fast, body.engine, body.model):
-            raise HTTPException(400, detail=erro("erro_criacao_sessao", "Fast exige Codex ou Claude com GPT no CLIProxyAPI local"))
-    # Antes de qualquer efeito (worktree, registry.create): convidado só abre dentro da pasta dele.
-    guest = guest_users.current.get()
-    if guest is not None and not guest_users.inside_root(guest, body.cwd):
-        raise HTTPException(403, detail=erro("erro_fora_da_pasta",
-                                             "o convidado só abre sessão dentro da pasta dele"))
-    # Sem isto a sessão sem terminal nasce e só quebra ao subir o processo, com um ENOENT que não
-    # diz qual arquivo faltou.
-    if not await asyncio.to_thread(os.path.isdir, os.path.expanduser(body.cwd)):
-        raise HTTPException(400, detail=erro("erro_cwd_inexistente", f"a pasta {body.cwd} não existe",
-                                             cwd=body.cwd))
-    account_models = None
-    if body.engine_account is not None:
-        if body.provider != "claude" or not body.engine:
-            raise HTTPException(400, detail=erro("erro_cliproxy_conta", "conta ChatGPT exige Claude com motor CLIProxyAPI local"))
-        account = await asyncio.to_thread(_fixed_engine_account, body.engine, body.engine_account)
-        cfg = engines.listar()[body.engine]
-        from app.cliproxy_accounts import base_model
-        account_models = body._engine_catalog if body._engine_catalog is not None else await _engine_models(body.engine, fresco=True)
-        try:
-            base = base_model(body.model or cfg["model"], account["prefix"])
-            catalog = cliproxy.validate_models(cfg, base, account, account_models)
-        except ValueError as exc:
-            raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
-        body = body.model_copy(update={"model": base})
-    if body.read_only:
-        from app.orq_readonly import prepare
-        try:
-            await asyncio.to_thread(prepare, body.cwd, runtime_dirs=(body.config_dir or "",))
-        except ValueError as exc:
-            raise HTTPException(400, detail=erro("erro_criacao_sessao", str(exc))) from None
-    if body.codex_account is not None and body.provider != "codex":
-        raise HTTPException(400, detail=erro("codex_account_so_codex",
-                                             "codex_account só vale para provider codex"))
-    codex_account_obj = None
-    codex_service = _codex_service() if body.provider == "codex" else None
-    if body.provider == "codex":
-        codex_account_obj = _resolve_codex_account(body.codex_account)
-        if body.read_only:
-            try:
-                await asyncio.to_thread(prepare, body.cwd, runtime_dirs=(str(codex_account_obj.home),))
-            except ValueError as exc:
-                raise HTTPException(400, detail=erro("erro_criacao_sessao", str(exc))) from None
-        if body.codex_account is not None:
-            await _codex_require_idle_preparation(codex_account_obj, codex_service)
-    if body.config_dir is not None and body.config_dir not in {c.path for c in list_config_dirs()}:
-        raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
-    # Mesma guarda do config_dir. Codex nao usa spawn_command/tmux desse jeito, entao motor + codex e
-    # pedido incoerente — 400, nao "ignora e segue".
-    if body.engine is not None:
-        if body.provider != "claude":
-            raise HTTPException(400, detail=erro("erro_motor_sem_claude", "motor so vale para provider claude"))
-        if body.engine not in await asyncio.to_thread(engines.listar):
-            raise HTTPException(400, detail=erro("erro_motor_invalido", "motor invalido"))
-    # permission_mode só vale para claude — e para o Codex sem terminal (vira sandbox/approval).
-    if body.permission_mode is not None and body.provider != "claude" \
-            and not (body.provider == "codex" and body.headless):
-        raise HTTPException(409, detail=erro("erro_permissao_so_claude", "modo de permissao so vale para claude"))
-    if body.omp_profile and body.provider != "omp":
-        raise HTTPException(400, detail=erro("erro_perfil_so_omp", "perfil so vale para provider omp"))
-    if body.subagent_model is not None:
-        if body.provider != "claude" or body.engine:
-            raise HTTPException(400, detail=erro("erro_subagente_so_claude",
-                                                 "modelo dos subagentes so vale para claude sem motor"))
-        try:
-            model_args.validar("claude", body.subagent_model, None)
-        except ValueError as e:
-            raise HTTPException(400, str(e).replace("model:", "subagent_model:", 1)) from None
-    # Mesma regra das linhas acima, pro model/effort: recusa ANTES de qualquer efeito no disco,
-    # inclusive pro provedor fora de escopo (codex/kimi) quando alguem pedir escolha — o valor
-    # entraria num comando de shell montado por concatenacao.
-    try:
-        # O modo do Codex sem terminal tem lista própria (sem_terminal.MODOS), validada no registry.
-        model_args.validar(body.provider, body.model, body.effort,
-                           None if body.provider == "codex" else body.permission_mode)
-    except ValueError as e:
-        # permission_mode fora da lista deve ser 409 com código específico, não 400 genérico
-        msg = str(e)
-        if "permission_mode" in msg:
-            raise HTTPException(409, detail=erro("erro_permissao_invalida", msg)) from None
-        raise HTTPException(400, str(e)) from None
-    # O nível do Codex não tem lista fechada em model_args (varia POR MODELO), então quem cruza
-    # modelo×nível é o catálogo. Sem isto, `--effort ultra` num `gpt-5.5` sobe a sessão e o binário
-    # descarta o nível calado — sucesso reportado sobre escolha que não valeu.
-    if body.provider == "codex" and (body.model or body.effort or body.service_tier is not None):
-        try:
-            checar_kw = ({"codex_home": codex_account_obj.home}
-                         if body.codex_account is not None else {})
-            if body.service_tier is not None:
-                checar_kw["service_tier"] = body.service_tier
-            await asyncio.to_thread(codex_models.checar_escolha, body.model, body.effort,
-                                    **checar_kw)
-        except ValueError as e:
-            raise HTTPException(422, detail=erro("erro_codex_escolha_invalida", str(e), erro=str(e))) from None
-        except codex_models.CodexIndisponivel as e:
-            if body.service_tier == "priority":
-                raise HTTPException(502, detail=erro("erro_codex_catalogo_invalido",
-                                                     f"Fast não pôde ser conferido: {e}", erro=str(e))) from None
-            # Catálogo fora do ar (ou `codex` ausente — o CodexAusente é um RuntimeError) não pode
-            # IMPEDIR de abrir sessão: mesma decisão da janela do motor, logo abaixo. A escolha
-            # segue pro comando e o CLI decide. A falha não some — fica no log.
-            _log.warning("codex: catalogo indisponivel, escolha nao conferida: %s", e)
-        except (codex_models.CodexRecusado, codex_models.CodexRespostaInvalida) as e:
-            raise HTTPException(502, detail=erro("erro_codex_catalogo_invalido", str(e),
-                                                 erro=str(e))) from None
-
-    if body.new_branch and body.branch is None:
-        raise HTTPException(400, detail=erro("erro_criacao_sessao", "branch nova sem nome"))
-    if body.branch is not None:
-        try:
-            root = await asyncio.to_thread(_allowed_scan_root, body.cwd)
-            source = body.cwd
-            # Recusa antes de criar a worktree, em vez de criar e desfazer no registry.create.
-            if not sanitize_session_name(body.name):
-                raise GitError(400, "nome de sessão inválido")
-            worker = asyncio.create_task(asyncio.to_thread(
-                git_ops.create_branch_worktree, source, body.branch, root,
-                new_branch=body.new_branch, base=body.base))
-            try:
-                path, created = await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                path, created = await asyncio.shield(worker)
-                if created:
-                    worktree.update(source=source, path=path,
-                                    new_branch=body.branch if body.new_branch else None)
-                raise
-        except (FsError, GitError) as exc:
-            raise HTTPException(exc.status, detail=erro("erro_criacao_sessao", exc.detail)) from None
-        if created:
-            worktree.update(source=source, path=path,
-                            new_branch=body.branch if body.new_branch else None)
-        body.cwd = worktree["cwd"] = path
-
-    # Janela do modelo escolhido, pra entrar no env do motor (Task 3). O número já está no cache do
-    # catálogo do provedor (_engine_models); vir do navegador seria deixar um terceiro escolher uma
-    # variável de ambiente — e ainda ficaria None justamente nos provedores que não reportam
-    # context_length. Com motor mas sem modelo (ou vice-versa), nada a resolver: o env segue o motor.
-    janela = None
-    if body.engine and body.model:
-        catalog_id = await asyncio.to_thread(engines.catalog_model, body.model)
-        try:
-            for m in await (_fixed_engine_models(body.engine, body.engine_account)
-                            if body.engine_account else _engine_models(body.engine)):
-                if m["id"] == catalog_id:
-                    janela = 1_000_000 if catalog_id != body.model else m.get("context_length")
-                    break
-        except HTTPException:
-            # _engine_models devolve 502 quando o cache expirou e o /v1/models não responde, e 409
-            # quando o motor sumiu do arquivo entre a validação e aqui. A janela é enfeite: deixar
-            # essa chamada derrubar a criação faria o provedor fora do ar IMPEDIR de abrir sessão —
-            # coisa que hoje não acontece, e que contradiz o Step 5 da Task 5 ("provedor parado: a
-            # sessão ainda cria"). A sessão sobe sem a var e o CLI usa o default dele.
-            janela = None
-
-    codex_lease = None
-    if body.provider == "codex" and (body.codex_account is not None or codex_service is not None):
-        if codex_service is None:
-            raise HTTPException(503, detail=erro("codex_account_service_unavailable",
-                                                 "serviço de contas Codex indisponível"))
-        try:
-            codex_lease = codex_service.reserve_creation(codex_account_obj)
-        except codex_accounts.AccountError as exc:
-            raise HTTPException(exc.status, detail=erro(exc.code, "criação da conta Codex recusada",
-                                                        **exc.params)) from None
-
-    async def _create_registry(kwargs: dict):
-        """A criação é bloqueante; se o request morrer, o worker ainda precisa terminar."""
-        nonlocal codex_lease
-        def create():
-            if body.engine_account is not None:
-                kwargs["engine_account"] = body.engine_account
-                kwargs["engine_models"] = account_models
-            from app.account_lifecycle import AccountKey, AccountLockError, acquire
-            from contextlib import nullcontext
-            home = (codex_account_obj.home if body.provider == "codex"
-                    else Path(tmux.config_dir_de(body.config_dir)))
-            try:
-                guard = (acquire(AccountKey.new("codex" if body.provider == "codex" else "claude", home))
-                         if body.provider in ("claude", "codex", "pi", "omp") else nullcontext())
-            except AccountLockError as exc:
-                # Exclusão ou login segura a conta: o app mostra "tente de novo", não um 500.
-                raise HTTPException(409, detail=erro(exc.code, "a conta está ocupada por outra operação")) from None
-            with guard:
-                try:
-                    info = registry.create(body.name, body.cwd, body.config_dir, **kwargs)
-                except claude_customizations.CustomizationsError as exc:
-                    raise HTTPException(exc.status, detail=erro(exc.code, exc.detail)) from None
-            worktree["session_created"] = True
-            # O mesmo nome pode estar no snapshot com o transcript da sessão encerrada.
-            _invalidate_lists()
-            return info
-
-        worker = asyncio.create_task(asyncio.to_thread(create))
-        if codex_lease is None:
-            try:
-                return await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                await asyncio.shield(worker)
-                raise
-        try:
-            info = await asyncio.shield(worker)
-        except asyncio.CancelledError:
-            try:
-                info = await asyncio.shield(worker)
-            except BaseException:
-                codex_lease.release()
-                codex_lease = None
-                raise
-            await _hold_codex_lease(info.name, codex_lease)
-            codex_lease = None
-            raise
-        except BaseException:
-            codex_lease.release()
-            codex_lease = None
-            raise
-        await _hold_codex_lease(info.name, codex_lease)
-        codex_lease = None
-        return info
-
-    # Um montador só: com conta nomeada e sem ela a sessão nasce com as mesmas escolhas.
-    def _registry_kwargs() -> dict:
-        kw = dict(provider=body.provider, engine=body.engine, model=body.model,
-                  effort=body.effort, context_window=janela)
-        if body.permission_mode is not None:
-            kw["permission_mode"] = body.permission_mode
-        if body.subagent_model is not None:
-            kw["subagent_model"] = body.subagent_model
-        if body.claude_customizations is not None:
-            kw["claude_customizations"] = body.claude_customizations.model_dump()
-        if _jev_efetivo(body.jev):
-            kw["jev"] = True
-        if body.initial_prompt is not None:
-            kw["initial_prompt"] = body.initial_prompt
-        if body.omp_profile:
-            kw["omp_profile"] = body.omp_profile
-        if body.codex_account is not None:
-            kw["codex_account"] = body.codex_account
-        if body.service_tier is not None:
-            kw["service_tier"] = body.service_tier
-        if body.read_only:
-            kw["read_only"] = True
-        if body.headless:
-            kw["headless"] = True
-        return kw
-
-    # Reconciliar e criar a sessão sob a MESMA guarda (ciclo_conta), só no caminho que consome o
-    # config dir (Claude/Pi — o Codex tem conta propria e nao le config dir do Claude). A guarda
-    # compartilhada faz a exclusão da conta, que é do Rust, esperar a sessão que está subindo.
-    if body.config_dir is not None and body.provider in ("claude", "pi", "omp"):
-        alvo = Path(body.config_dir)
-        if contas.e_conta(alvo):
-            nome_conta = alvo.name.removeprefix(".claude-")
-            _passo(body.name, "conta", conta=nome_conta)
-            try:
-                # `ciclo_conta` numa thread: o `flock` do __enter__ bloqueia, e no event loop isso
-                # congelava o app inteiro quando duas operações de conta se cruzavam. flock pertence
-                # ao descritor aberto, não à thread — tomar e soltar de threads diferentes é válido.
-                cm = contas.ciclo_conta(nome_conta)
-                ciclo = await asyncio.to_thread(cm.__enter__)
-                try:
-                    try:
-                        avisos = await asyncio.to_thread(ciclo.reconciliar,
-                                                         sanitize_cwd(body.cwd))
-                    except contas.ContaError as e:
-                        # ContaError já carrega status HTTP (o hangar-conta imprime o detail). Deixar
-                        # escapar viraria 500 com traceback — o usuário não saberia por que a
-                        # abertura falhou (ex: Windows sem Modo Desenvolvedor recusando symlink).
-                        raise HTTPException(e.status, e.detail) from None
-                    except OSError as e:
-                        raise HTTPException(500, detail=erro("erro_conta_reconciliacao_falhou",
-                                             f"não consegui reconciliar a conta "
-                                             f"{nome_conta}: {e}", nome_conta=nome_conta,
-                                             erro=str(e))) from None
-                    for aviso in avisos:
-                        _log.warning("conta %s: %s", alvo.name, aviso)
-                    try:
-                        _passo(body.name, "criando")
-                        info = await _create_registry(_registry_kwargs())
-                        if body.headless:
-                            # Hooks de SessionStart rodam enquanto a pessoa digita, não no 1º envio.
-                            wake = {"engine_models": account_models} if body.engine_account else {}
-                            get_adapter(CLAUDE_HEADLESS).acordar(info.name, **wake)
-                        return info.model_copy(update={"avisos": list(avisos)})
-                    except ValueError as e:
-                        code = _create_error_code(e)
-                        raise HTTPException(409, detail=erro(code, str(e)))
-                finally:
-                    # Solta a trava sempre — inclusive quando o corpo levanta HTTPException.
-                    await asyncio.to_thread(cm.__exit__, None, None, None)
-            except contas.ContaError as e:
-                # Conta sumiu entre a validação e a trava (ex: DELETE concorrente).
-                raise HTTPException(e.status, e.detail) from None
-    try:
-        _passo(body.name, "criando")
-        info = await _create_registry(_registry_kwargs())
-        if body.headless and body.provider == "codex":
-            # Aquece já: o app-server sobe e abre a thread agora, não no primeiro prompt.
-            _tarefas_soltas.add(asyncio.create_task(_aquecer_codex_sem_terminal(info.name)))
-        elif body.headless:
-            wake = {"engine_models": account_models} if body.engine_account else {}
-            get_adapter(CLAUDE_HEADLESS).acordar(info.name, **wake)
-        return info
-    except ValueError as e:
-        code = _create_error_code(e)
-        raise HTTPException(409, detail=erro(code, str(e)))
 
 
 def _jsonl_of_session(name: str) -> str | None:
@@ -2848,98 +2218,14 @@ class ModoExecucaoBody(_StrictBody):
     terminal: bool = Field(strict=True)
 
 
-_OCUPADA = {
-    "erro_sessao_iniciando": "a sessão ainda está iniciando — espere ela ficar pronta",
-    "erro_sessao_esperando_resposta": "há uma permissão ou pergunta esperando resposta",
-    "erro_sessao_trabalhando": "a sessão está trabalhando — espere ela terminar",
-    "erro_fila_pendente": "há mensagens na fila esperando entrega",
-}
-
-
-async def _motivo_ocupada(name: str, headless: bool) -> str | None:
-    """Código de `_OCUPADA` dizendo por que a sessão não pode trocar de modo (None = ociosa)."""
-    if headless:
-        from app.runtime_adapter import runtime_data
-        from app import runtime_coordinator
-        coordinator = runtime_coordinator.current()
-        try:
-            view = coordinator.source_view(name) if coordinator is not None else None
-        except RuntimeError:
-            return "erro_sessao_iniciando"
-        view = view if view is not None else runtime_data(name)
-        if view is not None:
-            state = view.get("public_state") or {}
-            if not view.get("initialized") or view.get("iniciando"):
-                return "erro_sessao_iniciando"
-            if state.get("state") == "awaiting_input" or view.get("pending") or view.get("question"):
-                return "erro_sessao_esperando_resposta"
-            if state.get("state") == "working" or view.get("in_progress"):
-                return "erro_sessao_trabalhando"
-            if state.get("state") not in ("idle", "dead"):
-                return "erro_sessao_iniciando"
-            # Entregue sem confirmação não segura a troca: ociosa, o ator já conferiu o transcript, e a
-            # que não chegou (limite da conta, desistida) prendia a sessão para sempre. Quem reinicia
-            # o processo a devolve à fila (`_requeue_unanswered`).
-        else:
-            sess = get_adapter(CLAUDE_HEADLESS)._sessions.get(name)
-            if sess is not None and sess.vivo:
-                if sess.iniciando:
-                    return "erro_sessao_iniciando"
-                if sess.pending or sess.question:
-                    return "erro_sessao_esperando_resposta"
-                if sess.in_progress:
-                    return "erro_sessao_trabalhando"
-    else:
-        info = next((i for i in await registry.list_with_state() if i.name == name), None)
-        if info is not None and info.state == "awaiting_input":
-            return "erro_sessao_esperando_resposta"
-        if info is not None and info.state != "idle":
-            return "erro_sessao_trabalhando"
-    fila = await asyncio.to_thread(PromptQueue(name).load)
-    if any(e.get("delivered") is False for e in fila):
-        return "erro_fila_pendente"
-    return None
-
-
-def _requeue_unanswered(name: str) -> int:
-    """Volta à fila a mensagem entregue que a sessão ociosa nunca confirmou: o processo que a
-    recebeu não a gravou, e a vida nova (outra conta, outro modo) precisa responder. Só sob a trava
-    de entrega e dentro da troca, para nenhum drain correr no meio. Desistida e saída local ficam.
-
-    Volta como linha NOVA: a antiga carrega a operação já aceita no diário da fila, e o drain com o
-    mesmo id devolveria a resposta guardada sem enviar nada. A antiga é confirmada (sai da tela).
-    O que já está no transcript só tinha a confirmação atrasada: é confirmado, nunca reenviado."""
-    meta = headless_sessions.load(name)
-    if meta is None:
-        return 0
-    committed = committed_user_lines(str(get_adapter(CLAUDE_HEADLESS).transcript_path_de(meta)))
-    if committed is None:
-        _log.warning("transcript de %s ilegível: mensagens sem confirmação ficam como estão", name)
-        return 0
-    queue = PromptQueue(name)
-    requeued = 0
-    for row in queue.load():
-        if (row.get("delivered") is not True or row.get("confirmed") or row.get("desistiu")
-                or _saida_local(row)):
-            continue
-        text, row_id = row.get("text") or "", str(row.get("id"))
-        if text.strip() and text.strip() not in committed:
-            queue.append(text, pre_transcript=bool(row.get("pre_transcript")))
-            requeued += 1
-        queue.confirm_delivered(apenas=lambda r, row_id=row_id: str(r.get("id")) == row_id)
-    if requeued:
-        _log.info("%d mensagem(ns) sem confirmação de %s voltaram à fila", requeued, name)
-    return requeued
-
-
 @app.post("/api/sessions/{name}/recarregar", dependencies=[Depends(require_auth), Depends(_codex_rust_port)])
 async def recarregar_sessao(name: str):
-    """Recicla o processo de uma sessão Claude sem terminal na mesma conversa (`--resume`): é o
-    jeito de ela reler MCP, hooks e settings da conta. Só ociosa e sem nada em aberto."""
+    """Recarregar a sessão é do Rust (Claude e Codex, com e sem terminal); aqui fica a recuperação da
+    transferência que falhou ao restaurar, que o Python conduz, e a recusa sem o Rust."""
     from app.conversation_transfer import transfer_for_session, TransferPhase, recover_transfer, TransferError, public_error
     record = await asyncio.to_thread(transfer_for_session, name)
     if record and record.phase == TransferPhase.RESTORE_FAILED:
-        operation = asyncio.create_task(_durante_troca(name, recover_transfer(registry, record), transfer=True))
+        operation = asyncio.create_task(_durante_troca(name, recover_transfer(registry, record)))
         try:
             return await asyncio.shield(operation)
         except asyncio.CancelledError:
@@ -2949,96 +2235,24 @@ async def recarregar_sessao(name: str):
                 raise
         except TransferError as exc:
             raise HTTPException(exc.status, detail=public_error(exc)) from None
-    from app.conversation_transfer import transfer_operation, require_available
-    info = await _cached_info(name)
-    if info and info.provider == "claude" and not _headless(name):
-        return await _durante_troca(name, _reload_terminal(name))
-    try:
-        async with transfer_operation(name):
-            await asyncio.to_thread(require_available, name)
-            return await _reload_session(name)
-    except TransferError as exc:
-        raise HTTPException(exc.status, detail=public_error(exc)) from None
-
-
-def _pane_came_up(name: str) -> bool:
-    """`new-session` volta 0 mesmo quando o comando morre ao nascer: conta o pane vivo após o boot."""
-    from app.terminal_input import _wait_input_ready
-    _wait_input_ready(name, timeout=10.0)
-    return tmux.has_session(name)
-
-
-async def _reload_terminal(name: str):
-    """Claude com terminal: o pane fecha e reabre na mesma conversa com o comando montado agora (plugin,
-    nome e token do lançador), pelas duas metades da troca de modo, sem subir o processo sem terminal."""
-    hl = get_adapter(CLAUDE_HEADLESS)
-    async with hl.delivery_lock(name):
-        motivo = await _motivo_ocupada(name, False)
-        if motivo:
-            raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
-        modo = await asyncio.to_thread(perm_mode.ler_modo, name)
-        try:
-            sidecar = await asyncio.to_thread(registry.para_headless, name, modo)
-        except KillFailed as e:
-            raise HTTPException(500, str(e))
-        except ValueError as e:
-            raise HTTPException(409, detail=erro("erro_troca_modo", f"não recarreguei: {e}", erro=str(e)))
-        except OSError as e:
-            # O `para_headless` já tentou devolver o pane; o texto diz se a sessão sobreviveu.
-            raise HTTPException(500, detail=erro("erro_troca_modo", f"não recarreguei: {e}", erro=str(e)))
-        # Daqui em diante o processo antigo já saiu: falha nenhuma pode deixar a sessão sem processo.
-        try:
-            await asyncio.to_thread(registry.para_terminal, name)
-            if await asyncio.to_thread(_pane_came_up, name):
-                return {"ok": True}
-            problema = "o terminal fechou logo depois de abrir"
-        except Exception as e:
-            problema = str(e) or type(e).__name__
-        _log.warning("recarregar: o terminal de %s não reabriu (%s); segue sem terminal", name, problema)
-        if not await asyncio.to_thread(headless_sessions.exists, name):
-            await asyncio.to_thread(headless_sessions.restaurar, sidecar)
-        hl.acordar(name)
-        raise HTTPException(502, detail=erro("erro_recarregar_sem_terminal",
-                                             f"o terminal não reabriu ({problema}); a sessão seguiu sem terminal",
-                                             erro=problema))
-
-
-async def _reload_session(name: str):
     info = await _cached_info(name)
     if not info:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
-    if info.provider == "codex":
-        # No Codex é a saída de um turno que nunca fecha, então vale com a sessão trabalhando.
-        codex = get_adapter("codex")
-        async with codex.delivery_lock(name):
-            try:
-                await codex.restart(name)
-            except ValueError as exc:
-                raise HTTPException(409, detail=erro("erro_recarregar_so_sem_terminal", str(exc)))
-            except Exception as exc:
-                # A sessão antiga já saiu da memória; o motivo fica em `problema` e o
-                # watch_sessions tenta de novo. Quem clicou precisa saber que não voltou.
-                _log.warning("codex: reiniciar falhou name=%s: %s", name, exc)
-                raise HTTPException(502, detail=erro("erro_codex_nao_reiniciou",
-                                                     f"o Codex não subiu de novo: {str(exc)[:200]}"))
-        return {"ok": True}
-    if info.provider != "claude" or not _headless(name):
-        raise HTTPException(409, detail=erro("erro_recarregar_so_sem_terminal",
-                                             "recarregar só vale para sessão Claude sem terminal"))
-    hl = get_adapter(CLAUDE_HEADLESS)
-    async with hl.delivery_lock(name):
-        motivo = await _motivo_ocupada(name, True)
-        if motivo:
-            raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
-        await hl.recarregar(name)
-    return {"ok": True}
+    if info.provider in ("claude", "codex"):
+        raise registry_mod.SessionOpenNeedsRust()
+    raise HTTPException(409, detail=erro("erro_recarregar_so_sem_terminal",
+                                         "recarregar só vale para sessão Claude sem terminal"))
 
 
 @app.post("/api/sessions/{name}/modo-execucao", dependencies=[Depends(require_auth), Depends(_codex_rust_port)])
 async def modo_execucao(name: str, body: ModoExecucaoBody):
-    """Troca uma sessão entre terminal (pane tmux) e sem terminal, na mesma conversa.
-    Só ociosa; o processo novo sobe já no clique, pra a primeira mensagem não pagar a largada."""
-    return await _durante_troca(name, _trocar_modo(name, body))
+    """Trocar entre terminal e sem terminal é do Rust; aqui só as recusas sem ele."""
+    info = await _cached_info(name)
+    if not info:
+        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
+    if info.provider in ("claude", "codex"):
+        raise registry_mod.SessionOpenNeedsRust()
+    raise HTTPException(409, detail=erro("erro_modo_so_claude", "a troca de modo só vale para sessões Claude"))
 
 
 async def _python_owns_headless() -> None:
@@ -3061,7 +2275,7 @@ async def _recover_pending_transfers() -> None:
     from app.conversation_transfer import list_incomplete, recover_transfer, TransferError
     for record in await asyncio.to_thread(list_incomplete):
         try:
-            await _durante_troca(record.name, recover_transfer(registry, record), transfer=True)
+            await _durante_troca(record.name, recover_transfer(registry, record))
         except TransferError:
             pass  # A fase durável mantém o erro e a ação Recarregar disponíveis.
         except Exception:
@@ -3110,25 +2324,10 @@ async def _boot_sessions(runtime) -> None:
         await _python_owns_headless()
 
 
-async def _durante_troca(name: str, troca, *, transfer: bool = False):
-    from app.conversation_transfer import transfer_operation, require_available, TransferError, public_error
-    if transfer:
-        return await _during_transfer_life(name, troca)
-    try:
-        async with transfer_operation(name):
-            await asyncio.to_thread(require_available, name)
-            return await _during_transfer_life(name, troca, require_idle=True)
-    except TransferError as exc:
-        troca.close()
-        raise HTTPException(exc.status, detail=public_error(exc)) from None
-    except BaseException:
-        troca.close()       # corrotina que nunca rodou não pode ficar sem await
-        raise
-
-
-async def _during_transfer_life(name: str, troca, *, require_idle: bool = False):
-    # A troca muda a identidade da sessão (sidecar <-> pane tmux); sem atualizar, a varredura
-    # revogaria o convite de uma sessão que continua viva. O Rust a segura no meio ("não sei", 503).
+async def _durante_troca(name: str, troca):
+    """A transferência Claude→Codex (e a recuperação dela) muda a identidade da sessão (sidecar <->
+    pane tmux); sem atualizar, a varredura revogaria o convite de uma sessão que continua viva. O
+    Rust a segura no meio ("não sei", 503)."""
     if name in share_bridge.changing_mode:
         return await troca
     share_bridge.changing_mode.add(name)
@@ -3137,12 +2336,6 @@ async def _during_transfer_life(name: str, troca, *, require_idle: bool = False)
         from app import runtime_coordinator
         coordinator = runtime_coordinator.current()
         if coordinator is not None and coordinator.managed_queue(name):
-            async def check_idle():
-                motivo = await _motivo_ocupada(name, _headless(name))
-                if motivo:
-                    raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
-            if require_idle:
-                return await coordinator.change(name, lambda: troca, preflight=check_idle)
             return await coordinator.change(name, lambda: troca)
         return await troca
     finally:
@@ -3155,72 +2348,13 @@ async def _during_transfer_life(name: str, troca, *, require_idle: bool = False)
                 try:
                     guest_users.set_life(name, life)
                 except Exception:
-                    # Não troca o resultado da troca de modo pelo erro de gravar o dono.
+                    # Não troca o resultado da troca pelo erro de gravar o dono.
                     _log.exception("[guests] dono de %s nao acompanhou a troca de modo", name)
             await asyncio.to_thread(_move_life)
         finally:
             share_bridge.changing_mode.discard(name)
             await asyncio.to_thread(share_bridge.mode_change, name, False)
             await asyncio.to_thread(_invalidate_lists)
-
-
-async def _trocar_modo(name: str, body: ModoExecucaoBody):
-    info = await _cached_info(name)
-    if not info:
-        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
-    if info.provider == "codex":
-        if info.headless != body.terminal:
-            return {"ok": True, "terminal": body.terminal}
-        codex = get_adapter("codex")
-        async with codex.delivery_lock(name):
-            task = asyncio.create_task(codex.open_terminal(name) if body.terminal else codex.open_headless(name))
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                await task
-                raise
-            except Exception as exc:
-                raise HTTPException(409, detail=erro("erro_troca_modo", f"não troquei de modo: {exc}", erro=str(exc))) from exc
-        # Fora do laço: com o Rust dono, esquecer é uma chamada à ponte.
-        await asyncio.to_thread(registry._forget, name)
-        return {"ok": True, "terminal": body.terminal}
-    if info.provider != "claude":
-        raise HTTPException(409, detail=erro("erro_modo_so_claude", "a troca de modo só vale para sessões Claude"))
-    headless = _headless(name)
-    if headless != body.terminal:
-        return {"ok": True, "terminal": body.terminal}
-    hl = get_adapter(CLAUDE_HEADLESS)
-    # A trava de entrega do headless: nenhum drain sobe processo no meio da troca.
-    async with hl.delivery_lock(name):
-        motivo = await _motivo_ocupada(name, headless)
-        if motivo:
-            raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
-        if headless:
-            await asyncio.to_thread(_requeue_unanswered, name)
-            try:
-                await asyncio.to_thread(registry.para_terminal, name)
-            except ValueError as e:
-                if headless_sessions.exists(name):
-                    hl.acordar(name)   # sidecar restaurado: religa o processo que a troca matou
-                raise HTTPException(409, detail=erro("erro_troca_modo", f"não troquei de modo: {e}", erro=str(e)))
-        else:
-            modo = await asyncio.to_thread(perm_mode.ler_modo, name)
-            try:
-                await asyncio.to_thread(registry.para_headless, name, modo)
-            except KillFailed as e:
-                raise HTTPException(500, str(e))
-            except (ValueError, OSError) as e:
-                raise HTTPException(409, detail=erro("erro_troca_modo", f"não troquei de modo: {e}", erro=str(e)))
-            try:
-                await hl.ensure_running(name, esperar_pronta=False)
-            except Exception as e:
-                _log.warning("troca para sem terminal: processo nao subiu name=%s; voltando ao terminal", name, exc_info=True)
-                try:
-                    await asyncio.to_thread(registry.para_terminal, name)
-                except Exception:
-                    _log.exception("troca para sem terminal: volta ao terminal falhou name=%s", name)
-                raise HTTPException(409, detail=erro("erro_troca_modo", f"não troquei de modo: {e}", erro=str(e)))
-    return {"ok": True, "terminal": body.terminal}
 
 
 class AccountMoveBody(_StrictBody):
@@ -3251,68 +2385,30 @@ class AccountMoveBody(_StrictBody):
         return self
 
 
-# Continuar reenvia o contexto inteiro no primeiro turno: conta quase no fim acaba nele. A partir de
-# LOW a tela avisa e pede confirmação; a partir de FULL não aceita.
-ACCOUNT_LOW_PCT = 95.0
-ACCOUNT_FULL_PCT = 99.0
-
-
-def _account_targets(atual: str | None) -> list[dict]:
-    """Contas Claude para onde a conversa pode ir, sem a atual: a de mais folga primeiro, sem
-    leitura de cota depois e as cheias no fim. `pct` é a janela mais cheia (None = sem leitura)."""
-    from app import cotas
-    lidas = {c.id.removeprefix("claude:"): c for c in cotas.cotas_claude()
-             if c.estado == "lida" and c.janelas}
-    out = []
-    for c in list_config_dirs(ordered=False):
-        if atual and Path(c.path).resolve() == Path(atual).resolve():
-            continue
-        cota = lidas.get(c.path)
-        pct = max(j.pct for j in cota.janelas) if cota else None
-        out.append({"path": c.path, "label": c.label, "pct": pct,
-                    "low": pct is not None and pct >= ACCOUNT_LOW_PCT,
-                    "full": pct is not None and pct >= ACCOUNT_FULL_PCT})
-    return sorted(out, key=lambda d: (d["full"], d["pct"] is None, d["pct"] or 0))
-
-
 @app.get("/api/sessions/{name}/conta", dependencies=[Depends(require_auth)])
 async def contas_destino(name: str):
-    info = await _cached_info(name)
-    if not info:
-        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
-    atual = ((headless_sessions.load(name) or {}).get("config_dir") if info.headless else
-             str(_session_config_dir(name) or Path.home() / ".claude"))
-    # No motor, mesmo o diretório atual é um destino: ele volta para a conta Claude sem mover nada.
-    return await asyncio.to_thread(_account_targets, None if info.engine else atual)
+    """As contas de destino e a troca de conta são do Rust."""
+    raise registry_mod.SessionOpenNeedsRust()
 
 
 @app.post("/api/sessions/{name}/conta", dependencies=[Depends(require_auth)])
 async def trocar_conta(name: str, body: AccountMoveBody):
-    """A mesma conversa continua noutra conta Claude, com o mesmo nome: para o processo, muda o
-    transcript de conta e reabre com `--resume`. Só ociosa, como a troca de modo."""
-    if body.credential_id is not None:
-        from app.conversation_transfer import transfer_claude_to_codex, TransferError, public_error
-        operation = asyncio.create_task(_durante_troca(name, transfer_claude_to_codex(
-            registry, name, body.credential_id, body.source_life, body.model, body.effort,
-            source_jsonl=body.source_jsonl), transfer=True))
+    """A troca de conta Claude é do Rust; aqui fica a transferência da conversa para o Codex."""
+    if body.credential_id is None:
+        raise registry_mod.SessionOpenNeedsRust()
+    from app.conversation_transfer import transfer_claude_to_codex, TransferError, public_error
+    operation = asyncio.create_task(_durante_troca(name, transfer_claude_to_codex(
+        registry, name, body.credential_id, body.source_life, body.model, body.effort,
+        source_jsonl=body.source_jsonl)))
+    try:
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError:
         try:
-            return await asyncio.shield(operation)
-        except asyncio.CancelledError:
-            try:
-                await operation
-            finally:
-                raise
-        except TransferError as exc:
-            raise HTTPException(exc.status, detail=public_error(exc)) from None
-    if body.engine_account is not None:
-        return await _durante_troca(name, _trocar_conta(name, None, engine_account=body.engine_account))
-    alvo = next((d for d in await asyncio.to_thread(_account_targets, None) if d["path"] == body.config_dir), None)
-    if alvo is None:
-        raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
-    if alvo["full"]:
-        raise HTTPException(409, detail=erro("erro_conta_cheia", f"a conta {alvo['label']} está em {alvo['pct']:.0f}% da cota",
-                                             conta=alvo["label"], pct=alvo["pct"]))
-    return await _durante_troca(name, _trocar_conta(name, body.config_dir))
+            await operation
+        finally:
+            raise
+    except TransferError as exc:
+        raise HTTPException(exc.status, detail=public_error(exc)) from None
 
 
 def _engine_fast_selection(name: str) -> tuple[str | None, str]:
@@ -3338,280 +2434,6 @@ def _engine_fast_selection(name: str) -> tuple[str | None, str]:
         current = registry_mod._escolhas_status(Path(jsonl).stem)[0]
         model = current or model
     return model, procinfo._env_var_of(agent, "CP_ENGINE_SERVICE_TIER") or "default"
-
-
-async def _trocar_conta(name: str, destino: str | None, *, engine_account: str | None = None,
-                       model: str | None = None, effort: str | None = None,
-                       context_window: int | None = None, engine_models: list[dict] | None = None,
-                       service_tier: str | None = None):
-    hl = get_adapter(CLAUDE_HEADLESS)
-    async with hl.delivery_lock(name):
-        # A troca anterior pode ter mudado motor, conta e transporte enquanto este pedido esperava.
-        await asyncio.to_thread(_invalidate_lists)
-        info = await _cached_info(name)
-        if not info:
-            raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
-        if info.provider != "claude":
-            raise HTTPException(409, detail=erro("erro_conta_so_claude", "só sessão Claude troca de conta por esta rota"))
-        headless = _headless(name)
-        current_meta = headless_sessions.load(name) if headless else None
-        if current_meta is not None:
-            info = info.model_copy(update={"engine": current_meta.get("engine"),
-                                           "engine_account": current_meta.get("engine_account"),
-                                           "headless": True})
-        # Read-only estacionada à espera do terminal protegido: a troca a reabre no terminal, nunca "ok" parada.
-        parked = bool((current_meta or {}).get("read_only"))
-        if service_tier is not None:
-            current_model, _ = await asyncio.to_thread(_engine_fast_selection, name)
-            if not await asyncio.to_thread(cliproxy.supports_fast, info.engine, current_model):
-                raise HTTPException(400, detail=erro("erro_fast_indisponivel", "Fast exige GPT no CLIProxyAPI local"))
-        elif engine_account is not None:
-            if not info.engine:
-                raise HTTPException(400, detail=erro("erro_cliproxy_conta", "esta sessão não usa o CLIProxyAPI local"))
-            if (model is not None or effort is not None) and info.engine_account != engine_account:
-                raise HTTPException(409, detail=erro("erro_cliproxy_conta", "a conta da sessão mudou; atualize a lista de modelos"))
-            account = await asyncio.to_thread(_fixed_engine_account, info.engine, engine_account)
-        elif info.engine:
-            try:
-                local_engine = cliproxy.is_local_engine(engines.listar().get(info.engine, {}))
-            except ValueError as exc:
-                raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
-            if not local_engine:
-                raise HTTPException(409, detail=erro("erro_conta_so_claude", "só conta Claude ou motor CLIProxyAPI local troca de conta"))
-        atual = ((current_meta or {}).get("config_dir") if headless else
-                 str(_session_config_dir(name) or Path.home() / ".claude"))
-        if engine_account is None and not info.engine and atual and Path(atual).resolve() == Path(destino).resolve() and not parked:
-            return {"ok": True, "config_dir": destino}
-        motivo = await _motivo_ocupada(name, headless)
-        if motivo:
-            raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
-        chosen_model = None
-        if engine_account is not None:
-            source_model, _ = await asyncio.to_thread(_engine_fast_selection, name)
-            source_model = model or source_model or engines.listar()[info.engine]["model"]
-            base = source_model.split("/", 1)[-1]
-            from app.cliproxy_accounts import prefix_model
-            try:
-                chosen_model = prefix_model(base, account["prefix"])
-            except ValueError as exc:
-                raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
-            account_models = engine_models if engine_models is not None else await _engine_models(info.engine, fresco=True)
-            try:
-                cliproxy.validate_models(engines.listar()[info.engine], chosen_model, account, account_models)
-                model_args.validar("claude", chosen_model, effort)
-            except (ValueError, KeyError) as exc:
-                raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
-            if info.engine_account == engine_account and model is None and effort is None and not parked:
-                return {"ok": True, "engine_account": engine_account}
-        # Terminal passa por sem terminal parada: o sidecar guarda as escolhas e a conta, e nenhum
-        # processo sobe até a conversa estar no lugar.
-        if headless:
-            cano = (((headless_sessions.load(name) or {}).get("cano")) or {}).get("pid")
-            pids = await asyncio.to_thread(_arvore_de, cano)
-            await hl.parar(name)
-        else:
-            pane = await asyncio.to_thread(registry._pane_of, name)
-            pids = await asyncio.to_thread(_arvore_de, (pane or {}).get("pid"))
-            modo = await asyncio.to_thread(perm_mode.ler_modo, name)
-            try:
-                extra = {"for_account_move": True} if info.engine else {}
-                await asyncio.to_thread(registry.para_headless, name, modo,
-                                        target_config_dir=destino or atual, **extra)
-            except KillFailed as e:
-                raise HTTPException(500, str(e))
-            except (ValueError, OSError) as e:
-                raise HTTPException(409, detail=erro("erro_troca_conta", f"não troquei de conta: {e}", erro=str(e)))
-        # Read-only não roda sem terminal: se o terminal não voltar, ela fica parada, não "segue".
-        read_only = bool((headless_sessions.load(name) or {}).get("read_only"))
-
-        def parada(motivo: str) -> HTTPException:
-            return HTTPException(409, detail=erro("erro_troca_conta_parada",
-                                                  f"o terminal protegido não voltou ({motivo}); a sessão read-only ficou parada até reabrir no terminal",
-                                                  erro=motivo))
-
-        async def reabrir() -> str | None:
-            """Reabre como estava; devolve o motivo quando o terminal não voltou (a sessão segue sem terminal, ou parada se read-only)."""
-            if headless and not read_only:
-                if engine_account is not None or info.engine:
-                    try:
-                        hl.reset_start_attempts(name)
-                        if await hl.ensure_running(name, require_initialize=True,
-                                                   engine_models=account_models if engine_account is not None else None) is None:
-                            raise RuntimeError("a sessão não reabriu")
-                    except Exception as exc:
-                        return str(exc)
-                else:
-                    hl.acordar(name)
-                return None
-            expected_meta = headless_sessions.load(name)
-            started = False
-            try:
-                kwargs = {"engine_models": account_models} if engine_account is not None else {}
-                await asyncio.to_thread(registry.para_terminal, name, **kwargs)
-                started = True
-                if engine_account is not None or info.engine:
-                    if expected_meta is None:
-                        raise RuntimeError("não consegui conferir a identidade da sessão retomada")
-                    await asyncio.to_thread(registry.wait_for_claude, name, expected_meta)
-                return None
-            except Exception as e:
-                _log.exception("troca de conta: terminal de %s não voltou", name)
-                if started and expected_meta is not None:
-                    pane = await asyncio.to_thread(registry._pane_of, name)
-                    new_pids = await asyncio.to_thread(_arvore_de, (pane or {}).get("pid"))
-                    if (await asyncio.to_thread(registry_mod.tmux.has_session, name)
-                            and not await asyncio.to_thread(registry_mod.tmux.kill_session, name)):
-                        raise HTTPException(409, detail=erro("erro_troca_conta", "a reabertura falhou e o terminal não encerrou para restaurar a sessão")) from e
-                    if not await asyncio.to_thread(_saiu, new_pids):
-                        raise HTTPException(409, detail=erro("erro_troca_conta", "o Claude novo não saiu; restauração recusada para não duplicar a conversa")) from e
-                    headless_sessions.restaurar(expected_meta)
-                if engine_account is None and not info.engine and not read_only:
-                    hl.acordar(name)   # sidecar restaurado: a conversa segue sem terminal
-                return str(e)
-
-        # O claude grava as últimas linhas pelo caminho ao sair: mover antes disso recria o arquivo na conta de
-        # origem, com o mesmo id, e o processo novo teria companhia no mesmo .jsonl.
-        if not await asyncio.to_thread(_saiu, pids):
-            if (motivo := await reabrir()) and read_only:
-                raise parada(motivo)
-            raise HTTPException(409, detail=erro("erro_troca_conta", "não troquei de conta: o processo antigo não saiu; a sessão segue na conta de antes",
-                                                 erro="processo vivo"))
-        falha = None
-        original_meta = None
-        movida: tuple[str, str, str | None] | None = None
-        try:
-            if headless:
-                await asyncio.to_thread(_requeue_unanswered, name)
-            meta = headless_sessions.load(name)
-            if meta is None:
-                raise RuntimeError("sessão sem o arquivo de estado")
-            original_meta = dict(meta)
-            jsonl = Path(hl.transcript_path_de(meta))
-            if service_tier is not None:
-                if current_model is not None:
-                    original_meta["model"] = current_model
-                changes = {"service_tier": service_tier, "problema": None,
-                           **({"model": current_model} if current_model is not None else {})}
-            elif engine_account is not None:
-                changes = {"engine_account": engine_account, "engine_credential_id": account["credential_id"],
-                           "engine_account_base_url": account["base_url"],
-                           "model": chosen_model, "problema": None}
-                if model is not None:
-                    changes["context_window"] = context_window
-                if effort is not None:
-                    changes["effort"] = effort
-            else:
-                if (jsonl.exists() and Path(meta.get("config_dir") or Path.home() / ".claude").resolve()
-                        != Path(destino).resolve()
-                        and await asyncio.to_thread(move_conversation, jsonl.parent.name, meta["session_id"], destino)):
-                    movida = (jsonl.parent.name, meta["session_id"], meta.get("config_dir"))
-                changes = {"config_dir": destino, "problema": None}
-                if info.engine:
-                    changes.update(engine=None, engine_account=None, engine_credential_id=None,
-                                   engine_account_base_url=None, model=None, context_window=None, service_tier=None)
-                # Confiança na pasta é por conta: sem isto o terminal (agora ou na troca de modo) abre no aviso, em "No, exit".
-                await asyncio.to_thread(registry_mod._pretrust_cwd, meta["cwd"], destino)
-            # O aviso da conta anterior (limite batido, sem login) não vale na nova.
-            if headless_sessions.update(name, **changes) is None:
-                raise RuntimeError("não gravei a conta nova no arquivo de estado da sessão")
-            hl.esquecer_problema(name)
-        except FileExistsError:
-            falha = HTTPException(409, detail=erro("erro_conversa_ja_na_conta", "a conta destino ja tem esta conversa"))
-        except Exception as e:
-            _log.exception("mover conversa de %s para %s falhou", name, destino)
-            onde = "na conta de antes"
-            if movida:
-                # A conversa já foi, mas a sessão continua apontando para a conta de antes: ela volta junto.
-                try:
-                    await asyncio.to_thread(move_conversation, *movida)
-                except Exception:
-                    _log.exception("troca de conta: a conversa de %s ficou em %s", name, destino)
-                    onde = f"em {destino}, mas a sessão aponta para a conta de antes"
-            if original_meta is not None:
-                try:
-                    headless_sessions.restaurar(original_meta)
-                except OSError:
-                    _log.exception("troca de conta: não consegui restaurar as escolhas de %s", name)
-                    onde = "com o arquivo de estado da sessão indisponível"
-            falha = HTTPException(500, detail=erro("erro_mover_conversa", f"nao consegui mover a conversa de conta ({e}); ela ficou {onde}", erro=str(e)))
-        motivo_terminal = await reabrir()
-        if motivo_terminal and falha is None and original_meta is not None and (engine_account is not None or info.engine):
-            rollback_error = None
-            try:
-                await hl.parar(name)
-                if movida:
-                    await asyncio.to_thread(move_conversation, *movida)
-                headless_sessions.restaurar(original_meta)
-                rollback_error = await reabrir()
-                if rollback_error and not headless and not read_only:
-                    hl.acordar(name)
-            except Exception as exc:
-                rollback_error = str(exc)
-                _log.exception("troca de conta: restauração da sessão %s falhou", name)
-            message = "a troca falhou; as escolhas anteriores foram restauradas"
-            if rollback_error:
-                message = "a troca falhou e a sessão anterior não reabriu"
-            if rollback_error and read_only:
-                falha = parada(rollback_error)
-            else:
-                falha = HTTPException(409, detail=erro("erro_troca_conta", message,
-                                                      erro=motivo_terminal, rollback_error=rollback_error))
-        await asyncio.to_thread(registry._forget, name)
-    if falha:
-        raise falha
-    if motivo_terminal and read_only:
-        raise parada(motivo_terminal)
-    if motivo_terminal:
-        raise HTTPException(409, detail=erro("erro_troca_conta", f"a conversa foi para a conta nova, mas o terminal não voltou ({motivo_terminal}); ela segue sem terminal",
-                                             erro=motivo_terminal))
-    if service_tier is not None:
-        return {"ok": True, "service_tier": service_tier}
-    return {"ok": True, "engine_account": engine_account} if engine_account is not None else {"ok": True, "config_dir": destino}
-
-
-def _arvore_de(pid: object) -> list[int]:
-    """O processo e os descendentes dele; sem pid legível, nenhum."""
-    try:
-        root = int(pid)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return []
-    return [root, *procinfo._descendant_pids(root)]
-
-
-def _saiu(pids: list[int]) -> bool:
-    """Espera os processos saírem; quem passar do prazo é morto à força. False = algum seguiu vivo mesmo assim."""
-    windows = os.name == "nt"
-    # No Windows a árvore sai em décimos de segundo quando sai; quem passou de 1,5 s (neto fora do
-    # psmux, servidor MCP preso) não sai sozinho, e esperar 15 s por ele só atrasa a troca.
-    prazo = 1.5 if windows else 15.0
-    registry_mod._esperar_saida(pids, prazo)
-    vivos = [p for p in pids if procinfo.pid_vivo(p)]
-    if vivos and windows:
-        taskkill = procinfo.taskkill_path()
-        if not taskkill:
-            _log.warning("troca de conta: taskkill não encontrado; processos %s seguem vivos", vivos)
-        else:
-            # Uma chamada para todos e sem /T: o /T segue o ppid de agora, e num pid já reaproveitado
-            # levaria junto a árvore de um processo alheio. Os netos já estão na foto tirada antes de parar.
-            try:
-                r = subprocess.run([taskkill, "/F", *(a for p in vivos for a in ("/PID", str(p)))],
-                                   capture_output=True, text=True, errors="replace", timeout=10)
-                if r.returncode != 0:
-                    _log.warning("troca de conta: taskkill saiu com %s: %s", r.returncode,
-                                 (r.stderr or r.stdout or "").strip()[:400])
-            except (OSError, subprocess.SubprocessError):
-                _log.warning("troca de conta: não consegui matar os processos %s", vivos, exc_info=True)
-    elif vivos:
-        import signal
-        for p in vivos:
-            try:
-                os.kill(p, signal.SIGKILL)
-            except OSError:
-                _log.warning("troca de conta: não consegui matar o processo %s", p, exc_info=True)
-    if vivos:
-        _log.warning("troca de conta: processos %s não saíram em %.1f s; tentei matá-los", vivos, prazo)
-        registry_mod._esperar_saida(vivos, 3.0)
-    return not any(procinfo.pid_vivo(p) for p in pids)
 
 
 class RenameBody(_StrictBody):
@@ -3710,24 +2532,14 @@ def _rename_session(name: str, body: RenameBody):
     if tmux.has_session(new) or headless_sessions.exists(new):
         raise HTTPException(409, detail=erro("erro_nome_em_uso", "ja existe uma sessao com esse nome"))
     grouped = _rename_group_first(name, new)
-    # Atualiza a reserva antes do rename do tmux: durante o boot o sidecar ainda pode não existir.
-    if registry_mod.apos_renomear_codex:
-        registry_mod.apos_renomear_codex(name, new)
     try:
         renamed = tmux.rename_session(name, new)
     except Exception:
-        if registry_mod.apos_renomear_codex:
-            registry_mod.apos_renomear_codex(new, name)
-        _codex_lease_rename_finished(name)
         _undo_group_rename(grouped, name, new)
         raise
     if not renamed:
-        if registry_mod.apos_renomear_codex:
-            registry_mod.apos_renomear_codex(new, name)
-        _codex_lease_rename_finished(name)
         _undo_group_rename(grouped, name, new)
         raise HTTPException(500, detail=erro("sessao_falha_renomear", "falha ao renomear"))
-    _codex_lease_rename_finished(new)
     registry.rename(name, new)  # migra o cache name->jsonl (senao serve transcript errado pos-rename)
     # O Rust move convites e pares externos; fora do ar, o rename segue e o aviso volta na resposta.
     share_failed = share_bridge.rename(name, new)
@@ -3932,36 +2744,6 @@ def loop_resolve(name: str, body: LoopResolve):
     return {"loop": link.get()}
 
 
-class ResumeBody(_StrictBody):
-    # None = "escolha por mim" (caso seguro) ou pede confirmacao (caso ambiguo). uuid = o candidato que o
-    # usuario escolheu no sheet de confirmacao.
-    session_id: str | None = None
-
-
-@app.post("/api/sessions/{name}/resume", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
-def resume_session(name: str, body: ResumeBody):
-    # Relança uma sessao "sem id" com `claude --resume <uuid>` pra passar a rastrea-la (chat volta a abrir,
-    # continuando a conversa). Sem session_id: se so ha esta sessao no cwd, retoma o transcript mais
-    # recente direto; se ha outras (ambiguo), devolve os candidatos pro app confirmar antes.
-    sid = body.session_id
-    if sid is None:
-        try:
-            _, ambiguous, candidates = registry.resume_candidates(name)
-        except ValueError as e:
-            raise HTTPException(404, str(e))
-        if not candidates:
-            raise HTTPException(404, detail=erro("erro_transcript_ausente", "nenhum transcript pra retomar neste diretorio"))
-        if ambiguous and len(candidates) > 1:
-            return {"ambiguous": True, "candidates": candidates}
-        sid = candidates[0]["session_id"]
-    try:
-        return registry.resume(name, sid)
-    except ValueError as e:
-        raise HTTPException(409, str(e))
-    finally:
-        _invalidate_lists()
-
-
 @app.get("/api/sessions/{name}/history", dependencies=[Depends(require_auth)], response_model=list[ChatEvent])
 async def history(request: Request, response: Response, name: str, limit: int | None = None):
     info = await _cached_info(name)
@@ -4058,7 +2840,7 @@ async def _bastao_alvo(name: str, project: str | None, session_id: str | None,
         return info
     if not (project and session_id):
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
-    # Mesma guarda de archive_history/resume_archived: sem ela, qualquer pasta da máquina vira
+    # Mesma guarda de archive_history e do retomar do Arquivo: sem ela, qualquer pasta da máquina vira
     # "conta" e o GET lê <pasta>/projects/<proj>/<uuid>.jsonl.
     if config_dir is not None and config_dir not in {c.path for c in list_config_dirs()}:
         raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
@@ -4126,11 +2908,9 @@ async def bastao_dossie(name: str):
 class BastaoBody(_StrictBody):
     """Sessão NOVA que vai continuar o trabalho de `{name}`.
 
-    Corpo próprio, e não `CreateBody`: aquele é `extra="forbid"` e tem `cwd` obrigatório — aqui o
-    padrão é o cwd da ORIGEM (a passagem continua o mesmo trabalho, na mesma árvore). Os campos
-    que sobrepõem o `CreateBody` são repassados pra ele tal e qual, então a validação de
-    provider/conta/motor/modelo/esforço/permissão continua num lugar só (`model_args` + o handler
-    de criação) — `provider` aqui é sempre o da SUCESSORA, nunca o da origem.
+    O padrão do `cwd` é o da ORIGEM (a passagem continua o mesmo trabalho, na mesma árvore). Os
+    campos do pedido de abertura vão ao Rust tal e qual, e é ele que valida
+    provider/conta/motor/modelo/esforço/permissão — `provider` aqui é sempre o da SUCESSORA.
     """
     name: str = Field(min_length=1)          # nome da sessão nova (o destino)
     cwd: str | None = None                   # None = o cwd da origem
@@ -4177,7 +2957,6 @@ def _bastao_preparar(info: SessionInfo, origem: str, destino: str,
     se der certo. A reescrita nunca levanta: falhando, grava o de código e devolve o aviso, porque
     uma continuação sem a camada interpretada é muito melhor que continuação nenhuma.
     """
-    _passo(destino, "resumo")
     texto = bastao_montar(info.jsonl, info.cwd, info.provider, origem, info.codex_home)
     aviso = None
     if por_modelo:
@@ -4197,7 +2976,6 @@ def _bastao_preparar(info: SessionInfo, origem: str, destino: str,
         if cfg is None:
             aviso = "só dá pra usar o modelo quando a sessão de origem é Claude nesta máquina"
         else:
-            _passo(destino, "resumo_modelo")
             texto, aviso = bastao_mod.reescrever_com_modelo(texto, cfg)
     alvo = bastao_mod.gravar(destino, texto)
     conta, modelo = bastao_mod.origem_resumida(info.jsonl, info.provider, info.codex_home)
@@ -4205,15 +2983,14 @@ def _bastao_preparar(info: SessionInfo, origem: str, destino: str,
 
 
 @app.post("/api/sessions/{name}/bastao", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
-async def bastao_passar(name: str, body: BastaoBody):
+async def bastao_passar(name: str, body: BastaoBody, request: Request):
     if "provider" not in body.model_fields_set:
         provider = await _default_session_provider(body.config_dir, body.engine, body.codex_account, body.omp_profile)
         body = body.model_copy(update={"provider": provider})
-    with _acompanhar_criacao(body.name):
-        return await _passar_bastao(name, body)
+    return await _passar_bastao(name, body, request)
 
 
-async def _passar_bastao(name: str, body: BastaoBody):
+async def _passar_bastao(name: str, body: BastaoBody, request: Request):
     """Passa o bastão de `{name}` pra uma sessão nova: dossiê no disco + sessão criada + kick-off
     na fila durável dela.
 
@@ -4291,7 +3068,6 @@ async def _passar_bastao(name: str, body: BastaoBody):
         raise HTTPException(400, detail=erro("erro_bastao_cwd_inexistente",
                                              f"a pasta {cwd} não existe mais; se ela foi renomeada "
                                              f"ou movida, escolha a pasta nova", cwd=cwd))
-    account_models = None
     if body.engine_account is not None:
         if body.provider != "claude" or not body.engine:
             raise HTTPException(400, detail=erro("erro_cliproxy_conta", "conta ChatGPT exige Claude com motor CLIProxyAPI local"))
@@ -4313,39 +3089,26 @@ async def _passar_bastao(name: str, body: BastaoBody):
         raise HTTPException(500, detail=erro("erro_bastao_gravar",
                                              f"não consegui gravar o dossiê: {e}",
                                              motivo=str(e))) from None
-    # Reusa o handler de criação inteiro (validação de provider/conta/motor/model_args, ciclo da
-    # conta, Codex): duplicar aquilo aqui seria uma segunda porta de criação pra manter em dia.
-    # HTTPException dele sobe tal e qual — o dossiê já gravado vira sidecar órfão, que o `prune`
+    # Reusa a abertura do Rust inteira (validação de provider/conta/motor/modelo, ciclo da conta,
+    # Codex): uma segunda porta de criação aqui seria mais uma pra manter em dia.
+    # A recusa dele sobe tal e qual — o dossiê já gravado vira sidecar órfão, que o `prune`
     # recolhe pelo nome (ver bastao_mod.caminho).
-    creation = CreateBody(
-        name=destino, cwd=cwd, config_dir=body.config_dir, provider=body.provider,
-        remember_provider=body.remember_provider,
-        engine=body.engine, engine_account=body.engine_account, model=body.model, effort=body.effort,
-        permission_mode=body.permission_mode, omp_profile=body.omp_profile,
-        codex_account=sucessora_codex_account,
-        # `CreateBody.headless` é estrito: None (cliente antigo, que não manda o campo) tem de
-        # virar False, e não chegar como None num campo que só aceita bool.
-        headless=bool(body.headless))
-    creation._engine_catalog = account_models
-    novo = await create_session(creation)
-    _passo(destino, "recado")
-    try:
-        await asyncio.to_thread(lambda: PromptQueue(novo.name).append(
-            kick, delivered=False, pre_transcript=True))
-    except OSError as e:
-        # A sessão JÁ existe: o erro tem de dizer isso, senão o 500 nomeia a coisa errada e quem
-        # lê acha que nada aconteceu — e vai criar outra. Aqui o conserto é humano (mandar o
-        # kick-off na mão), então o caminho do dossiê vai junto.
-        _log.error("bastao: sessão %s criada, mas o kick-off não entrou na fila: %s", novo.name, e)
-        raise HTTPException(500, detail=erro(
-            "erro_bastao_fila", f"a sessão {novo.name} nasceu, mas o kick-off não entrou na fila "
-            f"dela ({e}) — mande você mesmo o pedido apontando pra {alvo}",
-            nome=novo.name, dossie=str(alvo))) from None
-    # Drena numa thread: `send_prompt` espera a TUI ficar interativa (`_wait_input_ready`), o que
-    # pode levar segundos numa sessão recém-criada — segurar o request nisso não ajuda ninguém.
-    # Vale só pro Claude na prática (Pi/Kimi nascem com `jsonl=None` e a thread sai calada); não há
-    # perda, a fila é durável e o drain do próximo idle/SSE entrega.
-    threading.Thread(target=_drain_session, args=(novo.name,), daemon=True).start()
+    # A sucessora nasce no Rust com o kick-off como primeira mensagem. Pela 8765 o Rust já olhou o
+    # pedido e abre ele mesmo com o que volta daqui (sem voltar a ele de dentro dele).
+    creation = {k: v for k, v in {
+        "name": destino, "cwd": cwd, "config_dir": body.config_dir, "provider": body.provider,
+        "remember_provider": body.remember_provider,
+        "engine": body.engine, "engine_account": body.engine_account, "model": body.model, "effort": body.effort,
+        "permission_mode": body.permission_mode, "omp_profile": body.omp_profile,
+        "codex_account": sucessora_codex_account,
+        # Cliente antigo não manda `headless`: sem ele, com terminal.
+        "headless": bool(body.headless), "initial_prompt": kick}.items() if v is not None}
+    if request.headers.get("x-hangar-open") == "rust":
+        return JSONResponse({"open": creation, "dossie": str(alvo),
+                             "texto": texto, "kickoff": kick, "aviso": aviso_resumo}, headers={"x-hangar-open": "rust"})
+    novo = await _open_in_rust(json.dumps(creation).encode(), request)
+    if novo is None:
+        raise registry_mod.SessionOpenNeedsRust()
     # `aviso`: a reescrita pelo modelo foi pedida e não deu (cota, tempo, CLI ausente). A sessão
     # nasceu e o resumo de código está lá — quem pediu precisa saber que recebeu o outro.
     return {"name": novo.name, "dossie": str(alvo), "texto": texto, "kickoff": kick,
@@ -4623,6 +3386,11 @@ def _send_one_available(name: str, text: str, track_entry: bool = False) -> dict
     from app import runtime_coordinator
     from app.runtime_adapter import run_sync
     coordinator = runtime_coordinator.current()
+    # Claude com terminal, com o Rust de pé: o Rust o adota e entrega, numa fila só (um sentido).
+    if _rust_mode(coordinator) and not _headless(name) and _provider_of(name) == "claude" and (
+            rust := runtime_coordinator.rust_claude(name, "input", "POST", json.dumps({"text": text, "steer": False}).encode())):
+        reply = json.loads(rust[1] or b"{}")
+        return reply if rust[0] < 300 else {"ok": False, "error": reply.get("detail"), "delivered": False}
     if coordinator is not None and coordinator.managed_runtime(name):
         return run_sync(lambda: _send_managed(name, text, coordinator.slot(name).binding.provider,
             track_entry=track_entry), coordinator.loop)
@@ -6423,6 +5191,8 @@ class PluginCloseBody(_StrictBody):
 
 
 _MOD_SEM_RESPOSTA = erro("erro_mod_clique_sem_resposta", "O mod não respondeu a tempo.")
+# O clique dos mods é do Rust, sem reserva aqui: modo `python` ou sessão que ele não atende.
+_MOD_SEM_RUST = erro("mods_need_rust_server", "O clique do mod precisa do servidor Rust de pé e da sessão aberta nele.")
 
 
 def _convidado(request: Request) -> bool:
@@ -6433,9 +5203,8 @@ def _convidado(request: Request) -> bool:
 async def _mod_no_rust(name: str, op: str, request: Request) -> Response | None:
     """Operação de mod de sessão que o Rust atende, pedida por quem entrou pelo Python (convidado, de
     convite ou com login, e o Connect): a autenticação foi a desta porta, e o Rust aciona pela ponte
-    privada com o mesmo efeito do dono. `None`: a sessão não é dele (só o 404), e quem trata é o Python.
-    Convidado não chega ao `plugin_click` de terminal que é do Rust: com a ponte recusando, o clique
-    daqui dirigiria o pane do executor dele calado."""
+    privada com o mesmo efeito do dono. `None`: a sessão não é dele (só o 404) ou o Rust está fora; o
+    clique e o fechamento respondem o código, a aba e a digitação ficam no app."""
     from app import list_bridge, runtime_coordinator
     owner = runtime_coordinator.current()
     endpoint = list_bridge.endpoint()
@@ -6471,22 +5240,17 @@ async def _mod_no_rust(name: str, op: str, request: Request) -> Response | None:
 @app.post("/api/sessions/{name}/plugin/press", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def plugin_press(name: str, body: PluginPressBody, request: Request):
     """Clique num botão que um mod desenhou na faixa ou num painel, pedido pelo app."""
-    from app import plugin_click
     if (rust := await _mod_no_rust(name, "press", request)) is not None:
         return rust
-    # O app de antes da rota `close` fechava o painel pelo `press` com a `key` reservada.
-    if body.plugin is None and body.key == plugin_click.CLOSE_KEY:
-        return await _acao_de_mod(plugin_click.close(name, body.site))
-    return await _acao_de_mod(plugin_click.press(name, body.site, body.key, body.plugin))
+    raise HTTPException(503, detail=_MOD_SEM_RUST)
 
 
 @app.post("/api/sessions/{name}/plugin/close", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def plugin_close(name: str, body: PluginCloseBody, request: Request):
     """Fecha um painel de mod pelo `✕` do cabeçalho, pedido pelo app."""
-    from app import plugin_click
     if (rust := await _mod_no_rust(name, "close", request)) is not None:
         return rust
-    return await _acao_de_mod(plugin_click.close(name, body.site))
+    raise HTTPException(503, detail=_MOD_SEM_RUST)
 
 
 @app.post("/api/sessions/{name}/plugin/show", dependencies=[Depends(require_auth)])
@@ -6504,15 +5268,6 @@ async def plugin_input(name: str, request: Request):
         return rust
     raise HTTPException(409, detail=erro("erro_mod_sem_digitacao",
         "Nesta sessão, o campo do mod só aceita digitação no terminal ou não está ligado ao app."))
-
-
-async def _acao_de_mod(acao):
-    """Roda o clique pela tela e traduz as recusas para o app."""
-    from app import plugin_click
-    try:
-        return await acao
-    except plugin_click.PressRefused as e:
-        raise HTTPException(409, detail=e.detail)
 
 
 @app.post("/api/sessions/{name}/interrupt", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
@@ -6560,42 +5315,10 @@ async def interrupt(name: str, clear: bool = False):
     return {"ok": True}
 
 
-def _exige_claude_de_terminal(name: str) -> None:
-    # O /btw é da TUI do Claude Code: Codex, Pi, omp e Kimi não têm o comando nem o overlay.
-    # (Claude SEM terminal tem caminho próprio — o fork da conversa — e não passa por aqui.)
-    provider = "codex" if _provider_of(name) == "codex" else _pane_info(name)[0]
-    if provider != "claude":
-        raise HTTPException(400, detail=erro("erro_btw_so_claude", "pergunta lateral só existe em sessão Claude"))
-
-
-@app.post("/api/sessions/{name}/btw", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
-async def pergunta_lateral(name: str, body: BtwBody):
-    if not await _send_thread(_session_exists, name):
-        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
-    # Sem terminal não há overlay pra dirigir: a pergunta vira um fork descartável da conversa.
-    sem_terminal = await _send_thread(_headless, name)
-    if not sem_terminal:
-        await _send_thread(_exige_claude_de_terminal, name)
-        await asyncio.to_thread(_recusa_se_painel_aberto, name)
-    try:
-        perguntar = btw.perguntar_sem_terminal if sem_terminal else btw.perguntar
-        item = await asyncio.to_thread(perguntar, name, body.question)
-    except btw.BtwError as e:
-        raise HTTPException(e.status, detail=erro(e.code, e.detail))
-    # A TUI já respondeu e gastou a chamada: falha ao guardar o histórico não pode virar 500 e
-    # levar o cliente a perguntar de novo. Vai marcada, não escondida.
-    try:
-        await asyncio.to_thread(btw.registrar, name, item)
-        item["salvo"] = True
-    except OSError:
-        _log.exception("btw de %s: resposta entregue, historico nao gravado", name)
-        item["salvo"] = False
-    return item
-
-
-@app.get("/api/sessions/{name}/btw", dependencies=[Depends(require_auth)])
-async def historico_lateral(name: str):
-    return await asyncio.to_thread(btw.historico, name)
+# A pergunta lateral é do Rust (`session_write/btw.rs`); pelo Connect o `_codex_rust_port` a repassa.
+@app.api_route("/api/sessions/{name}/btw", methods=["GET", "POST"], dependencies=[Depends(require_auth), Depends(_codex_rust_port)])
+async def pergunta_lateral_precisa_do_rust(name: str):
+    raise HTTPException(503, detail=erro("btw_needs_rust_server", "a pergunta lateral precisa do servidor Rust"))
 
 
 _TOOL_USE_ID = re.compile(r"^toolu_[A-Za-z0-9_-]{1,80}$")
@@ -6740,17 +5463,8 @@ class CodexServiceTierBody(_StrictBody):
 @app.post("/api/sessions/{name}/service-tier", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 async def set_codex_service_tier(name: str, body: CodexServiceTierBody):
     if _provider_of(name) == "claude":
-        info = await _cached_info(name)
-        model, _ = await asyncio.to_thread(_engine_fast_selection, name)
-        if not info or not await asyncio.to_thread(cliproxy.supports_fast, info.engine, model):
-            raise HTTPException(400, detail=erro("erro_fast_indisponivel", "Fast exige GPT no CLIProxyAPI local"))
-        await asyncio.to_thread(_recusa_se_painel_aberto, name)
-        operation = asyncio.create_task(_durante_troca(name, _trocar_conta(name, None, service_tier=body.service_tier)))
-        try:
-            return await asyncio.shield(operation)
-        except asyncio.CancelledError:
-            await operation
-            raise
+        # O Fast do Claude reabre a sessão com o tier novo: é do Rust.
+        raise registry_mod.SessionOpenNeedsRust()
     if _provider_of(name) != "codex":
         raise HTTPException(400, detail=erro("erro_fast_indisponivel", "Fast exige Codex ou Claude com GPT no CLIProxyAPI local"))
     try:
@@ -6789,20 +5503,6 @@ async def _guard_permissao_codex(name: str) -> None:
 def _codex_sem_terminal(name: str) -> bool:
     from app.adapters.codex import sessions as codex_sessions
     return bool((codex_sessions.load(name) or {}).get("headless"))
-
-
-_tarefas_soltas: set[asyncio.Task] = set()
-
-
-async def _aquecer_codex_sem_terminal(name: str) -> None:
-    try:
-        await get_adapter("codex").ensure_running(name)
-    except Exception:
-        # Aqui só o log: no modo python o watch_sessions tenta de novo (até o teto de subidas); com o
-        # Rust dono, o próximo envio abre a sessão nele.
-        _log.warning("codex sem terminal: aquecimento na criação falhou name=%s", name, exc_info=True)
-    finally:
-        _tarefas_soltas.discard(asyncio.current_task())
 
 
 @app.get("/api/sessions/{name}/codex-permissions", dependencies=[Depends(require_auth), Depends(_codex_rust_port)])
@@ -7382,10 +6082,6 @@ async def _codex_auth_states() -> list[tuple]:
             result = {"status": "unavailable"}
         states.append((account, result))
     return states
-
-
-async def _connected_codex_accounts() -> list:
-    return [account for account, login in await _codex_auth_states() if login.get("status") == "connected"]
 
 
 async def _default_session_provider(config_dir=None, engine=None, codex_account=None, omp_profile=None,
@@ -8976,194 +7672,6 @@ def archive_image(project: str, session_id: str, uuid: str, idx: int,
     return Response(content=raw, media_type=media, headers={"Cache-Control": "max-age=31536000, immutable"})
 
 
-class ResumeArchivedBody(_StrictBody):
-    # Motor de modelo pro resume do Arquivo. O pane que rodava a sessao original ja morreu -> nao ha
-    # /proc pra descobrir o motor de entao (ver registry._engine_of); quem retoma escolhe de novo.
-    # Sem escolha, volta na conta Anthropic (comportamento de hoje).
-    engine: str | None = None
-    engine_account: str | None = None
-    model: str | None = None
-    # A CONTA em que a conversa continua. Omitida, e a dona do transcript (descoberta no disco). Outra
-    # conta: o transcript MUDA de conta antes do `--resume`, porque rodado na conta errada ele morre
-    # na hora com "No conversation found with session ID".
-    config_dir: str | None = None
-    # Agente dono da conversa. Pi e Kimi retomam com o comando DELES (`pi --session-id`,
-    # `kimi --session`); Codex nao tem via de resume aqui e e recusado logo abaixo.
-    provider: str = "claude"
-    codex_account: str | None = None
-    # Nome com que a sessão volta (o que ela tinha ao fechar); ocupado ganha -2, -3. Omitido: o da pasta.
-    name: str | None = None
-
-
-def _sessao_com_transcript(jsonl: Path) -> str | None:
-    """Nome da sessao viva que escreve neste transcript, ou None."""
-    alvo = os.path.realpath(str(jsonl))
-    for s in registry.list():
-        if s.jsonl and os.path.realpath(s.jsonl) == alvo:
-            return s.name
-    return None
-
-
-@app.post("/api/archive/{project}/{session_id}/resume", dependencies=[Depends(require_auth)],
-          response_model=SessionInfo)
-def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = ResumeArchivedBody()):
-    from app.conversation_history import archive_transfer, source_rows, verify_boundary, HistoryError
-    # "Retomar conversa" do Arquivo: sobe uma sessao tmux NOVA no cwd original com `claude --resume
-    # <uuid>` -- reusa registry.create (nome/config_dir/spawn tmux ja tratados), so troca o comando pro
-    # uuid EXISTENTE (nao um novo transcript). Nome derivado do basename do cwd, igual ao
-    # CreateSessionSheet do front; colisao suffixa -2/-3... (mesmo esquema, do lado do backend pq aqui
-    # nao ha form pro usuario escolher nome).
-    if body.config_dir is not None and body.config_dir not in {c.path for c in list_config_dirs()}:
-        raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
-    if body.provider != "claude" and body.provider not in archive_providers.PROVIDERS:
-        raise HTTPException(400, detail=erro("erro_provider_invalido", "provider invalido"))
-    if body.codex_account is not None and body.provider != "codex":
-        raise HTTPException(400, detail=erro("codex_account_so_codex",
-                                             "codex_account só vale para provider codex"))
-    # O id da conversa Codex e o uuid do FIM do nome do rollout, e e ele que o `codex resume` recebe.
-    # Um nome fora desse padrao nao tem id pra retomar — e dizer "caminho invalido" (o que o
-    # ValueError generico daqui a pouco daria) manda procurar defeito no lugar errado.
-    if body.provider == "codex" and not archive_providers.UUID_RE.match(session_id):
-        raise HTTPException(400, detail=erro("erro_rollout_sem_id",
-                                             "nome de rollout sem id de conversa"))
-    # Conta omitida (link antigo, chamador que nao sabe): descobre no disco. Deixar None aqui subia
-    # o pane na conta do backend e o `--resume` morria com "No conversation found with session ID".
-    # Conversa que nao existe nao vira erro AQUI: o archive_cwd logo abaixo faz a mesma busca e e
-    # ele quem devolve o 400/404 -- duplicar a recusa so daria duas mensagens pro mesmo caso.
-    # So o Claude tem conta: Pi e Kimi guardam transcript fora do config dir.
-    cfg = body.config_dir
-    # Conta pedida diferente da dona: a conversa MUDA de conta, mas so no fim, depois de toda
-    # recusa possivel -- mover e depois negar deixaria a conversa fora do lugar por um 409.
-    # `mover` guarda a conta de origem (o "None" da conta do processo tambem e origem valida).
-    mover: tuple[str | None] | None = None
-    if body.provider == "claude":
-        try:
-            dona = conta_de(project, session_id)
-            if cfg is None:
-                cfg = dona
-            elif dona != cfg:
-                # Conversa ABERTA nao muda de conta: o processo dela ainda escreve no arquivo, e o
-                # rename deixaria ele gravando num inode que a lista nao acha mais.
-                viva = _sessao_com_transcript(archive_jsonl(project, session_id, dona))
-                if viva:
-                    raise HTTPException(409, detail=erro("erro_conversa_viva",
-                                                         "conversa aberta nao muda de conta",
-                                                         sessao=viva))
-                mover = (dona,)
-        except (ValueError, FileNotFoundError):
-            pass
-    origem_codex_account = body.codex_account
-    try:
-        if body.provider == "codex":
-            origem_path = archive_jsonl(project, session_id, cfg, body.provider,
-                                        body.codex_account)
-            owner = codex_accounts.account_for_rollout(origem_path)
-            if owner is None:
-                raise FileNotFoundError(session_id)
-            if origem_codex_account is not None and owner.id != origem_codex_account:
-                raise codex_accounts.AccountError(
-                    409, "codex_account_archive_mismatch",
-                    {"account_id": origem_codex_account, "origin_account": owner.id},
-                )
-            origem_codex_account = owner.id
-            transfer = archive_transfer(origem_path)
-            if transfer:
-                source_rows(transfer.source)
-                verify_boundary(transfer, origem_path)
-            cwd = archive_cwd(project, session_id, cfg, body.provider, origem_codex_account)
-        else:
-            cwd = archive_cwd(project, session_id, mover[0] if mover else cfg, body.provider)
-    except codex_accounts.AccountError as e:
-        raise _erro_conta_codex(e) from None
-    except HistoryError as exc:
-        raise HTTPException(409, detail=erro("session_transfer_history_invalid", "histórico da transferência indisponível")) from exc
-    except ValueError:
-        raise HTTPException(400, detail=erro("erro_path_invalido", "invalid path"))
-    except FileNotFoundError:
-        raise HTTPException(404, detail=erro("erro_transcript_nao_encontrado", "transcript not found"))
-    if not cwd:
-        raise HTTPException(422, detail=erro("erro_cwd_ausente", "cwd not found in transcript"))
-    # Mesmo transcript ja aberto numa sessao: um segundo `--resume` poria dois processos gravando
-    # no mesmo arquivo. Antes do move e de qualquer spawn.
-    try:
-        viva = _sessao_com_transcript(archive_jsonl(
-            project, session_id, mover[0] if mover else cfg, body.provider,
-            origem_codex_account if body.provider == "codex" else None))
-    except (ValueError, FileNotFoundError):
-        viva = None
-    if viva:
-        raise HTTPException(409, detail=erro("erro_conversa_viva", "conversa já está aberta",
-                                             sessao=viva))
-    if body.engine is not None and body.engine not in engines.listar():
-        raise HTTPException(400, detail=erro("erro_motor_invalido", "motor invalido"))
-    fixed_model = body.model
-    if body.engine_account is not None:
-        if body.provider != "claude" or not body.engine:
-            raise HTTPException(400, detail=erro("erro_cliproxy_conta", "conta ChatGPT exige Claude com motor CLIProxyAPI local"))
-        account = _fixed_engine_account(body.engine, body.engine_account)
-        cfg_engine = engines.listar()[body.engine]
-        from app.cliproxy_accounts import base_model
-        try:
-            fixed_model = base_model(body.model or cfg_engine["model"], account["prefix"])
-            account_models = engine_probe.listar_modelos(cfg_engine["base_url"], cfg_engine["api_key"])
-            models = cliproxy.validate_models(cfg_engine, fixed_model, account, account_models)
-        except ValueError as exc:
-            raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
-        except RuntimeError:
-            raise HTTPException(502, detail=erro("erro_cliproxy_conta", "catálogo do CLIProxyAPI indisponível")) from None
-        catalog_id = engines.catalog_model(fixed_model)
-        if not any(m["id"] == catalog_id for m in models):
-            raise HTTPException(422, detail=erro("erro_modelo_fora_catalogo", "modelo indisponível nesta conta ChatGPT"))
-    elif body.model is not None:
-        try:
-            model_args.validar(body.provider, body.model, None)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from None
-    base = sanitize_session_name(body.name or Path(cwd).name) or "sessao"
-    name, i = base, 2
-    # As MESMAS fontes que a criacao normal consulta (registry.create). Olhando so o tmux, um nome
-    # ja usado por uma sessao Codex ou sem terminal passava por aqui e o conflito estourava la
-    # dentro, como um 409 com a mensagem de outro assunto.
-    while _nome_ocupado(name):
-        name = f"{base}-{i}"
-        i += 1
-    if mover:
-        try:
-            move_conversation(project, session_id, cfg)
-        except FileExistsError:
-            raise HTTPException(409, detail=erro("erro_conversa_ja_na_conta",
-                                                 "a conta destino ja tem esta conversa"))
-        except OSError as e:
-            _log.exception("mover conversa %s para %s falhou", session_id, cfg)
-            raise HTTPException(500, detail=erro("erro_mover_conversa",
-                                                 f"nao consegui mover a conversa de conta: {e}",
-                                                 erro=str(e)))
-    try:
-        extras = {"codex_account": origem_codex_account} \
-            if body.provider == "codex" and origem_codex_account is not None else {}
-        if body.engine_account is not None:
-            extras["engine_account"] = body.engine_account
-            extras["engine_models"] = account_models
-        if fixed_model is not None:
-            extras["model"] = fixed_model
-        if body.provider == "codex" and transfer:
-            extras.update(transfer_id=transfer.id, transfer_rollout_path=str(origem_path),
-                          tool_output_token_limit=transfer.destination_meta["tool_output_token_limit"])
-        info = registry.create(name, cwd, config_dir=cfg, provider=body.provider,
-                               resume_session_id=session_id, engine=body.engine, **extras)
-        _invalidate_lists()
-        return info
-    except ValueError as e:
-        if mover:
-            # Sessao nao nasceu: a conversa volta pra conta de origem. Falha aqui nao pode
-            # esconder o 409 original, mas tambem nao pode passar calada.
-            try:
-                move_conversation(project, session_id, mover[0])
-            except OSError:
-                _log.exception("conversa %s ficou em %s: rollback do move falhou", session_id, cfg)
-        raise HTTPException(409, str(e))
-
-
 # ── MCP hangar-computer-control: liga/desliga e configura nos .claude.json de todas as contas ──
 class ComputerControlBody(_StrictBody):
     enabled: bool
@@ -9818,31 +8326,20 @@ def answer(name: str, body: AnswerBody):
     return {"ok": True, "fallback": fallback}
 
 
-@app.post("/api/sessions/{name}/model-effort", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+class ModelEffortBody(_StrictBody):
+    # scope: 'session' (aperta `s`) ou 'default' (aperta Enter).
+    model: str | None = None
+    effort: str | None = None
+    scope: Literal["session", "default"] = "session"
+
+
+@app.post("/api/sessions/{name}/model-effort", dependencies=[Depends(require_auth), Depends(_transfer_guard), Depends(_codex_rust_port)])
 async def model_effort(name: str, body: ModelEffortBody):
+    # Do Claude é o Rust que troca (seletor no ator do terminal, controle no sem terminal); Pi, omp e Kimi,
+    # que não têm entrada lá, seguem aqui.
     info = await _cached_info(name)
-    if info and info.engine_account:
-        if body.scope != "session":
-            raise HTTPException(409, detail=erro("erro_cliproxy_modelo_rota",
-                                                 "a conta ChatGPT fixa não altera o padrão global de modelo ou esforço"))
-        if body.model is not None:
-            await engine_model_set(name, EngineModelBody(model=body.model, effort=body.effort))
-        elif body.effort is not None:
-            await _durante_troca(name, _trocar_conta(name, None, engine_account=info.engine_account,
-                                                   effort=body.effort))
-        return {"ok": True, "scope": "session", "result": None}
-    if _headless(name):
-        if _loop_servidor is None or not _loop_servidor.is_running():
-            raise HTTPException(503, detail=erro("erro_modelo_indisponivel", "servidor sem loop pra aplicar"))
-        try:
-            model_args.validar("claude", body.model, body.effort, None)
-        except ValueError as e:
-            raise HTTPException(422, str(e))
-        try:
-            await asyncio.wait_for(get_adapter(CLAUDE_HEADLESS).set_model(name, body.model, body.effort), 40)
-        except Exception as e:
-            raise HTTPException(409, detail=erro("erro_modelo_indisponivel", f"não consegui trocar: {e}"))
-        return {"ok": True, "scope": "session", "result": None}
+    if info is not None and getattr(info, "provider", "claude") == "claude":
+        raise HTTPException(503, detail=erro("model_effort_needs_rust_server", "trocar modelo e esforço precisa do servidor Rust"))
     await asyncio.to_thread(_recusa_se_painel_aberto, name)
     try:
         return await asyncio.to_thread(terminal.set_model_effort, name, body.model, body.effort, body.scope)
@@ -10006,7 +8503,8 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
             _log.warning("permissão: %s recusou bypass sem reiniciar (%s); reabrindo em bypass", name, e)
             ficou = None
         if alvo == "bypassPermissions" and ficou != alvo:
-            return await _bypass_reopen(name, info)
+            # Entrar em bypass reabrindo a sessão é do Rust.
+            raise registry_mod.SessionOpenNeedsRust()
         vivo = hl._sessions.get(name)
         await asyncio.to_thread(_invalidate_lists)
         from app.runtime_adapter import runtime_data
@@ -10015,7 +8513,7 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
                 "previous_non_plan":view.get("previous_non_plan") if view is not None else vivo.modo_nao_plan if vivo else None}
     await asyncio.to_thread(_guard_perm, name, info)
     if alvo == "bypassPermissions" and not await asyncio.to_thread(_bypass_no_ciclo, name):
-        return await _bypass_reopen(name, info)
+        raise registry_mod.SessionOpenNeedsRust()
     tracking_key = _tracking_key_perm(name, info)
     try:
         inicial = await asyncio.to_thread(perm_mode.ler_modo, name)
@@ -10054,74 +8552,6 @@ def _bypass_no_ciclo(name: str) -> bool:
     agent = registry_mod._pid_do_agente((registry._pane_of(name) or {}).get("pid"))
     cmd = " ".join(procinfo._cmdline(agent).split()).replace("--permission-mode=", "--permission-mode ") if agent else ""
     return any(f in cmd for f in _FLAGS_BYPASS)
-
-
-async def _bypass_reopen(name: str, info):
-    # Com o Rust dono, dentro da barreira a sessão já foi fechada e a vista dele (trabalhando,
-    # pergunta pendente) não é mais lida: a ociosidade se confere antes de fechar.
-    motivo = await _motivo_ocupada(name, _headless(name))
-    if motivo:
-        raise HTTPException(409, detail=erro(motivo, "para entrar em bypass a sessão reinicia: " + _OCUPADA[motivo]))
-    return await _durante_troca(name, _reabrir_em_bypass(name, info))
-
-
-async def _reabrir_em_bypass(name: str, info):
-    """Reabre a mesma conversa (`--resume`) já em bypass, como a troca de conta. Só ociosa."""
-    hl = get_adapter(CLAUDE_HEADLESS)
-    async with hl.delivery_lock(name):
-        # Uma troca que esperava na trava pode ter mudado o transporte da sessão.
-        await asyncio.to_thread(_invalidate_lists)
-        headless = _headless(name)
-        motivo = await _motivo_ocupada(name, headless)
-        if motivo:
-            raise HTTPException(409, detail=erro(motivo, "para entrar em bypass a sessão reinicia: " + _OCUPADA[motivo]))
-        if headless:
-            antes = headless_sessions.load(name) or {}
-            await asyncio.to_thread(_requeue_unanswered, name)
-            await hl.parar(name)
-            if headless_sessions.update(name, permission_mode="bypassPermissions",
-                                        previous_non_plan="bypassPermissions") is None:
-                hl.acordar(name)
-                raise HTTPException(409, detail=erro("erro_permissao_reabrir", "não gravei o modo novo no arquivo de estado da sessão"))
-            hl.reset_start_attempts(name)
-            try:
-                await hl.ensure_running(name, require_initialize=True)
-            except Exception as e:
-                _log.exception("permissão: %s não reabriu em bypass; voltando ao modo de antes", name)
-                # O processo pode ter subido em bypass e seguir vivo (initialize recusado): sem
-                # parar, ele continua em bypass com o arquivo dizendo outro modo.
-                try:
-                    await hl.parar(name)
-                except Exception as stop_error:
-                    # Processo talvez vivo em bypass: o arquivo segue dizendo bypass, não o modo de antes.
-                    _log.exception("permissão: %s não parou depois de falhar em bypass", name)
-                    raise HTTPException(409, detail=erro("erro_permissao_reabrir",
-                        f"a sessão não reabriu em bypass ({e}) e não parou ({stop_error}); ela pode seguir em bypass",
-                        erro=str(e), stop_error=str(stop_error))) from e
-                headless_sessions.update(name, permission_mode=antes.get("permission_mode"),
-                                         previous_non_plan=antes.get("previous_non_plan"))
-                hl.acordar(name)
-                raise HTTPException(409, detail=erro("erro_permissao_reabrir", f"a sessão não reabriu em bypass e voltou ao modo de antes: {e}", erro=str(e)))
-        else:
-            try:
-                await asyncio.to_thread(registry.para_headless, name, "bypassPermissions")
-            except KillFailed as e:
-                raise HTTPException(500, str(e))
-            except (ValueError, OSError) as e:
-                raise HTTPException(409, detail=erro("erro_permissao_reabrir", f"não reabri em bypass: {e}", erro=str(e)))
-            try:
-                await asyncio.to_thread(registry.para_terminal, name)
-            except Exception as e:
-                _log.exception("permissão: terminal de %s não voltou após reabrir em bypass", name)
-                if headless_sessions.exists(name):
-                    hl.acordar(name)
-                    msg = f"o terminal não voltou; a sessão seguiu sem terminal, em bypass: {e}"
-                else:
-                    msg = f"o terminal não voltou e a sessão ficou sem processo: {e}"
-                raise HTTPException(409, detail=erro("erro_permissao_reabrir", msg, erro=str(e)))
-    _perm_modes_cache.pop(_cache_key_perm(name, info), None)
-    return {"mode": "bypassPermissions", "current": "bypassPermissions",
-            "previous_non_plan": "bypassPermissions", "reopened": True}
 
 
 # ── Catalogo de modelos de uma sessao Claude Code ───────────────────────────────────────────────
@@ -10432,14 +8862,12 @@ async def engine_model_set(name: str, body: EngineModelBody):
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
     if not info.engine:
         raise HTTPException(400, detail=erro("erro_rota_so_motor", "esta rota so existe pra sessoes que rodam num motor"))
+    if info.engine_account:
+        # A conta ChatGPT fixa troca o modelo reabrindo a sessão: é do Rust.
+        raise registry_mod.SessionOpenNeedsRust()
     # fresco=True: a validacao promete "recusa aqui em vez de deixar a falha aparecer so no proximo
     # turno", e essa promessa nao sobrevive ao cache de 5 min (ver _engine_models).
-    account_models = await _engine_models(info.engine, fresco=True)
-    modelos = account_models
-    if info.engine_account:
-        from app.cliproxy_accounts import models_for
-        account = await asyncio.to_thread(_fixed_engine_account, info.engine, info.engine_account)
-        modelos = models_for(account_models, account["prefix"])
+    modelos = await _engine_models(info.engine, fresco=True)
     catalog_id = await asyncio.to_thread(engines.catalog_model, body.model)
     if not any(m["id"] == catalog_id for m in modelos):
         # Recusar aqui em vez de digitar: o CC aceitaria o id, a sessao passaria a mandar request
@@ -10450,13 +8878,6 @@ async def engine_model_set(name: str, body: EngineModelBody):
     if tier == "priority" and not await asyncio.to_thread(cliproxy.supports_fast, info.engine, body.model):
         raise HTTPException(409, detail=erro("erro_fast_indisponivel", "Desligue Fast antes de escolher um modelo que não o suporta"))
 
-    if info.engine_account:
-        selected = next(m for m in modelos if m["id"] == catalog_id)
-        window = 1_000_000 if catalog_id != body.model else selected.get("context_length")
-        await _durante_troca(name, _trocar_conta(name, None, engine_account=info.engine_account,
-                                               model=body.model, effort=body.effort,
-                                               context_window=window, engine_models=account_models))
-        return {"ok": True, "model": body.model}
     if _headless(name):
         # Sem pane: `set_model` por control_request, que (medido) NÃO grava o default global —
         # nada a repor no settings.json. O esforço vai como `/effort <x>` pelo stdin.
@@ -10531,31 +8952,6 @@ def _session_config_dir(name: str) -> Path | None:
         _log.warning("pi: nao consegui resolver o config dir de %s; usando ~/.claude", name,
                      exc_info=True)
         return None
-
-
-def _caller_config_dir(name: str) -> tuple[Path | None, bool]:
-    """CLAUDE_CONFIG_DIR de quem PEDE uma sessão nova: (Path | None, confiável).
-
-    A irmã acima (fallback silencioso pro ~/.claude) é certa pra LEITURA; aqui, criar na conta
-    errada cobra a conta errada calado. Falha de resolução e pane sem processo devolvem
-    confiável=False e quem chama recusa. None + True = processo vivo SEM a var no ambiente: usa
-    a conta padrão. Sem terminal a conta vem do sidecar, mesmo com o processo estacionado (ele
-    volta com --resume na mesma conta).
-    """
-    from app import tmux
-    if headless_sessions.exists(name):
-        meta = headless_sessions.load(name)
-        if not isinstance(meta, dict):
-            return None, False
-        cfg = meta.get("config_dir")
-        return (Path(cfg) if cfg else None), True
-    try:
-        pid = tmux.pane_pid(name)
-    except Exception:
-        return None, False
-    if not pid:
-        return None, False
-    return procinfo._config_dir_of_strict(pid)
 
 
 async def _pi_catalog(name: str) -> tuple[dict, str]:
@@ -11216,9 +9612,12 @@ class _UIStatic(StaticFiles):
         return resp
 
 
-from app import mcp_server
-# Antes do estático em "/": mount é resolvido na ordem de registro.
-app.mount("/mcp", mcp_server.asgi, name="mcp")
+# O MCP `hangar` é do Rust; sem ele, o código próprio. Antes do estático em "/", que responderia 405.
+@app.api_route("/mcp", methods=["GET", "POST", "DELETE"], dependencies=[Depends(require_auth)])
+@app.api_route("/mcp/", methods=["GET", "POST", "DELETE"], dependencies=[Depends(require_auth)])
+async def mcp_needs_rust():
+    raise HTTPException(503, detail=erro("mcp_needs_rust_server", "o MCP do Hangar precisa do servidor Rust"))
+
 
 _DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 if _DIST.is_dir():

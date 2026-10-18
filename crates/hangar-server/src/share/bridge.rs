@@ -34,7 +34,6 @@ enum Operation {
     Rename { old: String, new: String },
     SessionDied { name: String },
     EndPair { local: String, address: String },
-    Send { sender: String, target: String, text: String },
     ActiveSessions {},
 }
 
@@ -75,11 +74,6 @@ async fn execute(st: Arc<AppState>, share: Arc<ShareState>, op: Operation) -> Re
             let found = pair_routes::end_pair(&st, &share, &Direct, &local, &address).await;
             Ok(json!({"found": found.is_some(), "errors": found.unwrap_or_default()}))
         }
-        Operation::Send { sender, target, text } => pair_routes::send(&st, &share, &Direct, &sender, &target, &text).await
-            .map_err(|(_, detail)| Failed {
-                code: detail["code"].as_str().unwrap_or("share_send_failed").to_owned(),
-                detail: detail["msg"].as_str().unwrap_or_default().to_owned(),
-            }),
         Operation::ActiveSessions {} => {
             let mut sessions: Vec<String> = share.store.active_sessions().into_iter().collect();
             sessions.sort();

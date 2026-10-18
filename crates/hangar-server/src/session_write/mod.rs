@@ -7,14 +7,20 @@
 //! é procurada DEPOIS da porta: a achada antes de esperar pode ser a que o relançamento parou.
 //! Repasse nunca acontece com o passe na mão: o `freeze` do Python fecha a porta e esperaria o
 //! nosso próprio passe.
+pub mod account;
 pub mod answer;
 pub mod bridge;
+pub mod btw;
 pub mod codex;
 pub mod control;
+pub mod engine;
 pub mod input;
 pub(crate) mod delivery_timing;
+pub mod limit_switch;
+mod model_effort;
 pub mod permissions;
 pub mod relaunch;
+pub mod resume;
 pub mod table;
 
 use std::net::SocketAddr;
@@ -160,6 +166,12 @@ async fn dead_headless_codex(target: &WriteTarget) -> bool {
 }
 
 pub(crate) fn busy_body() -> Value { detail_body("session_transfer_busy", BUSY_MSG, json!({})) }
+
+/// Recusa por sessão ocupada (trocando de agente ou nas frases do `_OCUPADA`); `None` = outra recusa.
+pub(crate) fn busy_refusal(error: &crate::runtime::protocol::RuntimeError) -> Option<(StatusCode, Value)> {
+    if error.code == "session_transfer_busy" { return Some((StatusCode::CONFLICT, busy_body())); }
+    crate::runtime::claude_reopen::busy_message(&error.code).map(|message| (StatusCode::CONFLICT, detail_body(&error.code, message, json!({}))))
+}
 
 /// Corpo que a rota do Rust não aceita: 422 com código, nunca o repasse ao Python.
 pub(crate) fn invalid_body(headers: &axum::http::HeaderMap) -> Response {

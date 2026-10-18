@@ -377,8 +377,9 @@ def test_available_without_rust_binding_is_an_error(monkeypatch):
         monkeypatch.setattr(api, "_enviar_nativo", lambda *a: pytest.fail("socket nativo"))
         return await asyncio.to_thread(api._send_one_available, "s", "oi")
     result = asyncio.run(scenario())
+    # O texto vai ao Rust pela ponte; sem ela de pé o erro tem o código dela, e nada é digitado aqui.
     assert result["ok"] is False and result["delivered"] is False
-    assert "vínculo no Rust" in str(result["error"])
+    assert result["error"]["code"] == "claude_bridge_failed"
 
 
 # --- rodada de correção --------------------------------------------------------------------
@@ -467,61 +468,6 @@ def test_transfer_operation_close_failure_is_a_503_transfer_error(transfer_env):
 
 
 # Rotas e funções reais da troca: o gate fecha antes do corpo e abre na saída.
-
-def test_reload_route_wraps_the_reload_with_the_gate(transfer_env, monkeypatch):
-    transport, _, _ = transfer_env
-    monkeypatch.setattr(ct, "transfer_for_session", lambda name: None)
-    monkeypatch.setattr(ct, "require_available", lambda name: None)
-    seen = []
-    async def reload(name):
-        seen.append(list(transport.ingress()))
-        return {"ok": True}
-    monkeypatch.setattr(api, "_reload_session", reload)
-    assert asyncio.run(api.recarregar_sessao("s")) == {"ok": True}
-    assert seen == [[("s", True)]] and transport.ingress() == [("s", True), ("s", False)]
-
-
-def test_reload_route_answers_503_when_the_gate_is_busy(transfer_env, monkeypatch):
-    transport, _, _ = transfer_env
-    transport.busy = True
-    monkeypatch.setattr(ct, "transfer_for_session", lambda name: None)
-    monkeypatch.setattr(api, "_reload_session", lambda name: pytest.fail("não recarrega"))
-    with pytest.raises(api.HTTPException) as caught:
-        asyncio.run(api.recarregar_sessao("s"))
-    assert caught.value.status_code == 503
-
-
-def test_agent_switch_gate_and_closed_coroutine_on_busy(transfer_env, monkeypatch):
-    import inspect
-    transport, _, _ = transfer_env
-    monkeypatch.setattr(ct, "require_available", lambda name: None)
-    async def life(name, troca, **kw):
-        return await troca
-    monkeypatch.setattr(api, "_during_transfer_life", life)
-    async def troca():
-        return "feito"
-    assert asyncio.run(api._durante_troca("s", troca())) == "feito"
-    assert transport.ingress() == [("s", True), ("s", False)]
-    transport.busy = True
-    pending = troca()
-    with pytest.raises(api.HTTPException) as caught:
-        asyncio.run(api._durante_troca("s", pending))
-    assert caught.value.status_code == 503
-    assert inspect.getcoroutinestate(pending) == inspect.CORO_CLOSED
-
-
-def test_agent_switch_closes_the_coroutine_on_any_error(transfer_env, monkeypatch):
-    import inspect
-    def boom(name):
-        raise RuntimeError("x")
-    monkeypatch.setattr(ct, "require_available", boom)
-    async def troca():
-        return None
-    pending = troca()
-    with pytest.raises(RuntimeError):
-        asyncio.run(api._durante_troca("s", pending))
-    assert inspect.getcoroutinestate(pending) == inspect.CORO_CLOSED
-
 
 def test_transfer_claude_to_codex_uses_the_gate(transfer_env, monkeypatch):
     transport, _, _ = transfer_env

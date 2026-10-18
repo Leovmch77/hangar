@@ -251,6 +251,26 @@ impl Sources for NativeSources {
             state.side.hubs.plugin_rates().record(&identity.binding, tokens, seconds, crate::state::monitor::wall_now())
         })
     }
+    /// Todo fim de turno, e cada desfecho vai ao diário: a troca de conta calada já passou despercebida.
+    fn turn_error<'a>(&'a self, identity: &'a Identity) -> SourceFuture<'a, ()> {
+        Box::pin(async move {
+            let state = self.state()?;
+            let registry = state.state.runtime.get().ok_or(ServiceError("plugin_runtime_absent"))?;
+            let name = &identity.name;
+            let report = |code: &str, reason: &'static str| state.diag.report("session.limit_check", name, code, reason);
+            match registry.turn_limit(name, &identity.binding, crate::state::monitor::wall_now()).await {
+                Ok(crate::runtime::gateway::TurnLimit::NotTerminal) => report("limit_check_not_terminal", "fim de turno sem terminal: o limite é conferido pelo ator"),
+                Ok(crate::runtime::gateway::TurnLimit::Checked { limit: None, .. }) => report("limit_check_none", "fim de turno conferido: sem aviso de limite no transcript"),
+                Ok(crate::runtime::gateway::TurnLimit::Checked { limit: Some(_), sent: true, .. }) => report("limit_check_sent", "fim de turno: aviso de limite entregue ao vigia da troca de conta"),
+                Ok(crate::runtime::gateway::TurnLimit::Checked { limit: Some(_), sent: false, .. }) => report("limit_check_unsent", "fim de turno: aviso de limite achado e não entregue ao vigia"),
+                Err(error) => {
+                    report(&error.code, "fim de turno: o limite de uso não foi conferido");
+                    return Err(ServiceError("limit_check_failed"));
+                }
+            }
+            Ok(())
+        })
+    }
 }
 
 /// Grava a medida no transcript da conversa vigente, com ou sem terminal. A vida é conferida antes e

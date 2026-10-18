@@ -3,6 +3,7 @@ import React, { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { useServers } from '../../stores/servers';
+import * as m from '../../paraglide/messages';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const mocks = vi.hoisted(() => ({
@@ -10,12 +11,14 @@ const mocks = vi.hoisted(() => ({
   appState: null as null | ((state: string) => void), remove: vi.fn(),
   warning: vi.fn(), error: vi.fn(), screens: {} as Record<string, Record<string, unknown>>,
   connected: null as null | ((server: any) => void),
+  savedFatal: undefined as string | undefined,
 }));
 vi.mock('expo-secure-store', () => ({ getItemAsync: mocks.read, setItemAsync: vi.fn(async () => {}) }));
 vi.mock('./importMachines', () => ({ discoverSavedMachines: mocks.discover }));
 vi.mock('react-native-url-polyfill/auto', () => ({}));
 vi.mock('../../theme/unistyles', () => ({}));
 vi.mock('../../net/configureCore', () => ({ configureCore: () => {} }));
+vi.mock('../../stores/prefs', () => ({ prefs: { getString: () => mocks.savedFatal } }));
 vi.mock('../../stores/chat', () => ({ setChatsForeground: () => {} }));
 vi.mock('../../stores/sessions', () => ({
   useSessions: { getState: () => ({ setForeground: () => {} }) },
@@ -43,11 +46,18 @@ let root: Root;
 let el: HTMLDivElement;
 beforeEach(() => {
   vi.clearAllMocks(); mocks.segments = ['importar']; mocks.appState = null;
+  mocks.savedFatal = undefined;
   mocks.read.mockResolvedValue(null); mocks.discover.mockResolvedValue({ added: [], issues: [] });
   useServers.setState({ servers: [], activeId: null, ready: false, vaultReadable: false, aviso: null });
   el = document.createElement('div'); document.body.appendChild(el); root = createRoot(el);
 });
 afterEach(async () => { await act(async () => root.unmount()); el.remove(); });
+
+test('erro fatal salvo mostra o caminho do relatório na próxima abertura', async () => {
+  mocks.savedFatal = JSON.stringify({ report: { timestamp: '2026-10-18T10:26:00Z', message: 'Out of memory' }, pending: true });
+  await act(async () => root.render(<Layout />));
+  expect(mocks.warning).toHaveBeenCalledExactlyOnceWith(m.native_last_error_available(), { duration: 12_000 });
+});
 
 test.each(['android', 'ios'] as const)('registra Git com cabeçalho inicial e apresentação adequada no %s', async (platform) => {
   const previous = Platform.OS;

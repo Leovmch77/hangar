@@ -86,3 +86,53 @@ describe('painel da fila', () => {
       .toBe(m.erro_comando_nao_executado({ comando: '/clear', motivo: 'busy' }));
   });
 });
+
+describe('abertura e ciclo de vida da sessão recusados pelo Rust', () => {
+  it.each([
+    'codex_terminal_starting', 'runtime_unhealthy', 'erro_cliproxy_conta', 'erro_codex_catalogo_invalido',
+    'erro_codex_escolha_invalida', 'erro_codex_nao_reiniciou', 'erro_codex_reiniciando', 'erro_conta_criadora',
+    'erro_corpo_invalido', 'erro_criadora_ilegivel', 'erro_modo_desconhecido', 'erro_modo_padrao_ilegivel',
+    'erro_perfil_so_omp', 'erro_permissao_ocupada', 'erro_permissao_picker', 'erro_plano_fora_da_tela',
+    'erro_recarregar_so_sem_terminal', 'session_open_fact_unavailable', 'session_open_name_needs_server',
+    'session_patch_stale', 'session_patch_owner', 'session_patch_field', 'session_clear_cano_pid',
+    'lifecycle_busy', 'heal_not_needed', 'relaunch_policy_forbids_bypass', 'relaunch_bypass_already_enabled',
+    'relaunch_read_only', 'relaunch_not_claude',
+    // Família sem frase própria: a frase do grupo.
+    'lifecycle_kill', 'relaunch_ipc', 'heal_backoff',
+  ])('%s vira frase do app, não o texto do servidor', (code) => {
+    const texto = formataErro({ code, params: { nome: 'proj', erro: 'motivo' }, msg: 'texto-do-servidor' });
+    expect(texto).not.toBe('texto-do-servidor');
+    expect(texto).not.toBe(code);
+  });
+
+  it('o nome e o motivo entram na frase', () => {
+    expect(formataErro({ code: 'session_open_name_needs_server', params: { nome: 'proj' }, msg: 'x' })).toContain('proj');
+    expect(formataErro({ code: 'erro_codex_escolha_invalida', params: { erro: 'xhigh' }, msg: 'x' })).toContain('xhigh');
+  });
+
+  it('código desconhecido fora das famílias continua sem frase', () => {
+    expect(formataErro({ code: 'lifecycleless', params: {}, msg: 'texto-do-servidor' })).toBe('texto-do-servidor');
+  });
+});
+
+describe('lista indisponível sem detalhe', () => {
+  it.each(['erro_lista_indisponivel', 'erro_mux_indisponivel'])('%s sem detalhe não mostra "(undefined)"', (code) => {
+    const texto = formataErro({ code, params: {}, msg: 'x' })!;
+    expect(texto).not.toContain('undefined');
+    expect(texto).not.toContain('()');
+    expect(formataErro({ code, params: { detalhe: 'timeout' }, msg: 'x' })).toContain('(timeout)');
+  });
+});
+
+describe('recusas da abertura e da reabertura no Rust', () => {
+  it.each([
+    ['erro_conversa_viva', { sessao: 'web' }, 'web'],
+    ['erro_fast_indisponivel', {}, null],
+    ['erro_recarregar_sem_terminal', { erro: 'pane morreu' }, 'pane morreu'],
+    ['account_busy', {}, null],
+  ])('%s vira frase do app, não o texto do servidor', (code, params, contem) => {
+    const texto = formataErro({ code, params, msg: 'texto-do-servidor' });
+    expect(texto).not.toBe('texto-do-servidor');
+    if (contem) expect(texto).toContain(contem);
+  });
+});

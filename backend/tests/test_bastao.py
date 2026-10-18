@@ -482,6 +482,18 @@ def test_rota_404_sem_transcript(api_client_bastao):
 # POST: dossiê gravado -> sessão criada -> kick-off na fila
 # ---------------------------------------------------------------------------
 
+def _abertura_fingida(criadas: list):
+    """A criação da sucessora vai ao Rust por `_open_in_rust`; aqui ela só é registrada."""
+    from types import SimpleNamespace
+    from app.models import CreatedSessionInfo
+
+    async def abrir(raw, request=None):
+        corpo = SimpleNamespace(**json.loads(raw))
+        criadas.append(corpo)
+        return CreatedSessionInfo(name=corpo.name, cwd=corpo.cwd)
+    return abrir
+
+
 @pytest.fixture
 def bastao_post(api_client_bastao, monkeypatch, tmp_path):
     """Cliente + origem viva + criação de sessão fingida. Devolve (post, criadas)."""
@@ -492,19 +504,15 @@ def bastao_post(api_client_bastao, monkeypatch, tmp_path):
     origem = SessionInfo(name="cc", cwd=str(tmp_path), jsonl=str(FIX / "jsonl_samples.jsonl"))
     criadas: list = []
 
-    async def fake_create(body):
-        criadas.append(body)
-        return SessionInfo(name=body.name, cwd=body.cwd, jsonl=None)
-
-    monkeypatch.setattr(api_mod, "create_session", fake_create)
+    monkeypatch.setattr(api_mod, "_open_in_rust", _abertura_fingida(criadas))
     monkeypatch.setattr(api_mod, "_drain_session", lambda name: None)
     # Sem nome ocupado por padrão (e sem consultar o tmux da máquina que roda os testes).
     monkeypatch.setattr(api_mod, "_nome_ocupado", lambda nome: False)
 
-    def post(**corpo):
+    def post(headers=None, **corpo):
         with patch("app.api.registry.list", return_value=[origem]):
             return api_client_bastao.post("/api/sessions/cc/bastao",
-                                          headers={"Authorization": "Bearer secret"}, json=corpo)
+                                          headers={"Authorization": "Bearer secret", **(headers or {})}, json=corpo)
 
     return post, criadas
 
@@ -514,7 +522,7 @@ def test_post_grava_o_dossie_cria_a_sessao_e_enfileira_o_kickoff(bastao_post, tm
     from app.pqueue import PromptQueue
 
     post, criadas = bastao_post
-    r = post(name="cc2", model="opus")
+    r = post(name="cc2", model="opus", headless=True)
     assert r.status_code == 200, r.text
     d = r.json()
     assert d["name"] == "cc2"
@@ -522,11 +530,38 @@ def test_post_grava_o_dossie_cria_a_sessao_e_enfileira_o_kickoff(bastao_post, tm
     assert p.name == "cc2.md" and p.read_text(encoding="utf-8") == d["texto"]
     # cwd e provider herdados da origem quando o corpo não manda outros.
     assert criadas[0].cwd == str(tmp_path) and criadas[0].model == "opus"
-    entradas = PromptQueue("cc2").load()
-    assert [e["text"] for e in entradas] == [d["kickoff"]]
-    # delivered=False + pre_transcript: entrega pelo DRAIN (o /input digitaria numa TUI que ainda
-    # está subindo), e imune ao corte por idade da fila — ela nasceu antes do transcript existir.
-    assert entradas[0]["delivered"] is False and entradas[0]["pre_transcript"] is True
+    # O kick-off vai na abertura, como primeira mensagem; a fila do Hangar não o carrega.
+    assert criadas[0].initial_prompt == d["kickoff"]
+    assert PromptQueue("cc2").load() == []
+
+
+def test_claude_com_terminal_recebe_o_kickoff_como_primeira_mensagem(bastao_post):
+    """A sucessora Claude com terminal nasce no Rust com o kick-off no `initial_prompt`, sem fila. Pela
+    8765 o Rust marca o pedido e abre ele mesmo com o que volta daqui: o Python não cria nada."""
+    from app.pqueue import PromptQueue
+
+    post, criadas = bastao_post
+    r = post(name="cc2", provider="claude", headless=False)
+    assert r.status_code == 200, r.text
+    assert criadas[0].initial_prompt == r.json()["kickoff"] and PromptQueue("cc2").load() == []
+    r = post(headers={"x-hangar-open": "rust"}, name="cc3", provider="claude", headless=False)
+    assert r.status_code == 200 and r.headers["x-hangar-open"] == "rust"
+    assert r.json()["open"]["initial_prompt"] == r.json()["kickoff"] and r.json()["open"]["name"] == "cc3"
+    assert "config_dir" not in r.json()["open"], "o que não foi escolhido fica de fora, como omitido"
+    assert len(criadas) == 1, "com a marca do Rust o Python não cria"
+
+
+@pytest.mark.parametrize("provider", ["pi", "omp", "kimi"])
+def test_pi_omp_e_kimi_com_terminal_tambem_voltam_ao_rust_com_o_kickoff(bastao_post, provider):
+    """Pi, omp e Kimi com terminal nascem no Rust: o pedido volta com o kick-off no `initial_prompt`
+    (o Rust o põe na fila durável), e o Python não cria nem enfileira nada."""
+    from app.pqueue import PromptQueue
+
+    post, criadas = bastao_post
+    r = post(headers={"x-hangar-open": "rust"}, name="cc3", provider=provider, headless=False)
+    assert r.status_code == 200 and r.headers.get("x-hangar-open") == "rust", r.text
+    assert r.json()["open"]["provider"] == provider and r.json()["open"]["initial_prompt"] == r.json()["kickoff"]
+    assert criadas == [] and PromptQueue("cc3").load() == []
 
 
 def test_post_nao_cria_sessao_quando_a_gravacao_do_dossie_falha(bastao_post, monkeypatch):
@@ -570,18 +605,6 @@ def test_post_400_com_nome_que_sanitiza_pra_vazio(bastao_post, tmp_path):
     assert criadas == []
     # E nada foi gravado antes da recusa (o dossiê é caro: roda git e parseia transcript).
     assert not (tmp_path / ".hangar-bastao").exists()
-
-
-def test_post_diz_que_a_sessao_nasceu_quando_a_fila_falha(bastao_post, monkeypatch):
-    from app import pqueue
-    def sem_disco(self, *a, **kw):
-        raise OSError("disco cheio")
-    monkeypatch.setattr(pqueue.PromptQueue, "append", sem_disco)
-    post, criadas = bastao_post
-    r = post(name="cc2")
-    assert r.status_code == 500
-    assert criadas and criadas[0].name == "cc2"
-    assert "cc2" in r.text and "nasceu" in r.text      # nomeia o que de fato aconteceu
 
 
 def test_post_recusa_nome_ja_em_uso_sem_tocar_no_dossie_dela(bastao_post, monkeypatch):
@@ -682,17 +705,12 @@ def test_get_bastao_404_quando_nem_viva_nem_arquivada(api_client_bastao):
 
 def test_post_bastao_de_sessao_morta_usa_o_cwd_do_transcript(api_client_bastao, monkeypatch, tmp_path):
     from unittest.mock import AsyncMock, patch
-    from app.models import SessionInfo
     import app.api as api_mod
     cfg, proj, sid = _arquivo_morto(tmp_path)
     _conta_conhecida(monkeypatch, cfg)
     criadas = []
 
-    async def fake_create(body):
-        criadas.append(body)
-        return SessionInfo(name=body.name, cwd=body.cwd, jsonl=None)
-
-    monkeypatch.setattr(api_mod, "create_session", fake_create)
+    monkeypatch.setattr(api_mod, "_open_in_rust", _abertura_fingida(criadas))
     monkeypatch.setattr(api_mod, "_drain_session", lambda name: None)
     monkeypatch.setattr(api_mod, "_nome_ocupado", lambda nome: False)
     monkeypatch.setattr(api_mod, "_default_session_provider", AsyncMock(return_value="claude"))
@@ -712,22 +730,17 @@ def test_post_bastao_origem_morta_usa_origem_provider_pra_achar_o_transcript(api
     """origem_provider endereça só a origem MORTA no archive — o provider da sucessora (`provider`)
     não pode ser arrastado junto, senão passar o bastão de um Pi morto força a sucessora pro Pi."""
     from unittest.mock import patch
-    from app.models import SessionInfo
     import app.api as api_mod
     cfg, proj, sid = _arquivo_morto(tmp_path)
     _conta_conhecida(monkeypatch, cfg)
     criadas = []
     vistos = []
 
-    async def fake_create(body):
-        criadas.append(body)
-        return SessionInfo(name=body.name, cwd=body.cwd, jsonl=None)
-
     def fake_jsonl(project, session_id, config_dir, provider):
         vistos.append(provider)
         return FIX / "jsonl_samples.jsonl"
 
-    monkeypatch.setattr(api_mod, "create_session", fake_create)
+    monkeypatch.setattr(api_mod, "_open_in_rust", _abertura_fingida(criadas))
     monkeypatch.setattr(api_mod, "_drain_session", lambda name: None)
     monkeypatch.setattr(api_mod, "_nome_ocupado", lambda nome: False)
     monkeypatch.setattr(api_mod, "archive_jsonl", fake_jsonl)
@@ -763,11 +776,7 @@ def test_post_bastao_codex_herda_conta_da_origem(api_client_bastao, monkeypatch,
                          codex_home=str(work.home))
     criadas = []
 
-    async def fake_create(body):
-        criadas.append(body)
-        return SessionInfo(name=body.name, cwd=body.cwd, provider=body.provider)
-
-    monkeypatch.setattr(api_mod, "create_session", fake_create)
+    monkeypatch.setattr(api_mod, "_open_in_rust", _abertura_fingida(criadas))
     monkeypatch.setattr(api_mod, "_drain_session", lambda name: None)
     monkeypatch.setattr(api_mod, "_nome_ocupado", lambda nome: False)
     with __import__("unittest.mock").mock.patch("app.api.registry.list", return_value=[origem]):
@@ -795,7 +804,7 @@ def test_post_bastao_codex_recusa_conta_sucessora_diferente(api_client_bastao, m
     rollout.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": str(tmp_path)}}) + "\n")
     origem = SessionInfo(name="cx", cwd=str(tmp_path), jsonl=str(rollout), provider="codex",
                          codex_home=str(work.home))
-    monkeypatch.setattr(api_mod, "create_session", lambda body: pytest.fail("nao cria"))
+    monkeypatch.setattr(api_mod, "_open_in_rust", lambda raw, request=None: pytest.fail("nao cria"))
     monkeypatch.setattr(api_mod, "_nome_ocupado", lambda nome: False)
     with __import__("unittest.mock").mock.patch("app.api.registry.list", return_value=[origem]):
         response = api_client_bastao.post(

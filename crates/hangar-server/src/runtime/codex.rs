@@ -173,6 +173,8 @@ pub struct Engine {
     permission_mode:Option<String>,
     token_usage:Value,
     rate_limits:Value,
+    /// O turno de agora parou na cota da conta (`usageLimitExceeded` sem nova tentativa).
+    usage_limited:bool,
     preview:LiveBuffer,
     response_started:bool,
     first_response_start:Option<(String,f64)>,
@@ -247,9 +249,20 @@ fn approval(mode:&str) -> &'static str { if mode == "Full Access" { "never" } el
 fn sandbox(mode:&str) -> &'static str { match mode { "Full Access"=>"danger-full-access","Approve for me"=>"workspace-write",_=>"read-only" } }
 
 /// Código do problema pelo `codexErrorInfo` (texto, ou objeto de chave única); None = sem classe própria.
+/// `rateLimitExceeded` é o aperto temporário do provedor, com nova tentativa: não é a cota da conta.
 fn error_class(info:&Value) -> Option<&'static str> {
-    let info = info.as_str().or_else(||info.as_object().and_then(|fields|fields.keys().next()).map(String::as_str))?;
-    match info { "usageLimitExceeded" | "rateLimitExceeded"=>Some("codex_limite_uso"),"unauthorized"=>Some("codex_sem_login"),_=>None }
+    match error_info(info)? { "usageLimitExceeded"=>Some("codex_limite_uso"),"unauthorized"=>Some("codex_sem_login"),_=>None }
+}
+fn error_info(info:&Value) -> Option<&str> {
+    info.as_str().or_else(||info.as_object().and_then(|fields|fields.keys().next()).map(String::as_str))
+}
+/// A janela esgotada do último retrato da cota (a cheia, senão a mais usada) e quando ela volta.
+fn codex_usage_limit(rate_limits:&Value) -> UsageLimit {
+    let window = ["primary","secondary"].iter().map(|key|&rate_limits[key]).filter(|w|w.is_object())
+        .max_by(|a,b|a["usedPercent"].as_f64().unwrap_or(0.0).total_cmp(&b["usedPercent"].as_f64().unwrap_or(0.0)));
+    let name = match window.and_then(|w|w["windowDurationMins"].as_u64()) { Some(300)=>"five_hour".into(),Some(10080)=>"seven_day".into(),
+        Some(minutes)=>format!("{minutes}m"),None=>"unknown".into() };
+    UsageLimit { window:name,resets_at:window.and_then(|w|w["resetsAt"].as_f64()) }
 }
 /// `item/agentMessage/delta` → `item_agentmessage_delta` (o diário aceita `[a-z0-9_]{1,64}`).
 fn decode_code(method:&str) -> String {
@@ -453,7 +466,7 @@ impl Engine {
             service_tier:metadata.get("service_tier").and_then(service_tier),service_tier_pending:None,
             // Com terminal o sidecar guarda a abertura, não o modo de agora. Sem terminal, o desconhecido
             // já foi recusado no `new_checked`; em nenhum dos dois vira Full Access.
-            permission_mode:headless.then(||super::codex_launch::stored_mode(&metadata).ok()).flatten().map(Into::into),token_usage:Value::Null,rate_limits:Value::Null,
+            permission_mode:headless.then(||super::codex_launch::stored_mode(&metadata).ok()).flatten().map(Into::into),token_usage:Value::Null,rate_limits:Value::Null,usage_limited:false,
             preview:LiveBuffer::default(),response_started:false,first_response_start:None,compacting:false,
             running_commands:BTreeMap::new(),thinking:LiveBuffer::default(),was_working:metadata["in_progress"] == true,
             rpc:BTreeMap::new(),server_requests:Vec::new(),
@@ -1139,10 +1152,20 @@ impl Engine {
         }
         // Cano vivo já tem o esforço que a vida anterior aplicou: como no Python, religar não o reenvia.
         if let Some(effort) = self.metadata["effort"].as_str().filter(|_|self.fresh_process).map(str::to_owned) {
+            // O modelo escolhido vai junto: sem ele o Codex aplica o nível ao modelo que a thread abriu.
+            let model = self.metadata["model"].as_str().map(str::to_owned).or_else(||self.model.clone());
             let request = ClientRequest::ThreadSettingsUpdate(wire::ThreadSettingsUpdateParams { thread_id:self.thread_id.clone(),
-                effort:Some(Some(effort)),..Default::default() });
+                model:model.map(Some),effort:Some(Some(effort)),..Default::default() });
             self.send(format!("{parent}:effort"),request,Some(json!({"kind":"bootstrap_ready","parent":parent})),effects);
         } else { self.ready = true; effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Accepted,payload:json!({"ready":true}) }); effects.push(Effect::WakeQueue); }
+    }
+
+    /// Processo novo sem terminal que devolve outro Fast que o gravado não sobe (o Python recusava): a
+    /// escolha fica no arquivo da sessão e a recusa aparece, em vez de abrir num Fast que ninguém escolheu.
+    fn fast_dropped(&self,rpc:&Rpc,result:&Value) -> Option<String> {
+        let parent = rpc.continuation.as_ref().filter(|next|next["kind"] == "bootstrap_thread")?["parent"].as_str()?.to_owned();
+        let wanted = self.metadata["service_tier"].as_str().filter(|_|self.headless && self.fresh_process)?;
+        (result.get("serviceTier")?.as_str().unwrap_or("default") != wanted).then_some(parent)
     }
 
     /// Mesmos recuos da subida do Python: provedor sumido da config e conversa sem rollout. Transferência nunca recua.
@@ -1817,6 +1840,16 @@ impl Engine {
                 }
             }
             "thread/resume" | "thread/start" => {
+                if let Some(parent) = self.fast_dropped(&rpc,&result) {
+                    const DROPPED:&str = "O Codex não preservou a escolha Fast ao retomar";
+                    tracing::warn!(session = %self.metadata["name"].as_str().unwrap_or("-"), method = %rpc.method, "{DROPPED}");
+                    effects.push(Effect::Diag { event:DiagEvent::CodexBootstrap,code:rpc.method.clone() });
+                    self.state.problema = Some("codex_conversa_nao_abriu".into());
+                    self.state.problema_detalhe = Some(DROPPED.into());
+                    effects.push(Effect::Reply { operation_id:parent,disposition:Disposition::Rejected,payload:json!({"error":DROPPED}) });
+                    self.changed(effects,true);
+                    return Ok(());
+                }
                 let Some(response) = opened.take() else { return Err(error(UNPROVEN_THREAD)) };
                 if rpc.continuation.as_ref().is_some_and(|next|next["kind"] == "clear_thread") {
                     self.async_questions = AsyncQuestions::default();
@@ -2115,6 +2148,7 @@ impl Engine {
                 self.state.problema = None; self.state.problema_detalhe = None;
                 self.running_commands.clear();
                 self.lost_requests.clear();
+                self.usage_limited = false;
             }
             N::TurnCompleted(n) => {
                 if !n.turn.id.is_empty() && self.turn_id.as_deref().is_some_and(|current|current != n.turn.id) { return Ok(()); }
@@ -2135,6 +2169,7 @@ impl Engine {
                     }
                 } else if n.turn.status == "failed" {
                     let error = n.turn.error.unwrap_or_default();
+                    if error.codex_error_info.as_ref().and_then(error_info) == Some("usageLimitExceeded") { self.usage_limited = true; }
                     let class = error.codex_error_info.as_ref().and_then(error_class);
                     // O `turn.error` pode vir sem `codexErrorInfo`; a causa já veio no `error` anterior.
                     if class.is_some() || !matches!(self.state.problema.as_deref(),Some("codex_limite_uso" | "codex_sem_login")) {
@@ -2142,6 +2177,9 @@ impl Engine {
                         self.state.problema_detalhe = error_detail(&error);
                     }
                 } else if retry_problem(self.state.problema.as_deref()) { self.state.problema = None; self.state.problema_detalhe = None; }
+                if std::mem::take(&mut self.usage_limited) && n.turn.status == "failed" {
+                    effects.push(Effect::UsageLimit { limit:codex_usage_limit(&self.rate_limits) });
+                }
                 self.changed(effects,true); effects.push(Effect::WakeQueue); return Ok(());
             }
             N::ThreadStatusChanged(n) => {
@@ -2246,6 +2284,7 @@ impl Engine {
                 else { return Ok(()); }
             }
             N::Error(n) => {
+                if !n.will_retry && n.error.codex_error_info.as_ref().and_then(error_info) == Some("usageLimitExceeded") { self.usage_limited = true; }
                 self.state.problema = Some(n.error.codex_error_info.as_ref().and_then(error_class)
                     .unwrap_or(if n.will_retry { "codex_sem_conexao" } else { "headless_turno_erro" }).into());
                 self.state.problema_detalhe = error_detail(&n.error);

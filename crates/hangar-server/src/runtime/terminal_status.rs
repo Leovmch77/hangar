@@ -7,6 +7,8 @@ pub struct TerminalStatus {
     pub error: Option<String>,
     pub message: Option<String>,
     pub input_stalled: Option<String>,
+    /// A troca por limite de uso que não aconteceu: (código, detalhe). Fica até a próxima troca.
+    pub limit: Option<(String, String)>,
 }
 
 pub type StatusSender = watch::Sender<TerminalStatus>;
@@ -17,7 +19,7 @@ pub(crate) fn publish_snapshot(sender: &StatusSender, data: &Value) {
     let input_stalled = data["view"]["input_stalled"].as_str().map(str::to_owned);
     sender.send_if_modified(|current| {
         let message = current.message.clone().filter(|_| error.is_some() && error == current.error);
-        let next = TerminalStatus { error, message, input_stalled };
+        let next = TerminalStatus { error, message, input_stalled, limit: current.limit.clone() };
         if *current == next { return false; }
         *current = next;
         true
@@ -29,6 +31,24 @@ pub(crate) fn publish_problem(sender: &StatusSender, code: &str, message: &str) 
         if current.error.as_deref() == Some(code) && current.message.as_deref() == Some(message) { return false; }
         current.error = Some(code.to_owned());
         current.message = Some(message.to_owned());
+        true
+    });
+}
+
+/// Tira o problema `code`, se ainda for ele: outro que chegou depois fica.
+pub(crate) fn clear_problem(sender: &StatusSender, code: &str) {
+    sender.send_if_modified(|current| {
+        if current.error.as_deref() != Some(code) { return false; }
+        current.error = None;
+        current.message = None;
+        true
+    });
+}
+
+pub(crate) fn publish_limit(sender: &StatusSender, limit: Option<(String, String)>) {
+    sender.send_if_modified(|current| {
+        if current.limit == limit { return false; }
+        current.limit = limit;
         true
     });
 }

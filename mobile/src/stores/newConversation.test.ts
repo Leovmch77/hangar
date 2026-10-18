@@ -44,7 +44,7 @@ import { useServers } from './servers';
 import { readDraft, writeDraft } from './drafts';
 import {
   _resetNewConversationForTests, abandonUnknownAttempt, adoptCandidate, beginAttempt, discardAttempt, recoverAttempt,
-  restoreAttempt, useNewConversation, sendFirstInput, readFirstInput, confirmFirstInput,
+  restoreAttempt, useNewConversation, sendFirstInput, readFirstInput, confirmFirstInput, autoSessionName,
 } from './newConversation';
 
 const serverA = { id: 'server-a', label: 'A', baseUrl: 'http://a', token: 'secret-a' };
@@ -108,7 +108,7 @@ describe('newConversation', () => {
     const saved = stored();
     expect(saved).toMatchObject({ serverId: 'server-a', text: 'oi', phase: 'creating', sessionName: null });
     expect(saved.body).toMatchObject({ cwd: '/repo/mobile', provider: 'codex' });
-    expect(saved.body.name).toMatch(/^mobile-[a-z0-9]{4}$/);
+    expect(saved.body.name).toBe('mobile');
     expect(calls.create.mock.calls[0][0]).toBe(serverA);
     expect(calls.create.mock.calls[0][1]).toEqual(saved.body);
     expect(JSON.stringify([...memory.values()])).not.toContain('secret');
@@ -134,19 +134,20 @@ describe('newConversation', () => {
 
   it('evita nome já visível na lista sem depender dela para arbitrar', async () => {
     calls.create.mockImplementation(async (_s, body) => ({ name: body.name, state: 'idle' }));
-    const random = vi.spyOn(Math, 'random');
-    random.mockReturnValueOnce(0.1).mockReturnValueOnce(0.9);
-    const now = vi.spyOn(Date, 'now').mockReturnValue(1);
-    const firstName = `mobile-${`${(1).toString(36)}${(0.1).toString(36).slice(2, 8)}`.slice(-4)}`;
-    calls.sessions.mockResolvedValue([{ name: firstName, state: 'idle' }]);
+    calls.sessions.mockResolvedValue([{ name: 'mobile', state: 'idle' }, { name: 'mobile-2', state: 'idle' }]);
     await beginAttempt('server-a', input);
-    expect(attempt()?.sessionName).not.toBe(firstName);
-    now.mockRestore(); random.mockRestore();
+    expect(attempt()?.sessionName).toBe('mobile-3');
 
     _resetNewConversationForTests(); memory.clear();
     calls.sessions.mockRejectedValue(new Error('offline'));
     await beginAttempt('server-a', input);
     expect(calls.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('nome automático segue a regra das outras telas: acento vira letra sem acento', async () => {
+    calls.create.mockImplementation(async (_s, body) => ({ name: body.name, state: 'idle' }));
+    await beginAttempt('server-a', { ...input, body: { ...input.body, cwd: '/home/x/Área de trabalho' } });
+    expect(calls.create.mock.calls[0][1].name).toBe('Area-de-trabalho');
   });
 
   it('processo reaberto converte creating em create_unknown e não repete o POST', async () => {
@@ -197,6 +198,36 @@ describe('newConversation', () => {
     expect(attempt()?.body.name).toBe(name);
   });
 
+  it('409 erro_nome_em_uso é recusa definitiva: volta ao rascunho e nunca recupera a sessão antiga pelo nome', async () => {
+    calls.create.mockRejectedValue(Object.assign(httpError(409, 'já existe uma sessão com esse nome'), { code: 'erro_nome_em_uso' }));
+    await beginAttempt('server-a', input);
+    expect(attempt()).toMatchObject({ phase: 'draft', text: 'oi' });
+    expect(issue()).toEqual({ kind: 'rejected', message: 'já existe uma sessão com esse nome' });
+
+    const name = attempt()!.body.name;
+    calls.sessions.mockResolvedValue([{ name, cwd: '/repo/mobile', provider: 'codex', state: 'idle' }]);
+    await recoverAttempt('server-a');
+    expect(issue()?.kind).toBe('rejected');
+    expect(adoptCandidate('server-a', attempt()!.id)).toBe(false);
+  });
+
+  it('o nome automático das outras telas pula a lista e os recusados, e diz se a lista respondeu', async () => {
+    calls.sessions.mockResolvedValue([{ name: 'mobile', state: 'idle' }]);
+    expect(await autoSessionName(serverA, '/repo/mobile', ['mobile-2'])).toEqual({ name: 'mobile-3', known: true });
+    calls.sessions.mockRejectedValue(new Error('offline'));
+    expect(await autoSessionName(serverA, '/repo/mobile')).toEqual({ name: 'mobile', known: false });
+  });
+
+  it('nome automático em uso tenta uma vez com o próximo, mesmo sem a lista', async () => {
+    calls.sessions.mockRejectedValue(new Error('503'));
+    calls.create.mockImplementation(async (_s, body) => ({ name: body.name, state: 'idle' }));
+    calls.create.mockRejectedValueOnce(Object.assign(httpError(409, 'já existe uma sessão com esse nome'), { code: 'erro_nome_em_uso' }));
+    await beginAttempt('server-a', input);
+    expect(calls.create.mock.calls.map((c) => c[1].name)).toEqual(['mobile', 'mobile-2']);
+    expect(attempt()?.sessionName).toBe('mobile-2');
+    expect(issue()).toBeNull();
+  });
+
   it('nome explícito é gravado antes do POST e não ganha sufixo nem troca após conflito', async () => {
     const create = deferred<SessionInfo>();
     calls.create.mockReturnValue(create.promise);
@@ -219,7 +250,7 @@ describe('newConversation', () => {
     const worktree = { new_branch: true, base: 'main' };
     await beginAttempt('server-a', { ...input, body: { ...input.body, ...worktree, branch: '' } });
     const sent = calls.create.mock.calls[0][1];
-    expect(sent.name).toMatch(/^mobile-[a-z0-9]{4}$/);
+    expect(sent.name).toBe('mobile');
     expect(sent).toMatchObject({ branch: sent.name, new_branch: true, base: 'main' });
 
     _resetNewConversationForTests(); memory.clear();
@@ -549,6 +580,8 @@ describe('primeiro input', () => {
     const created = attempt()!;
     await sendFirstInput('server-a', created.id);
     confirmFirstInput(created.id);
+    // A sessão criada já está na lista: a tentativa nova ganha outro nome.
+    calls.sessions.mockResolvedValue([{ name: created.sessionName!, state: 'idle' }]);
     await beginAttempt('server-a', { ...input, text: 'nova edição' });
     const next = attempt()!;
     confirmFirstInput(created.id);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, BackHandler, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useHeaderHeight } from 'expo-router/react-navigation';
@@ -319,7 +319,9 @@ export default function ActivitySheet() {
   const headerTitle = level === 'list' ? m.ctx_atividade() : level === 'subagent' ? subTitle || m.atividade_subagente() : level === 'workflow' ? (detail?.name ?? m.atividade_workflow()) : (agentDetail?.label ?? m.atividade_agente());
   const countBadge = level === 'list' && activity.total > 0 ? `${activity.done}/${activity.total}` : null;
   const wfBadge = level === 'workflow' && detail ? detail.status : null;
-  const headerOptions = {
+  // Opções novas a cada render fazem o Stack.Screen chamar setOptions a cada render; no iOS o cabeçalho
+  // nativo da folha remede, a tela redesenha e o laço estoura "Maximum update depth exceeded".
+  const headerOptions = useMemo(() => ({
     ...header,
     headerShown: Platform.OS !== 'android',
     title: headerTitle,
@@ -330,7 +332,7 @@ export default function ActivitySheet() {
     sheetAllowedDetents: [0.92],
     sheetGrabberVisible: true,
     contentStyle: { backgroundColor: 'transparent' },
-  };
+  }), [header, headerTitle, level, back, countBadge, wfBadge, theme]);
 
   const androidHeader = Platform.OS === 'android' ? (
     <View style={styles.header}>

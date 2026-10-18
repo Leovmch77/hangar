@@ -11,7 +11,7 @@ function overwriteGetLocale(fn: () => 'en' | 'pt') {
 import { configureApi } from './apiEnv';
 // `getHistoryDesde` veio da main junto com o histórico condicional (304 + ETag).
 import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, createSession, getHistory, getHistoryDesde, isAbortError, transcribeFile, transcribeFileForServer, transcribeUploaded, transcribeUploadedForServer, uploadFile, uploadFileForServer, getModelOptions, setEngineModel, rotaGenerica, pairSession } from './api';
-import { createSessionForServer, getFolderGitForServer, folderGitActionForServer, defaultBase } from './api';
+import { createSessionForServer, getFolderGitForServer, folderGitActionForServer, defaultBase, resumeArchivedConversation } from './api';
 import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 import { fetchSessionsForServer, getSessions, probeServerResponse } from './api';
@@ -618,6 +618,17 @@ describe('contratos de conversa com servidor explícito', () => {
       .rejects.toMatchObject({ status, message: `${status}: recusado` });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toBe('https://b.test/api/sessions');
+  });
+
+  it('criação e retomada em B trazem o código e o envelope da recusa', async () => {
+    const recusa = (code: string, params: Record<string, unknown>) => new Response(JSON.stringify({ detail: { code, params, msg: 'x' } }), { status: 409 });
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(recusa('erro_nome_em_uso', { nome: 'repo' }))
+      .mockResolvedValueOnce(recusa('erro_conversa_viva', { sessao: 'web' }));
+    await expect(createSessionForServer(target, { name: 'repo', cwd: '/repo' }))
+      .rejects.toMatchObject({ status: 409, code: 'erro_nome_em_uso' });
+    await expect(resumeArchivedConversation('p', 's', null, null, 'claude', null, target))
+      .rejects.toMatchObject({ status: 409, code: 'erro_conversa_viva', envelope: { params: { sessao: 'web' } } });
   });
 
   it('criação com transporte incerto não inventa status nem tenta de novo', async () => {

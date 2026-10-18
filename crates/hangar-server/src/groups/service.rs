@@ -89,6 +89,9 @@ impl GroupService {
         if let Some(hook) = &self.on_change { hook() }
     }
 
+    /// O nome ainda tem grupo no disco (ilegível conta como tem): a criação recusa em vez de nascer nele.
+    pub fn has_sidecar(&self, name: &str) -> bool { self.dir.sidecar(name).map_or(true, |s| s.is_some()) }
+
     pub fn server_id(&self) -> &str { &self.server_id }
 
     /// Sidecar de `name` sem o lock, como o `PairLink.get`: leitura de quem só consulta.

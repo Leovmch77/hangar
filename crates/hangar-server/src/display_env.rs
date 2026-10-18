@@ -6,9 +6,11 @@ pub const KEYS: [&str; 4] = ["WAYLAND_DISPLAY", "DISPLAY", "HYPRLAND_INSTANCE_SI
 
 /// As variáveis de `KEYS` que faltam em `current`, vindas do ambiente do gerenciador systemd do usuário (`systemd`, a saída
 /// de `systemctl --user show-environment`) e, sem ele, da pasta de runtime: o primeiro socket `wayland-*` e a instância do
-/// Hyprland mais recente em `hypr/`. O que o processo já tem nunca é trocado.
+/// Hyprland mais recente em `hypr/`. O que o processo já tem só é trocado quando aponta para socket ou instância que não
+/// existe mais.
 pub fn missing(current: impl Fn(&str) -> Option<String>, systemd: &str, runtime: Option<&Path>) -> Vec<(String, String)> {
-    // Valor do gerenciador que aponta para socket ou instância que não existe mais (Hyprland reiniciado) não vale.
+    // Valor (do processo ou do gerenciador) que aponta para socket ou instância que não existe mais (Hyprland reiniciado)
+    // não vale.
     let alive = |key: &str, value: &str| match (key, runtime) {
         ("WAYLAND_DISPLAY", Some(run)) => run.join(value).exists(),
         ("HYPRLAND_INSTANCE_SIGNATURE", Some(run)) => run.join("hypr").join(value).exists(),
@@ -22,7 +24,7 @@ pub fn missing(current: impl Fn(&str) -> Option<String>, systemd: &str, runtime:
         "HYPRLAND_INSTANCE_SIGNATURE" => names(&runtime?.join("hypr")).into_iter().max_by_key(|(_, at)| *at).map(|(n, _)| n),
         _ => None,
     };
-    KEYS.iter().filter(|key| current(key).is_none())
+    KEYS.iter().filter(|key| current(key).filter(|v| alive(key, v)).is_none())
         .filter_map(|key| from_systemd(key).or_else(|| from_runtime(key)).map(|v| ((*key).to_owned(), v))).collect()
 }
 
@@ -32,14 +34,35 @@ fn names(dir: &Path) -> Vec<(String, std::time::SystemTime)> {
         .filter_map(|e| Some((e.file_name().into_string().ok()?, e.metadata().ok()?.modified().ok()?))).collect()
 }
 
+/// Todas as de `KEYS` para o que se lança: as de `current` e, as que faltam ou morreram, as de `missing`.
+pub fn complete(current: impl Fn(&str) -> Option<String>, systemd: &str, runtime: Option<&Path>) -> Vec<(String, String)> {
+    let found = missing(&current, systemd, runtime);
+    KEYS.iter().filter_map(|key| found.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()).or_else(|| current(key))
+        .map(|v| ((*key).to_owned(), v))).collect()
+}
+
+/// `complete` no Linux, com o gerenciador do usuário lido agora só se faltar alguma.
+pub fn for_launch(current: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+    if !cfg!(target_os = "linux") { return complete(current, "", None); }
+    let (systemd, runtime) = if KEYS.iter().all(|key| current(key).is_some()) {
+        (String::new(), current("XDG_RUNTIME_DIR").map(PathBuf::from))
+    } else { sources(&current) };
+    complete(current, &systemd, runtime.as_deref())
+}
+
 /// `missing` com o ambiente deste processo; fora do Linux, nada.
 pub fn fill() -> Vec<(String, String)> {
     if !cfg!(target_os = "linux") { return Vec::new(); }
     let current = |key: &str| std::env::var(key).ok().filter(|v| !v.is_empty());
+    let (systemd, runtime) = sources(&current);
+    missing(current, &systemd, runtime.as_deref())
+}
+
+fn sources(current: &impl Fn(&str) -> Option<String>) -> (String, Option<PathBuf>) {
     let systemd = systemd_environment().unwrap_or_default();
     let runtime = current("XDG_RUNTIME_DIR").map(PathBuf::from)
         .or_else(|| systemd.lines().find_map(|l| l.strip_prefix("XDG_RUNTIME_DIR=")).map(PathBuf::from));
-    missing(current, &systemd, runtime.as_deref())
+    (systemd, runtime)
 }
 
 /// Com prazo: barramento do usuário quebrado não pode prender quem lança.
@@ -103,8 +126,30 @@ mod tests {
         let got = missing(env(&[("DISPLAY", ":0"), ("XDG_RUNTIME_DIR", "x")]), systemd, Some(run.path()));
         assert_eq!(got, [("WAYLAND_DISPLAY".into(), "wayland-1".into()), ("HYPRLAND_INSTANCE_SIGNATURE".into(), "vivo_2".into())]);
         std::fs::create_dir_all(run.path().join("hypr").join("morto_1")).unwrap();
-        let got = missing(env(&[("DISPLAY", ":0"), ("XDG_RUNTIME_DIR", "x"), ("WAYLAND_DISPLAY", "w")]), systemd, Some(run.path()));
+        let got = missing(env(&[("DISPLAY", ":0"), ("XDG_RUNTIME_DIR", "x"), ("WAYLAND_DISPLAY", "wayland-1")]), systemd, Some(run.path()));
         assert_eq!(got, [("HYPRLAND_INSTANCE_SIGNATURE".into(), "morto_1".into())], "existindo, o do gerenciador vale");
+    }
+
+    #[test]
+    fn a_dead_value_of_the_process_is_replaced_by_the_one_that_exists() {
+        let run = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(run.path().join("hypr").join("vivo_2")).unwrap();
+        std::fs::write(run.path().join("wayland-1"), "").unwrap();
+        let current = env(&[("HYPRLAND_INSTANCE_SIGNATURE", "morto_1"), ("WAYLAND_DISPLAY", "wayland-0"), ("DISPLAY", ":0"), ("XDG_RUNTIME_DIR", "x")]);
+        assert_eq!(complete(current, "", Some(run.path())), [("WAYLAND_DISPLAY".into(), "wayland-1".into()), ("DISPLAY".into(), ":0".into()),
+            ("HYPRLAND_INSTANCE_SIGNATURE".into(), "vivo_2".into()), ("XDG_RUNTIME_DIR".into(), "x".into())]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn with_every_value_present_the_dead_instance_is_still_replaced() {
+        let run = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(run.path().join("hypr").join("vivo_2")).unwrap();
+        std::fs::write(run.path().join("wayland-1"), "").unwrap();
+        let dir = run.path().to_string_lossy().into_owned();
+        let current = |key: &str| Some(match key { "HYPRLAND_INSTANCE_SIGNATURE" => "morto_1".to_owned(), "WAYLAND_DISPLAY" => "wayland-1".to_owned(),
+            "DISPLAY" => ":0".to_owned(), _ => dir.clone() });
+        assert_eq!(for_launch(current)[2], ("HYPRLAND_INSTANCE_SIGNATURE".into(), "vivo_2".into()));
     }
 
     #[test]

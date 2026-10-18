@@ -1,5 +1,6 @@
-"""Troca terminal ⇄ sem terminal na mesma conversa: ordem (antigo morre antes do novo), o que
-passa de um lado pro outro, a volta quando o novo não nasce, e o 409 com a sessão ocupada."""
+"""Origem com terminal da transferência para o Codex saindo do pane (ordem: o pane morre antes do
+sidecar, o que passa de um lado pro outro, a volta quando o sidecar não grava) e a recusa da troca
+de modo, que é do Rust."""
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,6 +14,11 @@ from app.config import settings
 SID = "11111111-1111-1111-1111-111111111111"
 
 
+def _tm(tmp_path):
+    """O que a transferência gravou da origem; bate com o pane de `_pane`."""
+    return {"session_id": SID, "cwd": str(tmp_path), "pane_pid": 999, "key": "k-t1", "transfer_id": "tr-1"}
+
+
 @pytest.fixture
 def reg(tmp_path, monkeypatch):
     from app import pqueue, registry as R
@@ -22,40 +28,6 @@ def reg(tmp_path, monkeypatch):
     monkeypatch.setattr(R.procinfo, "pid_vivo", lambda pid: False)
     monkeypatch.setattr(R.tmux, "has_session", lambda n: False)
     return R.SessionRegistry(str(tmp_path / "projects"))
-
-
-def test_sem_terminal_vira_pane_com_resume_e_as_escolhas(reg, tmp_path, monkeypatch):
-    from app import registry as R
-    from app.pqueue import PromptQueue
-    meta = S.save("hl", str(tmp_path), SID, model="haiku", effort="low", permission_mode="acceptEdits",
-                  subagent_model="sonnet")
-    jsonl = ClaudeHeadlessAdapter().transcript_path_de(meta)
-    (tmp_path / "projects").mkdir(exist_ok=True)
-    from pathlib import Path
-    Path(jsonl).parent.mkdir(parents=True, exist_ok=True)
-    Path(jsonl).write_text("{}\n")
-    PromptQueue("hl").append_saida_local("nota que fica")
-    ordem = []
-    fake_hl = MagicMock()
-    fake_hl.transcript_path_de.side_effect = ClaudeHeadlessAdapter().transcript_path_de
-    fake_hl.close_sync.side_effect = lambda n, m: ordem.append(("fechou", S.exists(n)))
-    fake_hl.escolhas.return_value = (None, None)
-    monkeypatch.setattr("app.adapters.get_adapter", lambda chave: fake_hl)
-
-    def nova(name, cwd, cmd, cfg=None, provider="claude", env=None):
-        ordem.append(("pane", cmd))
-        ordem.append(("env", env))
-        return True
-    monkeypatch.setattr(R.tmux, "new_session", nova)
-    info = reg.para_terminal("hl")
-    assert ordem[0] == ("fechou", False)            # sidecar some antes de matar o processo
-    cmd = ordem[1][1]
-    assert f"--resume {SID}" in cmd and "--model haiku" in cmd and "--effort low" in cmd
-    assert "--permission-mode acceptEdits" in cmd
-    assert ordem[2][0] == "env" and ordem[2][1]["CLAUDE_CODE_SUBAGENT_MODEL"] == "sonnet"
-    assert not S.exists("hl") and not info.headless and info.jsonl == jsonl
-    assert S.em_troca("hl")
-    assert any(e.get("text") == "nota que fica" for e in PromptQueue("hl").load())
 
 
 @pytest.mark.parametrize("resume", [False, True])
@@ -72,17 +44,6 @@ def test_terminal_command_keeps_plugins_and_choices(monkeypatch, resume):
     assert argv[argv.index("--model") + 1] == "haiku"
     assert argv[argv.index("--effort") + 1] == "low"
     assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
-
-
-def test_pane_que_nao_nasce_devolve_o_sidecar(reg, tmp_path, monkeypatch):
-    from app import registry as R
-    S.save("hl", str(tmp_path), SID, model="haiku")
-    monkeypatch.setattr("app.adapters.get_adapter", lambda chave: MagicMock(
-        transcript_path_de=lambda m: str(tmp_path / "nao-existe.jsonl"), escolhas=lambda n: (None, None)))
-    monkeypatch.setattr(R.tmux, "new_session", lambda *a, **k: False)
-    with pytest.raises(ValueError):
-        reg.para_terminal("hl")
-    assert S.load("hl")["session_id"] == SID and S.load("hl")["cano"] is None
 
 
 def _pane(reg, tmp_path, monkeypatch, *, mata=True):
@@ -110,7 +71,7 @@ def _pane(reg, tmp_path, monkeypatch, *, mata=True):
 
 def test_pane_vira_sem_terminal_com_sid_vivo_conta_e_modo(reg, tmp_path, monkeypatch):
     mortos = _pane(reg, tmp_path, monkeypatch)
-    meta = reg.para_headless("t1", "plan")
+    meta = reg.para_headless("t1", "plan", transfer_meta=_tm(tmp_path))
     assert mortos == [("t1", False)]                 # pane morre antes do sidecar existir
     assert meta["session_id"] == SID and S.load("t1")["session_id"] == SID
     assert meta["config_dir"] == str(tmp_path / ".claude-b")
@@ -156,14 +117,13 @@ def test_engine_tier_survives_transport_and_rollback(reg, tmp_path, monkeypatch,
         monkeypatch.setattr(S, "save", MagicMock(side_effect=OSError("sidecar indisponível")))
         monkeypatch.setattr("app.terminal_input._wait_input_ready", lambda name, timeout=None: True)
         with pytest.raises(OSError, match="sidecar indisponível"):
-            reg.para_headless("t1", "acceptEdits")
+            reg.para_headless("t1", "acceptEdits", transfer_meta=_tm(tmp_path))
     else:
-        meta = reg.para_headless("t1", "acceptEdits")
+        meta = reg.para_headless("t1", "acceptEdits", transfer_meta=_tm(tmp_path))
         assert meta["service_tier"] == tier and S.load("t1")["service_tier"] == tier
         assert meta["model"] == expected_model and S.load("t1")["model"] == expected_model
-        fake_hl = MagicMock(transcript_path_de=lambda m: str(tmp_path / "missing.jsonl"))
-        monkeypatch.setattr("app.adapters.get_adapter", lambda chave: fake_hl)
-        reg.para_terminal("t1")
+        # A volta ao terminal é do Rust; o comando que ela montaria sai do sidecar gravado.
+        commands.append(R.SessionRegistry._comando_terminal(S.load("t1"), resume=True))
     assert stopped == [("t1", False)]
     assert f"--service-tier {tier} -- claude" in commands[0]
     assert f"--model {expected_model}" in commands[0] and "--model gpt-4" not in commands[0]
@@ -171,48 +131,6 @@ def test_engine_tier_survives_transport_and_rollback(reg, tmp_path, monkeypatch,
         assert "--model gpt-5.5" not in commands[0]
     if fixed_account:
         assert "--account default --account-home /tmp/codex" in commands[0]
-
-
-@pytest.mark.parametrize("source", ["shell", "user", "project", "local"])
-def test_invalid_engine_body_keeps_headless_before_terminal(reg, tmp_path, monkeypatch, source):
-    import json
-    import tempfile
-    from app import registry as R, engines, cliproxy
-    cwd = tmp_path / "session"
-    cwd.mkdir()
-    config = tmp_path / "account"
-    config.mkdir()
-    operator = tmp_path / "operator"
-    operator.mkdir()
-    monkeypatch.chdir(operator)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(operator / "wrong-account"))
-    monkeypatch.delenv("CLAUDE_CODE_EXTRA_BODY", raising=False)
-    monkeypatch.setattr(engines, "caminho", lambda: tmp_path / "engines.json")
-    engines.salvar("proxy", {"base_url": "http://127.0.0.1:8317", "api_key": "test", "model": "gpt-5.5"})
-    monkeypatch.setattr(cliproxy, "supports_fast", lambda *a: True)
-    monkeypatch.setattr(R, "_exigir_cp_engine", lambda: None)
-    if source == "shell":
-        monkeypatch.setenv("CLAUDE_CODE_EXTRA_BODY", "broken")
-    else:
-        path = config / "settings.json" if source == "user" else cwd / ".claude" / (
-            "settings.local.json" if source == "local" else "settings.json")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"env": {"CLAUDE_CODE_EXTRA_BODY": "broken"}}), encoding="utf-8")
-    meta = S.save("hl", str(cwd), SID, config_dir=str(config), engine="proxy",
-                  model="gpt-5.5", service_tier="priority")
-    fake_hl = MagicMock(transcript_path_de=lambda m: str(cwd / "missing.jsonl"))
-    monkeypatch.setattr("app.adapters.get_adapter", lambda key: fake_hl)
-    new_session = MagicMock()
-    monkeypatch.setattr(R.tmux, "new_session", new_session)
-    private_file = MagicMock()
-    monkeypatch.setattr(tempfile, "mkstemp", private_file)
-    with pytest.raises(ValueError, match="CLAUDE_CODE_EXTRA_BODY"):
-        reg.para_terminal("hl")
-    assert S.load("hl") == meta and not S.em_troca("hl")
-    assert R.Path.cwd() == operator
-    fake_hl.close_sync.assert_not_called()
-    new_session.assert_not_called()
-    private_file.assert_not_called()
 
 
 @pytest.mark.parametrize("removed", [False, True])
@@ -225,11 +143,11 @@ def test_transport_incompatible_priority_refuses_before_kill_or_clears_fallback(
     monkeypatch.setattr(R.procinfo, "_env_var_of", lambda pid, name: "priority" if name == "CP_ENGINE_SERVICE_TIER" else None)
     monkeypatch.setattr(cliproxy, "supports_fast", lambda *a: False)
     if removed:
-        meta = reg.para_headless("t1", "acceptEdits")
+        meta = reg.para_headless("t1", "acceptEdits", transfer_meta=_tm(tmp_path))
         assert "service_tier" not in meta and meta["engine"] is None
     else:
         with pytest.raises(ValueError, match="service_tier"):
-            reg.para_headless("t1", "acceptEdits")
+            reg.para_headless("t1", "acceptEdits", transfer_meta=_tm(tmp_path))
         assert not stopped and not S.exists("t1")
 
 
@@ -243,7 +161,7 @@ def test_pane_aberto_no_shell_le_conta_e_escolhas_do_claude_filho(reg, tmp_path,
     monkeypatch.setattr(R.procinfo, "_model_of", lambda pid: ("sonnet", "high") if pid == 1000 else (None, None))
     monkeypatch.setattr(R.procinfo, "_env_var_of",
                         lambda pid, key: "haiku" if pid == 1000 and key == "CLAUDE_CODE_SUBAGENT_MODEL" else None)
-    meta = reg.para_headless("t1", "plan")
+    meta = reg.para_headless("t1", "plan", transfer_meta=_tm(tmp_path))
     assert meta["config_dir"] == str(tmp_path / ".claude-b")
     assert (meta["model"], meta["effort"], meta["subagent_model"]) == ("sonnet", "high", "haiku")
 
@@ -254,7 +172,7 @@ def test_pane_leva_o_modelo_em_uso_nao_o_do_boot(reg, tmp_path, monkeypatch):
     _pane(reg, tmp_path, monkeypatch)
     monkeypatch.setattr(R.procinfo, "_model_of", lambda pid: (None, None))
     monkeypatch.setattr(R, "_escolhas_status", lambda sid: ("claude-opus-5[1m]", "high"))
-    meta = reg.para_headless("t1", "plan")
+    meta = reg.para_headless("t1", "plan", transfer_meta=_tm(tmp_path))
     assert (meta["model"], meta["effort"]) == ("claude-opus-5[1m]", "high")
 
 
@@ -263,36 +181,15 @@ def test_esforco_que_nao_existe_na_abertura_nao_trava_a_troca(reg, tmp_path, mon
     from app import registry as R
     _pane(reg, tmp_path, monkeypatch)
     monkeypatch.setattr(R, "_escolhas_status", lambda sid: ("claude-opus-5[1m]", "ultracode"))
-    meta = reg.para_headless("t1", "plan")
+    meta = reg.para_headless("t1", "plan", transfer_meta=_tm(tmp_path))
     assert (meta["model"], meta["effort"]) == ("claude-opus-5[1m]", "high")
-
-
-def test_sem_terminal_volta_com_o_modelo_em_uso(reg, tmp_path, monkeypatch):
-    from app import registry as R
-    from pathlib import Path
-    meta = S.save("hl", str(tmp_path), SID)
-    jsonl = ClaudeHeadlessAdapter().transcript_path_de(meta)
-    Path(jsonl).parent.mkdir(parents=True, exist_ok=True)
-    Path(jsonl).write_text("{}\n")
-    fake_hl = MagicMock()
-    fake_hl.transcript_path_de.side_effect = ClaudeHeadlessAdapter().transcript_path_de
-    fake_hl.escolhas.return_value = ("claude-opus-5[1m]", "high")
-    monkeypatch.setattr("app.adapters.get_adapter", lambda chave: fake_hl)
-    cmds = []
-    monkeypatch.setattr(R.tmux, "new_session", lambda name, cwd, cmd, *a, **k: cmds.append(cmd) or True)
-    reg.para_terminal("hl")
-    assert "--model 'claude-opus-5[1m]'" in cmds[0] and "--effort high" in cmds[0]
-    fake_hl.escolhas.return_value = ("claude-opus-5[1m]", "ultracode")
-    S.save("hl", str(tmp_path), SID)
-    reg.para_terminal("hl")
-    assert "--effort" not in cmds[1]
 
 
 def test_pane_que_nao_morre_nao_vira_sem_terminal(reg, tmp_path, monkeypatch):
     from app.registry import KillFailed
     _pane(reg, tmp_path, monkeypatch, mata=False)
     with pytest.raises(KillFailed):
-        reg.para_headless("t1", "manual")
+        reg.para_headless("t1", "manual", transfer_meta=_tm(tmp_path))
     assert not S.exists("t1")
 
 
@@ -323,55 +220,14 @@ def cliente(monkeypatch):
 _H = {"Authorization": "Bearer secret"}
 
 
-@pytest.mark.parametrize("terminal", [True, False])
-def test_codex_switches_in_both_directions(cliente, terminal):
-    from app.adapters.codex.adapter import CodexAdapter
+@pytest.mark.parametrize("provider", ["claude", "codex", "pi"])
+def test_mode_switch_is_rust_only(cliente, provider):
     from app.models import SessionInfo
-    codex = CodexAdapter()
-    codex.open_terminal = AsyncMock()
-    codex.open_headless = AsyncMock()
-    info = SessionInfo(name="cx", cwd="/tmp", provider="codex", headless=terminal)
-    with patch("app.api._cached_info", AsyncMock(return_value=info)), \
-         patch("app.api.get_adapter", return_value=codex), \
-         patch("app.api.registry._forget"):
-        result = cliente.post("/api/sessions/cx/modo-execucao", headers=_H, json={"terminal": terminal})
-    assert result.status_code == 200 and result.json() == {"ok": True, "terminal": terminal}
-    (codex.open_terminal if terminal else codex.open_headless).assert_awaited_once_with("cx")
-    (codex.open_headless if terminal else codex.open_terminal).assert_not_awaited()
+    info = SessionInfo(name="s1", cwd="/tmp", provider=provider)
+    with patch("app.api._cached_info", AsyncMock(return_value=info)):
+        r = cliente.post("/api/sessions/s1/modo-execucao", headers=_H, json={"terminal": True})
+    if provider == "pi":
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_modo_so_claude"
+    else:
+        assert r.status_code == 503 and r.json()["detail"]["code"] == "session_open_needs_rust_server"
 
-
-def test_troca_com_turno_em_voo_da_409_e_nao_mexe(cliente, monkeypatch):
-    from app.models import SessionInfo
-    import app.api as api_mod
-    info = SessionInfo(name="hl", cwd="/tmp", jsonl="/tmp/x.jsonl", tracked=True, provider="claude", headless=True)
-    hl = ClaudeHeadlessAdapter()
-    sess = MagicMock(vivo=True, iniciando=False, pending={}, question=None, in_progress=True)
-    hl._sessions["hl"] = sess
-    with patch("app.api._cached_info", AsyncMock(return_value=info)), \
-         patch("app.api._headless", return_value=True), \
-         patch("app.api.get_adapter", return_value=hl), \
-         patch.object(api_mod.registry, "para_terminal") as troca:
-        r = cliente.post("/api/sessions/hl/modo-execucao", headers=_H, json={"terminal": True})
-    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_sessao_trabalhando"
-    troca.assert_not_called()
-
-
-def test_troca_para_sem_terminal_sobe_o_processo_e_volta_se_nao_subir(cliente, monkeypatch, tmp_path):
-    from app.models import SessionInfo
-    import app.api as api_mod
-    monkeypatch.setattr("app.pqueue.settings.projects_dir", tmp_path)
-    info = SessionInfo(name="t1", cwd="/tmp", jsonl="/tmp/x.jsonl", tracked=True, provider="claude", state="idle")
-    hl = ClaudeHeadlessAdapter()
-    hl.ensure_running = AsyncMock(side_effect=RuntimeError("binário não encontrado: claude"))
-    with patch("app.api._cached_info", AsyncMock(return_value=info)), \
-         patch("app.api._headless", return_value=False), \
-         patch("app.api.get_adapter", return_value=hl), \
-         patch.object(api_mod.registry, "list_with_state", AsyncMock(return_value=[info])), \
-         patch.object(api_mod.perm_mode, "ler_modo", return_value="manual"), \
-         patch.object(api_mod.registry, "para_headless", return_value={}) as ida, \
-         patch.object(api_mod.registry, "para_terminal") as volta:
-        r = cliente.post("/api/sessions/t1/modo-execucao", headers=_H, json={"terminal": False})
-    ida.assert_called_once_with("t1", "manual")
-    hl.ensure_running.assert_awaited_once_with("t1", esperar_pronta=False)
-    volta.assert_called_once_with("t1")
-    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_troca_modo"

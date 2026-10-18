@@ -1,17 +1,16 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { ScrollView, Text, TextInput, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
-import { agruparSessoes, relativeTime, rotuloEstado } from '@hangar/core';
+import type { AggSession } from '@hangar/core';
 import { Sheet } from '../ui/Sheet';
-import { HangarMark } from '../ui/HangarMark';
-import { WorkingMark } from '../ui/WorkingMark';
-import { Icon } from '../ui/Icon';
 import { superficie } from '../theme/superficie';
 import { useSessions } from '../stores/sessions';
-import { placeOutside } from '../features/sessions/outsideRows';
+import { SessionRow } from '../features/sessions/SessionRow';
+import { SessionSectionCard, SessionSectionHeader } from '../features/sessions/SessionSection';
+import { buildSessionSections, sessionGroupKey } from '../features/sessions/sessionSections';
 import * as m from '../paraglide/messages';
 
 // Trocar de sessão sem voltar pra lista. `replace` e não `push`: empilhar chats faria o voltar
@@ -54,18 +53,27 @@ function PickerList({ onClose, atual, serverId }: { onClose: () => void; atual: 
     ? byServer.some((bucket) => !bucket.server.inviteEnded && !bucket.loaded && !bucket.error)
     : loading;
   const [query, setQuery] = useState('');
+  const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(() => new Set());
   const search = query.trim().toLowerCase();
   const liveRows = useMemo(() => rows.filter((s) => s.state !== 'dead'), [rows]);
   const groups = useMemo(() => {
     const current = liveRows.find((s) => s.name === atual && s.serverId === serverId);
     const currentServer = current?.outside?.localServerId ?? serverId;
-    const visible = search ? liveRows.filter((s) => s.name.toLowerCase().includes(search) || (s.cwd ?? '').toLowerCase().includes(search)) : liveRows;
-    return placeOutside(
-      agruparSessoes(visible.filter((s) => !s.outside), 'server'),
-      visible.filter((s) => s.outside), 'server', liveRows,
-    ).filter((group) => group.sessions.length)
-      .sort((a, b) => Number(b.id === currentServer) - Number(a.id === currentServer) || a.label.localeCompare(b.label));
-  }, [liveRows, atual, serverId, search]);
+    return buildSessionSections(liveRows, 'server', search, collapsedGroups, currentServer);
+  }, [liveRows, atual, serverId, search, collapsedGroups]);
+  const multipleServers = useMemo(() => new Set(liveRows.map((s) => s.serverId)).size > 1, [liveRows]);
+  const toggleGroup = useCallback((id: string) => setCollapsedGroups((current) => {
+    const next = new Set(current);
+    const key = sessionGroupKey('server', id);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    return next;
+  }), []);
+  const selectSession = useCallback((session: AggSession) => {
+    if (session.name === atual && session.serverId === serverId) return;
+    onClose();
+    router.replace(`/s/${session.serverId}/${session.name}` as never);
+  }, [atual, serverId, onClose, router]);
 
   return (
     <KeyboardAvoidingView behavior="padding" automaticOffset style={styles.container}>
@@ -96,43 +104,13 @@ function PickerList({ onClose, atual, serverId }: { onClose: () => void; atual: 
         {search ? m.lista_vazia_filtro() : m.lista_nenhuma_ativa()}
       </Text> : null}
       {groups.map((group) => <View key={group.id}>
-        <Text accessibilityRole="header" style={[styles.servidor, { color: theme.tokens.text.muted }]}>{group.label}</Text>
-        {group.sessions.map((s) => {
-          const selected = s.name === atual && s.serverId === serverId;
-          const stateLabel = rotuloEstado(s.state);
-          const stateColor = theme.tokens.pill[s.state === 'awaiting_input' ? 'input' : s.state].fg;
-          const engine = s.provider === 'claude' ? s.engine : null;
-          const time = relativeTime(s.last_activity);
-          return <Pressable
-            key={`${s.serverId}::${s.name}`}
-            onPress={() => {
-              onClose();
-              router.replace(`/s/${s.serverId}/${s.name}` as never);
-            }}
-            style={({ pressed }) => [styles.item, (selected || pressed) && { backgroundColor: superficie(theme, selected ? 0.8 : 0.6) }]}
-            accessibilityRole="button"
-            accessibilityLabel={`${s.name}, ${s.serverLabel}, ${stateLabel}${time ? `, ${time}` : ''}${engine ? `, ${engine}` : ''}${selected ? `, ${m.switcher_atual()}` : ''}`}
-            disabled={selected}
-            accessibilityState={{ selected, disabled: selected }}
-          >
-            {s.state === 'working' ? <WorkingMark size={20} color={stateColor} /> : <HangarMark size={20} color={stateColor} />}
-            <View style={styles.col}>
-              <View style={styles.line}>
-                <Text style={[styles.nome, { color: theme.tokens.text.primary, fontWeight: selected ? '700' : '500' }]} numberOfLines={1}>{s.name}</Text>
-                <Text style={[styles.time, { color: theme.tokens.text.muted }]} numberOfLines={1}>{time}</Text>
-              </View>
-              <View style={styles.line}>
-                <Text style={[styles.meta, { color: stateColor }]} numberOfLines={1}>{stateLabel}</Text>
-                {s.outside ? <Text style={[styles.meta, { color: theme.tokens.text.muted }]} numberOfLines={1}>{s.serverLabel}</Text> : null}
-                {engine ? <View style={styles.engine}>
-                  <Icon name="Settings" size={12} color={theme.tokens.accent.base} />
-                  <Text style={[styles.meta, { color: theme.tokens.accent.base }]} numberOfLines={1}>{engine}</Text>
-                </View> : null}
-              </View>
-            </View>
-            {selected ? <Icon name="Check" size={18} color={theme.tokens.accent.base} /> : null}
-          </Pressable>;
-        })}
+        <SessionSectionHeader section={group} onToggle={toggleGroup} />
+        {group.data.map((session, index) => <SessionSectionCard key={`${session.serverId}::${session.name}`} index={index} total={group.data.length}>
+          <SessionRow session={session} compact
+            selected={session.name === atual && session.serverId === serverId}
+            mostrarServidor={!!session.outside || (multipleServers && group.id.startsWith('state:'))}
+            onPress={selectSession} />
+        </SessionSectionCard>)}
       </View>)}
     </ScrollView>
     </KeyboardAvoidingView>
@@ -141,23 +119,8 @@ function PickerList({ onClose, atual, serverId }: { onClose: () => void; atual: 
 
 const styles = StyleSheet.create((theme) => ({
   container: { flex: 1 },
-  inner: { gap: theme.base.space[1], padding: theme.base.space[3] },
+  inner: { padding: theme.base.space[3] },
   title: { fontSize: theme.base.text.base, fontWeight: '600', marginBottom: theme.base.space[2] },
   search: { fontSize: theme.base.text.sm, minHeight: 44, paddingHorizontal: theme.base.space[3], borderRadius: theme.base.radius.md, marginBottom: theme.base.space[2] },
-  item: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.base.space[3],
-    minHeight: 48,
-    paddingHorizontal: theme.base.space[2],
-    paddingVertical: theme.base.space[1],
-    borderRadius: theme.base.radius.md,
-  },
-  col: { flex: 1, minWidth: 0, gap: 2 },
-  line: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], minWidth: 0 },
-  nome: { flex: 1, fontSize: theme.base.text.base },
-  time: { fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'], flexShrink: 0 },
   meta: { fontSize: theme.base.text.xs, flexShrink: 1 },
-  engine: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], flexShrink: 1, minWidth: 0 },
-  servidor: { fontSize: theme.base.text.xs, maxWidth: 120 },
 }));

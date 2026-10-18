@@ -190,13 +190,10 @@ async fn session_died_removes_the_external_pair_and_its_invite() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn end_pair_and_send_of_who_has_no_external_pair() {
+async fn end_pair_of_who_has_no_external_pair() {
     let dir = tempfile::tempdir().unwrap();
     let srv = server(dir.path(), true).await;
     assert_eq!(result(&srv, "end_pair", json!({"local": "s", "address": "ana::b"})).await, json!({"found": false, "errors": []}));
-    let (_, body) = bridge(srv.private, "send", json!({"sender": "s", "target": "ana::b", "text": "oi"}), Some(SECRET)).await;
-    assert_eq!(body["ok"], false);
-    assert_eq!(body["error"]["code"], "erro_par_inexistente");
 }
 
 #[tokio::test(flavor = "multi_thread")]

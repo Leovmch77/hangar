@@ -51,16 +51,5 @@ class KimiAdapter:
     async def deliverable(self, name: str) -> bool:
         return await asyncio.to_thread(ti.deliverable, name)
 
-    def spawn_command(self, cwd: str, session_id: str,
-                      model: str | None = None, effort: str | None = None,
-                      permission_mode: str | None = None) -> list[str]:
-        # O session_id gerado pelo registry e IGNORADO de proposito: o Kimi nao aceita id escolhido
-        # pelo caller (nao existe --session-id; -S so resume sessao existente). O sid real nasce no
-        # 1o prompt e chega ao backend pelo bilhete do hook (registry.kimi_session_file).
-        # model vira `--model <alias>` (alias `provider/id` do config.toml). Esforco nao tem flag
-        # no CLI do Kimi — o model_args ja recusou o pedido antes de chegar aqui.
-        from app import model_args
-        return ["kimi"] + model_args.args_de("kimi", model, effort)
-
     def transcript_path(self, cwd: str, session_id: str) -> str:
         return kimi_sessions.transcript_path(cwd, session_id)

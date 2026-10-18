@@ -244,7 +244,7 @@ pub fn tools() -> Value {
         tool_with("open_session", "Cria uma sessão nova na pasta falada (nome ou caminho) e a abre na tela. Pasta ambígua volta com as opções. \
             Com request, o trabalho ditado para ela é enviado assim que ela abre. O resto só quando o usuário disser: model, effort, \
             account (caminho do config dir para claude/pi/omp, id da conta para codex), engine (motor do Claude), permission (modo do \
-            Claude; sem ele, bypassPermissions) e headless (sem terminal, claude ou codex).",
+            Claude; sem ele, o da conta) e headless (sem terminal, claude ou codex).",
             json!({"folder": {"type": "string"}, "name": {"type": "string"},
                 "provider": {"type": "string", "enum": ["claude", "codex", "pi", "omp", "kimi"]},
                 "server": {"type": "string"}, "request": {"type": "string"}, "model": {"type": "string"}, "effort": {"type": "string"},

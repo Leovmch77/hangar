@@ -197,13 +197,26 @@ describe('CreateSessionSheet — conta sugerida pela cota', () => {
     unmount(comp);
   });
 
-  it.each(['indisponível', 'desconhecida'])('mantém a conta ativa com sugestão %s', async (scenario) => {
+  it.each(['indisponível', 'desconhecida'])('mostra a conta ativa com sugestão %s e não a manda (D-003: o servidor decide)', async (scenario) => {
     vi.mocked(api.listClaudeConfigs).mockResolvedValue(accounts);
     if (scenario === 'desconhecida') vi.mocked(api.getClaudeAccountSuggestion).mockResolvedValue({ path: '/outra-conta' });
     const { comp } = montar();
     await flush();
     await escolherPasta();
     expect(document.querySelector('#cfg-pick')!.textContent).toContain('atual');
+    (document.querySelector('.primary-btn') as HTMLElement).click();
+    await flush();
+    expect(onCreate.mock.calls[0]?.[2]).toBeNull();
+    unmount(comp);
+  });
+
+  it('a conta ativa escolhida à mão é mandada', async () => {
+    vi.mocked(api.listClaudeConfigs).mockResolvedValue(accounts);
+    const { comp } = montar();
+    await flush();
+    await escolherPasta();
+    await escolherNoCombo('#cfg-pick', '.claude-nova');
+    await escolherNoCombo('#cfg-pick', 'atual');
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
     expect(onCreate.mock.calls[0]?.[2]).toBe(accounts[0].path);
@@ -241,7 +254,7 @@ describe('CreateSessionSheet — conta sugerida pela cota', () => {
     expect(document.querySelector(selector)!.textContent).toContain(value);
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
-    expect(onCreate.mock.calls[0]?.[2]).toBe(accounts[0].path);
+    expect(onCreate.mock.calls[0]?.[2]).toBeNull();
     expect(onCreate.mock.calls[0]?.[argument]).toBe(value);
     unmount(comp);
   });
@@ -279,6 +292,21 @@ describe('CreateSessionSheet — reabertura com a lista de contas fora do ar', (
     await flush();
     expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'claude', null, null, null, null, null, false, null, false, null);
     unmount(comp);
+  });
+
+  it('celular: Claude sem escolha de permissão não manda o modo (vale o da conta)', async () => {
+    const real = window.matchMedia;
+    window.matchMedia = ((q: string) => ({ ...real.call(window, q), matches: false,
+      addEventListener() {}, removeEventListener() {} })) as typeof window.matchMedia;
+    try {
+      const { comp } = montar();
+      await flush();
+      await escolherPasta();
+      (document.querySelector('.primary-btn') as HTMLElement).click();
+      await flush();
+      expect(onCreate.mock.calls.at(-1)?.[7]).toBeNull();
+      unmount(comp);
+    } finally { window.matchMedia = real; }
   });
 
   it('B: fetch rejeitando — o .catch re-pede a lista (a tela não fica sem modelos)', async () => {
@@ -1119,17 +1147,18 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     unmount(comp);
   });
 
-  it('Codex sem terminal nasce visivelmente e é criado em Full Access', async () => {
+  it('Codex sem terminal sem escolha de permissão não manda o modo (o servidor usa o padrão)', async () => {
     const { comp } = await abrirNoCodex();
     const headless = [...document.querySelectorAll<HTMLElement>('.modo')]
       .find((b) => b.textContent?.includes(m.criar_modo_exec_headless()));
     headless!.click();
     await flush();
-    expect(document.querySelector('#perm-pick')!.textContent).toContain('Full Access');
+    expect(document.querySelector('#perm-pick')!.textContent).toContain(m.criar_permissao_padrao());
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
-    expect(api.createSessionForServer).toHaveBeenCalledWith(expect.objectContaining({ id: 'B' }),
-      expect.objectContaining({ provider: 'codex', headless: true, permission_mode: 'Full Access' }));
+    const body = vi.mocked(api.createSessionForServer).mock.calls.at(-1)![1];
+    expect(body).toEqual(expect.objectContaining({ provider: 'codex', headless: true }));
+    expect(body).not.toHaveProperty('permission_mode');
     unmount(comp);
   });
 

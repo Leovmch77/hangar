@@ -28,4 +28,6 @@ function codex {
         & $exe @args; return
     }
     & $lancador @args
+    # 3: nenhuma sessão abriu (nem servidor nem hangar-server); o oficial abre no lugar.
+    if ($LASTEXITCODE -eq 3) { & $exe @args }
 }

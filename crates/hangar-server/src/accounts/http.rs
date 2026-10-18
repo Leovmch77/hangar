@@ -362,7 +362,7 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
     }
 }
 
-pub(super) fn bridge(state: &crate::routes::AppState) -> Result<AccountsBridge, AccountError> {
+pub(crate) fn bridge(state: &crate::routes::AppState) -> Result<AccountsBridge, AccountError> {
     let instance = crate::config::Config::runtime_instance()
         .ok()
         .flatten()

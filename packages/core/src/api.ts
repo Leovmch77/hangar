@@ -379,9 +379,9 @@ export function probeServerResponse(server: Server, path: string, init?: Request
 // de repositório grande. Teto ainda existe para máquina fora do ar atrás de VPN não prender a tela.
 const SESSION_FILE_TIMEOUT_MS = 60_000;
 
-// `comCodigo`: o erro também leva o `code` e o `envelope` do servidor, como o do `apiFetch`. Opcional porque
-// quem já trata o erro destas chamadas pelo texto ou pelo status não muda de comportamento sem querer.
-async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit, prazoMs = 8000, comCodigo = false): Promise<T> {
+// O erro leva o `code` e o `envelope` do servidor, como o do `apiFetch`: quem decide pela recusa
+// (nome em uso, conversa já aberta) decide pelo código, não pelo texto.
+async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit, prazoMs = 8000): Promise<T> {
   let res: Response;
   // Prazo por PADRAO. Esta funcao fala com OUTRO servidor, e servidor offline atras de VPN nao
   // recusa a conexao — o socket fica pendurado e a promessa nunca resolve (o comentario do
@@ -402,7 +402,6 @@ async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit,
     throw e;
   }
   if (!res.ok) {
-    if (!comCodigo) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
     const { msg, code, envelope } = await lerErro(res);
     throw Object.assign(new Error(`${res.status}: ${msg}`), { status: res.status, code, envelope });
   }
@@ -822,9 +821,11 @@ export function uniqueSessionName(base: string, taken: Set<string>): string {
 // com a sessão nascendo e o reenvio duplicá-la.
 const SESSION_BIRTH_MS = 120_000;
 
-function withCreationWarnings<T extends { avisos?: string[] }>(result: T): T {
-  if (result?.avisos?.length) {
-    try { apiEnv().onSessionWarnings?.(result.avisos); }
+// Criação e reabertura (modo, recarregar, conta, motor, bypass) podem trazer `avisos` no sucesso.
+function withSessionWarnings<T extends object>(result: T): T {
+  const avisos = (result as { avisos?: string[] } | null)?.avisos;
+  if (avisos?.length) {
+    try { apiEnv().onSessionWarnings?.(avisos); }
     catch (error) { console.error('onSessionWarnings:', error); }
   }
   return result;
@@ -848,7 +849,7 @@ export function setClaudeDefaultsForServer(s: Server, body: ClaudeDefaultsBody):
 
 export function createSessionForServer(server: Server, body: CreateSessionBody): Promise<SessionInfo> {
   return apiFetchForServer<SessionInfo>(server, '/api/sessions', { method: 'POST', body: JSON.stringify(buildCreateSessionBody(body)) }, SESSION_BIRTH_MS)
-    .then(withCreationWarnings);
+    .then(withSessionWarnings);
 }
 
 export function createSession(
@@ -882,7 +883,7 @@ export function createSession(
   return apiFetch<SessionInfo>('/api/sessions', {
     method: 'POST',
     body: JSON.stringify(buildCreateSessionBody(body)),
-  }).then(withCreationWarnings);
+  }).then(withSessionWarnings);
 }
 
 // ── Passagem de bastão ──────────────────────────────────────────────────────
@@ -957,11 +958,11 @@ export function passarBastao(
 ): Promise<BastaoResult> {
   if (server) return apiFetchForServer<BastaoResult>(server, `/api/sessions/${encodeURIComponent(name)}/bastao`, {
     method: 'POST', body: JSON.stringify(body),
-  }).then(withCreationWarnings);
+  }).then(withSessionWarnings);
   return apiFetch<BastaoResult>(`/api/sessions/${encodeURIComponent(name)}/bastao`, {
     method: 'POST',
     body: JSON.stringify(body),
-  }).then(withCreationWarnings);
+  }).then(withSessionWarnings);
 }
 
 // Modelo oferecido na tela de ABERTURA (GET /api/model-options). O backend devolve QUATRO formatos
@@ -1211,13 +1212,13 @@ export async function folderGitActionForServer(server: Server, cwd: string, acti
 // `erro_git_folder_sessions` pede confirmação e reenvio com confirmSessions.
 export async function folderGitSwitchForServer(server: Server, cwd: string, branch: string, confirmSessions = false, root?: string): Promise<FolderGit> {
   const body = JSON.stringify({ root: await folderRoot(server, cwd, undefined, root), path: cwd, branch, confirm_sessions: confirmSessions });
-  return apiFetchForServer(server, '/api/fs/git/switch', { method: 'POST', body }, FOLDER_ACTION_MS, true);
+  return apiFetchForServer(server, '/api/fs/git/switch', { method: 'POST', body }, FOLDER_ACTION_MS);
 }
 export async function folderGitBranchForServer(server: Server, cwd: string, name: string,
   opts: { checkout: boolean; base?: string; confirmSessions?: boolean }, root?: string): Promise<FolderGit> {
   const body = JSON.stringify({ root: await folderRoot(server, cwd, undefined, root), path: cwd, name, checkout: opts.checkout,
     confirm_sessions: !!opts.confirmSessions, ...(opts.base ? { base: opts.base } : {}) });
-  return apiFetchForServer(server, '/api/fs/git/branch', { method: 'POST', body }, FOLDER_ACTION_MS, true);
+  return apiFetchForServer(server, '/api/fs/git/branch', { method: 'POST', body }, FOLDER_ACTION_MS);
 }
 
 export interface WorktreeChoice { branch: string; new_branch?: boolean; base?: string | null }
@@ -2858,7 +2859,7 @@ export async function pressPluginButton(
 function postPluginPress(name: string, body: Record<string, string>, server?: Server): Promise<{ ok: boolean; copied?: string; opened?: string }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/plugin/press`;
   const init = { method: 'POST', body: JSON.stringify(body) };
-  return server ? apiFetchForServer<{ ok: boolean; copied?: string; opened?: string }>(server, path, init, 8000, true)
+  return server ? apiFetchForServer<{ ok: boolean; copied?: string; opened?: string }>(server, path, init, 8000)
                 : apiFetch<{ ok: boolean; copied?: string; opened?: string }>(path, init);
 }
 
@@ -2877,7 +2878,7 @@ async function retryWithoutMod<T>(send: (withMod: boolean) => Promise<T>): Promi
 function postPluginPane(action: 'close' | 'show', name: string, site: string, server?: Server): Promise<{ ok: boolean }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/plugin/${action}`;
   const init = { method: 'POST', body: JSON.stringify({ site }) };
-  return server ? apiFetchForServer<{ ok: boolean }>(server, path, init, 8000, true) : apiFetch<{ ok: boolean }>(path, init);
+  return server ? apiFetchForServer<{ ok: boolean }>(server, path, init, 8000) : apiFetch<{ ok: boolean }>(path, init);
 }
 
 /** Fecha o painel de mod `site`, como o ✕ do cabeçalho dele (`plugin/close`). */
@@ -2907,7 +2908,7 @@ export async function inputPluginField(
   const path = `/api/sessions/${encodeURIComponent(name)}/plugin/input`;
   return retryWithoutMod((withMod) => {
     const init = { method: 'POST', body: JSON.stringify(withMod ? { site, plugin: field.plugin, key: field.key, kind, value } : { site, key: field.key, kind, value }) };
-    return server ? apiFetchForServer<{ ok: boolean }>(server, path, init, 8000, true)
+    return server ? apiFetchForServer<{ ok: boolean }>(server, path, init, 8000)
                   : apiFetch<{ ok: boolean }>(path, { ...init, signal: AbortSignal.timeout(8000) });
   });
 }
@@ -3097,19 +3098,20 @@ export function setEngineModel(
   body: { model: string; effort?: string | null }, server?: Server | null,
 ): Promise<{ ok: boolean; model: string; result: string | null; effort_error?: string }> {
   _invalidarCatalogo(name);
-  return sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/engine/model`, {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
+  return sessionFetch<{ ok: boolean; model: string; result: string | null; effort_error?: string }>(server,
+    `/api/sessions/${encodeURIComponent(name)}/engine/model`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }).then(withSessionWarnings);
 }
 
 // Fast da sessão viva (POST .../service-tier); `priority` liga, `default` volta ao padrão da conta.
 export function setServiceTier(name: string, tier: 'default' | 'priority', server?: Server | null): Promise<{ ok: boolean; service_tier: string }> {
   _invalidarCatalogo(name);
-  return sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/service-tier`, {
+  return sessionFetch<{ ok: boolean; service_tier: string }>(server, `/api/sessions/${encodeURIComponent(name)}/service-tier`, {
     method: 'POST',
     body: JSON.stringify({ service_tier: tier }),
-  });
+  }).then(withSessionWarnings);
 }
 
 /**
@@ -3135,7 +3137,7 @@ export async function setModelEffort(
   return sessionFetch<ModelEffortResposta>(server,
     `/api/sessions/${encodeURIComponent(name)}/model-effort`,
     { method: 'POST', body: JSON.stringify(body) },
-  );
+  ).then(withSessionWarnings);
 }
 
 // provider: quem RESPONDEU de fato (pode ter virado "local" pelo fallback do backend quando falta
@@ -3659,15 +3661,16 @@ export function getPermissionModes(name: string, sondar = false, server?: Server
 
 /** Troca a sessão Claude entre terminal e sem terminal, na mesma conversa. Só ociosa (409 com o motivo). */
 export function setModoExecucao(name: string, terminal: boolean, server?: Server | null): Promise<{ ok: boolean; terminal: boolean }> {
-  return sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/modo-execucao`, {
+  return sessionFetch<{ ok: boolean; terminal: boolean }>(server, `/api/sessions/${encodeURIComponent(name)}/modo-execucao`, {
     method: 'POST',
     body: JSON.stringify({ terminal }),
-  });
+  }).then(withSessionWarnings);
 }
 
 /** Recicla o processo da sessão Claude sem terminal na mesma conversa (relê MCP/hooks/settings). Só ociosa (409 com o motivo). */
 export function recarregarSessao(name: string, server?: Server | null): Promise<{ ok: boolean }> {
-  return sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/recarregar`, { method: 'POST' });
+  return sessionFetch<{ ok: boolean }>(server, `/api/sessions/${encodeURIComponent(name)}/recarregar`, { method: 'POST' })
+    .then(withSessionWarnings);
 }
 
 /** Conta Claude para onde a conversa pode ir: `pct` é a janela de cota mais cheia (null = sem leitura);
@@ -3682,25 +3685,26 @@ export function listAccountTargets(name: string, server?: Server | null): Promis
 /** Continua a mesma conversa noutra conta Claude (`path` de `listAccountTargets`). Só ociosa (409 com o motivo). */
 // Sessão com motor GPT do proxy: troca a conta ChatGPT (o nativo, confirm_engine_account).
 export function setSessionEngineAccount(name: string, account: string, server?: Server | null): Promise<{ ok: boolean }> {
-  return sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/conta`, {
+  return sessionFetch<{ ok: boolean }>(server, `/api/sessions/${encodeURIComponent(name)}/conta`, {
     method: 'POST',
     body: JSON.stringify({ engine_account: account }),
-  });
+  }).then(withSessionWarnings);
 }
 
 export function setSessionAccount(name: string, configDir: string, server?: Server | null): Promise<{ ok: boolean; config_dir: string }> {
-  return sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/conta`, {
+  return sessionFetch<{ ok: boolean; config_dir: string }>(server, `/api/sessions/${encodeURIComponent(name)}/conta`, {
     method: 'POST',
     body: JSON.stringify({ config_dir: configDir }),
-  });
+  }).then(withSessionWarnings);
 }
 
 export function setPermissionMode(name: string, mode: string, server?: Server | null): Promise<{ mode: string; current: string; previous_non_plan: string }> {
   _invalidarCatalogo(name);
-  return sessionFetch(server, `/api/sessions/${encodeURIComponent(name)}/permission-mode`, {
-    method: 'POST',
-    body: JSON.stringify({ mode }),
-  });
+  return sessionFetch<{ mode: string; current: string; previous_non_plan: string }>(server,
+    `/api/sessions/${encodeURIComponent(name)}/permission-mode`, {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
+    }).then(withSessionWarnings);
 }
 
 // ── Loop runner (Task 9+): obter, criar, parar e resolver loops autonomos por sessao ───────────

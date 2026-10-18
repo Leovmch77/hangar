@@ -869,7 +869,7 @@ fn usage_limit_has_its_own_problem_and_survives_the_failed_turn() {
     line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
     line(&mut engine,json!({"method":"error","params":{"threadId":"thread-1","turnId":"turn-1","willRetry":true,
         "error":{"message":"Rate limit reached","codexErrorInfo":"rateLimitExceeded"}}}),10.5);
-    assert_eq!(engine.view()["problema"],"codex_limite_uso");
+    assert_eq!(engine.view()["problema"],"codex_sem_conexao","o aperto temporário segue tentando; não é a cota");
     line(&mut engine,json!({"method":"error","params":{"threadId":"thread-1","turnId":"turn-1","willRetry":false,
         "error":{"message":"You've hit your usage limit.","codexErrorInfo":"usageLimitExceeded"}}}),11.0);
     line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed",
@@ -1248,6 +1248,30 @@ fn refused_effort_is_a_problem_not_a_failure() {
     assert_eq!(engine.view()["problema"],"codex_esforco_nao_aplicado");
     assert_eq!(engine.control_view()["ready"],true);
     assert!(effects.iter().any(|e|matches!(e,Effect::WakeQueue)));
+}
+
+/// Processo novo que devolve outro Fast que o escolhido não sobe; a recusa aparece com o motivo.
+#[test]
+fn a_fresh_process_that_drops_the_chosen_fast_does_not_come_up() {
+    for (method,meta) in [("thread/resume",json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","service_tier":"priority"})),
+        ("thread/start",json!({"name":"s","headless":true,"cwd":"/p","service_tier":"priority"}))] {
+        let (mut engine,sent) = bootstrapped(meta);
+        let open = find_method(&sent,method);
+        let effects = line(&mut engine,json!({"id":open["id"],"result":{"thread":{"id":"t1","status":{"type":"idle"},"turns":[]},"serviceTier":null}}),12.0);
+        assert!(effects.iter().any(|e|matches!(e,Effect::Reply { operation_id,disposition:Disposition::Rejected,.. } if operation_id == "boot")),"{method}");
+        assert_eq!(engine.control_view()["ready"],false,"{method}");
+        assert_eq!(engine.view()["problema_detalhe"],"O Codex não preservou a escolha Fast ao retomar","{method}");
+    }
+}
+
+/// O esforço depois de abrir leva o modelo escolhido junto (o `thread/settings/update` do Python).
+#[test]
+fn the_effort_after_opening_carries_the_chosen_model() {
+    let (mut engine,sent) = bootstrapped(json!({"name":"s","thread_id":"t1","headless":true,"cwd":"/p","effort":"high","model":"gpt-chosen"}));
+    let resume = find_method(&sent,"thread/resume");
+    let effects = line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"t1","status":{"type":"idle"},"turns":[]},"model":"gpt-default"}}),12.0);
+    let update = find_method(&frames(&effects),"thread/settings/update");
+    assert_eq!(update["params"],json!({"threadId":"t1","model":"gpt-chosen","effort":"high"}));
 }
 
 #[test]
@@ -2508,4 +2532,31 @@ fn a_dead_headless_mode_is_published_only_once_written() {
     engine.apply(EngineInput::PolicyResult { request_id:patch,payload:json!({"updated":false}) },clock(11.5)).unwrap();
     assert_eq!(engine.control_view()["permission_mode"],before,"a falha volta ao modo gravado, nunca a um pendente");
     assert_eq!(engine.control_view()["permission_mode_saved"],before);
+}
+
+fn usage_limits(effects:&[Effect]) -> Vec<UsageLimit> {
+    effects.iter().filter_map(|e|match e { Effect::UsageLimit { limit }=>Some(limit.clone()),_=>None }).collect()
+}
+
+#[test]
+fn usage_limit_ends_the_turn_with_the_exhausted_window() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    let effects:Vec<Effect> = include_str!("fixtures/usage_limit/codex_usage_limit.jsonl").lines()
+        .flat_map(|l|line(&mut engine,serde_json::from_str(l).unwrap(),11.0)).collect();
+    assert_eq!(usage_limits(&effects),vec![UsageLimit { window:"five_hour".into(),resets_at:Some(1791577800.0) }]);
+    assert_eq!(engine.view()["problema"],"codex_limite_uso");
+}
+
+#[test]
+fn upstream_throttle_is_not_the_usage_limit() {
+    let mut engine = engine();
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}),10.0);
+    let mut effects:Vec<Effect> = include_str!("fixtures/usage_limit/codex_throttle.jsonl").lines()
+        .flat_map(|l|line(&mut engine,serde_json::from_str(l).unwrap(),10.5)).collect();
+    assert_eq!(engine.view()["problema"],"codex_sem_conexao");
+    effects.extend(line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"failed",
+        "error":{"message":"Rate limit reached","codexErrorInfo":"rateLimitExceeded"}}}}),11.0));
+    assert!(usage_limits(&effects).is_empty());
+    assert_ne!(engine.view()["problema"],"codex_limite_uso");
 }

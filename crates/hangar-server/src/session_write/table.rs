@@ -2,6 +2,9 @@
 //! o corpo de cada rota mora nos módulos irmãos.
 use axum::body::Bytes;
 
+use crate::session_open::AgentProvider;
+
+/// O recorte do `AgentProvider` que o Rust escreve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Provider { Claude, Codex }
 
@@ -9,7 +12,25 @@ impl Provider {
     /// `None` para provedor que o Rust não escreve (Pi, omp, Kimi): a rota segue ao Python.
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(name: &str) -> Option<Provider> {
-        match name { "claude" => Some(Provider::Claude), "codex" => Some(Provider::Codex), _ => None }
+        AgentProvider::parse(name)?.try_into().ok()
+    }
+}
+
+impl From<Provider> for AgentProvider {
+    fn from(provider: Provider) -> Self {
+        match provider { Provider::Claude => AgentProvider::Claude, Provider::Codex => AgentProvider::Codex }
+    }
+}
+
+impl TryFrom<AgentProvider> for Provider {
+    type Error = AgentProvider;
+
+    fn try_from(provider: AgentProvider) -> Result<Self, Self::Error> {
+        match provider {
+            AgentProvider::Claude => Ok(Provider::Claude),
+            AgentProvider::Codex => Ok(Provider::Codex),
+            other => Err(other),
+        }
     }
 }
 
@@ -39,7 +60,7 @@ pub fn decide(route: WriteRoute, provider: Provider, terminal: bool) -> Owner {
 }
 
 impl Provider {
-    pub fn name(self) -> &'static str { match self { Provider::Claude => "claude", Provider::Codex => "codex" } }
+    pub fn name(self) -> &'static str { AgentProvider::from(self).name() }
 }
 
 /// Provedor+modo (`true` = sem terminal) que a tabela entrega ao Rust na entrada de texto: é o que a
@@ -108,6 +129,14 @@ mod tests {
         assert_eq!(Provider::from_str("claude"), Some(Provider::Claude));
         assert_eq!(Provider::from_str("codex"), Some(Provider::Codex));
         assert_eq!(Provider::from_str("pi"), None);
+        assert_eq!(Provider::from_str("Claude"), None);
+        for provider in [Provider::Claude, Provider::Codex] {
+            assert_eq!(Provider::try_from(AgentProvider::from(provider)), Ok(provider));
+            assert_eq!(Provider::from_str(provider.name()), Some(provider));
+        }
+        for other in [AgentProvider::Pi, AgentProvider::Omp, AgentProvider::Kimi] {
+            assert_eq!(Provider::try_from(other), Err(other));
+        }
     }
 
     #[test]

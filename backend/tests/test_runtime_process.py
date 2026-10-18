@@ -140,7 +140,11 @@ time.sleep(60)
         except psutil.NoSuchProcess:pass
         assert runtime_process.reconcile_startup(record) is True
         # O filho pode sumir entre as consultas; sumir conta como limpo.
-        try:alive=psutil.Process(info['child']).status()!=psutil.STATUS_ZOMBIE
+        # No Windows o processo encerrado segue listado, sem threads, enquanto há handle dele: o mesmo
+        # critério do `_same_process`.
+        try:
+            child=psutil.Process(info['child'])
+            alive=child.status()!=psutil.STATUS_ZOMBIE and (sys.platform!='win32' or child.num_threads()>0)
         except psutil.NoSuchProcess:alive=False
         assert not alive
         assert not record.exists()
@@ -241,6 +245,7 @@ def _fake_job_holder(tmp_path, monkeypatch):
     from app.runtime_process import Containment
     class Job:
         name = 'Global\\Hangar-runtime-' + 'b' * 32
+        def members(self): return []
     monkeypatch.setattr(runtime_process, '_same_process', lambda pid, birth: True)
     containment = Containment(os.getpid(), 1.0, Job(), record=tmp_path / 'containment.json', life='t')
     return type('Contained', (), {'runtime_containment': containment})()

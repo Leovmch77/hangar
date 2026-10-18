@@ -72,10 +72,10 @@ vi.mock('react-native-gesture-handler/ReanimatedDrawerLayout', () => ({
 }));
 vi.mock('react-native-safe-area-context', () => ({ SafeAreaView: ({ children }: { children: ReactNode }) => children }));
 vi.mock('../../ui/Glass', () => ({ Glass: () => createElement('span', { 'data-testid': 'glass' }) }));
-vi.mock('./SessionList', async () => {
+vi.mock('./DrawerMenu', async () => {
   const { useContext } = await import('react');
   const { WorkingMarkPaused } = await import('../../ui/WorkingMark');
-  return { SessionList: () => createElement('span', { 'data-testid': 'list', 'data-paused': String(useContext(WorkingMarkPaused)) }) };
+  return { DrawerMenu: () => createElement('span', { 'data-testid': 'list', 'data-paused': String(useContext(WorkingMarkPaused)) }) };
 });
 
 import { BackHandler } from 'react-native';

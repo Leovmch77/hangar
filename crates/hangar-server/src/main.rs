@@ -1,9 +1,15 @@
 //! hangar-server: sobe como filho do Python (app/main.py), na porta pública.
 
-fn main() {
+fn main() -> std::process::ExitCode {
+    // `open`/`resolve`: o lançador como comando de terminal, com runtime próprio (fora do `run`).
+    let args: Vec<String> = std::env::args_os().skip(1).map(|a| a.to_string_lossy().into_owned()).collect();
+    if matches!(args.first().map(String::as_str), Some("open" | "resolve")) {
+        return hangar_server::session_open::cli::run(&args);
+    }
     // O glibc exige a configuração antes de o runtime criar threads.
     unsafe { hangar_server::tune_allocator(); }
     run();
+    std::process::ExitCode::SUCCESS
 }
 
 /// No Windows `0.0.0.0` não impede outro programa de abrir a mesma porta em `[::]` dual-stack (Node,
@@ -68,6 +74,13 @@ async fn run() {
     };
     hangar_server::init_log(cfg.log_path.as_deref());
     hangar_server::install_panic_hook();
+    // O `hangar-server open` instalado em `~/.hangar/bin` acha o `.env` por aqui (o servidor roda na `backend/`).
+    if let Ok(backend) = std::env::current_dir() && backend.join(".env").is_file() {
+        let home = hangar_server::accounts::environment::AccountEnvironment::capture().home;
+        if let Err(error) = hangar_server::session_open::cli::publish_backend_dir(&home, &backend) {
+            tracing::warn!(kind = ?error.kind(), "pasta do backend não anotada; o comando de terminal instalado não acha o .env");
+        }
+    }
     let listener = match tokio::net::TcpListener::bind(cfg.listen).await {
         Ok(l) => l,
         Err(e) => {

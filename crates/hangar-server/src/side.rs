@@ -223,6 +223,10 @@ pub struct SideCtx {
     pub runtime: Arc<std::sync::OnceLock<Arc<crate::runtime::gateway::RuntimeRegistry>>>,
     /// Pasta das projeções da fila (`<conta Claude>/.hangar-queue`); `None`: hub sem fila (testes).
     pub queue_dir: Option<PathBuf>,
+    /// Quanto um problema de estado espera antes de sair (`problem_gate::HOLD`; zero nos testes dos produtores).
+    pub problem_hold: std::time::Duration,
+    /// O problema que a lista mostra de cada sessão (`ListBridge::gate_problems`): o hub nasce com ele.
+    pub shown_problems: Arc<crate::problem_gate::Shown>,
 }
 
 impl SideCtx {
@@ -404,7 +408,13 @@ pub struct Hub {
     /// Arquivo da fila que a descoberta deu, avisado por quem já tem a `InternalInfo` (rota, canal privado,
     /// vigia da ligação): a vigia da fila nunca pergunta a descoberta por conta própria.
     queue_path: Mutex<Option<PathBuf>>,
+    /// O portão do `problema` do estado (`problem_gate`) e o reenvio do estado retido quando o prazo vence.
+    problems: Mutex<StateProblems>,
+    me: std::sync::Weak<Hub>,
 }
+
+#[derive(Default)]
+struct StateProblems { gate: crate::problem_gate::ProblemGate, timer: Option<tokio::task::AbortHandle>, epoch: u64 }
 
 /// O que um aparelho recebe ao entrar: cauda + retrato, e o canal para o resto. `ui`: a versão do
 /// `plugin_ui` que já vai no retrato; marcador dela ou anterior não precisa sair de novo.
@@ -436,6 +446,7 @@ impl Hub {
     fn start(name: &str, binding: Binding, ctx: SideCtx, owners: usize) -> Arc<Hub> {
         let (tx, _) = broadcast::channel(CHANNEL);
         let owned = ctx.runtime.get().is_some_and(|registry| registry.owns_codex_terminal(name));
+        let seed = ctx.shown_problems.get(name);
         let hub = Arc::new_cyclic(|weak| {
             let tail = FileTail::spawn(
                 binding.jsonl.clone(),
@@ -464,6 +475,8 @@ impl Hub {
                 queue_watch: Mutex::new(None),
                 queue_wake: Arc::new(Notify::new()),
                 queue_path: Mutex::new(None),
+                problems: Mutex::new(StateProblems { gate: crate::problem_gate::ProblemGate::showing(seed), ..Default::default() }),
+                me: weak.clone(),
             }
         });
         if let Some((generation, binding)) = hub.source_binding() {
@@ -821,6 +834,8 @@ impl Hub {
         self.start_queue_feed(generation, &binding);
         *bound = Some(Bound { binding, generation, tail });
         *self.committed.lock().unwrap() = None;
+        // O estado retido era da conversa anterior: não volta depois da troca.
+        { let mut problems = self.problems.lock().unwrap(); problems.epoch += 1; if let Some(timer) = problems.timer.take() { timer.abort(); } problems.gate = crate::problem_gate::ProblemGate::showing(self.ctx.shown_problems.get(&self.name)); }
         // Os avisos de mod ficam (o `cache.toasts` os guarda): são da sessão, não do transcript. A faixa
         // do Rust também é da sessão: volta ao retrato antes do `reset`, senão quem religa depois de um
         // `/clear` fica sem ela até o mod redesenhar. Limpeza e semeadura sob uma trava só.
@@ -860,6 +875,11 @@ impl Hub {
     }
 
     fn deliver_bound(&self, event: &str, data: &str, pane_question: bool) {
+        let gated = if event == "state" { self.gate_problem(data, pane_question) } else { None };
+        self.deliver_frame(event, gated.as_deref().unwrap_or(data), pane_question);
+    }
+
+    fn deliver_frame(&self, event: &str, data: &str, pane_question: bool) {
         let frame = sse_frame(event, data, None);
         // Retrato antes do envio: quem assina entre os dois recebe repetido, nunca nada.
         let mut cache = self.cache.lock().unwrap();
@@ -877,6 +897,39 @@ impl Hub {
         if !repeated {
             let _ = self.tx.send(Self::out(event, frame, &cache));
         }
+    }
+
+    /// `Some`: o estado sai sem o problema, que ainda não valeu pelo prazo; o original volta a passar por
+    /// aqui quando o prazo vence, se nenhum estado mais novo chegou antes.
+    fn gate_problem(&self, data: &str, pane_question: bool) -> Option<String> {
+        use crate::problem_gate::Gate;
+        let mut value: serde_json::Value = serde_json::from_str(data).ok()?;
+        // Fora de um runtime não há como reenviar: o problema sai como chegou, sem contar prazo.
+        let runtime = tokio::runtime::Handle::try_current().ok()?;
+        let mut problems = self.problems.lock().unwrap();
+        problems.epoch += 1;
+        if let Some(timer) = problems.timer.take() { timer.abort(); }
+        let now = tokio::time::Instant::now();
+        let Gate::Hold(at) = problems.gate.admit(value["problema"].as_str(), now.into_std(), self.ctx.problem_hold) else { return None };
+        let (hub, original, epoch) = (self.me.clone(), data.to_owned(), problems.epoch);
+        problems.timer = Some(runtime.spawn(async move {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
+            if let Some(hub) = hub.upgrade() { hub.redeliver_problem(epoch, &original, pane_question); }
+        }).abort_handle());
+        value["problema"] = serde_json::Value::Null;
+        value["problema_detalhe"] = serde_json::Value::Null;
+        Some(value.to_string())
+    }
+
+    /// O estado retido sai com o problema, se nenhum estado mais novo nem troca de conversa veio depois. Conferir
+    /// e entregar sob a mesma trava: um estado novo espera e sai depois deste, nunca por baixo dele.
+    fn redeliver_problem(&self, epoch: u64, original: &str, pane_question: bool) {
+        let mut problems = self.problems.lock().unwrap();
+        if problems.epoch != epoch { return; }
+        problems.timer = None;
+        let code = serde_json::from_str::<serde_json::Value>(original).ok().and_then(|v| v["problema"].as_str().map(str::to_owned));
+        let _ = problems.gate.admit(code.as_deref(), tokio::time::Instant::now().into_std(), self.ctx.problem_hold);
+        self.deliver_frame("state", original, pane_question);
     }
 
     /// O `plugin_ui` sai pelo canal só como marcador da versão gravada no retrato.
@@ -1460,6 +1513,8 @@ pub(crate) fn test_ctx() -> SideCtx {
         mods: Default::default(),
         runtime: Default::default(),
         queue_dir: None,
+        problem_hold: std::time::Duration::ZERO,
+        shown_problems: Arc::default(),
     }
 }
 
@@ -2567,6 +2622,57 @@ mod tests {
         let _owner = ctx.hubs.acquire("fila", queue_binding(dir.path(), "a"), &ctx);
         assert_ne!(side(&guest.hub), side_before, "a conexão interna religou com app=1");
         assert_eq!(feed(&guest.hub), Some(feed_before), "o produtor da fila segue o mesmo");
+    }
+
+    /// Problema de estado só sai depois de valer pelo prazo (o hub o reenvia sozinho quando vence); o que
+    /// dura menos nunca sai, e resolvido some na hora. O estado em si sai sem espera.
+    #[tokio::test]
+    async fn a_state_problem_goes_out_only_after_it_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = SideCtx { queue_dir: Some(dir.path().to_path_buf()), problem_hold: crate::problem_gate::HOLD, ..test_ctx() };
+        let lease = ctx.hubs.acquire("prob", queue_binding(dir.path(), "a"), &ctx);
+        tokio::time::pause();
+        let state = |hub: &Hub| -> serde_json::Value {
+            let frames: String = hub.cache.lock().unwrap().replay().iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect();
+            frames.split("\n\n").find(|f| f.starts_with("event: state")).and_then(|f| f.split_once("data: "))
+                .map(|(_, data)| serde_json::from_str(data.trim()).unwrap()).unwrap_or_default()
+        };
+        let with = |problema: Option<&str>| serde_json::json!({"state":"working","problema":problema,"problema_detalhe":problema.map(|p| format!("{p}: detalhe"))}).to_string();
+        assert!(lease.hub.publish_own("state", &with(Some("runtime_binding"))));
+        assert_eq!((state(&lease.hub)["state"].as_str(), state(&lease.hub)["problema"].as_str()), (Some("working"), None), "estado já, problema não");
+        // O temporizador do tokio arredonda o prazo para o milissegundo seguinte.
+        tokio::time::advance(crate::problem_gate::HOLD + std::time::Duration::from_millis(5)).await;
+        for _ in 0..5 { tokio::task::yield_now().await; }
+        assert_eq!(state(&lease.hub)["problema"], "runtime_binding", "valeu pelo prazo: sai sozinho");
+        assert!(lease.hub.publish_own("state", &with(None)));
+        assert!(state(&lease.hub)["problema"].is_null(), "resolvido some na hora");
+        assert!(lease.hub.publish_own("state", &with(Some("passageiro"))));
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(lease.hub.publish_own("state", &with(None)));
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        for _ in 0..5 { tokio::task::yield_now().await; }
+        assert!(state(&lease.hub)["problema"].is_null(), "o passageiro nunca saiu");
+        // Retido na conversa anterior: a troca o descarta, e o prazo vencido não o põe de volta.
+        assert!(lease.hub.publish_own("state", &with(Some("da_anterior"))));
+        lease.hub.rebind(queue_binding(dir.path(), "b"));
+        tokio::time::advance(crate::problem_gate::HOLD + std::time::Duration::from_secs(1)).await;
+        for _ in 0..5 { tokio::task::yield_now().await; }
+        assert_ne!(state(&lease.hub)["problema"], "da_anterior", "o estado da conversa anterior não volta");
+    }
+
+    /// A conversa aberta depois começa do problema que a lista já mostra: o mesmo sai na hora, sem esperar.
+    #[tokio::test]
+    async fn a_hub_opens_with_the_problem_the_list_already_shows() {
+        let dir = tempfile::tempdir().unwrap();
+        let shown = Arc::new(crate::problem_gate::Shown::default());
+        shown.set("seed", Some("headless_processo_caiu"));
+        let ctx = SideCtx { queue_dir: Some(dir.path().to_path_buf()), problem_hold: crate::problem_gate::HOLD, shown_problems: shown, ..test_ctx() };
+        let lease = ctx.hubs.acquire("seed", queue_binding(dir.path(), "a"), &ctx);
+        let frames = |hub: &Hub| -> String { hub.cache.lock().unwrap().replay().iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect() };
+        assert!(lease.hub.publish_own("state", r#"{"state":"idle","problema":"headless_processo_caiu","problema_detalhe":"rc=143"}"#));
+        assert!(frames(&lease.hub).contains(r#""problema":"headless_processo_caiu""#), "a lista já mostra: a conversa também, sem prazo");
+        assert!(lease.hub.publish_own("state", r#"{"state":"idle","problema":"outro","problema_detalhe":null}"#));
+        assert!(!frames(&lease.hub).contains(r#""problema":"outro""#), "problema diferente espera o prazo");
     }
 
     /// Troca de conversa: o retrato perde a fila da anterior na hora, quadro da geração anterior não

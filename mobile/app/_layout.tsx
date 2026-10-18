@@ -15,6 +15,7 @@ import { aplicarTemaSalvo, useAparencia } from '../src/stores/aparencia';
 import { aplicarMaterial } from '../src/theme/aplicarMaterial';
 import { Toaster, toast } from '../src/ui/Toast';
 import { LiveVoiceRoot } from '../src/features/voice/LiveVoiceRoot';
+import { readFatalError, setFatalErrorRoute } from '../src/net/fatalErrors';
 import * as m from '../src/paraglide/messages';
 
 configureCore();
@@ -24,10 +25,16 @@ aplicarMaterial(useAparencia.getState());
 export default function Layout() {
   const router = useRouter();
   const segments = useSegments();
+  setFatalErrorRoute(segments);
   const ready = useServers((s) => s.ready);
   const servers = useServers((s) => s.servers);
   const aviso = useServers((s) => s.aviso);
   const limparAviso = useServers((s) => s.limparAviso);
+
+  useEffect(() => {
+    try { if (readFatalError()) toast.aviso(m.native_last_error_available()); }
+    catch { toast.erro(m.native_last_error_read_failed()); }
+  }, []);
 
   useEffect(() => {
     setMachineDiscovery((server) => { void discoverSavedMachines([server]); });

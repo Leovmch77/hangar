@@ -166,6 +166,13 @@ impl Fixture {
         let options=TerminalOptions {interactions:Some(self.plugin.interactions().clone()),plugin:Some(self.plugin.clone()),io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),give_up_after,turn_start_wait:self.turn_start_wait(),..TerminalOptions::default()};
         TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)))
     }
+    fn start_grace(&self,start_grace:Duration)->hangar_server::runtime::terminal::TerminalHandle {
+        self.start_plugin();
+        let lease=crate::lease_when_free(&self.target.lease_path);
+        let store=Store::open(&self.target.state_path,&self.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+        let options=TerminalOptions {interactions:Some(self.plugin.interactions().clone()),plugin:Some(self.plugin.clone()),io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),status:Some(self.status.clone()),start_grace,turn_start_wait:self.turn_start_wait(),..TerminalOptions::default()};
+        TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)))
+    }
     /// Espera do turno depois de uma entrega comum: zero por padrão, para os testes de duas mensagens seguidas.
     fn turn_start_wait(&self)->Duration {Duration::from_millis(self.turn_start_ms.load(std::sync::atomic::Ordering::Acquire))}
     fn command(&self,id:&str,text:&str)->RuntimeCommand { RuntimeCommand {operation_id:id.into(),kind:OperationKind::Input,payload:json!({"text":text,"pre_transcript":false})} }
@@ -482,7 +489,7 @@ async fn terminal_runtime_maintenance_failure_publishes_problem_and_stops_uncoor
 async fn terminal_runtime_status_reopening_resets_old_error_before_subscribing() {
     let f=Fixture::new().await;
     for _ in 0..2 {
-        f.status.send_replace(TerminalStatus {error:Some("old_error".into()),message:Some("erro da vida anterior".into()),input_stalled:None});
+        f.status.send_replace(TerminalStatus {error:Some("old_error".into()),message:Some("erro da vida anterior".into()),input_stalled:None,limit:None});
         let h=f.start();
         h.snapshot().await.unwrap();
         let late=f.status.subscribe();
@@ -983,6 +990,32 @@ async fn terminal_runtime_missing_native_record_and_silent_plugin_mark_no_safe_d
     assert_eq!(h.snapshot().await.unwrap()["view"]["input_stalled"],"no_safe_delivery");
     *f.io.native_record.lock().unwrap()=saved;f.io.refresh_record();
     f.wait_for("o aviso sai com a prova de volta",||f.status.borrow().input_stalled.is_none()).await;
+    h.stop().await.unwrap();
+}
+/// Vida nova: o Claude ainda subindo não tem registro nativo nem conversa aberta. A primeira mensagem espera
+/// na fila sem erro na sessão e sai quando a prova chega; passado o prazo de subida, a falta de prova é erro.
+#[tokio::test]
+async fn terminal_runtime_a_starting_life_without_its_conversation_waits_without_an_error() {
+    let f=Fixture::new().await;
+    let native=f.target.metadata.config_dir.join("sessions").join(format!("{}.json",f.target.metadata.agent_pid));
+    let saved=f.io.native_record.lock().unwrap().take();std::fs::remove_file(&native).unwrap();
+    // O agente do teste é este processo: o prazo cobre a idade dele numa suíte longa.
+    let h=f.start_grace(Duration::from_secs(24*3600));
+    assert_eq!(h.command(f.command("primeira","oi")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    assert!(h.drain().await.is_ok(),"subindo não é erro");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(h.snapshot().await.unwrap()["error"].is_null(),"nenhum tique publicou erro");
+    assert!(f.status.borrow().error.is_none(),"a sessão não mostra problema");
+    *f.io.native_record.lock().unwrap()=saved;f.io.refresh_record();
+    f.wait_for("a primeira mensagem sai com a prova",||!typed_at(&f,"oi").is_empty()).await;
+    h.stop().await.unwrap();
+
+    let f=Fixture::new().await;
+    let native=f.target.metadata.config_dir.join("sessions").join(format!("{}.json",f.target.metadata.agent_pid));
+    f.io.native_record.lock().unwrap().take();std::fs::remove_file(&native).unwrap();
+    let h=f.start_grace(Duration::ZERO);
+    h.command(f.command("primeira","oi")).await.unwrap();
+    assert_eq!(h.drain().await.unwrap_err().code,"terminal_facts","passado o prazo de subida");
     h.stop().await.unwrap();
 }
 #[tokio::test]
@@ -2141,3 +2174,81 @@ async fn probe_that_does_not_restore_still_answers_the_list() {
         (hangar_server::runtime::protocol::Disposition::Accepted,json!(false),json!(["manual","auto","plan"])),"{probe:?}");
     h.stop().await.unwrap();
 }
+
+// ── Seletor do `/model` no ator ─────────────────────────────────────────────────────────────────────
+/// As capturas da tela (sem `-e`) saem do roteiro do golden, a última fica; as da guarda e o resto vão ao
+/// `Io` da fixture. As teclas só são anotadas.
+struct PickerIo {inner:Arc<Io>,script:Mutex<std::collections::VecDeque<String>>,keys:Mutex<Vec<String>>}
+impl TerminalIo for PickerIo {
+    fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput> { Box::pin(async move {
+        if r.args[0]=="send-keys" {
+            let key=r.args.last().unwrap().clone();
+            self.keys.lock().unwrap().push(if key=="\r" {"Enter".into()} else {key});
+            return Ok(CommandOutput {success:true,stdout:vec![]});
+        }
+        if r.args[0]=="capture-pane" && !r.args.contains(&"-e".into()) {
+            let mut script=self.script.lock().unwrap();
+            let pane=if script.len()>1 {script.pop_front().unwrap()} else {script[0].clone()};
+            return Ok(CommandOutput {success:true,stdout:pane.into_bytes()});
+        }
+        self.inner.command(r).await
+    }) }
+    fn socket<'a>(&'a self,m:&'a NativeMessage,e:Vec<u8>)->IoFuture<'a,WriteOutcome> {self.inner.socket(m,e)}
+}
+fn picker_golden(name:&str)->Value {
+    let path=concat!(env!("CARGO_MANIFEST_DIR"),"/../../backend/tests/fixtures/contract/golden/model_picker.json");
+    let data:Value=serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    data["cases"].as_array().unwrap().iter().find(|case|case["name"]==name).unwrap().clone()
+}
+fn picker_actor(f:&Fixture,case:&Value)->(Arc<PickerIo>,hangar_server::runtime::terminal::TerminalHandle) {
+    let script=case["panes"].as_array().unwrap().iter().map(|p|p.as_str().unwrap().to_owned()).collect();
+    let io=Arc::new(PickerIo {inner:f.io.clone(),script:Mutex::new(script),keys:Default::default()});
+    let lease=crate::lease_when_free(&f.target.lease_path);
+    let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let terms=Arc::new(hangar_server::term::Terms::new(hangar_server::term::TermConfig::default()));
+    let options=TerminalOptions {io:io.clone(),terms:Some(terms),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_secs(600),..TerminalOptions::default()};
+    (io,TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0))))
+}
+
+/// B20: o sucesso sai do ator com o JSON do Python e fica no diário como aceito.
+#[tokio::test]
+async fn model_picker_b20_success_answers_python_json_and_is_journaled() {
+    let f=Fixture::new().await;
+    let case=picker_golden("session_navigates_and_presses_s");
+    let (io,h)=picker_actor(&f,&case);
+    let reply=h.control("me".into(),"set_model_effort".into(),json!({"model":"sonnet","effort":null,"scope":"session"})).await;
+    assert_eq!(*io.keys.lock().unwrap(),["/model","Enter","Down","s"]);
+    let reply=reply.unwrap();
+    assert_eq!((reply.disposition,&reply.payload),(hangar_server::runtime::protocol::Disposition::Accepted,&case["expect"]["ok"]));
+    assert_eq!(f.state()["operations"]["me"]["status"],"accepted");
+    h.stop().await.unwrap();
+}
+
+/// B10/B11: com o teclado emprestado o seletor não digita, e a recusa tem o código do Python.
+#[tokio::test]
+async fn model_picker_b10_b11_borrowed_keyboard_refuses_with_code() {
+    let f=Fixture::new().await;
+    let (io,h)=picker_actor(&f,&picker_golden("session_navigates_and_presses_s"));
+    assert_eq!(h.control("loan".into(),"keyboard_loan".into(),json!({"seconds":30})).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    let refused=h.control("me".into(),"set_model_effort".into(),json!({"model":"sonnet","effort":null,"scope":"session"})).await;
+    assert!(io.keys.lock().unwrap().is_empty(),"nenhuma tecla com o teclado emprestado");
+    assert_eq!(refused.map_err(|e|e.code).map(|r|r.disposition),Err("erro_opcao_nao_convergiu".into()));
+    h.stop().await.unwrap();
+}
+
+/// B11: o mesmo id repetido responde o recibo do diário (o resultado, enxugado como todo recibo), sem
+/// digitar de novo.
+#[tokio::test]
+async fn model_picker_b11_repeated_id_answers_from_the_journal() {
+    let f=Fixture::new().await;
+    let (io,h)=picker_actor(&f,&picker_golden("session_navigates_and_presses_s"));
+    let payload=json!({"model":"sonnet","effort":null,"scope":"session"});
+    let first=h.control("me".into(),"set_model_effort".into(),payload.clone()).await;
+    let typed=io.keys.lock().unwrap().len();
+    let again=h.control("me".into(),"set_model_effort".into(),payload).await;
+    assert_eq!(io.keys.lock().unwrap().len(),typed,"a repetição não digita");
+    assert_eq!(again.map(|r|r.disposition).ok(),first.map(|r|r.disposition).ok());
+    assert!(typed>0);
+    h.stop().await.unwrap();
+}
+

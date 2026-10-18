@@ -37,22 +37,42 @@ fn as_owner(req: &mut Request, name: &str, rest: &str) -> bool {
     true
 }
 
-/// `/__hangar_server/claude/<nome>/<rota>`: `POST` em `input`, `answer`, `select`, `select/submit` e
-/// `permission-mode`, `GET` em `permission-modes`, e as rotas do painel da fila (`DELETE`/`PATCH
+/// `/__hangar_server/claude/<nome>/<rota>`: `POST` em `input`, `answer`, `select`, `select/submit`,
+/// `permission-mode` e `model-effort`, `GET` em `permission-modes`, e as rotas do painel da fila (`DELETE`/`PATCH
 /// queue/<id>`, `POST queue/reorder` e `queue/<id>/steer`), de sessão Claude com entrada no Rust, pela
-/// mesma rota do dono. Outra rota, método ou sessão: 421.
+/// mesma rota do dono; `POST`/`GET btw` de qualquer sessão (a rota decide). Outra rota, método ou sessão: 421.
 pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, mut req: Request) -> Response {
     use super::{answer, control, input, permissions};
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
     let Some((name, rest)) = split(&req, "/__hangar_server/claude/") else { return not_ours() };
+    // Abrir Claude com terminal pelo que entrou direto no Python (Connect, MCP): o nome vem no corpo.
+    if rest == "open" && req.method() == Method::POST {
+        return crate::session_open::server::bridge(State(st), ConnectInfo(peer), req).await;
+    }
+    // Pergunta lateral (`POST`/`GET btw`): a própria rota decide sessão, provedor e modo, inclusive o
+    // Claude sem terminal parado, que ainda não tem entrada.
+    if rest == "btw" && matches!(*req.method(), Method::POST | Method::GET) {
+        if !as_owner(&mut req, &name, &rest) { return not_ours(); }
+        let (s, c) = (State(st), ConnectInfo(peer));
+        return if req.method() == Method::POST { super::btw::ask(s, c, req).await } else { super::btw::list(s, c, req).await };
+    }
     let queue = control::queue_route(req.method(), &rest);
     let allowed = queue.is_some() || match *req.method() {
-        Method::POST => matches!(rest.as_str(), "input" | "answer" | "select" | "select/submit" | "permission-mode"),
+        Method::POST => matches!(rest.as_str(), "input" | "answer" | "select" | "select/submit" | "permission-mode" | "model-effort"),
         Method::GET => rest == "permission-modes",
         _ => false,
     };
     if !allowed { return not_ours(); }
     let Some(runtime) = st.state.runtime.get().cloned() else { return not_ours() };
+    // Texto que nasce no Python (grupo, par, MCP) para o Claude com terminal: o Rust o adota aqui, e a
+    // fila da sessão é uma só. O seletor do `/model` do convidado também só existe no ator.
+    if matches!(rest.as_str(), "input" | "model-effort") && !runtime.has_entry(None, &name).await {
+        match runtime.adopt_now(&name).await {
+            None => return not_ours(),
+            Some(Err(error)) => return super::detail(StatusCode::SERVICE_UNAVAILABLE, &error.code, &error.message, json!({})),
+            Some(Ok(())) => {}
+        }
+    }
     if !runtime.writable(&name).await.is_some_and(|target| target.provider == "claude") { return not_ours(); }
     if !as_owner(&mut req, &name, &rest) { return not_ours(); }
     if let Some(route) = queue { return control::queue_dispatch(route, st, peer, req).await; }
@@ -63,6 +83,8 @@ pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         "select" => control::select(s, c, req).await,
         "permission-mode" => permissions::set_mode(s, c, req).await,
         "permission-modes" => permissions::modes(s, c, req).await,
+        "input" => super::input::input(s, c, req).await,
+        "model-effort" => super::engine::effort(s, c, req).await,
         _ => control::select_submit(s, c, req).await,
     }
 }
@@ -112,6 +134,13 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     req.headers_mut().remove(CLOSED_TRANSCRIPT);
     let name = super::session_name(req.uri().path());
     // Sem vigia (sem as pastas da lista), `kill_codex_terminal` é `None`.
+    // Fechada de propósito não volta no próximo reboot, de qualquer agente.
+    if let (true, Some(name), Some(dirs)) = (owner, name.as_deref(), st.list.env().dirs.as_ref()) {
+        crate::session_open::restore::forget(&dirs.home, name);
+    }
+    if let (true, Some(name)) = (owner, name.as_deref()) {
+        crate::diag::record(crate::diag::diary_dir(), vec![close_line(name, req.headers(), peer)], "sessão fechada");
+    }
     let (Some(runtime), true, Some(name)) = (st.state.runtime.get().cloned(), owner, name)
         else { return crate::routes::pass(&st, req, &fwd).await };
     match runtime.kill_codex_terminal(&name).await {
@@ -189,5 +218,26 @@ async fn dispatch(st: Arc<AppState>, peer: SocketAddr, method: &str, rest: &str,
         ("POST", "modo-execucao") => relaunch::mode(s, c, req).await,
         ("POST", "recarregar") => relaunch::reload(s, c, req).await,
         _ => not_ours(),
+    }
+}
+
+/// Quem pediu o fechamento: o cliente e a origem que a requisição traz (o dono não manda identidade própria). O
+/// pedido, não o resultado: o encerramento pode falhar depois, e a sessão que some sem ele vai como `sessao.sumiu`.
+fn close_line(name: &str, headers: &axum::http::HeaderMap, peer: SocketAddr) -> serde_json::Value {
+    let header = |key: &str| headers.get(key).and_then(|v| v.to_str().ok()).map(|v| v.chars().take(80).collect::<String>());
+    json!({"evento": "sessao.fechamento_pedido", "nivel": "ok", "sessao": name, "codigo": "session_close_requested_by_owner",
+        "cliente": header("user-agent"), "req": header("x-hangar-req"), "origem": header("x-forwarded-for").unwrap_or_else(|| peer.ip().to_string())})
+}
+
+#[cfg(test)]
+mod close_tests {
+    /// O fechamento pelo dono vai ao diário com o cliente e a origem.
+    #[test]
+    fn the_owner_close_names_the_client_and_the_origin() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("user-agent", "curl/8.10".parse().unwrap());
+        let line = super::close_line("s1", &headers, "127.0.0.1:5000".parse().unwrap());
+        assert_eq!((line["evento"].as_str(), line["sessao"].as_str(), line["codigo"].as_str()), (Some("sessao.fechamento_pedido"), Some("s1"), Some("session_close_requested_by_owner")));
+        assert_eq!((line["cliente"].as_str(), line["origem"].as_str()), (Some("curl/8.10"), Some("127.0.0.1")));
     }
 }

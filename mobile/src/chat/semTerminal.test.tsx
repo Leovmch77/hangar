@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement, useState, type ReactNode } from 'react';
+import { act, createElement, useContext, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { configureApi, estilosDitado, fetchSessionsForServer, implementCodexPlan, interrupt, loadLiveVoiceSettings, recarregarSessao, setPermissionMode, _limparEsfriamentoParaTestes, _resetRotasForTests, type FirstConversationAttempt, type MotivoFim, type QueuePanel, type SessionInfo } from '@hangar/core';
@@ -16,6 +16,7 @@ vi.mock('react-native', async (original) => {
   const native = await original<typeof import('react-native')>();
   return {
   ...native,
+  Switch: ({ value, onValueChange, disabled }: { value: boolean; onValueChange: (value: boolean) => void; disabled?: boolean }) => createElement('button', { role: 'switch', 'aria-checked': value, disabled, onClick: () => onValueChange(!value) }),
   View: ({ onLayout, testID, ...props }: import('react-native').ViewProps) => {
     if (onLayout && testID) layouts.set(testID, onLayout);
     return createElement(native.View, { ...props, onLayout, ...{ 'data-testid': testID } });
@@ -51,6 +52,7 @@ const focusNavigation = vi.hoisted(() => ({
 }));
 const nativeNavigation = {
   isFocused: () => focusNavigation.focused,
+  getState: () => ({ routes: Array.from({ length: navigation.depth + 1 + navigation.above }, (_, i) => ({ key: i === navigation.depth ? 'chat' : `tela-${i}` })) }),
   addListener: (name: string, listener: (event: { data: { closing: boolean } }) => void) => {
     const listeners = focusNavigation.listeners.get(name) ?? new Set();
     listeners.add(listener);
@@ -60,7 +62,7 @@ const nativeNavigation = {
 };
 const routerPush = vi.hoisted(() => vi.fn());
 const chatRow = vi.hoisted(() => ({ extra: {} as Record<string, unknown> }));
-const navigation = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), dismissTo: vi.fn(), canGoBack: true }));
+const navigation = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), dismissTo: vi.fn(), canGoBack: true, depth: 1, above: 0 }));
 const route = vi.hoisted(() => ({ params: { server: 's1', name: 'sess' }, segments: ['s'] }));
 const realSettings = vi.hoisted(() => ({ enabled: false, models: vi.fn(), permissions: vi.fn(), commands: vi.fn() }));
 const realFirstInput = vi.hoisted(() => ({ enabled: false, send: vi.fn(), steer: vi.fn(), history: vi.fn(), transcribe: vi.fn(), relimpar: vi.fn(),
@@ -71,9 +73,11 @@ const voiceInput = vi.hoisted(() => ({ recording: false, simulateRecorder: false
   onFim: null as null | ((file: File, reason: MotivoFim, uri: string) => Promise<void>),
   finishRecording: null as null | ((reason: MotivoFim) => void), onStopError: null as null | ((e: Error) => void) }));
 vi.mock('expo-router', () => ({
+  useIsFocused: () => focusNavigation.focused,
   useNavigation: () => nativeNavigation,
   useRouter: () => ({ push: routerPush, back: navigation.back, replace: navigation.replace, dismissTo: navigation.dismissTo, canGoBack: () => navigation.canGoBack }),
   useLocalSearchParams: () => route.params, useSegments: () => route.segments,
+  useRoute: () => ({ key: 'chat' }),
 }));
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
@@ -88,6 +92,8 @@ vi.mock('@hangar/core', async (original) => ({
   recarregarSessao: vi.fn(async () => ({ ok: true })),
   implementCodexPlan: vi.fn(async () => {}),
   setPermissionMode: vi.fn(async () => ({ mode: 'acceptEdits', current: 'acceptEdits', previous_non_plan: 'acceptEdits' })),
+  getCredentialsForServer: vi.fn(async () => []),
+  getCodexModels: vi.fn(async () => ({ current: { model: 'gpt-test', effort: 'high' }, models: [] })),
   getModelOptions: realSettings.models, getPermissionModes: realSettings.permissions, getCommands: realSettings.commands,
   sendInputForServer: realFirstInput.send,
   steerSession: realFirstInput.steer,
@@ -105,10 +111,9 @@ vi.mock('../ui/Screen', () => ({ Screen: ({ children }: { children: ReactNode })
 // Conta os renders da tela: a gaveta é filha direta dela, sem memo.
 const screenRenders = vi.hoisted(() => ({ n: 0 }));
 // A gaveta puxa o gesture-handler nativo, que o vitest não carrega; aqui só o conteúdo importa.
-vi.mock('../features/sessions/SessionsDrawer', () => ({ SessionsDrawer: ({ children, onClose, onNewConversation }: { children: ReactNode; onClose: () => void; onNewConversation?: () => void }) => {
+vi.mock('../features/sessions/SessionsDrawer', () => ({ SessionsDrawer: ({ children, onClose }: { children: ReactNode; onClose: () => void }) => {
   screenRenders.n++;
-  return createElement('div', null, children,
-    createElement('button', { 'aria-label': 'drawer-new-conversation', onClick: onNewConversation ?? onClose }),
+  return createElement('div', { 'data-working-paused': String(useContext(WorkingMarkPaused)) }, children,
     createElement('button', { 'aria-label': 'drawer-navigation-close', onClick: onClose }));
 } }));
 vi.mock('../features/sessions/ServerSheet', () => ({ ServerSheet: () => null }));
@@ -122,7 +127,8 @@ vi.mock('./RecarregarPill', () => ({ RecarregarPill: () => null }));
 vi.mock('./PendingPlan', () => ({ PendingPlan: () => null }));
 vi.mock('./SessionProblem', () => ({ SessionProblem: () => null }));
 vi.mock('./SessionPickerSheet', () => ({ SessionPickerSheet: () => null }));
-vi.mock('../features/create/CreateSessionSheet', () => ({ CreateSessionSheet: () => createElement('div', { 'data-create': true }) }));
+vi.mock('../features/create/CreateSessionSheet', () => ({ CreateSessionSheet: ({ onClose, layout }: { onClose?: () => void; layout?: string }) =>
+  createElement('div', { 'data-create': layout }, createElement('button', { 'aria-label': 'comum_cancelar', onClick: onClose })) }));
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('../ui/HangarMark', () => ({ HangarMark: () => null }));
 const sheetEvents = vi.hoisted(() => ({ presented: undefined as (() => void) | undefined, dismissed: undefined as (() => void) | undefined }));
@@ -149,7 +155,7 @@ vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 vi.mock('../paraglide/messages', async (importOriginal) => ({
   ...await importOriginal<typeof import('../paraglide/messages')>(),
   ...Object.fromEntries(
-  ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo compartilhar_menu ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes mods_celular_mostrar mods_celular_mostrar_um mods_celular_mostrar_paineis mods_celular_ocultar mods_celular_sub plugin_band_label navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de switcher_buscar_conversas term_titulo '
+  ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_ir_inicio chat_voltar_sessoes codex_limites_titulo compartilhar_menu ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes mods_celular_mostrar mods_celular_mostrar_um mods_celular_mostrar_paineis mods_celular_ocultar mods_celular_sub plugin_band_label navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de switcher_buscar_conversas term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
     .concat(' sessao_git chat_acao_git_detalhe cota_conta_ativa accounts_switch_title native_ctl_model_title native_new_chat_reasoning native_mode_bypassPermissions chat_mode_label')
     .concat(' live_voice_open composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint composer_steer_current_text ditado_estilo_titulo uso_aria codex_orientar_ajuda composer_fila_titulo composer_submission_recover_first queue_steer_uncertain')
@@ -357,6 +363,7 @@ vi.mock('./ArquivoChip', () => ({
 }));
 
 import { ChatHeader } from './ChatHeader';
+import { WorkingMarkPaused } from '../ui/WorkingMark';
 import { MessageList } from './MessageList';
 import { MoreSheet } from './MoreSheet';
 import { Composer } from './Composer';
@@ -429,6 +436,24 @@ describe('ações e atualização da conversa na rota', () => {
   });
   afterEach(() => { _resetChatsForTests(); chatRow.extra = {}; vi.useRealTimers(); });
 
+  it('pausa as marcas do chat e da gaveta quando outra tela cobre a conversa', async () => {
+    focusNavigation.focused = true;
+    const { container, root } = await render(createElement(ChatScreen));
+    const paused = () => container.querySelector('[data-working-paused]')?.getAttribute('data-working-paused');
+    try {
+      expect(paused()).toBe('false');
+      focusNavigation.focused = false;
+      await act(async () => root.render(createElement(ChatScreen)));
+      expect(paused()).toBe('true');
+      focusNavigation.focused = true;
+      await act(async () => root.render(createElement(ChatScreen)));
+      expect(paused()).toBe('false');
+    } finally {
+      focusNavigation.focused = true;
+      act(() => root.unmount());
+    }
+  });
+
   describe('ajustes pelo rodapé na tela real', () => {
     beforeEach(() => {
       realSettings.enabled = true;
@@ -467,11 +492,11 @@ describe('ações e atualização da conversa na rota', () => {
       expect(panel(container)).toBeNull();
     };
 
-    it('modo e conta abrem e reabrem a mesma folha, que mostra a conta e navega para trocar na rota certa', async () => {
+    it('modo abre os ajustes e conta abre direto a troca na rota certa', async () => {
       const { container, root } = await render(createElement(ChatScreen));
       try {
         expect(panel(container)).toBeNull();
-        for (const label of ['native_mode_bypassPermissions', 'native_mode_bypassPermissions', 'route-account', 'route-account']) {
+        for (const label of ['native_mode_bypassPermissions', 'native_mode_bypassPermissions']) {
           await openFooter(container, label);
           expect(container.querySelectorAll('[role="dialog"][aria-label="composer_session_settings"]')).toHaveLength(1);
           expect(panel(container)!.textContent).toContain('cota_conta_ativa');
@@ -485,17 +510,27 @@ describe('ações e atualização da conversa na rota', () => {
         expect(setPermissionMode).not.toHaveBeenCalled();
         expect(realFirstInput.send).not.toHaveBeenCalled();
         expect(realSettings.models).toHaveBeenCalledWith('sess', useServers.getState().servers[0]);
-        await openFooter(container, 'route-account');
-        await act(async () => button(container, 'accounts_switch_title')!.click());
+        await measureFooter();
+        await act(async () => button(container, 'route-account')!.click());
         expect(panel(container)).toBeNull();
         expect(routerPush).toHaveBeenLastCalledWith('/s/s1/sess/account');
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('chip de Codex nativo mantém os ajustes porque a troca só existe para Claude e seus motores', async () => {
+      sessionsState.rows[2] = { ...sessionsState.rows[2], provider: 'codex', conta: 'codex:/home/test/.codex-route-account' };
+      const { container, root } = await render(createElement(ChatScreen));
+      try {
+        await openFooter(container, 'route-account');
+        expect(routerPush).not.toHaveBeenCalled();
+        expect(button(panel(container)! as HTMLElement, 'accounts_switch_title')).toBeUndefined();
       } finally { act(() => root.unmount()); }
     });
 
     it('pedido consumido não reabre depois de remontar o Composer nem ao trocar servidor ou sessão', async () => {
       const { container, root } = await render(createElement(ChatScreen));
       try {
-        await openFooter(container, 'route-account');
+        await openFooter(container, 'native_mode_bypassPermissions');
         await closePanel(container);
         // O rodapé de orquestração desmonta o Composer mantendo a mesma tela e rota.
         sessionsState.rows[2] = { ...sessionsState.rows[2], provider: 'orq' };
@@ -509,19 +544,19 @@ describe('ações e atualização da conversa na rota', () => {
         route.params = { server: 's2', name: 'sess' };
         await act(async () => root.render(createElement(ChatScreen)));
         expect(panel(container)).toBeNull();
-        await openFooter(container, 'active-server');
+        await openFooter(container, 'chat_mode_label');
         route.params = { server: 's1', name: 'another' };
         chatRow.extra = { name: 'another' };
         await act(async () => root.render(createElement(ChatScreen)));
         expect(panel(container)).toBeNull();
-        await openFooter(container, 'other-session');
+        await openFooter(container, 'chat_mode_label');
       } finally { act(() => root.unmount()); }
     });
 
     it('/model e /effort continuam reabrindo a folha depois do pedido externo, sem enviar comandos', async () => {
       const { container, root } = await render(createElement(ChatScreen));
       try {
-        await openFooter(container, 'route-account');
+        await openFooter(container, 'native_mode_bypassPermissions');
         await closePanel(container);
         for (const command of ['/model', '/model', '/effort', '/effort']) {
           const field = container.querySelector('textarea')!;
@@ -540,12 +575,31 @@ describe('ações e atualização da conversa na rota', () => {
     });
   });
 
-  it('Nova conversa da gaveta do chat pede compose na inicial, sem mudar o fechamento das demais navegações', async () => {
+  it('casa no cabeçalho só aparece com outra tela entre o chat e o Início, e leva direto ao Início', async () => {
+    navigation.dismissTo.mockClear();
+    navigation.depth = 1;
+    const first = await render(createElement(ChatScreen));
+    try {
+      expect(button(first.container, 'chat_ir_inicio')).toBeUndefined();
+    } finally { act(() => first.root.unmount()); }
+    // Folha aberta por cima do chat não conta: a posição é a deste chat.
+    navigation.above = 2;
+    const sheet = await render(createElement(ChatScreen));
+    try {
+      expect(button(sheet.container, 'chat_ir_inicio')).toBeUndefined();
+    } finally { act(() => sheet.root.unmount()); navigation.above = 0; }
+    navigation.depth = 2;
+    const { container, root } = await render(createElement(ChatScreen));
+    try {
+      await act(async () => button(container, 'chat_ir_inicio')!.click());
+      expect(navigation.dismissTo).toHaveBeenLastCalledWith('/');
+    } finally { act(() => root.unmount()); navigation.depth = 1; }
+  });
+
+  it('o menu da gaveta do chat volta ao Início antes de navegar', async () => {
     navigation.dismissTo.mockClear();
     const { container, root } = await render(createElement(ChatScreen));
     try {
-      await act(async () => button(container, 'drawer-new-conversation')!.click());
-      expect(navigation.dismissTo).toHaveBeenLastCalledWith({ pathname: '/', params: { compose: '1' } });
       await act(async () => button(container, 'drawer-navigation-close')!.click());
       expect(navigation.dismissTo).toHaveBeenLastCalledWith('/');
     } finally { act(() => root.unmount()); }
@@ -2270,10 +2324,9 @@ describe('handoff nas rotas reais', () => {
   it.each([true, false])('Nova conversa tem saída acessível com ou sem tela anterior: %s', async (canGoBack) => {
     route.segments = ['create']; navigation.canGoBack = canGoBack;
     const { container, root } = await render(createElement(CreateRoute));
+    expect(container.querySelector('[data-create]')?.getAttribute('data-create')).toBe('form');
     const cancel = container.querySelector<HTMLButtonElement>('[aria-label="comum_cancelar"]');
     expect(cancel).not.toBeNull();
-    expect(cancel!.style.minHeight).toBe('44px');
-    expect(cancel!.style.minWidth).toBe('44px');
     act(() => cancel!.click());
     if (canGoBack) {
       expect(navigation.back).toHaveBeenCalledTimes(1);

@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException, Request, Response
 
-from app import auth, diag, peers, registry, sse, sync
+from app import auth, diag, peers, sse, sync
 
 
 SECRET = "segredo-que-nao-pode-aparecer@example.invalid"
@@ -116,31 +116,6 @@ def test_sync_registra_causas_e_resultado_sem_login_senha_ou_vault(diario, tmp_p
     rows = diario()
     assert {r.get("detalhe") for r in rows} >= {"bootstrap_invalido", "credenciais_invalidas", "revisao_desatualizada"}
     assert {r["evento"] for r in rows} >= {"sync.cadastrado", "sync.login_concluido", "sync.gravado"}
-    assert SECRET not in json.dumps(rows)
-
-
-@pytest.mark.parametrize("criou", [False, True])
-def test_criacao_registra_etapas_sem_caminho_ou_comando(diario, tmp_path, monkeypatch, criou):
-    reg = registry.SessionRegistry(projects_dir=tmp_path / "projects")
-    monkeypatch.setattr(registry.tmux, "has_session", lambda _: False)
-    monkeypatch.setattr(registry.codex_sessions, "exists", lambda _: False)
-    monkeypatch.setattr(registry.tmux, "new_session", lambda *args, provider="claude", env=None: criou)
-    monkeypatch.setattr(registry, "_pretrust_cwd", lambda *args: None)
-    monkeypatch.setattr(registry.PromptQueue, "clear", lambda _: None)
-    monkeypatch.setattr(registry.ThenLink, "clear", lambda _: None)
-    monkeypatch.setattr(reg, "_clear_pair", lambda _: None)
-    monkeypatch.setattr(reg, "_jsonl_cache", {})
-    if criou:
-        assert reg.create("teste", str(tmp_path / SECRET)).name == "teste"
-    else:
-        with pytest.raises(ValueError, match="falha ao criar"):
-            reg.create("teste", str(tmp_path / SECRET))
-    rows = diario()
-    etapas = [r["etapa"] for r in rows if r["evento"] == "sessao.criar_etapa"]
-    assert etapas[:4] == ["validar", "preparar_comando", "confiar_pasta", "criar_terminal"]
-    assert ("limpar_estado_anterior" in etapas) is criou
-    assert rows[-1]["codigo"] == ("retornou" if criou else "excecao")
-    assert len({r["operacao"] for r in rows}) == 1
     assert SECRET not in json.dumps(rows)
 
 

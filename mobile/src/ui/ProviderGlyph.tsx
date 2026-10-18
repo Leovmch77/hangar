@@ -21,21 +21,24 @@ function colorOf(provider: string, dark: boolean): [string, string] {
   }
 }
 
-// Selo do provider: quadradinho com 20% da cor da marca e o logo (ou a letra) por cima.
-export function ProviderGlyph({ provider, size = 16 }: { provider: string; size?: number }) {
+// Na linha do nome, a marca fica sem o fundo do selo.
+export function ProviderGlyph({ provider, size = 16, inline = false, color: tint }: { provider: string; size?: number; inline?: boolean; color?: string }) {
   const { rt, theme } = useUnistyles();
-  const [color, letter] = colorOf(provider, rt.themeName !== 'light');
+  const [providerColor, letter] = colorOf(provider, rt.themeName !== 'light');
+  const color = tint ?? providerColor;
+  if (inline && letter === '?') return null;
   const d = LOGO[provider];
+  const logoSize = inline ? size : size * 0.72;
   return (
     <View
-      style={{ width: size, height: size, borderRadius: 4, backgroundColor: `${color}33`, alignItems: 'center', justifyContent: 'center' }}
+      style={{ width: size, height: size, flexShrink: inline ? 0 : undefined, borderRadius: 4, backgroundColor: inline ? 'transparent' : `${color}33`, alignItems: 'center', justifyContent: 'center' }}
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
     >
       {d ? (
-        <Svg width={size * 0.72} height={size * 0.72} viewBox="0 0 24 24" fill={color}><Path d={d} /></Svg>
+        <Svg width={logoSize} height={logoSize} viewBox="0 0 24 24" fill={color}><Path d={d} /></Svg>
       ) : (
-        <Text style={{ color, fontSize: theme.base.text.xxxs, fontWeight: '700' }} maxFontSizeMultiplier={1}>{letter}</Text>
+        <Text style={{ color, fontSize: inline ? theme.base.text.base : theme.base.text.xxxs, fontWeight: '700' }} maxFontSizeMultiplier={1}>{letter}</Text>
       )}
     </View>
   );

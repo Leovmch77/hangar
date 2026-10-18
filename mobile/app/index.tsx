@@ -39,7 +39,6 @@ export default function Index() {
     setMode('newConversation');
     if (focus) setFocusRequest((request) => request + 1);
   }, []);
-  const newFromDrawer = useCallback(() => { closeDrawer(); openConversation(true); }, [closeDrawer, openConversation]);
   // O keyboardDismissMode da gaveta só age no arrasto; pelo botão o campo seguiria focado atrás dela.
   const openDrawer = () => { Keyboard.dismiss(); drawer.current?.openDrawer(); };
 
@@ -76,7 +75,7 @@ export default function Index() {
   return (
     <WorkingMarkPaused.Provider value={!focused}>
     <Screen edges={[]}>
-      <SessionsDrawer ref={drawer} onClose={closeDrawer} onNewConversation={newFromDrawer} onOpenServers={() => setServersOpen(true)}>
+      <SessionsDrawer ref={drawer} onClose={closeDrawer} onOpenServers={() => setServersOpen(true)}>
         <View style={styles.bar} {...swipe.panHandlers}>
           <Pressable onPress={mode === 'newConversation' ? showSessions : openDrawer} style={styles.sessions}
             accessibilityRole="button" accessibilityLabel={m.native_sessions()} accessibilityValue={{ text: String(count) }}>

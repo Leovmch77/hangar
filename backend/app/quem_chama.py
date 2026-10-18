@@ -52,6 +52,14 @@ def _por_chave(chave: str) -> Optional[str]:
     return None
 
 
+def _registro_existe(chave: str) -> bool:
+    """`~/.hangar/session-specs/<chave>.json`, que o Rust grava ao abrir (chave de 32 hex)."""
+    if len(chave) != 32 or any(c not in "0123456789abcdef" for c in chave):
+        return False
+    from pathlib import Path
+    return (Path.home() / ".hangar" / "session-specs" / f"{chave}.json").is_file()
+
+
 def _por_pane(pane: str) -> Optional[str]:
     donos = {nome for nome, panes in tmux.list_panes_all().items()
              if any(p.get("pane_id") == pane for p in panes)}
@@ -96,7 +104,10 @@ def resolver(cabecalhos: Mapping[str, str]) -> tuple[str, str]:
         nome = _por_chave(h[CAB_CHAVE])
         if nome:
             return nome, "chave"
-        raise SessaoDesconhecida("chave de sessão sem terminal não corresponde a nenhum sidecar")
+        if not _registro_existe(h[CAB_CHAVE]):
+            raise SessaoDesconhecida("chave de sessão sem terminal não corresponde a nenhum sidecar")
+        # Sessão com terminal aberta pelo Rust: a chave mora no registro dela, sem sidecar; quem
+        # diz o nome atual é o pane (o rename não muda o pane id).
     if h.get(CAB_PANE):
         nome = _por_pane(h[CAB_PANE])
         if nome:

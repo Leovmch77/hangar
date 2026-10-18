@@ -35,10 +35,8 @@ vi.mock('../ui/Sheet', () => ({ Sheet: ({ children, onDismiss }: { children: Rea
   calls.dismiss = onDismiss;
   return children;
 } }));
-vi.mock('../ui/HangarMark', () => ({ HangarMark: ({ color }: { color: string }) =>
-  React.createElement('span', { 'data-mark': 'idle', style: { color } }) }));
-vi.mock('../ui/WorkingMark', () => ({ WorkingMark: ({ color }: { color: string }) =>
-  React.createElement('span', { 'data-mark': 'working', style: { color } }) }));
+vi.mock('@react-native-menu/menu', () => ({ MenuView: ({ children }: React.PropsWithChildren) =>
+  React.createElement('div', { 'data-menu': true }, children) }));
 vi.mock('../ui/Icon', () => ({ Icon: ({ name, color }: { name: string; color: string }) =>
   React.createElement('span', { 'data-icon': name, style: { color } }) }));
 vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 34, left: 0, right: 0 }) }));
@@ -50,6 +48,8 @@ vi.mock('react-native', async (original) => {
   const native = await original<typeof import('react-native')>();
   return {
   ...native,
+  View: ({ testID, ...props }: import('react-native').ViewProps) =>
+    React.createElement(native.View, { ...props, ...{ 'data-testid': testID } }),
   ScrollView: ({ children, ...props }: React.PropsWithChildren<typeof calls.scroll>) => {
     calls.scroll = props;
     return React.createElement(native.View, { style: props.style as never }, children);
@@ -59,12 +59,12 @@ vi.mock('react-native', async (original) => {
   }) => React.createElement('input', { value, placeholder, 'aria-label': accessibilityLabel,
     onInput: (event: React.FormEvent<HTMLInputElement>) => onChangeText(event.currentTarget.value) }),
   Pressable: ({ onPress, accessibilityLabel, accessibilityState, disabled, children, style }: {
-    onPress: () => void; accessibilityLabel: string; accessibilityState?: { selected?: boolean }; disabled?: boolean; children: React.ReactNode;
+    onPress: () => void; accessibilityLabel: string; accessibilityState?: { selected?: boolean; expanded?: boolean }; disabled?: boolean; children: React.ReactNode;
     style?: unknown;
   }) => {
     const raw = typeof style === 'function' ? style({ pressed: false }) : style;
     const flattened = Array.isArray(raw) ? Object.assign({}, ...raw.flat(Infinity).filter(Boolean)) : raw;
-    return React.createElement('button', { onClick: onPress, 'aria-label': accessibilityLabel, 'aria-selected': accessibilityState?.selected,
+    return React.createElement('button', { onClick: onPress, 'aria-label': accessibilityLabel, 'aria-selected': accessibilityState?.selected, 'aria-expanded': accessibilityState?.expanded,
       disabled, style: flattened as React.CSSProperties }, children);
   },
   };
@@ -85,7 +85,7 @@ describe('SessionPickerSheet', () => {
     ];
   });
 
-  it('agrupa como a lista inicial, com o servidor atual primeiro e quem aguarda antes das outras', async () => {
+  it.each([false, true])('reúne o topo como a home e prioriza o servidor atual (atual externa=%s)', async (outsideCurrent) => {
     const row = (name: string, serverId: string, serverLabel: string, state: AggSession['state'] = 'idle'): AggSession =>
       ({ name, serverId, serverLabel, state, serverColor: '#000' });
     calls.rows = [
@@ -102,15 +102,25 @@ describe('SessionPickerSheet', () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(React.createElement(SessionPickerSheet, {
-        open: true, atual: 'z-current', serverId: 'srv1', onClose: () => {},
+        open: true, atual: outsideCurrent ? 'outside' : 'z-current', serverId: outsideCurrent ? 'external' : 'srv1', onClose: () => {},
       })));
-      const labels = Array.from(container.querySelectorAll('button')).map((button) => button.getAttribute('aria-label')?.split(',')[0]);
-      expect(labels).toEqual(['z-wait', 'outside', 'a-idle', 'z-current', 'b-remote', 'c-remote']);
+      const labels = Array.from(container.querySelectorAll('button[aria-selected]')).map((button) => button.getAttribute('aria-label')?.split(',')[0]);
+      expect(labels).toEqual(['c-remote', 'z-wait', 'outside', 'z-current', 'a-idle', 'b-remote']);
       const headings = Array.from(container.querySelectorAll('[role="header"]')).map((header) => header.textContent);
-      expect(headings).toContain('z-machine');
+      expect(headings).toEqual([m.home_sessions_awaiting(), m.home_sessions_working(), 'z-machine', 'b-machine']);
+      const groups = container.querySelectorAll('button[aria-expanded]');
+      expect(groups[0].textContent).toContain('3');
+      expect(groups[1].textContent).toContain('1');
       expect(headings.indexOf('z-machine')).toBeLessThan(headings.indexOf('b-machine'));
-      expect(headings.indexOf('b-machine')).toBeLessThan(headings.indexOf('c-machine'));
+      expect(headings).not.toContain('c-machine');
       expect(headings).not.toContain('outside-machine');
+      await act(async () => (groups[0] as HTMLButtonElement).click());
+      expect(groups[0].getAttribute('aria-expanded')).toBe('false');
+      expect(groups[0].textContent).toContain('3');
+      expect(container.querySelectorAll('button[aria-selected]')).toHaveLength(3);
+      await act(async () => (groups[0] as HTMLButtonElement).click());
+      expect(container.querySelectorAll('button[aria-selected]')).toHaveLength(6);
+      expect(container.querySelectorAll('button[aria-selected="true"]')).toHaveLength(1);
     } finally {
       await act(async () => root.unmount());
     }
@@ -130,7 +140,7 @@ describe('SessionPickerSheet', () => {
         open: true, atual: 'anchor', serverId: 'srv1', onClose: () => {},
       })));
       expect(Array.from(container.querySelectorAll('[role="header"]')).map((header) => header.textContent)).toEqual(['first-server']);
-      const externalRows = Array.from(container.querySelectorAll('button')).filter((button) => button.getAttribute('aria-label')?.startsWith('shared,'));
+      const externalRows = Array.from(container.querySelectorAll('button[aria-selected]')).filter((button) => button.getAttribute('aria-label')?.startsWith('shared,'));
       expect(externalRows).toHaveLength(2);
       expect(externalRows[0].textContent).toContain('first-owner');
       expect(externalRows[1].textContent).toContain('second-owner');
@@ -180,8 +190,8 @@ describe('SessionPickerSheet', () => {
       })));
       const current = container.querySelector<HTMLButtonElement>('button[aria-selected="true"]')!;
       const other = container.querySelector<HTMLButtonElement>('button[aria-selected="false"]')!;
-      expect(current.querySelector('[data-icon="Check"]')).not.toBeNull();
-      expect(other.querySelector('[data-icon="Check"]')).toBeNull();
+      expect(current.querySelector(':scope > [data-icon="Check"]')).not.toBeNull();
+      expect(other.querySelector(':scope > [data-icon="Check"]')).toBeNull();
       expect(current.getAttribute('aria-label')).toContain(m.switcher_atual());
       expect(current.style.backgroundColor).not.toBe('');
       expect(current.style.backgroundColor).not.toBe(other.style.backgroundColor);
@@ -191,13 +201,16 @@ describe('SessionPickerSheet', () => {
   });
 
   it.each([
-    ['working', 'estado_em_execucao', 'working', '#70f'],
-    ['idle', 'estado_pronto', 'idle', '#080'],
-    ['awaiting_input', 'estado_aguardando', 'idle', '#b70'],
-  ] as const)('linha compacta mostra estado %s, cor da home, tempo e motor Claude', async (state, label, mark, color) => {
+    ['working', null, '#00f', false],
+    ['idle', 'Check', '#ccc', false],
+    ['awaiting_input', null, '#f90', false],
+    ['idle', 'Hourglass', '#f90', true],
+  ] as const)('reusa a linha da home com estado %s (%s), atividade e metadados', async (state, mark, color, limited) => {
     const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.UTC(2026, 9, 18, 12));
-    calls.rows = [{ ...calls.rows[0], state, last_activity: Date.now() / 1000 - 125,
-      provider: 'claude', engine: 'test-engine', question: 'not-the-state', label: 'not-the-state' },
+    calls.rows = [{ ...calls.rows[0], state, limited, last_activity: Date.now() / 1000 - 125,
+      provider: 'claude', engine: 'test-engine', question: state === 'awaiting_input' ? 'pending-question' : undefined,
+      label: 'running-task', branch: 'feat/session-picker', git_ahead: 2, git_behind: 3, git_added: 4, git_removed: 5,
+      conta: 'claude:/home/test/.claude-review' },
       { ...calls.rows[1], provider: 'codex', engine: 'not-a-claude-engine' }];
     const container = document.createElement('div');
     const root = createRoot(container);
@@ -207,16 +220,28 @@ describe('SessionPickerSheet', () => {
       })));
       const current = container.querySelector<HTMLButtonElement>('button[aria-selected="true"]')!;
       const other = container.querySelector<HTMLButtonElement>('button[aria-selected="false"]')!;
-      expect(current.textContent).toContain(m[label]());
+      expect(current.textContent).not.toContain(state === 'working' ? m.estado_em_execucao() : state === 'awaiting_input' ? m.estado_aguardando() : m.estado_pronto());
       expect(current.textContent).toContain(m.tempo_min_atras({ n: 2 }));
-      expect(current.getAttribute('aria-label')).toContain(m[label]());
       expect(current.getAttribute('aria-label')).toContain('test-engine');
-      expect(current.querySelector<HTMLElement>(`[data-mark="${mark}"]`)?.style.color).toBe(color);
+      const avatar = current.querySelector('[data-testid="session-avatar"]');
+      expect(avatar?.querySelector<HTMLElement>('[data-testid="session-avatar-ring"]')?.style.borderColor).toBe(color);
+      const badge = avatar?.querySelector('[data-testid="session-avatar-badge"]');
+      if (mark) expect(badge?.querySelector(`[data-icon="${mark}"]`)).not.toBeNull();
+      else expect(badge).toBeNull();
+      if (state === 'working') expect(current.textContent).toContain('running-task');
+      if (state === 'awaiting_input') expect(current.textContent).toContain('pending-question');
       expect(current.textContent).toContain('test-engine');
+      expect(current.textContent).toContain('feat/session-picker');
+      expect(current.textContent).toContain('+4');
+      expect(current.textContent).toContain('−5');
+      expect(current.textContent).toContain('review');
+      expect(current.querySelector('[data-icon="ArrowUp"]')).not.toBeNull();
+      expect(current.querySelector('[data-icon="ArrowDown"]')).not.toBeNull();
       expect(current.querySelector('[data-icon="Settings"]')).not.toBeNull();
       expect(other.textContent).not.toContain('not-a-claude-engine');
       expect(other.querySelector('[data-icon="Settings"]')).toBeNull();
-      expect(current.style.minHeight).toBe('48px');
+      expect(current.style.minHeight).toBe('44px');
+      expect(container.querySelector('[data-menu]')).toBeNull();
     } finally {
       clock.mockRestore();
       await act(async () => root.unmount());
@@ -244,23 +269,23 @@ describe('SessionPickerSheet', () => {
       await render();
       expect(search(), 'nove vivas têm campo de busca').not.toBeNull();
       expect(search().getAttribute('aria-label')).toBe(m.switcher_buscar_sessao());
-      expect(search().compareDocumentPosition(container.querySelector('button')!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+      expect(search().compareDocumentPosition(container.querySelector('button[aria-selected]')!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
       await type('  SHARED  ');
-      expect(container.querySelectorAll('button')).toHaveLength(2);
+      expect(container.querySelectorAll('button[aria-selected]')).toHaveLength(2);
       expect(search().value).toBe('  SHARED  ');
       await type(' /work/TARGET ');
-      expect(container.querySelectorAll('button')).toHaveLength(1);
-      expect(container.querySelector('button')?.textContent).toContain('outside-target');
+      expect(container.querySelectorAll('button[aria-selected]')).toHaveLength(1);
+      expect(container.querySelector('button[aria-selected]')?.textContent).toContain('outside-target');
       expect(container.querySelector('[role="header"]')?.textContent).toBe('first-server');
       await type('no-match');
-      expect(container.querySelectorAll('button')).toHaveLength(0);
+      expect(container.querySelectorAll('button[aria-selected]')).toHaveLength(0);
       expect(container.textContent).toContain(m.lista_vazia_filtro());
       expect(search().value).toBe('no-match');
       calls.rows = calls.rows.slice(0, 2);
       await render();
       expect(search().value, 'a lista ao vivo encolher não apaga a busca').toBe('no-match');
       await type('');
-      expect(container.querySelectorAll('button')).toHaveLength(2);
+      expect(container.querySelectorAll('button[aria-selected]')).toHaveLength(2);
       expect(container.textContent).not.toContain(m.lista_vazia_filtro());
     } finally {
       await act(async () => root.unmount());
@@ -298,7 +323,7 @@ describe('SessionPickerSheet', () => {
       await render();
       expect(container.querySelector('[role="alert"]')?.textContent).toBe('first-server: producer-failed');
       expect(container.textContent).toContain(`third-server: ${m.lista_carregando()}`);
-      expect(container.querySelectorAll('button')).toHaveLength(1);
+      expect(container.querySelectorAll('button[aria-selected]')).toHaveLength(1);
       expect(container.textContent).not.toContain(m.lista_nenhuma_ativa());
       calls.rows = [];
       calls.byServer = [{ server, sessions: [], loaded: false, error: 'offline' }];
@@ -335,7 +360,7 @@ describe('SessionPickerSheet', () => {
         sessions: calls.rows, loaded: true, error: null,
       }];
       await render();
-      expect(container.querySelectorAll('button')).toHaveLength(9);
+      expect(container.querySelectorAll('button[aria-selected]')).toHaveLength(9);
       expect(container.textContent).toContain(`ended-server: ${m.convite_encerrado()}`);
       expect(container.textContent).not.toContain(m.lista_carregando());
       const search = container.querySelector<HTMLInputElement>('input')!;
@@ -343,10 +368,26 @@ describe('SessionPickerSheet', () => {
         search.value = 'no-match';
         search.dispatchEvent(new Event('input', { bubbles: true }));
       });
-      expect(container.querySelectorAll('button')).toHaveLength(0);
+      expect(container.querySelectorAll('button[aria-selected]')).toHaveLength(0);
       expect(container.textContent).toContain(m.lista_vazia_filtro());
       expect(container.textContent).not.toContain(m.lista_nenhuma_ativa());
       expect(container.textContent).not.toContain(m.lista_carregando());
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it('a folha só troca de sessão, sem ações administrativas nem retomada', async () => {
+    calls.rows = [{ ...calls.rows[0], provider: 'claude', tracked: false, cwd: '/repo' }, calls.rows[1]];
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(React.createElement(SessionPickerSheet, {
+        open: true, atual: 'shared', serverId: 'srv1', onClose: () => {},
+      })));
+      expect(container.querySelector('[data-menu]')).toBeNull();
+      expect(container.textContent).not.toContain(m.sessao_retomar());
+      expect(container.querySelectorAll('button[aria-selected]')).toHaveLength(2);
     } finally {
       await act(async () => root.unmount());
     }
@@ -367,7 +408,7 @@ describe('SessionPickerSheet', () => {
       expect(calls.keyboard.automaticOffset).toBe(true);
       expect(calls.keyboard.behavior).toBe('padding');
       expect(flatten(calls.keyboard.style).flex).toBe(1);
-      expect(container.querySelectorAll('button')).toHaveLength(2);
+      expect(container.querySelectorAll('button[aria-selected]')).toHaveLength(2);
     } finally {
       await act(async () => root.unmount());
     }
@@ -388,10 +429,10 @@ describe('SessionPickerSheet', () => {
       expect(calls.retain).toHaveBeenCalledTimes(1);
       await render(false);
       expect(calls.release).not.toHaveBeenCalled();
-      expect(container.querySelectorAll('button')).toHaveLength(2);
+      expect(container.querySelectorAll('button[aria-selected]')).toHaveLength(2);
       await act(async () => calls.dismiss!());
       expect(calls.release).toHaveBeenCalledTimes(1);
-      expect(container.querySelectorAll('button')).toHaveLength(0);
+      expect(container.querySelectorAll('button[aria-selected]')).toHaveLength(0);
       await render(true);
       expect(calls.retain).toHaveBeenCalledTimes(2);
     } finally {
@@ -410,13 +451,13 @@ describe('SessionPickerSheet', () => {
       calls.reads = 0;
       await render(false);
       expect(calls.reads).toBe(0);
-      expect(container.querySelectorAll('button')).toHaveLength(0);
+      expect(container.querySelectorAll('button[aria-selected]')).toHaveLength(0);
       await render(true);
-      expect(container.querySelectorAll('button')).toHaveLength(2);
+      expect(container.querySelectorAll('button[aria-selected]')).toHaveLength(2);
       await render(false);
-      expect(container.querySelectorAll('button')).toHaveLength(2);
+      expect(container.querySelectorAll('button[aria-selected]')).toHaveLength(2);
       await act(async () => calls.dismiss!());
-      expect(container.querySelectorAll('button')).toHaveLength(0);
+      expect(container.querySelectorAll('button[aria-selected]')).toHaveLength(0);
     } finally {
       await act(async () => root.unmount());
     }

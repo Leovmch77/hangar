@@ -1,9 +1,10 @@
 ﻿# Wrapper do `claude` pro PowerShell - equivalente do scripts/shell/claude.posix.sh.
 #
-# Sem ele, um `claude` aberto por voce no terminal e INVISIVEL pro app: sem --session-id o
-# backend nao sabe qual transcript .jsonl e daquela sessao, e fora do multiplexador nao ha pane
-# pra ler estado nem receber input. Com ele, `claude` na pasta do projeto abre uma sessao no
-# psmux, nomeada pela pasta, com id proprio - igual ao Linux.
+# Faz todo `claude` interativo aberto no terminal nascer como sessao do Hangar, igual as do app:
+# fora do multiplexador, o lancador do Hangar (`hangar-server open`) abre a sessao no psmux e o
+# terminal anexa nela. --session-id/--resume/-c/--continue, modo -p, entrada redirecionada, ja
+# dentro do psmux ou subcomando -> claude cru; argumento que o pedido nao cobre ou sem
+# hangar-server -> sessao no psmux com o nome da pasta.
 #
 # Instalado pelo install.ps1, que adiciona um bloco marcado no $PROFILE chamando este arquivo.
 # Compativel com Windows PowerShell 5.1 (nada de operador ternario nem API de .NET Core).
@@ -53,71 +54,136 @@ function claude {
 
     $id = [guid]::NewGuid().ToString()
 
-    # So injeta o id (sem criar sessao) quando: ja estamos dentro do multiplexador, modo -p, ou
-    # a entrada nao e um terminal (pipe/redirecionamento) - nesses casos criar sessao atrapalha.
-
     if ($env:TMUX -and $env:TMUX_PANE) {
         # TMUX herdado pode estar MORTO (terminal reaproveitado de um pane que ja fechou).
-        # list-panes sai != 0 pra pane inexistente; stale -> limpa e cai no caminho de criar.
+        # list-panes sai != 0 pra pane inexistente; stale -> limpa e abre pelo Hangar.
         tmux list-panes -t $env:TMUX_PANE 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { $env:TMUX = $null; $env:TMUX_PANE = $null }
     }
 
-    if ($env:TMUX -or $modoPrint -or [Console]::IsInputRedirected) {
-        $env:COLORTERM = 'truecolor'; $env:CLAUDE_CODE_TMUX_TRUECOLOR = '1'
-        if ($pre.Count -eq 0) { & $claudeExe --session-id $id @plug @args }
-        else { $r = @($pre[1..($pre.Count - 1)]) + @('claude', '--session-id', $id) + $plug + $args
-               & $pre[0] @r }
-        return
+    # Fora do multiplexador e interativo: a sessao nasce pelo lancador do Hangar
+    # (`hangar-server open`), igual as do app, e o terminal anexa nela. Mesmas regras do
+    # claude.posix.sh / scripts/hangar-open: argumento que o pedido nao cobre, ou sem
+    # hangar-server -> sessao no psmux abaixo; recusa -> erro, sem segunda abertura.
+    if (-not $env:TMUX -and -not $modoPrint -and -not [Console]::IsInputRedirected) {
+        $pedido = [ordered]@{ provider = 'claude'; cwd = (Get-Location).ProviderPath; headless = $false }
+        if ($env:CLAUDE_CONFIG_DIR) { $pedido.config_dir = $env:CLAUDE_CONFIG_DIR }
+        if ($env:CP_ENGINE) { $pedido.engine = $env:CP_ENGINE }
+        $chaves = @{ '--model' = 'model'; '--effort' = 'effort'; '--permission-mode' = 'permission_mode' }
+        $cobre = $true
+        # Subcomando do claude (`claude --help`, secao Commands) so vale como PRIMEIRO argumento e
+        # roda cru: virar sessao faria dele o prompt inicial. Mesma lista do scripts/hangar-open.
+        $subcomandos = @('agents', 'attach', 'auth', 'auto-mode', 'doctor', 'gateway', 'import', 'install',
+                         'logs', 'mcp', 'plugin', 'plugins', 'purge', 'respawn', 'rm', 'setup-token', 'stop',
+                         'kill', 'ultrareview', 'update', 'upgrade')
+        if ($args.Count -gt 0 -and $subcomandos -ccontains [string]$args[0]) { $cobre = $false }
+        $barrou = $null
+        for ($i = 0; $cobre -and $i -lt $args.Count; $i++) {
+            $a = [string]$args[$i]
+            $flag, $valor = $a -split '=', 2
+            if ($chaves.ContainsKey($flag)) {
+                if ($null -eq $valor) {
+                    $i++
+                    if ($i -ge $args.Count) { $barrou = $a; break }
+                    $valor = [string]$args[$i]
+                }
+                $pedido[$chaves[$flag]] = $valor
+            } elseif ($a -eq '--dangerously-skip-permissions') {
+                $pedido.permission_mode = 'bypassPermissions'
+            } elseif ($a.StartsWith('-') -or $pedido.Contains('initial_prompt')) {
+                $barrou = $a; break
+            } else {
+                $pedido.initial_prompt = $a
+            }
+        }
+        if ($null -ne $barrou) {
+            $cobre = $false
+            [Console]::Error.WriteLine("hangar: o argumento '$barrou' nao cabe no pedido do Hangar; abrindo o claude sem o Hangar")
+        }
+        if ($cobre) {
+            # O mesmo binario que o Supervisor sobe (backend/app/rust_bins.py): CP_RUST_SERVER_BIN
+            # vence e nao cai para outro; sem ela, o mais novo entre o build desta copia e o baixado
+            # (empate fica com a copia); o PATH so sem nenhum dos dois.
+            $servidor = $null
+            $melhor = $null
+            if ($env:CP_RUST_SERVER_BIN) {
+                if (Test-Path -LiteralPath $env:CP_RUST_SERVER_BIN -PathType Leaf) { $servidor = $env:CP_RUST_SERVER_BIN }
+            } else {
+                foreach ($c in @((Join-Path $PSScriptRoot '..\..\crates\target\release\hangar-server.exe'),
+                                 (Join-Path $HOME '.hangar\bin\hangar-server.exe'))) {
+                    if (Test-Path -LiteralPath $c -PathType Leaf) {
+                        $item = Get-Item -LiteralPath $c
+                        if (-not $melhor -or $item.LastWriteTimeUtc -gt $melhor.LastWriteTimeUtc) { $melhor = $item }
+                    }
+                }
+                if ($melhor) { $servidor = $melhor.FullName }
+            }
+            if (-not $servidor -and -not $env:CP_RUST_SERVER_BIN) {
+                $servidor = (Get-Command hangar-server -CommandType Application -ErrorAction SilentlyContinue |
+                             Select-Object -First 1).Source
+            }
+            if (-not $servidor) {
+                [Console]::Error.WriteLine('hangar: hangar-server nao encontrado; abrindo o claude sem o Hangar')
+            } else {
+                # Pela entrada padrao, nao como argumento: o PowerShell 5.1 come as aspas de dentro
+                # do JSON ao chamar um executavel. UTF-8 pra pasta com acento chegar inteira.
+                $OutputEncoding = New-Object System.Text.UTF8Encoding $false
+                $saida = ($pedido | ConvertTo-Json -Compress) | & $servidor open
+                $codigo = $LASTEXITCODE
+                if ($codigo -eq 0) {
+                    $nome = (($saida -join "`n") | ConvertFrom-Json).name
+                    if (-not $nome) { Write-Error "hangar: resposta do hangar-server sem o nome da sessao: $saida"; return }
+                    # Nome cru: o psmux nao honra `=` em todo comando e o nome ja e exato la.
+                    tmux attach-session -t $nome
+                    return
+                }
+                # 2 = hangar-server antigo, sem `open`; 4 = sem token no .env. Nada foi enviado: segue cru.
+                if ($codigo -eq 2 -or $codigo -eq 4) {
+                    [Console]::Error.WriteLine("hangar: o hangar-server nao abriu a sessao (saida $codigo); abrindo o claude sem o Hangar")
+                } else {
+                    # Saida 3 (resolvido mas nao aberto aqui) traz o spec no stdout.
+                    if ($saida) { [Console]::Error.WriteLine(($saida -join "`n")) }
+                    $global:LASTEXITCODE = $codigo
+                    return
+                }
+            }
+        }
+
+        # O Hangar nao abriu: sem o psmux o claude ficaria invisivel pro app. Subcomando roda cru.
+        if ($args.Count -eq 0 -or $subcomandos -cnotcontains [string]$args[0]) {
+            # Sessao com o nome da pasta, unica. FormD + descarte da marca = acento vira ASCII,
+            # mesma regra do backend (app/names.py).
+            $base = Split-Path -Leaf (Get-Location).ProviderPath
+            $base = -join ($base.Normalize([Text.NormalizationForm]::FormD).ToCharArray() | Where-Object {
+                [Globalization.CharUnicodeInfo]::GetUnicodeCategory($_) -ne 'NonSpacingMark'
+            })
+            $base = ($base -replace '[^A-Za-z0-9_-]', '-').Trim('-')
+            if (-not $base) { $base = 'session' }
+            $nome = $base; $n = 2
+            while ($true) {
+                # `=`: match exato; sem ele "proj-2" viva responderia por "proj".
+                tmux has-session -t "=$nome" 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) { break }
+                $nome = "$base-$n"; $n++
+            }
+            # So com a variavel: no psmux o pane herda o ambiente de quem chama, e
+            # CLAUDE_CONFIG_DIR apontando pro padrao faria o Claude ler o .claude.json errado.
+            if ($env:CLAUDE_CONFIG_DIR) { $cfg = @('-e', "CLAUDE_CONFIG_DIR=$($env:CLAUDE_CONFIG_DIR)") }
+            else { $cfg = @() }
+            # CP_SESSION_NAME: identidade da sessao pro hangar-send de dentro do pane.
+            $cmd = @('tmux', 'new-session', '-s', $nome, '-c', (Get-Location).ProviderPath,
+                     '-e', 'COLORTERM=truecolor', '-e', 'CLAUDE_CODE_TMUX_TRUECOLOR=1',
+                     '-e', "CP_SESSION_NAME=$nome") +
+                   $cfg + $pre + @('claude', '--session-id', $id) + $plug + $args
+            $r = @($cmd[1..($cmd.Count - 1)])
+            & $cmd[0] @r
+            return
+        }
     }
 
-    # Fora do multiplexador e interativo: cria sessao com o nome da pasta, unico.
-    $base = Split-Path -Leaf (Get-Location).Path
-    # Acento vira o ASCII equivalente ANTES do filtro (mesma regra do backend, app/names.py):
-    # sem isto "?rea de Trabalho" perderia a primeira letra. FormD separa a letra do acento e o
-    # filtro seguinte descarta a marca, que e o que o iconv //TRANSLIT faz no Linux.
-    $base = -join ($base.Normalize([Text.NormalizationForm]::FormD).ToCharArray() | Where-Object {
-        [Globalization.CharUnicodeInfo]::GetUnicodeCategory($_) -ne 'NonSpacingMark'
-    })
-    $base = ($base -replace '[^A-Za-z0-9_-]', '-').Trim('-')
-    if (-not $base) { $base = 'session' }
-
-    $nome = $base; $i = 2
-    while ($true) {
-        # `=$nome`: match EXATO. Sem o '=', o alvo do tmux cai em match por PREFIXO e "proj-2"
-        # viva responderia "existe" pra "proj" - o loop nunca acharia um nome livre.
-        tmux has-session -t "=$nome" 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) { break }
-        $nome = "$base-$i"; $i++
-    }
-
-    # Conta Claude (claude-conta setou CLAUDE_CONFIG_DIR): psmux NAO herda o env de quem chama —
-    # sem repassar aqui, a sessao nasceria na conta padrao, calada. Aqui pode ir por `-e` (ao
-    # contrario da key do motor, que vai pelo `hangar-engine --exec` justamente pra nao aparecer em
-    # /proc/<pid>/cmdline): isto e um caminho, nao um segredo.
-    # SO quando o chamador tem a variavel. O padrao explicito ($HOME\.claude) que ficava aqui era
-    # medido como ERRADO em 22/08/2026: pro Claude Code, CLAUDE_CONFIG_DIR setado — mesmo apontando
-    # pro proprio ~/.claude — quer dizer "leia o .claude.json de DENTRO dessa pasta", que nasce
-    # vazio; sem a variavel ele le o ~/.claude.json, o de verdade (onboarding, tema, historico).
-    # Resultado do `-e` com o padrao: sessao na tela de boas-vindas ("Select login method") com a
-    # credencial intacta, e o settings.json lido da pasta errada junto.
-    # E omitir aqui NAO abre a porta pra conta vazar de outra sessao: no psmux o pane herda o
-    # ambiente de QUEM CHAMA, e nada passa de uma sessao pra outra (medido no psmux 3.3.7 — a
-    # mesma medicao esta em `_e_config_dir`, backend/app/tmux.py, que aplica esta regra do lado do
-    # app). Chamador com a variavel (`claude-conta`) segue mandando o `-e`: e o unico jeito de a
-    # conta chegar no pane, e ali o valor nunca e string vazia.
-    if ($env:CLAUDE_CONFIG_DIR) { $cfg = @('-e', "CLAUDE_CONFIG_DIR=$($env:CLAUDE_CONFIG_DIR)") }
-    else { $cfg = @() }
-
-    # Sem `exec` e sem systemd-run, ao contrario do POSIX: nao ha shell intermediario dentro do
-    # pane do psmux (ele roda o comando direto no ConPTY) e nao ha cgroup de servico pra escapar.
-    # CP_SESSION_NAME: mesmo carimbo que o backend poe em new_session (app/tmux.py). Sem ele o
-    # hangar-send de dentro da sessao cai no `display-message -p '#S'`, que devolve a sessao do CLIENTE
-    # anexado e nao a de quem chama -> o --unpair de uma sessao desfazia o vinculo da OUTRA.
-    $cmd = @('tmux', 'new-session', '-s', $nome, '-c', (Get-Location).Path,
-             '-e', 'COLORTERM=truecolor', '-e', 'CLAUDE_CODE_TMUX_TRUECOLOR=1',
-             '-e', "CP_SESSION_NAME=$nome") +
-           $cfg + $pre + @('claude', '--session-id', $id) + $plug + $args
-    $r = @($cmd[1..($cmd.Count - 1)])
-    & $cmd[0] @r
+    # Claude cru com o id: ja dentro do multiplexador, modo -p, entrada redirecionada ou subcomando.
+    $env:COLORTERM = 'truecolor'; $env:CLAUDE_CODE_TMUX_TRUECOLOR = '1'
+    if ($pre.Count -eq 0) { & $claudeExe --session-id $id @plug @args }
+    else { $r = @($pre[1..($pre.Count - 1)]) + @('claude', '--session-id', $id) + $plug + $args
+           & $pre[0] @r }
 }

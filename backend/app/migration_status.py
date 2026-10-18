@@ -86,24 +86,34 @@ def _checkout_branch() -> str | None:
     return _branch
 
 
-def _read_proc(pid: int) -> tuple[int, float] | None:
-    """(RSS em bytes, segundos de CPU) de um pid conhecido; None se ele saiu ou não dá para ler."""
+def _status_memory(text: str) -> tuple[int, int]:
+    """(VmRSS, VmSwap) em bytes do `/proc/<pid>/status`: com zram o kernel troca uma pela outra."""
+    found = {}
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        if key in ("VmRSS", "VmSwap"):
+            found[key] = int(value.split()[0]) * 1024
+    return found.get("VmRSS", 0), found.get("VmSwap", 0)
+
+
+def _read_proc(pid: int) -> tuple[int, int, float] | None:
+    """(RSS e swap em bytes, segundos de CPU) de um pid conhecido; None se ele saiu ou não dá para ler."""
     if sys.platform.startswith("linux"):
         try:
-            with open(f"/proc/{pid}/statm", encoding="ascii") as f:
-                rss = int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+            with open(f"/proc/{pid}/status", encoding="ascii", errors="replace") as f:
+                rss, swap = _status_memory(f.read())
             with open(f"/proc/{pid}/stat", encoding="ascii", errors="replace") as f:
                 fields = f.read().rsplit(")", 1)[1].split()
             # utime e stime: campos 14 e 15 do stat, contados a partir do estado (campo 3).
             cpu = (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
         except (OSError, ValueError, IndexError):
             return None
-        return rss, cpu
+        return rss, swap, cpu
     import psutil
     try:
         proc = psutil.Process(pid)
         times = proc.cpu_times()
-        return proc.memory_info().rss, times.user + times.system
+        return proc.memory_info().rss, 0, times.user + times.system
     except (psutil.Error, OSError):
         return None
 
@@ -114,7 +124,7 @@ def _usage(pid: int | None) -> dict | None:
     read = _read_proc(pid)
     if read is None:
         return None
-    rss, cpu = read
+    rss, swap, cpu = read
     now = time.monotonic()
     with _samples_lock:
         before = _samples.get(pid)
@@ -124,7 +134,7 @@ def _usage(pid: int | None) -> dict | None:
     percent = None
     if before is not None and now - before[0] > 0.2 and now - before[0] < _SAMPLE_MAX_AGE:
         percent = round(max(cpu - before[1], 0.0) / (now - before[0]) * 100, 1)
-    return {"pid": pid, "rss_bytes": rss, "cpu_seconds": round(cpu, 2), "cpu_percent": percent}
+    return {"pid": pid, "rss_bytes": rss, "swap_bytes": swap, "cpu_seconds": round(cpu, 2), "cpu_percent": percent}
 
 
 def _is_cano(pid: int) -> bool:
@@ -170,13 +180,14 @@ def _cano_pids() -> list[int]:
 
 
 def _canos_usage() -> dict:
-    total = {"count": 0, "rss_bytes": 0, "cpu_percent": 0.0}
+    total = {"count": 0, "rss_bytes": 0, "swap_bytes": 0, "cpu_percent": 0.0}
     for pid in _cano_pids():
         usage = _usage(pid)
         if usage is None:
             continue
         total["count"] += 1
         total["rss_bytes"] += usage["rss_bytes"]
+        total["swap_bytes"] += usage["swap_bytes"]
         # Um cano sem a segunda leitura deixa a soma incompleta: a tela mostra "medindo", não um número menor.
         if usage["cpu_percent"] is None or total["cpu_percent"] is None:
             total["cpu_percent"] = None

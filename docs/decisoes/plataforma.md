@@ -670,6 +670,14 @@ resolvendo localmente porque funciona com o backend caído. **Token**: Claude Co
 transcript. Prova ponta a ponta: `enviar` de `hangar-2` pra `cx-pergunta` entregou
 `[de: hangar-2] …` e a resposta `ok` voltou pelo caminho de sempre.
 
+**No Rust (16/10/2026, Task 12 da abertura única).** O `/mcp` passou ao `hangar-server`
+(`crates/hangar-server/src/mcp/`, SDK `rmcp` 3.5.0); `mcp_server.py` saiu. Mesmas tools,
+nomes, parâmetros e identidade; cada tool chama a rota pública que o CLI chama, por dentro do
+processo. A sessão MCP fecha após 30 min parada, como no Python: o padrão do `rmcp` (5 min) não
+conta a tool em curso como atividade e o `browser_goal` (até 300 s) perdia a resposta. No modo
+`python` do Supervisor, `/mcp` e `/mcp/` respondem 503 `mcp_needs_rust_server`, sem reserva
+Python; antes da rota própria caíam no estático e voltavam 405.
+
 ## Arquivo citado na conversa é editável, com a citação como consentimento
 
 17/09/2026. Um arquivo fora da raiz da sessão abria no visor em modo leitura: `abrirExterno`
@@ -1456,6 +1464,30 @@ A reserva é no mesmo processo, sem novo lifespan: dois lifespans rodariam watch
 dobro. O motivo vai ao diário como `hangar_server.reserva` (`sem_binario`, `sem_resposta`,
 `protocolo`, `endereco_privado`, `quedas`, `erro`, `porta_ocupada`); cada queda, como
 `hangar_server.caiu`.
+
+**O Rust volta sozinho (D-014, 15/10/2026).** Com a abertura de sessão migrando para o Rust, a
+reserva até o próximo restart deixaria abrir e reabrir sem dono. Depois da desistência o Python
+atende a porta e, a cada espera de `RETRY_DELAYS` (30 s, 1, 2, 5 e 10 min, a última repetida),
+tenta devolvê-la. Ordem: primeiro as sessões saem do Python pela passagem normal (`leave_python`:
+operação em curso termina em até 5 s, `quiesce` com o ack da escrita em voo, trava solta, modo
+`pending`); os SSE com estado do Python fecham (`state_owner_changed`) e o app reconecta. Só então
+as conexões da porta pública são fechadas, a porta é solta e o filho nasce. Falhou ao soltar (ou há
+Codex com processo do próprio Python, que soltar mataria): o Python segue com tudo e o Rust não
+sobe naquela tentativa (`hangar_server.religar_falhou`). Subiu: `hangar_server.voltou`, e o
+`_enter_rust` reabre as sessões como depois de uma queda. Não subiu: nova desistência, `enter_python`
+as retoma e o gancho do modo Python roda de novo. A contagem só zera com o Rust de pé por uma
+`CRASH_WINDOW` inteira; um Rust que sobe e cai em seguida segue esperando mais. Calado, outro
+protocolo ou sem endereço privado com o MESMO binário falhariam igual: nesses casos a porta só é
+solta de novo depois de o binário mudar no disco (inode, tamanho ou mtime). Sinal de parada no meio
+da troca encerra sem subir o filho.
+
+A porta fica sem dono do fechamento das conexões até o filho escutar (subida do binário, sem a
+espera da saúde) e, se ele não subir, até o Python reabri-la: até `START_TIMEOUT` (10 s) por
+tentativa no pior caso. Os SSE da porta pública não esperam o prazo de parada do uvicorn: a conexão
+fechada é a desconexão que eles já tratam. O `sse_starlette` vigia o `should_exit` de qualquer
+uvicorn do processo e, ao ver o da porta pública, encerraria para sempre todo SSE do processo
+(inclusive os que o Rust abre no Python); por isso a vigia automática fica desligada e só o
+`Server.handle_exit` (sinal real) marca a saída.
 
 **Modo do processo (dono único, Task 5, 04/10/2026).** O coordenador tem um modo só para o processo:
 `pending` desde a subida com o binário esperado até o Supervisor decidir, e de novo entre uma queda 1
@@ -2404,8 +2436,12 @@ relato, porque esse caminho não deixava rastro.
 - **A conexão interna recebe a conversa do Rust** (`side-events?provider=…&jsonl=…`) e não procura
   nada; a troca religa essa conexão. O Python continua com a própria descoberta só no modo `python`,
   no convidado (8766) e no Connect (8768).
-- **A reabertura da sessão em erro continua no coordenador do Python**: abrir a conversa (dono ou
-  convidado) pede `POST /internal/sessions/{name}/reopen`, sem esperar resposta.
+- **A reabertura da sessão em erro é do Rust**: abrir a conversa (dono ou convidado) ou escrever
+  numa sessão doente pede ao registro do runtime (`RuntimeRegistry::request_reopen`), sem esperar
+  resposta; uma por sessão em voo. A saudável só refaz a projeção da fila; a doente fecha e reabre
+  pelo tipo dela (Claude sem terminal pelo spec, Codex pela vigia, Claude com terminal pelo alvo
+  aberto), e a falha vai ao diário (`runtime.reopen_failed`). O Claude com terminal que ficou sem
+  entrada aqui não é reaberto por esse caminho: a próxima escrita o abre pelo coordenador.
 
 ## Processos que usam uma conta: o Claude Desktop não é cliente
 
@@ -2716,6 +2752,48 @@ Python fica com Pi, omp, Kimi e o modo `python`.
   chamada do cache em disco em 0,5 ms. Erro de sintaxe é 422 com a mensagem do parser e fica no
   cache; Chromium ausente, fila cheia ou prazo é 503, fora do cache, e o cliente oferece "Tentar de
   novo".
+
+
+## Abertura de sessão única no Rust
+
+(16/10/2026, pedido do usuário: "independente de onde eu abrir, é uma sessão do Hangar".) Antes,
+~17 entradas e ~25 lançadores entre o Python e o Rust abriam a sessão cada um de um jeito: sem
+plugin, na conta errada, no modo errado. A conferência de 769 comportamentos do Python e 81
+defeitos achados nele (todos consertados no Rust, decisão do usuário) estão nos arquivos da fase
+(`.superpowers/sdd/2026-10-15-abertura-de-sessao/`, fora do git).
+
+- **Um pedido, uma resolução, um registro.** `SessionOpenRequest` → `resolve_open()` → `SessionSpec`
+  gravado por sessão em `~/.hangar/session-specs/<chave>.json`. A referência de "abrir certo" é a
+  matriz capacidades × origens, não o modal "+": os padrões que as telas preenchiam (modo, conta)
+  passaram ao `resolve_open()`, e tela que não tocou num campo não o manda. Herança da criadora
+  (conta, modo, com/sem terminal) vale para todo provider que tem o conceito; `inherit: false` pede
+  o padrão da conta. Conta a 95% ou mais na abertura cai na de mais folga, com aviso em toda tela,
+  na voz e no `hangar-send`.
+- **Reabrir é o mesmo lançador com uma mudança.** `reopen_session(spec ⊕ SessionChange)` cobre modo,
+  recarregar, conta, bypass, `/resume` ao vivo (só Claude) e retomar do Arquivo, com as guardas da
+  criação. Nada é encerrado antes de a vida nova estar montada; falha volta com código.
+- **Terminal sem servidor.** `claude`/`codex`/`pi`/`omp`/`kimi` digitados chamam `hangar-server open`
+  (subcomando, não binário próprio: o `hangar-server` já é instalado em toda máquina). Com o
+  servidor de pé, ele abre e registra; fora do ar, abre igual e o servidor adota depois. Recusa HTTP
+  não cai no CLI cru: só a falta de conexão e de lançador cai.
+- **Restore depois de reboot ou queda do tmux.** O Rust fotografa a cada 30 s as sessões com terminal
+  e a conversa delas (`~/.hangar/session-restore.json`). Quando o servidor do multiplexador não é o
+  da fotografia (`#{start_time}`; sem ele, nascimento do processo; sem os dois, o boot), reabre cada
+  uma pelo spec, no modo em que estava ao cair, com o comando no `new-session`. Sessão fica na
+  fotografia até ausente por 2 min com o servidor de pé; fechada pelo app sai na hora; o servidor que
+  some tendo uma sessão só conta como fim normal dela e não volta (limite aceito: `kill-server` com
+  uma sessão também não). Falha passageira tenta 3 vezes antes de o servidor novo virar o da
+  fotografia. A varredura de grupos espera o restore. Motivo de não digitar no shell: com zsh e
+  `CORRECT_ALL` o shell parava em "correct 'claude' to '.claude'?".
+- **Limite de uso troca de conta sozinho (Claude).** Sinal pelo transcript (com terminal) ou pelo
+  stream-json (sem terminal), nunca pelo pane. A fila fica segura até a troca terminar; o recado de
+  continuar vai à frente na fila durável; conta gasta fica marcada até o reset (`limit-spent.json`);
+  sem conta com folga, a sessão para e mostra `limit_switch_no_room`. Codex: só a detecção; o
+  `rateLimitExceeded` é throttle temporário e não conta como limite.
+- **O Python saiu.** `backend/app` desde `601bc62a0`: +605/−4524. Sem lançador Python e sem reserva:
+  no modo `python`, abrir e reabrir respondem 503 com código. Ficam no Python, registrados: texto que
+  nasce nele (grupo, par, broadcast) acorda Claude/Codex sem terminal pedindo ao Rust, e a
+  transferência Claude→Codex (inativa no serviço).
 
 ## WebSocket do dono com token não confere Origin (17/10/2026)
 

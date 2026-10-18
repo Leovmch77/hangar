@@ -1,7 +1,6 @@
 import json
 
 import pytest
-from pydantic import ValidationError
 
 from app import claude_customizations as customizations
 from app.adapters.claude import ClaudeAdapter
@@ -68,19 +67,6 @@ def test_invalid_existing_settings_fail_before_launch(tmp_path):
         customizations.apply_settings(["claude", "--settings", str(path)], SETTINGS)
 
 
-def test_resuming_another_conversation_uses_its_choices_not_the_current_process(tmp_path, monkeypatch):
-    monkeypatch.setattr(customizations.Path, "home", lambda: tmp_path)
-    directory = tmp_path / ".hangar" / "claude-customizations"
-    directory.mkdir(parents=True)
-    other = "22222222-2222-2222-2222-222222222222"
-    other_settings = {"enabledPlugins": {"ecc@ecc": False}}
-    (directory / f"{other}.json").write_text(json.dumps({"settings": other_settings}), encoding="utf-8")
-
-    assert customizations.resume_settings(other, SID, SETTINGS) == other_settings
-    assert customizations.resume_settings(SID, SID, SETTINGS) == SETTINGS
-    assert customizations.resume_settings("33333333-3333-3333-3333-333333333333", SID, SETTINGS) is None
-
-
 def test_headless_metadata_retains_choices_without_copying_them_to_new_sessions(tmp_path, monkeypatch):
     monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "sessions")
     sessions.save("chosen", str(tmp_path), SID, claude_settings=SETTINGS)
@@ -94,17 +80,15 @@ def test_headless_metadata_retains_choices_without_copying_them_to_new_sessions(
     assert fresh is not None and "claude_settings" not in fresh
 
 
-def test_terminal_and_headless_resume_apply_the_same_session_settings(monkeypatch, tmp_path):
+def test_terminal_resume_applies_the_session_settings(monkeypatch, tmp_path):
+    # O lado sem terminal é lançado pelo Rust (claude_launch.rs) e testado lá.
     from app import pensamento, plugin_bridge
 
     monkeypatch.setattr(plugin_bridge, "raizes_dos_plugins", lambda: [])
     monkeypatch.setattr(pensamento, "ler", lambda: False)
     terminal = ClaudeAdapter().spawn_command(str(tmp_path), SID, claude_settings=SETTINGS)
-    headless = ClaudeHeadlessAdapter()._argv(SID, resume=True, claude_settings=SETTINGS)
 
     assert json.loads(terminal[terminal.index("--settings") + 1]) == SETTINGS
-    assert json.loads(headless[headless.index("--settings") + 1]) == SETTINGS
-    assert headless[headless.index("--resume") + 1] == SID
 
 
 def test_terminal_binding_carries_choices_for_the_active_conversation(tmp_path, monkeypatch):
@@ -123,31 +107,6 @@ def test_terminal_binding_carries_choices_for_the_active_conversation(tmp_path, 
 
     assert binding is not None and binding.meta["session_id"] == SID
     assert binding.meta["claude_settings"] == SETTINGS
-
-
-def test_creation_accepts_typed_choices_but_not_arbitrary_settings():
-    from app.api import CreateBody
-
-    body = CreateBody.model_validate({"name": "chosen", "cwd": "/tmp", "claude_customizations": {
-        "plugins": {"superpowers@claude-plugins-official": False},
-        "skills": {"falar": False},
-        "blocked_skills": ["superpowers:brainstorming"],
-    }})
-
-    assert body.claude_customizations is not None
-    assert body.claude_customizations.model_dump() == {
-        "plugins": {"superpowers@claude-plugins-official": False},
-        "skills": {"falar": False},
-        "blocked_skills": ["superpowers:brainstorming"],
-    }
-    with pytest.raises(ValidationError):
-        CreateBody.model_validate({"name": "chosen", "cwd": "/tmp", "claude_customizations": {
-            "env": {"ANTHROPIC_BASE_URL": "other"},
-        }})
-    with pytest.raises(ValidationError):
-        CreateBody.model_validate({"name": "chosen", "cwd": "/tmp", "claude_customizations": {
-            "plugins": {"superpowers@claude-plugins-official": "false"},
-        }})
 
 
 def test_clear_keeps_choices_and_reports_unavailable_persistence_without_blocking_init(tmp_path, monkeypatch):

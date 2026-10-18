@@ -249,7 +249,7 @@ fn omp_agent_dir(profile: Option<&str>, dirs: &Dirs) -> PathBuf {
 }
 
 /// Pasta das sessões Pi de um cwd: só separador vira `-` (`getDefaultSessionDirPath` do Pi).
-fn pi_cwd_slug(cwd: &str) -> String {
+pub(crate) fn pi_cwd_slug(cwd: &str) -> String {
     let resolved = absolute(cwd);
     let trimmed = resolved.strip_prefix(['/', '\\']).unwrap_or(&resolved);
     format!("--{}--", trimmed.replace(['/', '\\', ':'], "-"))
@@ -453,27 +453,14 @@ pub fn kimi_workdir_key(cwd: &str) -> String {
     format!("wd_{slug}_{}", &hex[..12])
 }
 
-/// `names.sanitize_session_name`: acento vira a letra sem ele, o resto fora de `[A-Za-z0-9_-]` vira `-`.
+/// `names.sanitize_session_name`: NFKD e descarte do que não é ASCII (a letra acentuada vira a base),
+/// o resto fora de `[A-Za-z0-9_-]` vira `-`. Nome já ASCII sai idêntico: sidecars e filas são por ele.
 pub fn sanitize_session_name(name: &str) -> String {
-    // ponytail: só os acentos do português e vizinhos, sem NFKD completo (crate novo); outra letra
-    // composta some em vez de virar a base. Nome criado pelo app já chega sanitizado.
-    let ascii: String = name.chars().filter_map(fold_accent).collect();
-    if name.chars().any(|c| c.is_alphabetic() && fold_accent(c).is_none()) {
-        warn_limited(name, "list_session_name_unfolded", "name");
-    }
+    use unicode_normalization::UnicodeNormalization;
+    let clean = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'-';
+    if name.bytes().all(clean) && !name.starts_with('-') && !name.ends_with('-') { return name.to_owned(); }
+    let ascii: String = name.nfkd().filter(char::is_ascii).collect();
     ascii.trim().chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' }).collect::<String>().trim_matches('-').to_owned()
-}
-
-/// Letra latina acentuada → a base ASCII (o NFKD + `encode("ascii", "ignore")`); outro não-ASCII some.
-fn fold_accent(c: char) -> Option<char> {
-    if c.is_ascii() {
-        return Some(c);
-    }
-    const MAP: [(&str, char); 14] = [
-        ("ÀÁÂÃÄÅ", 'A'), ("àáâãäå", 'a'), ("ÈÉÊË", 'E'), ("èéêë", 'e'), ("ÌÍÎÏ", 'I'), ("ìíîï", 'i'),
-        ("ÒÓÔÕÖ", 'O'), ("òóôõö", 'o'), ("ÙÚÛÜ", 'U'), ("ùúûü", 'u'), ("Ç", 'C'), ("ç", 'c'), ("Ñ", 'N'), ("ñ", 'n'),
-    ];
-    MAP.iter().find(|(set, _)| set.contains(c)).map(|(_, b)| *b)
 }
 
 /// O pane de mesmo nome sai da lista: identidade e histórico do Codex vêm do sidecar.

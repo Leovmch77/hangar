@@ -37,12 +37,15 @@ porta, destino = int(sys.argv[1]), sys.argv[2]
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+        if self.path.startswith("/api/claude-configs"):
+            self.wfile.write(b'[{"path":"/home/la/.claude","label":"default"}]')
+            return
         self.wfile.write(b'{"claude":{"disponivel":true,"default":true},"codex":{"disponivel":true,"default":false}}')
     def do_POST(self):
         corpo = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         open(destino, "wb").write(corpo)
         self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
-        self.wfile.write(b'{"avisos":["aviso-teste"]}')
+        self.wfile.write(b'{"avisos":["aviso-teste"],"provider":"claude","provider_source":"inherited"}')
     def log_message(self, *a): pass
 http.server.HTTPServer(("127.0.0.1", porta), H).serve_forever()
 PY
@@ -79,6 +82,27 @@ resultado=$(bash "$TMP/scripts/hangar-send" --new lembrar /tmp --provider codex 
 checa "--remember-provider no corpo" 'true' "$(campo remember_provider 2>/dev/null)"
 [[ "$resultado" == *"aviso-teste"* ]]
 checa "aviso da criação aparece" '0' "$?"
+[[ "$resultado" == *"agente herdado: claude"* ]]
+checa "o agente herdado aparece na criação" '0' "$?"
+
+# 2b. Chamado de uma sessão, sem --provider: o agente fica para o backend herdar da criadora; o
+# padrão lembrado do servidor só vale de fora de uma sessão.
+mkdir -p "$TMP/hl" && printf '{"name":"criadora","key":"k-criadora"}' > "$TMP/hl/criadora.json"
+rm -f "$TMP/corpo.json"
+CP_SESSION_KEY=k-criadora HANGAR_HEADLESS_DIR="$TMP/hl" bash "$TMP/scripts/hangar-send" --new herda /tmp >/dev/null 2>&1
+checa "de uma sessão: sem provider no corpo" 'null' "$(campo provider 2>/dev/null)"
+checa "de uma sessão: a criadora vai" '"criadora"' "$(campo creator 2>/dev/null)"
+rm -f "$TMP/corpo.json"
+env -u TMUX -u TMUX_PANE -u CP_SESSION_KEY -u HANGAR_CANO_KEY -u CP_SESSION_NAME bash "$TMP/scripts/hangar-send" --new de-fora /tmp >/dev/null 2>&1
+checa "de fora: o padrão do servidor" '"claude"' "$(campo provider 2>/dev/null)"
+
+# 2c. Retomar noutra máquina: sem pasta, a pasta vem da conversa (lá), nunca a home de lá.
+printf '{"la":{"base_url":"http://127.0.0.1:%s","token":"teste"}}' "$PORTA" > "$TMP/backend/peers.json"
+rm -f "$TMP/corpo.json"
+bash "$TMP/scripts/hangar-send" --new la::retoma --resume abc123 >/dev/null 2>&1
+checa "--resume noutra máquina: código" '0' "$?"
+checa "--resume noutra máquina: sem cwd no corpo" 'null' "$(campo cwd 2>/dev/null)"
+rm -f "$TMP/backend/peers.json"
 
 # 3. Codex também aceita o modo sem terminal.
 rm -f "$TMP/corpo.json"

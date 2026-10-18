@@ -125,6 +125,12 @@ pub async fn private(
     envelope(run(&st, op).await)
 }
 
+/// A operação `prepare` da ponte, para a abertura de sessão do próprio Rust: `{"settings": …}`.
+pub(crate) async fn prepare_for_open(st: &Arc<AppState>, args: Value) -> std::result::Result<Value, (u16, &'static str, &'static str)> {
+    let op = serde_json::from_value::<Operation>(json!({"op": "prepare", "args": args})).map_err(|_| { let e = invalid(); (e.status, e.code, e.detail) })?;
+    run(st, op).await.map_err(|e| (e.status, e.code, e.detail))
+}
+
 pub(crate) const CATALOG_PATH: &str = "/api/claude/customizations";
 
 /// `GET /api/claude/customizations`: o catálogo de plugins e skills da pasta na conta, com o
@@ -874,6 +880,11 @@ fn restricted_settings(settings: &Value) -> Result<()> {
 pub fn remember(session_id: &str, settings: &Value) -> std::result::Result<(), (&'static str, &'static str)> {
     if settings.is_null() || settings.as_object().is_some_and(|object| object.is_empty()) { return Ok(()); }
     save_settings(&store_root().map_err(|e| (e.code, e.detail))?, session_id, settings).map_err(|e| (e.code, e.detail))
+}
+/// As escolhas guardadas da conversa `session_id` (`stored_settings` do Python); `None` sem registro.
+pub fn stored(home: &Path, session_id: &str) -> std::result::Result<Option<Value>, (&'static str, &'static str)> {
+    let settings = load_settings(&home.join(".hangar/claude-customizations"), session_id).map_err(|e| (e.code, e.detail))?;
+    Ok(settings.as_object().is_some_and(|object| !object.is_empty()).then_some(settings))
 }
 fn store_root() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))

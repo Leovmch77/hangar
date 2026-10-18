@@ -48,6 +48,8 @@ pub struct ClaudeEngine {
     format_gate: FormatGate,
     reload_deadline: f64,
     rate_limit_info: Value,
+    /// Limite do plano visto na mensagem sintética do turno; sai como efeito quando o turno termina.
+    turn_limit: Option<UsageLimit>,
     commands: Option<Value>,
     terminal_commands: Value,
     preview: LiveBuffer,
@@ -87,6 +89,8 @@ pub struct ClaudeEngine {
     echoes: std::collections::VecDeque<(String,String)>,
     /// `task_id` do último `background_tasks_changed`: o trabalho de fundo segue vivo depois do `result`.
     background: BTreeSet<String>,
+    /// Último evento da CLI ou comando nosso, no relógio do motor: daqui conta o tempo parado.
+    active_at: f64,
 }
 
 const ECHO_LIMIT: usize = 64;
@@ -126,11 +130,11 @@ impl ClaudeEngine {
             init_warning:None,in_progress:false,state,model:string(&metadata["model"]),effort:string(&metadata["effort"]),
             permission_mode,previous_non_plan,restore_plan:None,pending:Vec::new(),question:None,
             waiters:BTreeMap::new(),wires:BTreeMap::new(),retired_writes:BTreeSet::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),reload_deadline:clock.monotonic_s+10.0,
-            rate_limit_info:Value::Null,commands:metadata.get("commands").filter(|commands|!commands.is_null()).cloned(),terminal_commands:metadata.get("terminal_commands").cloned().unwrap_or_else(||json!([])),
+            rate_limit_info:Value::Null,turn_limit:None,commands:metadata.get("commands").filter(|commands|!commands.is_null()).cloned(),terminal_commands:metadata.get("terminal_commands").cloned().unwrap_or_else(||json!([])),
             preview:LiveBuffer::default(),thinking:LiveBuffer::default(),tool_input:LiveBuffer::default(),tool_name:None,tool_visible:false,
             label:None,compacting:false,turn_start:None,label_deadline:None,tokens_closed:0,tokens_message:None,gen_start:None,
             token_chars:0,thinking_start:None,thought_s:0.0,tasks:Vec::new(),usage:metadata.get("usage").cloned().unwrap_or(Value::Null),
-            context_window:metadata["context_window"].as_u64(),cost:metadata["cost"].as_f64(),effort_intent,effort_deadline:None,active_input:None,slash_input:None,unknown:BTreeSet::new(),surface:None,stderr_tail:Vec::new(),problem_persisted,subagents:BTreeMap::new(),echoes:std::collections::VecDeque::new(),background:BTreeSet::new(),metadata };
+            context_window:metadata["context_window"].as_u64(),cost:metadata["cost"].as_f64(),effort_intent,effort_deadline:None,active_input:None,slash_input:None,unknown:BTreeSet::new(),surface:None,stderr_tail:Vec::new(),problem_persisted,subagents:BTreeMap::new(),echoes:std::collections::VecDeque::new(),background:BTreeSet::new(),active_at:clock.monotonic_s,metadata };
         if let Some(controls) = engine.metadata["control_carry"].as_array() {
             for control in controls {
                 let Ok(request_id) = serde_json::from_value::<RequestId>(control["request_id"].clone()) else { continue };
@@ -325,6 +329,15 @@ impl ClaudeEngine {
         effects.push(Effect::Policy { kind:kind.into(),request_id,payload });
     }
 
+    /// Problema que vem de fora do motor; o próximo turno bem-sucedido o apaga, como os dele.
+    pub fn set_problem(&mut self,code:&str,detail:Option<String>) -> Vec<Effect> {
+        self.state.problema = Some(code.into());
+        self.state.problema_detalhe = detail.map(|detail|detail.chars().take(300).collect());
+        let mut effects = Vec::new();
+        self.changed(&mut effects,false);
+        effects
+    }
+
     fn changed(&mut self,effects:&mut Vec<Effect>,format:bool) {
         // A faixa recebe `isWorking`: começo e fim de turno pedem um desenho novo dela.
         let (now,working) = (self.clock.monotonic_s,self.in_progress);
@@ -483,6 +496,7 @@ impl ClaudeEngine {
 
     pub fn command(&mut self,command:RuntimeCommand,clock:ClockSample) -> Result<Vec<Effect>,RuntimeError> {
         self.clock = clock;
+        self.active_at = clock.monotonic_s;
         if !self.alive {
             // A queda levou os pedidos em aberto: responder a um deles é responder a algo que já não existe (409).
             if matches!(command.kind,OperationKind::Select | OperationKind::AnswerQuestions | OperationKind::SkipQuestion) {
@@ -618,7 +632,11 @@ impl ClaudeEngine {
         self.clock = clock;
         let mut effects = Vec::new();
         match input {
-            EngineInput::Line(event) => self.on_line(event,&mut effects)?,
+            EngineInput::Line(event) => {
+                // Batimento e stderr do cano chegam com a sessão parada: não são atividade (o Python também os ignorava).
+                if !matches!(event["type"].as_str(),Some("keep_alive" | "cano_stderr")) { self.active_at = clock.monotonic_s; }
+                self.on_line(event,&mut effects)?
+            },
             EngineInput::WriteAck { operation_id,outcome } => self.on_ack(operation_id,outcome,&mut effects),
             EngineInput::Tick => self.on_tick(&mut effects),
             EngineInput::PolicyResult { request_id,payload } => {
@@ -706,7 +724,11 @@ impl ClaudeEngine {
                             "initialize" => {
                                 self.initialized = true; self.initializing = false; self.init_warning = None;
                                 self.commands = result.get("commands").cloned();
-                                if self.state.problema.as_deref() == Some("headless_sem_resposta") { self.state.problema = None; self.state.problema_detalhe = None; }
+                                // A vida subiu: a queda da anterior (na tela e no arquivo da sessão) não vale mais.
+                                self.state.problema = None; self.state.problema_detalhe = None;
+                                if std::mem::take(&mut self.problem_persisted) {
+                                    effects.push(Effect::PersistClaude { operation_id:None,patch:json!({"problema":null}) });
+                                }
                                 if self.effort_intent.as_ref().is_some_and(|intent|intent["status"] == "prepared") { self.dispatch_effort(effects); }
                                 else { effects.push(Effect::WakeQueue); }
                                 // `ui_surface_v1`: o processo aceita o Hangar como superfície remota dos mods.
@@ -761,6 +783,7 @@ impl ClaudeEngine {
             "stream_event" => self.on_stream(&event["event"],effects),
             "command_lifecycle" if event["state"] == "started" => { if !self.in_progress { self.start_turn(); self.changed(effects,true); } }
             "assistant" => {
+                if let Some(limit) = usage_limit(&event,&self.rate_limit_info,self.clock.epoch_s) { self.turn_limit = Some(limit); }
                 if !event["local_command_source"].is_null() {
                     let text = text_blocks(&event["message"]["content"]);
                     // A CLI de hoje põe a saída no `local_command_source`, sem o comando: a resposta do `/effort` é
@@ -878,12 +901,16 @@ impl ClaudeEngine {
                     self.state.problema = Some(if event["result"].as_str().unwrap_or("").to_lowercase().contains("not logged in") {
                         "headless_sem_login" } else { "headless_turno_erro" }.into());
                     self.state.problema_detalhe = Some(format!("{subtype}: {}",event["result"].as_str().unwrap_or("").chars().take(300).collect::<String>()));
+                    if let Some(limit) = self.turn_limit.take().or_else(||usage_limit(&event,&self.rate_limit_info,self.clock.epoch_s)) {
+                        effects.push(Effect::UsageLimit { limit });
+                    }
                 } else if subtype == "success" && !local {
                     self.state.problema = None; self.state.problema_detalhe = None;
                     if std::mem::take(&mut self.problem_persisted) {
                         effects.push(Effect::PersistClaude { operation_id:None,patch:json!({"problema":null}) });
                     }
                 }
+                self.turn_limit = None;
                 if local { effects.push(Effect::ConfirmLocalCommands); }
                 self.apply_usage(&event,effects);
                 self.clear_streams(effects); self.changed(effects,true);
@@ -1211,6 +1238,14 @@ impl ClaudeEngine {
         Self::surface_out(effects,out);
     }
 
+    /// Segundos parada desde o último evento da CLI ou comando nosso, se nada está em aberto; `None` = não estaciona.
+    pub fn park_idle(&self,now:f64) -> Option<f64> {
+        let open = !self.alive || self.initializing || self.in_progress || !self.pending.is_empty() || self.question.is_some()
+            || self.effort_intent.as_ref().is_some_and(|intent|intent["status"] == "prepared" || intent["status"] == "dispatching")
+            || !self.background.is_empty();
+        (!open).then(||now - self.active_at)
+    }
+
     pub fn next_deadline(&self) -> Option<f64> {
         [self.preview.deadline(),self.thinking.deadline(),self.tool_input.deadline(),self.init_warning,self.label_deadline,self.effort_deadline,Some(self.reload_deadline),
             self.surface.as_ref().and_then(Surface::deadline)]
@@ -1233,6 +1268,16 @@ fn turn_activity(kind:&str,event:&Value) -> bool {
         "user" => event["message"]["content"].as_array().is_some_and(|blocks|blocks.iter().any(|block|block["type"] == "tool_result")),
         _ => false,
     }
+}
+
+/// Limite do plano na mensagem sintética: `usage_limit_reached` (CLI de hoje) ou, no CLI antigo, `rate_limit`
+/// com a última cota recusada ainda valendo. O aperto temporário também é `rate_limit`, sem cota recusada.
+fn usage_limit(event:&Value,last:&Value,now:f64) -> Option<UsageLimit> {
+    let params = &event["api_error_params"]["rate_limit_info"];
+    let info = if event["api_error"] == "usage_limit_reached" { if params.is_object() { params } else { last } }
+        else if event["api_error"].is_null() && event["error"] == "rate_limit" && last["status"] == "rejected" && last["resetsAt"].as_f64().is_some_and(|reset|reset > now) { last }
+        else { return None };
+    Some(UsageLimit::from_info(info))
 }
 
 fn text_blocks(blocks:&Value) -> String {

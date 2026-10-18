@@ -475,46 +475,6 @@ def tail_events(project: str, session_id: str, n: int = 30, config_dir: Optional
         span *= 8
 
 
-def conta_de(project: str, session_id: str) -> Optional[str]:
-    """config_dir da conta que guarda esta conversa (None = a do processo do backend). Quem retoma
-    precisa dele: `claude --resume <uuid>` rodado na conta errada morre na hora. Mesma validacao e
-    mesmos erros de archive_jsonl."""
-    if not _PROJ_RE.match(project) or not _SID_RE.match(session_id):
-        raise ValueError("caminho invalido")
-    for cfg, _rot, base in _contas():
-        if (base / project / f"{session_id}.jsonl").is_file():
-            return cfg
-    raise FileNotFoundError(project)
-
-
-def move_conversation(project: str, session_id: str, config_dir: Optional[str]) -> bool:
-    """Leva a conversa pra conta `config_dir` (None = a do processo); False = ja estava la. E um
-    rename: `<uuid>.jsonl` mais a pasta irma `<uuid>/` (tool-results e subagentes), que um
-    `--resume` na conta destino le como se sempre tivesse sido dela. Nada fica na origem de
-    proposito: copia deixaria a mesma conversa listada duas vezes, e a que continua e so uma.
-
-    Conflito no destino (mesmo uuid ja la) e FileExistsError; fora isso, mesmos erros de conta_de."""
-    origem = conta_de(project, session_id)
-    if origem == config_dir:
-        return False
-    de = _base(origem) / project
-    para = _base(config_dir) / project
-    if (para / f"{session_id}.jsonl").exists() or (para / session_id).exists():
-        raise FileExistsError(session_id)
-    para.mkdir(parents=True, exist_ok=True)
-    os.replace(de / f"{session_id}.jsonl", para / f"{session_id}.jsonl")
-    irma = de / session_id
-    if irma.is_dir():
-        try:
-            os.replace(irma, para / session_id)
-        except OSError:
-            # Sem a pasta irma o jsonl na conta nova perde tool-results e subagentes: melhor a
-            # conversa inteira na origem do que metade em cada conta.
-            os.replace(para / f"{session_id}.jsonl", de / f"{session_id}.jsonl")
-            raise
-    return True
-
-
 def archive_cwd(project: str, session_id: str, config_dir: Optional[str] = None,
                 provider: str = "claude", codex_account: str | None = None) -> Optional[str]:
     """cwd real da conversa arquivada (lido do cabecalho do transcript) -- usado pra retomar (feature

@@ -79,6 +79,8 @@ pub struct AppState {
     pub chromium: fn() -> Option<std::path::PathBuf>,
     /// Quanto uma escrita espera a porta de entrada da sessão reabrir (os testes encurtam).
     pub write_gate_wait: std::time::Duration,
+    /// O `claude` e o `hangar-engine` do fork do `/btw` (os testes trocam por falsos).
+    pub btw_programs: crate::session_write::btw::Programs,
     /// Grupos de sessões em `.hangar-pair`; `None` sem as pastas da lista (as rotas seguem ao Python).
     pub groups: Option<Arc<crate::groups::service::GroupService>>,
     /// Outras máquinas do dono (`peers.json`), para o par 1:1 entre máquinas.
@@ -130,6 +132,8 @@ impl AppState {
             mods: mods.clone(),
             runtime: Default::default(),
             queue_dir: list.env().dirs.as_ref().map(|dirs| dirs.claude.join(".hangar-queue")),
+            problem_hold: crate::problem_gate::HOLD,
+            shown_problems: list.shown_problems(),
         };
         mods.bind_hubs(side.hubs.downgrade());
         let diag = crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone());
@@ -164,6 +168,7 @@ impl AppState {
             artifacts: Arc::default(),
             chromium: crate::pages::chrome::find,
             write_gate_wait: std::time::Duration::from_secs(30),
+            btw_programs: Default::default(),
             voice: Arc::new(crate::voice::hub::VoiceHub::new()),
             share, guest_bound: Default::default() }
     }
@@ -185,9 +190,9 @@ impl AppState {
         found
     }
 
-    /// Abrir a conversa reabre a sessão em erro; quem reabre é o coordenador do Python.
+    /// Abrir a conversa reabre a sessão em erro, aqui no registro do runtime.
     pub(crate) fn request_reopen(&self, name: &str) {
-        crate::locate::request_reopen(&self.http, self.cfg.upstream, &self.cfg.internal_secret, &self.diag, name);
+        if let Some(runtime) = self.state.runtime.get() { runtime.request_reopen(name); }
     }
 }
 
@@ -234,7 +239,11 @@ pub async fn serve_with_guest(listener: TcpListener, mut state: AppState, guest:
     let _worktree_sweep=crate::AbortOnDrop(crate::worktree_policy::spawn(state.clone()));
     let v6_state = state.clone();
     // Abortada na saída: a tarefa segura o estado do servidor, que sobreviveria a ele.
+    // As sessões com terminal que o multiplexador perdeu voltam pelo spec; antes da varredura de grupos, que
+    // conta como vivos os nomes à espera dele.
+    let _session_restore = crate::session_open::restore::spawn(state.clone()).map(crate::AbortOnDrop);
     let _group_sweep = crate::groups::sweep::spawn(state.clone()).map(crate::AbortOnDrop);
+    let _limit_switch = crate::session_write::limit_switch::spawn(state.clone()).map(crate::AbortOnDrop);
     // Sem a fotografia do Python a varredura não revoga nada (ver `life::sweep`); o túnel religa já.
     let _share_sweep = state.share.clone().map(|share| crate::AbortOnDrop(tokio::spawn(
         crate::share::owner_routes::sweep_loop(share, crate::share::owner_routes::SWEEP_EVERY))));
@@ -380,7 +389,7 @@ where H: axum::handler::Handler<T, Arc<AppState>>, T: 'static {
     Router::new()
         .route("/api/sessions/{name}/term", get(crate::term::session_ws).fallback(fallback.clone()))
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
-        .route("/api/sessions", get(crate::list::hub::list).fallback(fallback.clone()))
+        .route("/api/sessions", get(crate::list::hub::list).post(crate::session_open::create).fallback(fallback.clone()))
         .route("/api/sessions/events", get(crate::list::hub::events).fallback(fallback.clone()))
         .route("/api/sessions/{name}/history", get(history).fallback(fallback.clone()))
         .route("/api/sessions/{name}/events", get(events).fallback(fallback.clone()))
@@ -399,6 +408,8 @@ where H: axum::handler::Handler<T, Arc<AppState>>, T: 'static {
         .route("/api/sessions/{name}/answer", axum::routing::post(crate::session_write::answer::answer).fallback(fallback.clone()))
         .route("/api/sessions/{name}/keys", axum::routing::post(crate::session_write::control::keys).fallback(fallback.clone()))
         .route("/api/sessions/{name}/term-input", axum::routing::post(crate::session_write::control::term_input).fallback(fallback.clone()))
+        // Pergunta lateral: inteira no Rust, com e sem terminal; o convidado completo também.
+        .route("/api/sessions/{name}/btw", axum::routing::post(crate::session_write::btw::ask).get(crate::session_write::btw::list).fallback(fallback.clone()))
         // Painel da fila. `reorder` é caminho fixo: o DELETE e o PATCH dele valem como os de um id de mesmo nome.
         .route("/api/sessions/{name}/queue/reorder", axum::routing::post(crate::session_write::control::queue_reorder)
             .delete(crate::session_write::control::queue_remove).patch(crate::session_write::control::queue_edit).fallback(fallback.clone()))
@@ -408,7 +419,7 @@ where H: axum::handler::Handler<T, Arc<AppState>>, T: 'static {
         // Rotas só do Codex: o Rust atende a sessão sem terminal dele; o resto segue ao Python.
         .route("/api/sessions/{name}/models", get(crate::session_write::codex::models).fallback(fallback.clone()))
         .route("/api/sessions/{name}/model", axum::routing::post(crate::session_write::codex::model).fallback(fallback.clone()))
-        .route("/api/sessions/{name}/service-tier", axum::routing::post(crate::session_write::codex::service_tier).fallback(fallback.clone()))
+        .route("/api/sessions/{name}/service-tier", axum::routing::post(crate::session_write::engine::service_tier).fallback(fallback.clone()))
         .route("/api/sessions/{name}/codex/mode", axum::routing::post(crate::session_write::codex::mode).fallback(fallback.clone()))
         .route("/api/sessions/{name}/limits", get(crate::session_write::codex::limits).fallback(fallback.clone()))
         .route("/api/sessions/{name}/question/skip", axum::routing::post(crate::session_write::codex::skip_question).fallback(fallback.clone()))
@@ -438,7 +449,6 @@ fn terminal_router_with(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> 
         .route("/__hangar_server/quotas", axum::routing::post(crate::accounts::quotas::private))
         .route("/__hangar_server/accounts/claude", axum::routing::post(crate::accounts::http::private_claude))
         .route("/__hangar_server/accounts/public", axum::routing::any(crate::accounts::http::private_public))
-        .route("/__hangar_server/pages", axum::routing::post(crate::pages::routes::publish_bridge))
         .route("/__hangar_server/groups", axum::routing::post(crate::groups::bridge::private))
         .route("/__hangar_server/codex/{*rest}", axum::routing::any(crate::session_write::bridge::codex))
         .route("/__hangar_server/claude/{*rest}", axum::routing::any(crate::session_write::bridge::claude))
@@ -467,6 +477,12 @@ pub fn router(state: Arc<AppState>) -> Router {
 }
 
 fn router_with(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router {
+    let api = public_routes(state.clone(), pair);
+    // O MCP chama as tools pelas mesmas rotas que o `hangar-send` chama: o roteador público inteiro.
+    api.clone().merge(crate::mcp::router(state, api))
+}
+
+fn public_routes(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router {
     session_routes(pass_any)
         .route("/api/hangar-terminals/{ident}/term", get(crate::term::hangar_ws).fallback(pass_any))
         .route("/__hangar_server/health", get(health))
@@ -485,6 +501,12 @@ fn router_with(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router {
         .route("/api/mermaid", axum::routing::post(crate::mermaid::route).fallback(pass_any))
         // Encerrar: o Codex com terminal do Rust encerra aqui e só então segue ao Python, marcado.
         .route("/api/sessions/{name}", axum::routing::delete(crate::session_write::bridge::delete).fallback(pass_any))
+        .route("/api/sessions/creation-progress", get(crate::session_open::server::creation_progress).fallback(pass_any))
+        // Bastão do dono: o Python prepara o dossiê e a sucessora Claude com terminal nasce aqui.
+        .route("/api/sessions/{name}/bastao", axum::routing::post(crate::session_open::server::bastao).fallback(pass_any))
+        // Retomar do Arquivo e o `/resume` ao vivo: a abertura e a reabertura do Rust, com a conversa que já existe.
+        .route("/api/archive/{project}/{session_id}/resume", axum::routing::post(crate::session_open::server::archive_resume).fallback(pass_any))
+        .route("/api/sessions/{name}/resume", axum::routing::post(crate::session_write::resume::route).fallback(pass_any))
         // Broadcast do dono: o alvo Codex com terminal do Rust recebe aqui; o resto segue ao Python.
         .route("/api/broadcast", axum::routing::post(crate::session_write::input::broadcast).fallback(pass_any))
         .route("/api/sessions/{name}/permission-modes", get(crate::session_write::permissions::modes).fallback(pass_any))
@@ -493,6 +515,11 @@ fn router_with(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router {
         // Relançar o Codex do Rust (troca de modo e reinício) é dele do começo ao fim; o resto segue ao Python.
         .route("/api/sessions/{name}/modo-execucao", axum::routing::post(crate::session_write::relaunch::mode).fallback(pass_any))
         .route("/api/sessions/{name}/recarregar", axum::routing::post(crate::session_write::relaunch::reload).fallback(pass_any))
+        // Trocar de conta (e a conta ChatGPT fixa, o modelo e o esforço dela) reabre o Claude pelo spec no Rust.
+        .route("/api/sessions/{name}/conta", get(crate::session_write::account::targets_route).fallback(pass_any))
+        .route("/api/sessions/{name}/conta", axum::routing::post(crate::session_write::account::switch_route))
+        .route("/api/sessions/{name}/engine/model", axum::routing::post(crate::session_write::engine::model).fallback(pass_any))
+        .route("/api/sessions/{name}/model-effort", axum::routing::post(crate::session_write::engine::effort).fallback(pass_any))
         .route("/api/costs", get(crate::costs_routes::costs).fallback(pass_any))
         .route("/api/cotacao", get(crate::costs_routes::cotacao).fallback(pass_any))
         .route("/api/uso", get(crate::costs_routes::usage).fallback(pass_any))
@@ -710,7 +737,7 @@ pub(crate) async fn pass_any(
 }
 
 /// Id de correlação do diário: cabeçalho x-hangar-req; o EventSource só manda ?diag_req.
-fn diag_req(req: &Request) -> String {
+pub(crate) fn diag_req(req: &Request) -> String {
     let h: String = req
         .headers()
         .get("x-hangar-req")
@@ -1046,6 +1073,8 @@ mod tests {
             mods: Default::default(),
             runtime: Default::default(),
             queue_dir: None,
+            problem_hold: std::time::Duration::ZERO,
+            shown_problems: Default::default(),
         };
         let jsonl = dir.join("t.jsonl");
         std::fs::write(&jsonl, "").unwrap();

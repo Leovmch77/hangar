@@ -56,7 +56,7 @@ describe('NewChatDraft.send', () => {
     const r = await draft.send('oi');
 
     expect(core.createSessionForServer).toHaveBeenCalledWith(srv, expect.objectContaining({
-      name: 'proj-2', cwd: '/home/u/proj', provider: 'claude', config_dir: '/c' }));
+      name: 'proj-2', cwd: '/home/u/proj', provider: 'claude', config_dir: null }));
     expect(core.sendInputForServer).toHaveBeenCalledWith(srv, 'proj-3', 'oi');
     expect(r).toEqual({ serverId: 'pc', name: 'proj-3' });
   });
@@ -258,6 +258,32 @@ describe('NewChatDraft.switchFromExhausted', () => {
     expect(draft.configDir).toBe('/c');
   });
 
+  it('D-003: só a conta escolhida à mão ou sugerida vai no pedido; a troca da esgotada não', async () => {
+    core.fetchSessionsForServer.mockResolvedValue([]);
+    core.createSessionForServer.mockResolvedValue({ name: 'proj' });
+    core.sendInputForServer.mockResolvedValue(undefined);
+    const sent = () => core.createSessionForServer.mock.calls.at(-1)![1].config_dir;
+
+    const trocada = await ready();
+    trocada.switchFromExhausted([conta('/c', 100, true), conta('/d', 20)]);
+    await flush();
+    expect(trocada.configDir).toBe('/d');
+    await trocada.send('oi');
+    expect(sent()).toBeNull();
+
+    const escolhida = await ready();
+    escolhida.setConfig('/c');
+    await flush();
+    await escolhida.send('oi');
+    expect(sent()).toBe('/c');
+
+    core.getClaudeAccountSuggestion.mockResolvedValue({ path: '/d' });
+    const sugerida = await ready();
+    expect(sugerida.configDir).toBe('/d');
+    await sugerida.send('oi');
+    expect(sent()).toBe('/d');
+  });
+
   it('sem conta com folga fica na atual', async () => {
     const draft = await ready();
     draft.switchFromExhausted([conta('/c', 100, true), conta('/d', 100)]);
@@ -284,7 +310,7 @@ describe('NewChatDraft — abertura igual à do desktop', () => {
     core.getCodexAccountsForServer.mockResolvedValue([{ id: 'gpt', is_default: true, auth: { status: 'connected' } }]);
     const draft = await ready();
     expect(draft.provider).toBe('codex');
-    expect(draft.permission).toBe('Full Access');
+    expect(draft.permission).toBe('');
   });
 
   it('sem a config do servidor lida, headless fica nulo e o envio espera', async () => {
@@ -294,7 +320,7 @@ describe('NewChatDraft — abertura igual à do desktop', () => {
     expect(draft.loading).toBe(true);
   });
 
-  it('Claude nasce em Bypass e manda o modo de execução lido do servidor', async () => {
+  it('Claude sem escolha de permissão não manda o modo e manda o modo de execução lido do servidor', async () => {
     core.getConfigForServer.mockResolvedValue({ campos: { headless_default: { valor: false } } });
     core.fetchSessionsForServer.mockResolvedValue([]);
     core.createSessionForServer.mockResolvedValue({ name: 'proj' });
@@ -302,7 +328,8 @@ describe('NewChatDraft — abertura igual à do desktop', () => {
     const draft = await ready();
     await draft.send('oi');
     expect(core.createSessionForServer).toHaveBeenCalledWith(srv, expect.objectContaining({
-      provider: 'claude', permission_mode: 'bypassPermissions', headless: false }));
+      provider: 'claude', headless: false }));
+    expect(core.createSessionForServer.mock.calls.at(-1)![1]).not.toHaveProperty('permission_mode');
   });
 });
 

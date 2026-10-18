@@ -213,6 +213,35 @@ async fn gate_closed_past_the_wait_answers_409_busy() {
     assert_eq!(python.hits_to("/api/sessions/s/input"), 0);
 }
 
+/// Btw B2 (`api.py:404`): troca de conta em curso é 409 antes do corpo, e nada chega ao Python.
+#[tokio::test]
+async fn btw_with_the_gate_closed_is_409_busy_before_the_body() {
+    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    open_entry(&registry, dir.path(), "k", "s").await;
+    registry.ingress().close("s", Duration::from_secs(1)).await.unwrap();
+    let (python, upstream) = spawn_fake().await;
+    let mut state = AppState::new(config(upstream, "127.0.0.1"));
+    state.write_gate_wait = Duration::from_millis(100);
+    assert!(state.state.runtime.set(registry).is_ok());
+    let server = spawn_state(state).await;
+    let (status, text) = post(server, "btw", "não é json", OWNER).await;
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("session_transfer_busy")));
+    assert_eq!(python.hits_to("/api/sessions/s/btw"), 0);
+}
+
+/// Btw B6: com a porta aberta, o corpo fora do modelo é o 422 do Rust, sem o Python.
+#[tokio::test]
+async fn btw_body_outside_the_model_is_a_rust_422() {
+    let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
+    open_entry(&registry, dir.path(), "k", "s").await;
+    let (python, server) = serve_with(Some(registry)).await;
+    let (status, text) = post(server, "btw", r#"{"question":"q","x":1}"#, OWNER).await;
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!((status, body["detail"][0]["type"].as_str()), (422, Some("extra_forbidden")));
+    assert_eq!(python.hits_to("/api/sessions/s/btw"), 0);
+}
+
 #[tokio::test]
 async fn gate_held_by_a_transfer_answers_409_without_waiting() {
     let (dir, registry) = (tempfile::tempdir().unwrap(), registry().await);
@@ -297,13 +326,17 @@ async fn post_to(server: std::net::SocketAddr, name: &str, route: &str, body: &s
     (response.status().as_u16(), response.text().await.unwrap())
 }
 
-/// Parity A3: escrever para a sessão doente pede a reabertura ao coordenador do Python (o 503 fica).
+/// Parity A3: escrever para a sessão doente a reabre aqui, sem pedir ao Python (o 503 fica). Sem o
+/// sidecar dela na casa do teste, a reabertura falha visível no diário e a vida doente sai.
 #[tokio::test]
-async fn unhealthy_write_asks_python_to_reopen_the_session() {
+async fn unhealthy_write_reopens_the_session_in_rust() {
     let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
     let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
     let registry = crate::runtime_open::with_hubs(RuntimeRegistry::new(policy_seen(seen.clone()).await, "secret-test".into(), "instance-test".into())
-        .with_processes(Arc::new(crate::runtime_open::RecipeProcesses("sid-1"))));
+        .with_processes(Arc::new(crate::runtime_open::RecipeProcesses("sid-1")))
+        .with_codex_environment(hangar_server::accounts::environment::AccountEnvironment::from_map(
+            [("HOME".to_owned(), home.path().to_string_lossy().into_owned())].into())));
     let kill = Arc::new(tokio::sync::Notify::new());
     open_entry_with(&registry, dir.path(), "d", "doente", 1, cano_with(Some(kill.clone())).await).await;
     kill.notify_one();
@@ -314,10 +347,13 @@ async fn unhealthy_write_asks_python_to_reopen_the_session() {
     let (_python, server) = serve_with(Some(registry.clone())).await;
     let (status, _) = post_to(server, "doente", "input", r#"{"text":"oi"}"#).await;
     assert_eq!(status, 503);
-    let wanted = "POST /internal/sessions/doente/reopen HTTP/1.1";
-    for _ in 0..100 {
-        if seen.lock().unwrap().iter().any(|line| line == wanted) { break; }
+    let diary = "POST /internal/diag HTTP/1.1";
+    for _ in 0..250 {
+        if registry.writable("doente").await.is_none() && seen.lock().unwrap().iter().any(|line| line == diary) { break; }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(seen.lock().unwrap().iter().any(|line| line == wanted), "{:?}", seen.lock().unwrap());
+    assert!(registry.writable("doente").await.is_none(), "a vida doente fechou para reabrir");
+    let seen = seen.lock().unwrap();
+    assert!(seen.iter().any(|line| line == diary), "a falha da reabertura vai ao diário: {seen:?}");
+    assert!(!seen.iter().any(|line| line.contains("/reopen")), "nada vai ao coordenador do Python: {seen:?}");
 }

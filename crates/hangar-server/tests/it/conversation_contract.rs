@@ -221,6 +221,8 @@ async fn claude_bridge_serves_input_answers_and_queue_of_a_rust_claude() {
     let (status, reply) = post("s/input", json!({"text":"oi","jev_task":"t"}).to_string()).await;
     assert_eq!((status, reply["detail"]["code"].as_str()), (422, Some("erro_corpo_invalido")));
     assert_eq!(call(reqwest::Method::POST, "s/input", r#"{"text":"oi"}"#, false).await.0, 404);
+    // Sessão que o Rust não tem não entra pela ponte.
+    assert_eq!(post("nada/input", json!({"text": "oi"}).to_string()).await.0, 421);
     // Fora do recorte: aba Submit sem pane, outra rota, outro método, sessão desconhecida.
     assert_eq!(post("s/select/submit", "{}".into()).await.0, 421);
     assert_eq!(post("s/not-a-route", "{}".into()).await.0, 421);
@@ -237,6 +239,10 @@ async fn claude_bridge_serves_input_answers_and_queue_of_a_rust_claude() {
     assert_eq!((status, reply["sondavel"].as_bool()), (200, Some(false)), "{reply}");
     assert_eq!(post("s/permission-modes", "{}".into()).await.0, 421, "lista só por GET");
     assert_eq!(python.hits_to("/api/sessions/s/permission-modes"), 0);
+    // Btw: a pergunta lateral do Connect chega à rota do Rust, que responde até o corpo errado.
+    let (status, reply) = post("s/btw", r#"{"question":"q","x":1}"#.into()).await;
+    assert_eq!((status, reply["detail"][0]["type"].as_str()), (422, Some("extra_forbidden")), "{reply}");
+    assert_eq!(python.hits_to("/api/sessions/s/btw"), 0);
     // A rota irmã das personalizações não é engolida pela ponte.
     assert_ne!(post("customizations", "{}".into()).await.0, 421);
     for route in ["answer", "select", "select/submit", "input"] {

@@ -49,71 +49,12 @@ def _salva(nome, cwd, rollout, app_pid=None):
                         endpoint="ws://127.0.0.1:1", app_pid=app_pid)
 
 
-def test_cria_direto_no_tmux_com_o_comando_do_lancador(w):
-    from app.adapters.codex import lancador
-    chamadas = []
-
-    class _R:
-        returncode = 0
-        stderr = ""
-
-    with patch.object(w, "_tmux_vivas", return_value=set()), \
-         patch.object(w.subprocess, "run", lambda *a, **k: chamadas.append(a[0]) or _R()):
-        nome = w._create_local("/tmp/proj", "revise", lancador)
-
-    assert nome == "proj"
-    argv = chamadas[0]
-    assert argv[:4] == ["tmux", "new-session", "-d", "-s"]
-    # A identidade vai por env, que e de onde o lancador a le — nao repetida no comando.
-    assert f"CP_SESSION_NAME={nome}" in argv
-    assert "hangar-codex-tui --cwd /tmp/proj" in argv[-1]
-    assert "--prompt revise" in argv[-1]
 
 
-def test_cria_direto_preserva_codex_home_herdado(w, monkeypatch):
-    from app.adapters.codex import lancador
-    chamadas = []
-
-    class _R:
-        returncode = 0
-        stderr = ""
-
-    monkeypatch.setenv("CODEX_HOME", "/tmp/codex-custom")
-    with patch.object(w, "_tmux_vivas", return_value=set()), \
-         patch.object(w.subprocess, "run", lambda *a, **k: chamadas.append(a[0]) or _R()):
-        w._create_local("/tmp/proj", None, lancador)
-    assert "--codex-home /tmp/codex-custom" in chamadas[0][-1]
-    assert "--codex-account custom" in chamadas[0][-1]
 
 
-def test_cria_direto_fixa_home_padrao_do_chamador(w, monkeypatch, tmp_path):
-    from app.adapters.codex import lancador
-    chamadas = []
-
-    class _R:
-        returncode = 0
-        stderr = ""
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("CODEX_HOME", raising=False)
-    with patch.object(w, "_tmux_vivas", return_value=set()), \
-         patch.object(w.subprocess, "run", lambda *a, **k: chamadas.append(a[0]) or _R()):
-        w._create_local("/tmp/proj", None, lancador)
-
-    assert f"--codex-home {tmp_path / '.codex'}" in chamadas[0][-1]
-    assert "--codex-account default" in chamadas[0][-1]
 
 
-def test_nome_livre_pula_o_que_o_tmux_ja_tem(w):
-    from app.adapters.codex import lancador
-
-    class _R:
-        returncode = 0
-        stderr = ""
-
-    with patch.object(w, "_tmux_vivas", return_value={"proj", "proj-2"}), \
-         patch.object(w.subprocess, "run", lambda *a, **k: _R()):
-        assert w._create_local("/tmp/proj", None, lancador) == "proj-3"
 
 
 def test_limpeza_sem_api_mata_o_app_server_e_apaga_o_sidecar(w, tmp_path):
@@ -158,107 +99,17 @@ def test_carregar_os_modulos_nao_puxa_o_pacote_dos_adapters(w, monkeypatch):
     for nome in ("app.adapters", "app.adapters.codex"):
         monkeypatch.delitem(_sys.modules, nome, raising=False)
 
-    sessions, lancador = w._do_backend()
+    sessions = w._do_backend()
 
-    assert sessions is not None and lancador is not None
+    assert sessions is not None
     assert "app.adapters" not in _sys.modules
-    assert callable(lancador.comando_do_lancador)
+    assert callable(sessions.load)
 
 
-@pytest.mark.parametrize("prompt", [None, "revise"])
-@pytest.mark.parametrize("backend", ["ativo", "fora", "sem_token"])
-@pytest.mark.parametrize("pane", ["fora", "vivo", "morto"])
-def test_main_cria_sessao_nova_e_escolhe_cliente(w, monkeypatch, tmp_path, prompt, backend, pane):
-    from app.adapters.codex import lancador
-    from types import SimpleNamespace
-
-    cwd = str(tmp_path)
-    _salva(tmp_path.name, cwd, tmp_path / "antigo.jsonl")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(w.sys, "argv", ["hangar-codex"] + ([prompt] if prompt else []))
-    monkeypatch.setattr(w, "_do_backend", lambda: (codex_sessions, lancador))
-    monkeypatch.setattr(w, "_tmux_vivas", lambda: {tmp_path.name})
-    monkeypatch.setattr(w, "_env", lambda: {})
-    monkeypatch.delenv("CP_AUTH_TOKEN", raising=False)
-    if pane == "fora":
-        monkeypatch.delenv("TMUX", raising=False)
-        monkeypatch.delenv("TMUX_PANE", raising=False)
-    else:
-        monkeypatch.setenv("TMUX", "socket-herdado")
-        monkeypatch.setenv("TMUX_PANE", "%42")
-    chamadas, pedidos = [], []
-
-    def api(method, path, body=None):
-        pedidos.append((method, path, body))
-        if backend == "fora":
-            raise w.BackendTransportError("backend inacessivel")
-        if method == "GET":
-            return [{"name": tmp_path.name, "cwd": cwd, "provider": "codex"}]
-        if method == "POST":
-            return {"name": body["name"]}
-        return {}
-
-    if backend != "sem_token":
-        monkeypatch.setattr(w, "_api", api)
-
-    def run(argv, **kwargs):
-        chamadas.append(argv)
-        command = argv[1]
-        if command == "list-panes":
-            return SimpleNamespace(returncode=0 if pane == "vivo" else 1)
-        if command == "has-session":
-            return SimpleNamespace(returncode=1)
-        if command == "attach-session":
-            assert "TMUX" not in os.environ
-            assert "TMUX_PANE" not in os.environ
-        return SimpleNamespace(returncode=0, stderr="")
-
-    monkeypatch.setattr(w.subprocess, "run", run)
-    assert w.main() == 0
-    name = f"{tmp_path.name}-2"
-    if backend == "ativo":
-        assert pedidos[1] == ("POST", "/api/sessions", {
-            "name": name, "cwd": cwd, "provider": "codex", "headless": False, "initial_prompt": prompt,
-        })
-    else:
-        creation = next(c for c in chamadas if c[1] == "new-session")
-        assert creation[4] == name
-        assert "--resume" not in creation[-1]
-        if prompt:
-            assert f"--prompt {prompt}" in creation[-1]
-    action = "switch-client" if pane == "vivo" else "attach-session"
-    assert ["tmux", action, "-t", f"={name}"] in chamadas
-    assert all("/input" not in path for _, path, _ in pedidos)
-    assert codex_sessions.load(tmp_path.name) is not None
 
 
-def test_http_recusado_nao_abre_sessao_local(w, monkeypatch, tmp_path):
-    from app.adapters.codex import lancador
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(w.sys, "argv", ["hangar-codex"])
-    monkeypatch.setattr(w, "_do_backend", lambda: (codex_sessions, lancador))
-    monkeypatch.setattr(w, "_api", lambda *a, **k: (_ for _ in ()).throw(
-        RuntimeError("HTTP 409: codex_account_preparing")))
-    with patch.object(w, "_create_local") as local:
-        assert w.main() == 1
-    local.assert_not_called()
 
 
-def test_so_409_de_nome_ocupado_repete_no_proximo_nome(w, monkeypatch):
-    from app.adapters.codex import lancador
-    tentativas = []
-
-    def api(method, path, body=None):
-        if method == "GET":
-            return []
-        tentativas.append(body["name"])
-        if len(tentativas) == 1:
-            raise w.BackendHttpError(409, {"code": "erro_nome_em_uso"})
-        return {"name": body["name"]}
-
-    monkeypatch.setattr(w, "_api", api)
-    assert w._create("/tmp/proj", None) == "proj-2"
-    assert tentativas == ["proj", "proj-2"]
 
 
 def test_api_desembrulha_detail_do_fastapi(w, monkeypatch):
@@ -275,20 +126,159 @@ def test_api_desembrulha_detail_do_fastapi(w, monkeypatch):
     assert exc.value.detail == {"code": "erro_nome_em_uso"}
 
 
-@pytest.mark.parametrize("code", ["codex_account_preparing", "session_name_conflict"])
-def test_outro_409_nao_repete_nem_abre_local(w, monkeypatch, code):
-    from app.adapters.codex import lancador
-    tentativas = []
 
-    def api(method, path, body=None):
-        if method == "GET":
-            return []
-        tentativas.append(body["name"])
-        raise w.BackendHttpError(409, {"code": code})
 
+
+def _servidor_falso(tmp_path, monkeypatch, respostas):
+    """`hangar-server` falso (o `open` do lançador): grava cada pedido e responde, em ordem, `(código, saída)`."""
+    import sys as _sys
+    if os.name == "nt":
+        pytest.skip("o hangar-server falso é script com shebang, e o Windows só executa .exe")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    (tmp_path / "respostas.json").write_text(json.dumps(respostas))
+    script = bin_dir / "hangar-server"
+    script.write_text(f"""#!{_sys.executable}
+import json, sys
+from pathlib import Path
+base = Path({str(tmp_path)!r})
+pedidos = base / "pedidos.jsonl"
+with pedidos.open("a") as fh:
+    fh.write(json.dumps(sys.argv[1:]) + "\\n")
+n = len(pedidos.read_text().splitlines()) - 1
+codigo, saida = json.loads((base / "respostas.json").read_text())[n]
+print(saida, file=sys.stdout if codigo == 0 else sys.stderr)
+sys.exit(codigo)
+""")
+    script.chmod(0o755)
+    monkeypatch.setenv("CP_RUST_SERVER_BIN", str(script))
+    return lambda: [json.loads(l) for l in (tmp_path / "pedidos.jsonl").read_text().splitlines()] \
+        if (tmp_path / "pedidos.jsonl").exists() else []
+
+
+def _main(w, monkeypatch, tmp_path, api, pane="fora"):
+    """Roda o `main` com a API dada e um tmux falso; devolve (código, chamadas ao tmux)."""
+    from types import SimpleNamespace
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(w.sys, "argv", ["hangar-codex", "revise"])
     monkeypatch.setattr(w, "_api", api)
-    with patch.object(w, "_create_local") as local:
-        with pytest.raises(w.BackendHttpError):
-            w._create("/tmp/proj", None)
-    assert tentativas == ["proj"]
-    local.assert_not_called()
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    if pane == "fora":
+        monkeypatch.delenv("TMUX", raising=False)
+        monkeypatch.delenv("TMUX_PANE", raising=False)
+    else:
+        monkeypatch.setenv("TMUX", "socket")
+        monkeypatch.setenv("TMUX_PANE", "%42")
+    chamadas = []
+    real_run = w.subprocess.run
+
+    def run(argv, **kwargs):
+        if argv[:1] != ["tmux"]:
+            return real_run(argv, **kwargs)
+        chamadas.append(argv)
+        if argv[1] == "list-panes":
+            return SimpleNamespace(returncode=0 if pane == "vivo" else 1)
+        if argv[1] == "has-session":
+            return SimpleNamespace(returncode=1)
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(w.subprocess, "run", run)
+    return w.main(), chamadas
+
+
+def _sem_post(method, path, body=None):
+    assert method == "DELETE", f"o wrapper não fala com a API para abrir: {method} {path}"
+    return {}
+
+
+@pytest.mark.parametrize("pane", ["fora", "vivo"])
+def test_abre_sempre_pelo_hangar_server_open(w, monkeypatch, tmp_path, pane):
+    # O `hangar-server open` pergunta ao servidor e, fora do ar ou sem Rust, abre aqui: o wrapper
+    # não faz o POST ele mesmo, senão o 503 do Python sem Rust virava erro e nada abria.
+    pedidos = _servidor_falso(tmp_path, monkeypatch, [[0, json.dumps({"name": "proj"})]])
+    codigo, chamadas = _main(w, monkeypatch, tmp_path, _sem_post, pane)
+    assert codigo == 0
+    (comando, pedido), = pedidos()
+    assert comando == "open"
+    assert json.loads(pedido) == {"cwd": str(tmp_path), "provider": "codex", "headless": False,
+                                  "initial_prompt": "revise"}
+    assert not any(c[:2] == ["tmux", "new-session"] for c in chamadas), "pane próprio fora do lançador único"
+    acao = "switch-client" if pane == "vivo" else "attach-session"
+    assert ["tmux", acao, "-t", "=proj"] in chamadas
+
+
+def test_codex_home_de_conta_gerenciada_vai_no_pedido_sem_perguntar_ao_servidor(w, monkeypatch, tmp_path):
+    casa = tmp_path / "casa"
+    (casa / ".codex-trabalho").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(casa))
+    pedidos = _servidor_falso(tmp_path, monkeypatch, [[0, json.dumps({"name": "proj"})]])
+    monkeypatch.setattr(w, "_api", _sem_post)
+    monkeypatch.setenv("CODEX_HOME", str(casa / ".codex-trabalho"))
+    assert w._create("/tmp/proj", None) == "proj"
+    (_, pedido), = pedidos()
+    assert json.loads(pedido)["codex_account"] == "trabalho"
+
+
+def test_codex_home_fora_das_contas_recusa_sem_abrir(w, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "casa"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "outro"))
+    pedidos = _servidor_falso(tmp_path, monkeypatch, [[0, json.dumps({"name": "proj"})]])
+    with pytest.raises(RuntimeError, match="CODEX_HOME"):
+        w._create("/tmp/proj", None)
+    assert pedidos() == []
+
+
+def test_sem_o_lancador_sai_3_para_o_codex_cru(w, monkeypatch, tmp_path, capsys):
+    # Sem `hangar-server` em lugar nenhum: nada abre, e o código 3 manda o wrapper do shell abrir o
+    # `codex` oficial.
+    monkeypatch.setenv("CP_RUST_SERVER_BIN", str(tmp_path / "nao-existe"))
+    monkeypatch.setenv("HOME", str(tmp_path / "casa"))
+    monkeypatch.setattr(w, "_repo", lambda: tmp_path / "sem-copia")
+    monkeypatch.setenv("PATH", str(tmp_path / "vazio"))
+    codigo, chamadas = _main(w, monkeypatch, tmp_path, _sem_post)
+    assert codigo == 3
+    assert "hangar-server" in capsys.readouterr().err
+    assert chamadas == []
+
+
+def test_recusa_nao_repete_e_nao_abre_o_codex_oficial(w, monkeypatch, tmp_path, capsys):
+    # T-016 (CDX-124): recusa (do servidor ou do lançador local) sai 1, nunca 3.
+    saida = json.dumps({"detail": {"code": "erro_cwd_inexistente", "msg": "a pasta não existe", "params": {}}})
+    pedidos = _servidor_falso(tmp_path, monkeypatch, [[1, saida]])
+    codigo, chamadas = _main(w, monkeypatch, tmp_path, _sem_post)
+    assert codigo == 1
+    assert "a pasta não existe" in capsys.readouterr().err
+    assert len(pedidos()) == 1 and chamadas == []
+
+
+@pytest.mark.parametrize("saida", [2, 4])
+def test_lancador_antigo_ou_sem_token_sai_3_para_o_codex_cru(w, monkeypatch, tmp_path, saida):
+    # 2 = hangar-server sem `open`; 4 = sem token no .env. Nada foi enviado: o `codex` oficial abre.
+    pedidos = _servidor_falso(tmp_path, monkeypatch, [[saida, "hangar-server: não abriu"]])
+    codigo, chamadas = _main(w, monkeypatch, tmp_path, _sem_post)
+    assert codigo == 3
+    assert len(pedidos()) == 1 and chamadas == []
+
+
+def test_acha_o_mesmo_hangar_server_que_o_supervisor(w, monkeypatch, tmp_path):
+    # Mesma regra do `hangar-open` (`rust_bins.find_bin`): o mais novo entre a cópia e o baixado.
+    import shutil
+    # Resolvida como o `rust_bins` a vê: no Windows o `resolve()` traz a caixa de letra do disco.
+    raiz = tmp_path.resolve() / "copia"
+    (raiz / "scripts").mkdir(parents=True)
+    (raiz / "backend" / "app").mkdir(parents=True)
+    shutil.copy(_CAMINHO.parent / "hangar-open", raiz / "scripts" / "hangar-open")
+    shutil.copy(_CAMINHO.parents[1] / "backend" / "app" / "rust_bins.py", raiz / "backend" / "app" / "rust_bins.py")
+    monkeypatch.setattr(w, "_repo", lambda: raiz)
+    # `Path.home()` lê o HOME no POSIX e o USERPROFILE no Windows, onde o binário tem `.exe`.
+    monkeypatch.setenv("HOME", str(tmp_path / "casa"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "casa"))
+    monkeypatch.delenv("CP_RUST_SERVER_BIN", raising=False)
+    servidor = "hangar-server" + (".exe" if os.name == "nt" else "")
+    for caminho, mtime in ((tmp_path / "casa" / ".hangar" / "bin" / servidor, 1000),
+                           (raiz / "crates" / "target" / "release" / servidor, 2000)):
+        caminho.parent.mkdir(parents=True)
+        caminho.write_text("#!/bin/sh\n")
+        caminho.chmod(0o755)
+        os.utime(caminho, (mtime, mtime))
+    assert w._hangar_server() == str(raiz / "crates" / "target" / "release" / servidor)

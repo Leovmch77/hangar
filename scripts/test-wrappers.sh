@@ -121,7 +121,7 @@ check_pi_injected() {
 }
 
 # $1=descrição  $2=arquivo de saída — o omp NÃO tem --session-id: quem escolhe a sessão é o CAMINHO
-# passado em --session, e ele precisa ser o mesmo que o backend montaria (transcript_alvo), senão o
+# passado em --session, e ele precisa ser o mesmo que o servidor montaria (session_open/agents.rs), senão o
 # glob `*_<uuid>.jsonl` do registry procura numa pasta e o transcript nasce noutra.
 check_omp_injected() {
     local desc="$1" out="$2" sid caminho esperado_dir arquivo
@@ -598,26 +598,209 @@ else
     echo "== fish: não encontrado no PATH, pulando =="
 fi
 
-echo "== carimbo de identidade (CP_SESSION_NAME) =="
-# Por que ESTATICO e nao comportamental: o ramo que cria sessao so roda com stdin em TTY
-# (`[ ! -t 0 ]` manda pro bypass), entao exercita-lo exigiria pty + fake tmux — e o que se quer
-# travar aqui e mais simples: que nenhum `new-session` fique SEM o carimbo. Sem ele o hangar-send de
-# dentro do pane cai no `display-message -p '#S'` (sessao do CLIENTE anexado) e o --unpair de uma
-# sessao desfaz o vinculo da OUTRA — aconteceu 2x. O backend ja carimba em app/tmux.py; estes
-# wrappers criam sessao POR CONTA, entao precisam carimbar tambem.
-# ponytail: contagem por arquivo, nao casamento linha-a-linha; upgrade = pty + fake tmux se algum
-# dia um wrapper passar a montar o comando em pedacos e a contagem deixar de bater.
-for w in claude.posix.sh claude.fish claude.ps1 pi.posix.sh pi.fish omp.posix.sh omp.fish; do
-    f="$REPO/scripts/shell/$w"
-    # `^[^#]*` descarta MENÇÃO em comentário: os wrappers do pi citam "tmux new-session" no cabeçalho
-    # pra explicar por que o export vai dentro do `sh -c`, e contar isso dava falso positivo.
-    n_new=$(grep -c '^[^#]*new-session' "$f" || true)
-    n_cp=$(grep -c '^[^#]*CP_SESSION_NAME=' "$f" || true)
-    if [ "$n_new" -gt 0 ] && [ "$n_cp" -lt "$n_new" ]; then
-        echo "FAIL: $w tem $n_new new-session e só $n_cp CP_SESSION_NAME= — sessão nasceria sem identidade"
-        fail=1
+echo "== abertura pelo Hangar (fora do tmux, em terminal) =="
+# O ramo que abre pelo Hangar só roda com stdin em terminal: cada caso roda num pty (pty.spawn do
+# python). HOME falso e PATH fechado de propósito: o ~/.hangar/bin/hangar-server de verdade abriria
+# uma sessão real no servidor vivo.
+HS_DIR="$TMP/hs"
+mkdir -p "$HS_DIR"
+cat >"$HS_DIR/hangar-server" <<'FAKE'
+#!/usr/bin/env bash
+[ "$1" = open ] || { echo "fake hangar-server: esperava open, veio '$1'" >&2; exit 2; }
+# 2 = binário antigo sem `open`; 4 = sem token no .env. Nos dois nada foi enviado.
+[ -n "${CP_TEST_HS_EXIT:-}" ] && { echo "fake hangar-server: saída $CP_TEST_HS_EXIT" >&2; exit "$CP_TEST_HS_EXIT"; }
+printf '%s' "$2" > "$CP_TEST_HS"
+if [ -n "${CP_TEST_HS_FAIL:-}" ]; then echo '{"detail":"recusado no teste"}' >&2; exit 1; fi
+echo '{"name":"x","provider":"qualquer","warnings":[]}'
+FAKE
+chmod +x "$HS_DIR/hangar-server"
+# tmux falso: o servidor tmux de verdade nunca é tocado; só registra o attach.
+cat >"$TMP/bin/tmux" <<'FAKE'
+#!/usr/bin/env bash
+{ printf 'TMUX:'; printf ' %s' "$@"; printf '\n'; } >> "${CP_TEST_TMUX:-/dev/null}"
+[ "$1" != has-session ]   # nenhuma sessão existe
+FAKE
+chmod +x "$TMP/bin/tmux"
+cat >"$TMP/bin/kimi" <<'FAKE'
+#!/usr/bin/env bash
+{ printf 'ARGV:'; printf ' %q' "$@"; printf '\n'; } > "$CP_TEST_OUT"
+FAKE
+chmod +x "$TMP/bin/kimi"
+TTY_CWD="$TMP/pasta Área"
+TTY_HOME="$TMP/home-tty"
+mkdir -p "$TTY_CWD" "$TTY_HOME"
+
+# $1=shell (bash|zsh|fish)  $2=cli  $3=modo (ok|fail|none = sem hangar-server|noopen = sem hangar-open
+# no PATH|pipe = stdin sem tty)
+# resto=args. CASE_CFG/CASE_ENGINE/CASE_PROFILE viram CLAUDE_CONFIG_DIR/CP_ENGINE/OMP_PROFILE.
+# Imprime a pasta do caso: cli (argv do CLI cru), hs (pedido JSON), tmux, rc, tty (saída do pty).
+tty_case() {
+    local sh="$1" cli="$2" mode="$3" d="$TMP/tty.$RANDOM.$RANDOM" path="$REPO/scripts:$TMP/bin:/usr/bin:/bin"
+    shift 3
+    mkdir -p "$d"
+    [ "$mode" = noopen ] && path="$TMP/bin:/usr/bin:/bin"
+    [ "$mode" = none ] || [ "$mode" = noopen ] || path="$HS_DIR:$path"
+    local -a extra=() run=() pty=(python3 -c 'import pty,sys; pty.spawn(sys.argv[1:])')
+    [ -n "${CASE_CFG:-}" ] && extra+=("CLAUDE_CONFIG_DIR=$CASE_CFG")
+    [ -n "${CASE_ENGINE:-}" ] && extra+=("CP_ENGINE=$CASE_ENGINE" "CP_ENGINES_FILE=$CP_ENGINES_FILE")
+    [ -n "${CASE_PROFILE:-}" ] && extra+=("OMP_PROFILE=$CASE_PROFILE")
+    [ "$mode" = fail ] && extra+=(CP_TEST_HS_FAIL=1)
+    case "$mode" in exit*) extra+=("CP_TEST_HS_EXIT=${mode#exit}") ;; esac
+    [ "$mode" = pipe ] && pty=()
+    if [ "$sh" = fish ]; then
+        run=(fish --no-config -c 'source $argv[1]; '"$cli"' $argv[2..-1]; echo "RC=$status" > $CP_TEST_RC' \
+            -- "$REPO/scripts/shell/$cli.fish" "$@")
+    else
+        run=("$sh" -c 'source "$1"; shift; '"$cli"' "$@"; echo "RC=$?" > "$CP_TEST_RC"' _ "$REPO/scripts/shell/$cli.posix.sh" "$@")
     fi
+    (cd "$TTY_CWD" && env -i PATH="$path" ZDOTDIR="$EMPTY_ZDOTDIR" HOME="$TTY_HOME" PI_CODING_AGENT_DIR="$OMP_DIR" \
+        CP_TEST_OUT="$d/cli" CP_TEST_HS="$d/hs" CP_TEST_TMUX="$d/tmux" CP_TEST_RC="$d/rc" "${extra[@]}" \
+        "${pty[@]}" "${run[@]}") </dev/null >"$d/tty" 2>&1 || true
+    printf '%s' "$d"
+}
+
+# $1=descrição  $2=pasta do caso  $3=pedido esperado (JSON, comparado como objeto)
+check_opened() {
+    local desc="$1" d="$2" want="$3"
+    if ! [ -f "$d/hs" ] || ! python3 -c 'import json,sys; sys.exit(json.load(open(sys.argv[1])) != json.loads(sys.argv[2]))' "$d/hs" "$want"; then
+        echo "FAIL: $desc — pedido ao hangar-server: $(cat "$d/hs" 2>/dev/null || echo '(nenhum)'), esperava $want"
+        sed 's/^/    tty: /' "$d/tty"; fail=1
+    fi
+    if ! grep -qxF 'TMUX: attach-session -t =x' "$d/tmux" 2>/dev/null; then
+        echo "FAIL: $desc — não anexou em =x ($(cat "$d/tmux" 2>/dev/null))"; fail=1
+    fi
+    if [ -f "$d/cli" ]; then echo "FAIL: $desc — rodou o CLI cru além de abrir pelo Hangar"; fail=1; fi
+}
+
+# $1=descrição  $2=pasta do caso  $3=linha ARGV esperada
+check_raw() {
+    local desc="$1" d="$2" want="$3"
+    if [ -f "$d/hs" ]; then echo "FAIL: $desc — chamou o hangar-server ($(cat "$d/hs"))"; fail=1; fi
+    if [ -s "$d/tmux" ] && grep -q attach-session "$d/tmux"; then echo "FAIL: $desc — anexou no tmux"; fail=1; fi
+    check_argv "$desc" "$d/cli" "$want"
+}
+
+# O Hangar não abriu (saída 100 do hangar-open, ou sem hangar-open): a sessão nasce no tmux com o
+# nome da pasta, senão o CLI rodaria fora do tmux e sumiria do app. O tmux falso só registra o argv.
+# $1=descrição  $2=pasta do caso  $3=regex do resto da linha depois de `-c <pasta> `
+check_tmux_fallback() {
+    local desc="$1" d="$2" want="$3"
+    if [ -f "$d/hs" ]; then echo "FAIL: $desc — o hangar-server abriu ($(cat "$d/hs"))"; fail=1; fi
+    if [ -f "$d/cli" ]; then echo "FAIL: $desc — rodou o CLI cru fora do tmux"; fail=1; fi
+    if ! grep -qE '^TMUX: new-session -s ([A-Za-z0-9_-]+) -c '"$TTY_CWD $want" "$d/tmux" 2>/dev/null; then
+        echo "FAIL: $desc — sem tmux new-session esperado ($(grep new-session "$d/tmux" 2>/dev/null || echo nenhum))"
+        sed 's/^/    tty: /' "$d/tty"; fail=1
+    fi
+}
+UUID='[0-9a-fA-F-]{36}'
+CL_ENV='-e COLORTERM=truecolor -e CLAUDE_CODE_TMUX_TRUECOLOR=1 -e CP_SESSION_NAME=\1'
+
+for SH in bash zsh fish; do
+    command -v "$SH" >/dev/null 2>&1 || { echo "== $SH: não encontrado, pulando =="; continue; }
+    echo "== $SH (abertura pelo Hangar) =="
+    base='"cwd": "'"$TTY_CWD"'", "headless": false'
+
+    d=$(tty_case "$SH" claude ok)
+    check_opened "$SH claude sem flags" "$d" '{"provider": "claude", '"$base"'}'
+
+    d=$(CASE_CFG="$TMP/conta b" CASE_ENGINE=probe tty_case "$SH" claude ok --model opus --effort high --permission-mode plan)
+    check_opened "$SH claude conta + motor + flags" "$d" \
+        '{"provider": "claude", '"$base"', "config_dir": "'"$TMP/conta b"'", "engine": "probe", "model": "opus", "effort": "high", "permission_mode": "plan"}'
+
+    d=$(tty_case "$SH" claude ok --model=sonnet --dangerously-skip-permissions 'oi "mundo"')
+    check_opened "$SH claude --model= + bypass + prompt" "$d" \
+        '{"provider": "claude", '"$base"', "model": "sonnet", "permission_mode": "bypassPermissions", "initial_prompt": "oi \"mundo\""}'
+
+    d=$(tty_case "$SH" claude ok --flag-que-o-pedido-nao-conhece)
+    check_tmux_fallback "$SH claude flag desconhecida abre no tmux" "$d" \
+        "$CL_ENV env -u CLAUDE_CONFIG_DIR claude --session-id $UUID --flag-que-o-pedido-nao-conhece\$"
+    grep -qF "argumento '--flag-que-o-pedido-nao-conhece'" "$d/tty" \
+        || { echo "FAIL: $SH claude flag desconhecida — não disse qual argumento impediu"; fail=1; }
+
+    d=$(tty_case "$SH" claude ok update)
+    check_raw "$SH claude subcomando vai cru" "$d" '^ARGV: --session-id [0-9a-fA-F-]+ update$'
+
+    d=$(tty_case "$SH" pi ok auth)
+    check_raw "$SH pi subcomando auth vai cru" "$d" '^ARGV: auth$'
+
+    d=$(tty_case "$SH" claude ok --resume abc)
+    check_raw "$SH claude --resume vai cru" "$d" '^ARGV: --resume abc$'
+
+    d=$(tty_case "$SH" claude ok -p oi)
+    check_raw "$SH claude -p vai cru" "$d" '^ARGV: --session-id [0-9a-fA-F-]+ -p oi$'
+
+    d=$(tty_case "$SH" claude pipe)
+    check_raw "$SH claude com stdin sem tty vai cru" "$d" '^ARGV: --session-id [0-9a-fA-F-]+$'
+
+    d=$(tty_case "$SH" claude none)
+    check_tmux_fallback "$SH claude sem hangar-server abre no tmux" "$d" "$CL_ENV env -u CLAUDE_CONFIG_DIR claude --session-id $UUID\$"
+    grep -qF 'hangar-server não encontrado' "$d/tty" || { echo "FAIL: $SH claude sem hangar-server — sem aviso"; fail=1; }
+
+    for code in 2 4; do
+        d=$(tty_case "$SH" claude "exit$code")
+        check_tmux_fallback "$SH claude hangar-server sai $code abre no tmux" "$d" "$CL_ENV env -u CLAUDE_CONFIG_DIR claude --session-id $UUID\$"
+        grep -qF 'abrindo o claude sem o Hangar' "$d/tty" || { echo "FAIL: $SH claude hangar-server sai $code — sem aviso"; fail=1; }
+    done
+
+    d=$(tty_case "$SH" claude noopen)
+    check_tmux_fallback "$SH claude sem hangar-open abre no tmux" "$d" "$CL_ENV env -u CLAUDE_CONFIG_DIR claude --session-id $UUID\$"
+    grep -qF 'hangar-open não encontrado' "$d/tty" || { echo "FAIL: $SH claude sem hangar-open — sem aviso"; fail=1; }
+
+    d=$(CASE_CFG="$TMP/conta b" CASE_ENGINE=probe tty_case "$SH" claude none --model opus)
+    check_tmux_fallback "$SH claude conta + motor abre no tmux" "$d" \
+        "$CL_ENV -e CLAUDE_CONFIG_DIR=$TMP/conta b hangar-engine --exec probe -- claude --session-id $UUID --model opus\$"
+
+    d=$(tty_case "$SH" claude fail)
+    if [ -f "$d/cli" ] || grep -q attach-session "$d/tmux" 2>/dev/null || grep -qx 'RC=0' "$d/rc" 2>/dev/null \
+        || ! grep -qF 'recusado no teste' "$d/tty"; then
+        echo "FAIL: $SH claude recusado — esperava erro visível, sem attach, sem CLI cru e código != 0"
+        sed 's/^/    tty: /' "$d/tty"; cat "$d/rc" 2>/dev/null; fail=1
+    fi
+
+    d=$(tty_case "$SH" pi ok --model m1 --thinking high)
+    check_opened "$SH pi --model --thinking" "$d" '{"provider": "pi", '"$base"', "model": "m1", "effort": "high"}'
+
+    d=$(tty_case "$SH" pi ok --session foo)
+    check_raw "$SH pi --session vai cru" "$d" '^ARGV: --session foo$'
+
+    d=$(tty_case "$SH" pi ok --flag-desconhecida)
+    check_tmux_fallback "$SH pi flag desconhecida abre no tmux" "$d" \
+        "-e CP_SESSION_NAME=\\1 sh -c .*exec pi --session-id .* _ $UUID --flag-desconhecida\$"
+
+    for m in none noopen; do
+        d=$(tty_case "$SH" pi "$m")
+        check_tmux_fallback "$SH pi $m abre no tmux" "$d" "-e CP_SESSION_NAME=\\1 sh -c .*exec pi --session-id .* _ $UUID\$"
+        d=$(CASE_PROFILE=casa tty_case "$SH" omp "$m")
+        check_tmux_fallback "$SH omp $m abre no tmux" "$d" \
+            "-e CP_SESSION_NAME=\\1 -e OMP_PROFILE=casa sh -c .*exec omp --session .* _ $UUID $TTY_HOME/.omp/profiles/casa/agent/sessions/.*_$UUID\\.jsonl\$"
+        d=$(tty_case "$SH" kimi "$m" --model k2)
+        check_tmux_fallback "$SH kimi $m abre no tmux" "$d" \
+            "-e CP_SESSION_NAME=\\1 -e KIMI_CODE_TUI_FULL_SCREEN=1 sh -c exec kimi \"\\\$@\" _ --model k2\$"
+    done
+
+    d=$(tty_case "$SH" omp ok --profile work --model m1)
+    check_opened "$SH omp --profile --model" "$d" '{"provider": "omp", '"$base"', "omp_profile": "work", "model": "m1"}'
+
+    d=$(CASE_PROFILE=casa tty_case "$SH" omp ok)
+    check_opened "$SH omp com OMP_PROFILE" "$d" '{"provider": "omp", '"$base"', "omp_profile": "casa"}'
+
+    d=$(tty_case "$SH" omp ok -c)
+    check_raw "$SH omp -c vai cru" "$d" '^ARGV: -c$'
+
+    d=$(tty_case "$SH" kimi ok --model k2)
+    check_opened "$SH kimi --model" "$d" '{"provider": "kimi", '"$base"', "model": "k2"}'
+
+    d=$(tty_case "$SH" kimi ok -S abc)
+    check_raw "$SH kimi -S vai cru" "$d" '^ARGV: -S abc$'
 done
+
+echo "== claude.ps1: pasta de share e alvo do psmux =="
+# Sem PowerShell aqui: confere o texto. `.Path` num share vem com o prefixo do provider
+# (Microsoft.PowerShell.Core\FileSystem::\\...); o psmux não honra `=` em todo comando, e o nome
+# cru já é exato lá (o lançador Rust anexa assim no Windows).
+ps1="$REPO/scripts/shell/claude.ps1"
+grep -q '(Get-Location)\.ProviderPath' "$ps1" || { echo "FAIL: claude.ps1 não usa (Get-Location).ProviderPath"; fail=1; }
+if grep -qE 'attach-session -t "?=' "$ps1"; then echo "FAIL: claude.ps1 anexa com '=' no alvo do psmux"; fail=1; fi
 
 echo "== bloco gerenciado no rc (marcador novo entra, antigo sai) =="
 # O marcador virou `# >>> hangar >>>`. Um rc que ainda tenha o bloco do nome ANTIGO precisa

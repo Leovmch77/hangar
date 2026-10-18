@@ -66,14 +66,20 @@ async fn setup_gated(link: FakeLink) -> (std::net::SocketAddr, Arc<RuntimeRegist
 fn abrir() -> Value { json!({"site": "above-prompt", "plugin": "vitrine", "key": "abrir"}) }
 
 async fn post(server: std::net::SocketAddr, name: &str, route: &str, body: Value, token: Option<&str>) -> (u16, Value) {
+    timed_post(server, name, route, body, token).await.0
+}
+
+/// O tempo conta do envio, como o prazo do app: montar o cliente (certificados do sistema) fica de fora.
+async fn timed_post(server: std::net::SocketAddr, name: &str, route: &str, body: Value, token: Option<&str>) -> ((u16, Value), Duration) {
     // O `reqwest` do crate não tem a função `json`: o corpo vai pronto, com o tipo.
     let mut request = client().post(format!("http://{server}/api/sessions/{name}/plugin/{route}"))
         .header("content-type", "application/json").body(body.to_string());
     if let Some(token) = token { request = request.header("authorization", format!("Bearer {token}")); }
+    let start = Instant::now();
     let response = request.send().await.unwrap();
     let status = response.status().as_u16();
     let text = response.text().await.unwrap();
-    (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
+    ((status, serde_json::from_str(&text).unwrap_or(Value::String(text))), start.elapsed())
 }
 
 #[tokio::test]
@@ -128,10 +134,9 @@ async fn transfer_in_progress_is_refused_before_the_mod() {
     registry.ingress().hold("s", Duration::from_secs(1)).await.unwrap();
     for (route, body) in [("press", abrir()), ("show", json!({"site": "painel"})),
                           ("input", json!({"site": "painel", "plugin": "vitrine", "key": "V18-campo", "kind": "change", "value": "o"}))] {
-        let start = Instant::now();
-        let (status, answer) = post(server, "s", route, body, Some(OWNER)).await;
+        let ((status, answer), took) = timed_post(server, "s", route, body, Some(OWNER)).await;
         assert_eq!((status, answer["detail"]["code"].as_str()), (409, Some("session_transfer_busy")), "{route}");
-        assert!(start.elapsed() < Duration::from_secs(1), "{route}: {:?}", start.elapsed());
+        assert!(took < Duration::from_secs(1), "{route}: {took:?}");
     }
     assert!(link.calls.lock().unwrap().is_empty(), "nada chega ao mod durante a troca");
     registry.ingress().release("s");
@@ -161,10 +166,9 @@ async fn short_freeze_is_waited_inside_the_budget() {
     tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(200)).await; gates.ingress().open("s") });
     assert_eq!(post(server, "s", "press", abrir(), Some(OWNER)).await.0, 200);
     registry.ingress().close("s", Duration::from_secs(1)).await.unwrap();
-    let start = Instant::now();
-    let (status, body) = post(server, "s", "press", abrir(), Some(OWNER)).await;
+    let ((status, body), took) = timed_post(server, "s", "press", abrir(), Some(OWNER)).await;
     assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("erro_mod_clique_sem_resposta")));
-    assert!(start.elapsed() < APP_GIVES_UP, "{:?}", start.elapsed());
+    assert!(took < APP_GIVES_UP, "{took:?}");
     assert_eq!(link.calls.lock().unwrap().len(), 1);
 }
 
@@ -188,10 +192,9 @@ async fn busy_turn_answers_before_the_app_gives_up_without_the_mod() {
     let (_python, server, mods, link) = setup(FakeLink::default()).await;
     let turn = mods.link("s").unwrap().lock;
     let held = turn.lock().await;
-    let start = Instant::now();
-    let (status, body) = post(server, "s", "press", json!({"site": "above-prompt", "plugin": "vitrine", "key": "abrir"}), Some(OWNER)).await;
+    let ((status, body), took) = timed_post(server, "s", "press", json!({"site": "above-prompt", "plugin": "vitrine", "key": "abrir"}), Some(OWNER)).await;
     assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("erro_mod_clique_sem_resposta")));
-    assert!(start.elapsed() < APP_GIVES_UP, "{:?}", start.elapsed());
+    assert!(took < APP_GIVES_UP, "{took:?}");
     assert!(link.calls.lock().unwrap().is_empty());
     // Solta a vez: o pedido seguinte passa.
     drop(held);
@@ -202,10 +205,9 @@ async fn busy_turn_answers_before_the_app_gives_up_without_the_mod() {
 async fn stuck_mod_is_cut_before_the_app_gives_up_and_frees_the_turn() {
     // O que sobra do prazo limita a chamada ao mod: preso, ele não segura o app nem a vez da sessão.
     let (_python, server, mods, link) = setup(FakeLink::with(FakeInner { delay: Duration::from_secs(30), ..Default::default() })).await;
-    let start = Instant::now();
-    let (status, body) = post(server, "s", "press", json!({"site": "above-prompt", "plugin": "vitrine", "key": "abrir"}), Some(OWNER)).await;
+    let ((status, body), took) = timed_post(server, "s", "press", json!({"site": "above-prompt", "plugin": "vitrine", "key": "abrir"}), Some(OWNER)).await;
     assert_eq!((status, body["detail"]["code"].as_str()), (409, Some("erro_mod_clique_sem_resposta")));
-    assert!(start.elapsed() < APP_GIVES_UP, "{:?}", start.elapsed());
+    assert!(took < APP_GIVES_UP, "{took:?}");
     assert_eq!(link.calls.lock().unwrap().len(), 1);
     let turn = mods.link("s").unwrap().lock;
     assert!(turn.try_lock().is_ok(), "a vez da sessão ficou livre");

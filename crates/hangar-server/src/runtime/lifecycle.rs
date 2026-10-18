@@ -15,6 +15,10 @@ pub(super) struct Barrier {
     serial:tokio::sync::Mutex<()>,
     pub operation:std::sync::Mutex<Option<(String,std::sync::Arc<std::sync::atomic::AtomicBool>)>>,
     pub closed:std::sync::Mutex<Option<ClosedLife>>,
+    /// Envios pela porta privada leem; estacionar só escreve com nenhum em curso.
+    pub park:tokio::sync::RwLock<()>,
+    /// Nome da sessão estacionada desta chave: o próximo envio a reabre pelo arquivo dela.
+    pub parked:std::sync::Mutex<Option<String>>,
 }
 #[derive(Clone)]
 pub(super) struct ClosedLife {
@@ -36,7 +40,18 @@ pub(super) struct HeadlessOperation {
 pub struct ClosedIngress {gates:super::ingress::IngressGates,name:String}
 impl ClosedIngress {
     pub async fn acquire(gates:&super::ingress::IngressGates,name:&str)->Result<Self,RuntimeError> {
-        gates.close(name,Duration::from_secs(60)).await.map_err(|_|failure("lifecycle_ingress_busy"))?;
+        Self::acquire_within(gates,name,Duration::from_secs(60)).await
+    }
+    pub async fn acquire_within(gates:&super::ingress::IngressGates,name:&str,wait:Duration)->Result<Self,RuntimeError> {
+        gates.close(name,wait).await.map_err(|_|failure("lifecycle_ingress_busy"))?;
+        Ok(Self {gates:gates.clone(),name:name.into()})
+    }
+    /// A porta retida pela troca de conversa recusa na hora, com o código da transferência.
+    pub async fn acquire_unless_transfer(gates:&super::ingress::IngressGates,name:&str)->Result<Self,RuntimeError> {
+        gates.close_unless_held(name,Duration::from_secs(60)).await.map_err(|refused|match refused {
+            super::ingress::CloseRefused::Held=>RuntimeError::new("session_transfer_busy","a sessão está trocando de agente"),
+            super::ingress::CloseRefused::Busy=>failure("lifecycle_ingress_busy"),
+        })?;
         Ok(Self {gates:gates.clone(),name:name.into()})
     }
 }
@@ -226,41 +241,17 @@ fn patch_locked(path:&std::path::Path,target:&super::protocol::RuntimeTarget,pat
     Ok(json!({"updated":true,"metadata":meta,"digest":sidecar_hash(&written)}))
 }
 
-pub(crate) async fn stage_session(io:&dyn TerminalIo,mux_argv:&[String],name:&str,cwd:&std::path::Path,env_e:&[(String,String)],endpoint:&str,windows:bool)->Result<(String,i64),RuntimeError> {
-    if name.is_empty() || name.len()>64 || !name.bytes().all(|b|b.is_ascii_alphanumeric() || b"._-".contains(&b)) {return Err(failure("relaunch_session_name"));}
-    let allowed=["CP_SESSION_KEY","CP_SESSION_NAME","CP_PROVIDER","COLORTERM","CLAUDE_CODE_TMUX_TRUECOLOR","CLAUDE_CODE_NO_FLICKER","CP_HEADLESS"];
-    if env_e.iter().any(|(key,value)|!allowed.contains(&key.as_str()) || value.chars().any(|c|c.is_control()) || value.len()>256) {return Err(failure("relaunch_public_environment"));}
-    let exe=std::env::current_exe().map_err(|_|failure("relaunch_binary"))?;
-    let mut shell=[exe.to_str().ok_or_else(||failure("relaunch_binary"))?,super::claude_relaunch::RELAUNCH_FLAG,endpoint].iter().map(|arg|super::claude_relaunch::quote(arg,windows)).collect::<Vec<_>>().join(" ");
-    if !windows {shell=format!("exec {shell}");}
-    let (program,prefix)=mux_argv.split_first().ok_or_else(||failure("lifecycle_mux"))?;
-    let mut args=prefix.to_vec();args.extend(["new-session".into(),"-d".into(),"-P".into(),"-F".into(),"#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_pid}".into(),"-s".into(),name.into(),"-c".into(),cwd.to_str().ok_or_else(||failure("relaunch_cwd"))?.into(),"-x".into(),"200".into(),"-y".into(),"50".into()]);
-    for (key,value) in env_e {args.extend(["-e".into(),format!("{key}={value}")]);}
-    args.push(shell);
-    let scope=tokio::task::spawn_blocking(super::process::scope_command).await.map_err(|_|failure("relaunch_scope"))?.map_err(|_|failure("relaunch_scope"))?;
-    let (program,args)=if let Some((leader,scope_args))=scope.split_first() {
-        let mut scoped=scope_args.iter().map(|a|a.to_str().ok_or_else(||failure("relaunch_scope")).map(str::to_owned)).collect::<Result<Vec<_>,_>>()?;
-        scoped.push(program.clone());scoped.extend(args);
-        (leader.to_str().ok_or_else(||failure("relaunch_scope"))?.to_owned(),scoped)
-    } else {(program.clone(),args)};
-    let output=io.command(CommandRequest {program,args,stdin:vec![]}).await.map_err(|_|failure("relaunch_stage"))?;
-    if !output.success {return Err(failure("relaunch_stage"));}
-    let raw=std::str::from_utf8(&output.stdout).map_err(|_|failure("relaunch_stage"))?;
-    let fields:Vec<_>=raw.trim_end().split('\t').collect();
-    if fields.len()!=5 || fields[0]!=name || !fields[1..3].iter().all(|s|!s.is_empty() && s.bytes().all(|b|b.is_ascii_digit())) || windows && raw.contains('\u{fffd}') {return Err(failure("relaunch_stage"));}
-    let pid=fields[4].parse::<i64>().ok().filter(|pid|*pid>0).ok_or_else(||failure("relaunch_stage"))?;
-    let target=if windows {format!("={name}:{}.{}",fields[1],fields[2])} else {fields[3].to_owned()};
-    if !windows && !target.strip_prefix('%').is_some_and(|s|!s.is_empty() && s.bytes().all(|b|b.is_ascii_digit())) {return Err(failure("relaunch_stage"));}
-    Ok((target,pid))
-}
-
 pub async fn stage(io:&dyn TerminalIo,binding:&TerminalBinding,endpoint:&str)->Result<(String,i64),RuntimeError> {
     let exe=std::env::current_exe().map_err(|_|failure("relaunch_binary"))?;
     let executable=exe.to_str().ok_or_else(||failure("relaunch_binary"))?;
     let mut command=[executable,super::claude_relaunch::RELAUNCH_FLAG,endpoint].iter().map(|arg|super::claude_relaunch::quote(arg,binding.windows)).collect::<Vec<_>>().join(" ");
     if !binding.windows {command=format!("exec {command}");}
-    let output=mux(io,binding,vec!["new-window".into(),"-d".into(),"-P".into(),"-F".into(),
-        "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_pid}".into(),"-t".into(),format!("={}",binding.name),command]).await?;
+    let mut args:Vec<String>=vec!["new-window".into(),"-d".into(),"-P".into(),"-F".into(),
+        "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_pid}".into(),"-t".into(),format!("={}",binding.name)];
+    // Em argumentos separados o tmux roda direto, sem o `default-shell` do usuário (o fish carrega o `conf.d`).
+    if !binding.windows {args.extend(["/bin/sh".into(),"-c".into()]);}
+    args.push(command);
+    let output=mux(io,binding,args).await?;
     if !output.success {return Err(failure("relaunch_stage"));}
     let raw=std::str::from_utf8(&output.stdout).map_err(|_|failure("relaunch_stage"))?;
     let fields:Vec<_>=raw.trim_end().split('\t').collect();
@@ -283,6 +274,24 @@ mod tests {
     }
     fn binding()->TerminalBinding {
         TerminalBinding {name:"session".into(),pane:"%2".into(),conversation:"sid".into(),generation:4,created:1000,mux_argv:vec!["tmux".into()],windows:false,clipboard_lock_path:None}
+    }
+    /// A relançada não passa pelo `default-shell` do usuário: argumentos separados, o tmux roda direto.
+    #[tokio::test]
+    async fn the_relaunch_window_does_not_go_through_the_user_default_shell() {
+        struct Seen(std::sync::Mutex<Vec<CommandRequest>>);
+        impl TerminalIo for Seen {
+            fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput> {
+                self.0.lock().unwrap().push(r);
+                Box::pin(async {Ok(CommandOutput {success:true,stdout:b"session\t0\t1\t%3\t42\n".to_vec()})})
+            }
+            fn socket<'a>(&'a self,_:&'a NativeMessage,_:Vec<u8>)->IoFuture<'a,WriteOutcome> {Box::pin(async {panic!("lifecycle não entrega entrada")})}
+        }
+        let io=Seen(std::sync::Mutex::new(vec![]));
+        stage(&io,&binding(),"http://127.0.0.1:1/x").await.unwrap();
+        let args=io.0.lock().unwrap()[0].args.clone();
+        let tail=&args[args.len()-3..];
+        assert_eq!((tail[0].as_str(),tail[1].as_str()),("/bin/sh","-c"),"{args:?}");
+        assert!(tail[2].starts_with("exec ")&&tail[2].contains(super::super::claude_relaunch::RELAUNCH_FLAG),"{args:?}");
     }
     #[tokio::test]
     async fn missing_capture_is_not_definitive_death() {

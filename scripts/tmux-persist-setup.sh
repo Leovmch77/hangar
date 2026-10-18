@@ -23,7 +23,7 @@ set -euo pipefail
 
 PLUGIN_DIR="$HOME/.tmux/plugins"
 CONF="$HOME/.tmux.conf"
-# Persist/restore the claude conversation per session (resurrect alone restores only a bare shell).
+# The Hangar sessions come back through the Hangar server; this hook keeps them out of the resurrect save.
 RESUME_SH="$(cd "$(dirname "$0")" && pwd)/tmux-claude-resume.sh"
 SD_DIR="$HOME/.config/systemd/user"
 SERVICE="tmux-resurrect-save.service"
@@ -76,7 +76,7 @@ set -g @plugin 'tmux-plugins/tmux-continuum'
 set -g @resurrect-capture-pane-contents 'on'
 set -g @continuum-restore 'on'
 set -g @continuum-save-interval '0'   # save driven by systemd timer (status bar is off)
-# Bring the claude conversation back (not a bare shell): save name->uuid, restore via --resume.
+# Hangar sessions come back through the Hangar server: the save drops them from the resurrect snapshot.
 set -g @resurrect-hook-post-save-all    '$RESUME_SH save'
 set -g @resurrect-hook-post-restore-all '$RESUME_SH restore'
 run-shell '$RESUME_SH fix-last'      # empty \`last\` (save cut by a crash) -> newest good save
@@ -86,14 +86,14 @@ EOF
 fi
 
 # 2b. Resume hooks: a conf that already had the plugin lines (e.g. copied from
-# docs/tmux.conf.example) skipped the block above and has NO hooks — without them the
-# name->uuid map is never saved and restore brings back bare shells. Append just the hooks.
+# docs/tmux.conf.example) skipped the block above and has NO hooks — without them resurrect
+# recreates the Hangar sessions as bare shells and takes their names. Append just the hooks.
 if ! grep -qF "tmux-claude-resume.sh" "$CONF"; then
   log "Appending claude-resume hooks to $CONF"
   cat >> "$CONF" <<EOF
 
 # >>> hangar resume hooks >>>
-# Bring the claude conversation back (not a bare shell): save name->uuid, restore via --resume.
+# Hangar sessions come back through the Hangar server: the save drops them from the resurrect snapshot.
 set -g @resurrect-hook-post-save-all    '$RESUME_SH save'
 set -g @resurrect-hook-post-restore-all '$RESUME_SH restore'
 run-shell '$RESUME_SH fix-last'

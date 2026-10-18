@@ -149,23 +149,6 @@ def test_create_worktree_from_dirty_repo_and_remove(tmp_path):
     assert not (tmp_path / "repo-chat").exists()
 
 
-def test_branch_worktree_is_named_after_branch_and_skips_occupied(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    d = _repo(repo)
-    (tmp_path / "repo-PM-1").mkdir()
-    path, created = git_ops.create_branch_worktree(d, "PM-1", tmp_path, new_branch=True)
-    assert created and path == str(tmp_path / "repo-PM-1-2")
-    assert git_ops.branch_of(path) == "PM-1"
-    path, _ = git_ops.create_branch_worktree(d, "feat/x", tmp_path, new_branch=True)
-    assert path == str(tmp_path / "repo-feat-x")
-    with pytest.raises(GitError) as taken:
-        git_ops.create_branch_worktree(d, "PM-1", tmp_path, new_branch=True)
-    assert taken.value.detail == "já existe uma branch com esse nome"
-    path, _ = git_ops.create_branch_worktree(d, "日本", tmp_path, new_branch=True)
-    assert path == str(tmp_path / "repo-worktree")
-
-
 def test_worktree_target_taken_text_matches_rust():
     # O retry compara o texto: a ponte repassa o `detail` do Rust sem código.
     git_rs = Path(__file__).parents[2] / "crates/hangar-workspace/src/git.rs"
@@ -243,10 +226,9 @@ def test_create_worktree_from_remote_branch(tmp_path):
     git_ops.remove_worktree(d, path)
 
 
-def test_fs_branches_and_create_session_worktree(tmp_path, monkeypatch):
+def test_fs_branches(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from app import api, fs
-    from app.models import SessionInfo
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -254,13 +236,6 @@ def test_fs_branches_and_create_session_worktree(tmp_path, monkeypatch):
     monkeypatch.setattr(fs, "resolve_scan_roots", lambda _settings: [tmp_path])
     monkeypatch.setattr(api, "resolve_scan_roots", lambda _settings: [tmp_path])
     monkeypatch.setattr(api.settings, "auth_token", "test-token")
-    calls = []
-
-    def create(name, cwd, config_dir, **kwargs):
-        calls.append(cwd)
-        return SessionInfo(name=name, cwd=cwd, provider="claude")
-
-    monkeypatch.setattr(api.registry, "create", create)
     client = TestClient(api.app)
     auth = {"Authorization": "Bearer test-token"}
     branches = client.get("/api/fs/branches", params={"root": str(tmp_path), "path": d}, headers=auth)
@@ -268,36 +243,6 @@ def test_fs_branches_and_create_session_worktree(tmp_path, monkeypatch):
     assert set(branches.json()["branches"]) == {"main", "feature"}
     assert client.get("/api/fs/branches", params={"root": str(repo), "path": d},
                       headers=auth).status_code == 403
-
-    result = client.post("/api/sessions", json={"name": "chat", "cwd": d,
-                                                 "branch": "feature"}, headers=auth)
-    assert result.status_code == 200, result.text
-    assert result.json()["cwd"] == str(tmp_path / "repo-feature")
-    assert result.json()["branch"] == "feature"
-    assert calls == [str(tmp_path / "repo-feature")]
-    git_ops.remove_worktree(d, calls[0])
-
-
-def test_create_session_rolls_back_worktree_when_registry_fails(tmp_path, monkeypatch):
-    from fastapi.testclient import TestClient
-    from app import api, fs
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    d = _repo(repo)
-    monkeypatch.setattr(fs, "resolve_scan_roots", lambda _settings: [tmp_path])
-    monkeypatch.setattr(api, "resolve_scan_roots", lambda _settings: [tmp_path])
-    monkeypatch.setattr(api.settings, "auth_token", "test-token")
-
-    def fail(*_args, **_kwargs):
-        raise ValueError("ja existe uma sessao com esse nome")
-
-    monkeypatch.setattr(api.registry, "create", fail)
-    response = TestClient(api.app).post("/api/sessions", json={"name": "chat", "cwd": d,
-                                                              "branch": "feature"},
-                                        headers={"Authorization": "Bearer test-token"})
-    assert response.status_code == 409
-    assert not (tmp_path / "repo-chat").exists()
 
 
 def _repo_with_file(tmp_path):
@@ -1255,55 +1200,6 @@ def test_create_worktree_new_branch_rejects_existing(tmp_path):
     with pytest.raises(GitError) as e:
         git_ops.create_worktree(d, "feature", "chat", tmp_path, new_branch=True)
     assert e.value.status == 409
-
-
-def test_create_session_with_new_branch(tmp_path, monkeypatch):
-    from fastapi.testclient import TestClient
-    from app import api, fs
-    from app.models import SessionInfo
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    d = _repo(repo)
-    monkeypatch.setattr(fs, "resolve_scan_roots", lambda _settings: [tmp_path])
-    monkeypatch.setattr(api, "resolve_scan_roots", lambda _settings: [tmp_path])
-    monkeypatch.setattr(api.settings, "auth_token", "test-token")
-    monkeypatch.setattr(api.registry, "create",
-                        lambda name, cwd, config_dir, **kw: SessionInfo(name=name, cwd=cwd, provider="claude"))
-    r = TestClient(api.app).post("/api/sessions", json={"name": "chat", "cwd": d, "branch": "nova",
-                                                        "new_branch": True, "base": "main"},
-                                 headers={"Authorization": "Bearer test-token"})
-    assert r.status_code == 200, r.text
-    assert r.json()["branch"] == "nova" and r.json()["worktree"] is True
-    git_ops.remove_worktree(d, r.json()["cwd"])
-
-
-def test_create_session_rollback_deletes_new_branch(tmp_path, monkeypatch):
-    from fastapi.testclient import TestClient
-    from app import api, fs
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    d = _repo(repo)
-    # .env ignorado só no main: na worktree (base feature) ele é untracked e o desfazer precisa forçar.
-    (repo / ".gitignore").write_text(".env\n")
-    git_ops._run(d, "add", ".gitignore")
-    git_ops._run(d, "commit", "-q", "-m", "ignore")
-    (repo / ".env").write_text("SECRET=1")
-    monkeypatch.setattr(fs, "resolve_scan_roots", lambda _settings: [tmp_path])
-    monkeypatch.setattr(api, "resolve_scan_roots", lambda _settings: [tmp_path])
-    monkeypatch.setattr(api.settings, "auth_token", "test-token")
-
-    def fail(*_args, **_kwargs):
-        raise ValueError("ja existe uma sessao com esse nome")
-
-    monkeypatch.setattr(api.registry, "create", fail)
-    r = TestClient(api.app).post("/api/sessions", json={"name": "chat", "cwd": d, "branch": "nova",
-                                                        "new_branch": True, "base": "feature"},
-                                 headers={"Authorization": "Bearer test-token"})
-    assert r.status_code == 409
-    assert not (tmp_path / "repo-chat").exists()
-    assert "nova" not in git_ops.list_branches(d)["branches"]
 
 
 def test_create_worktree_new_branch_does_not_track_base(tmp_path):

@@ -345,27 +345,6 @@ def test_same_name_new_mux_does_not_import_old_queue(monkeypatch,tmp_path):
     asyncio.run(flow())
 
 
-def test_plugin_click_writes_with_the_terminal_ownership(monkeypatch,tmp_path):
-    # O clique de mod pelo app com o Rust dono do pane: sem a posse, era o 500 do log de 04/10/2026.
-    from app import plugin_click, tmux
-    gateway=LoanGateway()
-    owner,slot,_=live_owner(monkeypatch,tmp_path,gateway=gateway)
-    sent=[]
-    def send_keys(name, keys, literal=False):
-        from app.runtime_terminal import assert_writer
-        assert_writer(name)
-        sent.append((name, keys, slot.phase))
-        return True
-    monkeypatch.setattr(tmux,'send_keys',send_keys)
-    async def flow():
-        await _to_rust(owner,'session')
-        assert await asyncio.to_thread(plugin_click.click,'session',2,5)
-        assert [(name, phase) for name, _, phase in sent]==[('session',Phase.Rust)]
-        assert [kind for kind,_ in gateway.controls] == ['keyboard_loan','keyboard_return']
-        await owner.detach('session')
-    asyncio.run(flow())
-
-
 def test_admin_loan_refused_has_zero_effect(monkeypatch,tmp_path):
     from app.runtime_terminal import run_admin
     class Silent(LoanGateway):
@@ -1169,28 +1148,6 @@ def test_terminal_session_registers_in_rust_without_python_phase(monkeypatch, tm
     asyncio.run(flow())
 
 
-def test_click_that_opens_the_terminal_in_rust_borrows_the_keyboard(monkeypatch, tmp_path):
-    # Primeira operação depois de reiniciar o backend: ainda não há slot. O próprio clique abre a sessão
-    # no Rust e recebe o teclado emprestado, também quando quem clica é convidado.
-    from app import plugin_click, tmux, runtime_terminal as terminal
-    gateway = LoanGateway()
-    owner = _born_terminal(monkeypatch, tmp_path, gateway)
-    sent = []
-    def send_keys(name, keys, literal=False):
-        terminal.assert_writer(name)
-        sent.append(name)
-        return True
-    monkeypatch.setattr(tmux, 'send_keys', send_keys)
-    async def flow():
-        owner.loop = asyncio.get_running_loop()
-        assert 'session' not in owner.names and not owner.terminal_in_rust('session')
-        await plugin_click._click('session', 2, 5)
-        assert owner.slot('session').phase == Phase.Rust and gateway.calls.count('open') == 1
-        assert sent == ['session'] and [kind for kind, _ in gateway.controls] == ['keyboard_loan', 'keyboard_return']
-        await owner.change('session', lambda: asyncio.sleep(0), remove=True)
-    asyncio.run(flow())
-
-
 def test_admin_borrows_keyboard_without_moving_queue(monkeypatch, tmp_path):
     from app import runtime_terminal as terminal
     gateway = LoanGateway()
@@ -1390,44 +1347,6 @@ def test_queue_inside_lifecycle_never_waits_for_the_mode(monkeypatch, tmp_path):
                 rc._lifecycle.reset(token)
         handled, rows = await asyncio.wait_for(asyncio.to_thread(admin), 2)
         assert handled and rows == []
-    asyncio.run(flow())
-
-
-def test_rust_bypass_reopen_of_terminal_closes_and_reopens_in_rust(monkeypatch, tmp_path):
-    from types import SimpleNamespace
-    from app import api, runtime_terminal as terminal
-    gateway = TerminalGateway()
-    owner, slot, collected = live_owner(monkeypatch, tmp_path, gateway=gateway)
-    facts = {'now': {**collected, 'session_proof': 'p1'}}
-    proof = {'now': 'p1'}
-    monkeypatch.setattr(terminal, '_collect', lambda name: {**facts['now'], 'name': name})
-    monkeypatch.setattr(terminal, '_session_proof', lambda name: proof['now'])
-    monkeypatch.setattr(terminal, '_pane_life', lambda name: None, raising=False)
-    monkeypatch.setattr(api, '_headless', lambda name: False)
-    monkeypatch.setattr(api, '_invalidate_lists', lambda: None)
-    async def idle(name, headless):
-        return None
-    monkeypatch.setattr(api, '_motivo_ocupada', idle)
-    calls = []
-    def para_headless(name, mode):
-        assert gateway.calls[-1] == 'close' and gateway.lease is None, 'o Rust soltou antes de matar o pane'
-        calls.append(('para_headless', name, mode))
-    def para_terminal(name):
-        calls.append(('para_terminal', name))
-        proof['now'] = 'p2'
-        facts['now'] = {**collected, 'pane': '%7', 'created': 456, 'namespace': 'mux-novo', 'session_proof': 'p2'}
-    monkeypatch.setattr(api.registry, 'para_headless', para_headless)
-    monkeypatch.setattr(api.registry, 'para_terminal', para_terminal)
-    async def flow():
-        assert await owner.prepare_session('session', 'claude')
-        assert slot.phase == Phase.Rust
-        info = SimpleNamespace(name='session', provider='claude', headless=False, jsonl=None)
-        result = await api._durante_troca('session', api._reabrir_em_bypass('session', info))
-        assert result['reopened'] is True
-        assert calls == [('para_headless', 'session', 'bypassPermissions'), ('para_terminal', 'session')]
-        # Duas portas aninhadas: a da troca (`transfer_operation`) por fora e a do `change` por dentro.
-        assert gateway.calls == ['open', 'ingress', 'ingress', 'snapshot', 'close', 'open', 'ingress', 'ingress']
-        assert slot.phase == Phase.Rust and slot.lease is None and slot.binding.meta['terminal']['pane'] == '%7'
     asyncio.run(flow())
 
 

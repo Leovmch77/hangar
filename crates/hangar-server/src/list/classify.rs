@@ -200,6 +200,26 @@ fn apply(row: &mut SessionRow, a: &PaneAnalysis) {
     row.options = a.options.clone();
 }
 
+/// Última adoção tentada pela lista, por sessão: a prova lê os processos, e a lista roda a cada 1,5 s.
+static ADOPTIONS: std::sync::Mutex<BTreeMap<String, std::time::Instant>> = std::sync::Mutex::new(BTreeMap::new());
+const ADOPTION_EVERY: Duration = Duration::from_secs(30);
+
+fn adoption_due(name: &str, now: std::time::Instant) -> bool {
+    let mut tried = ADOPTIONS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if tried.get(name).is_some_and(|at| now.duration_since(*at) < ADOPTION_EVERY) { return false; }
+    tried.insert(name.to_owned(), now);
+    true
+}
+
+/// O último código anotado por sessão: a mesma falha vai ao diário uma vez, e de novo só depois de um acerto.
+static NOTED_CODES: std::sync::Mutex<BTreeMap<String, String>> = std::sync::Mutex::new(BTreeMap::new());
+
+fn first_note(name: &str, code: &str) -> bool {
+    NOTED_CODES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(name.to_owned(), code.to_owned()).as_deref() != Some(code)
+}
+
+fn clear_notes(name: &str) { NOTED_CODES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(name); }
+
 impl Classifier {
     pub fn set_plugin_runtime(&mut self, runtime: std::sync::Arc<crate::runtime::gateway::RuntimeRegistry>) { self.plugin_runtime = Some(runtime); }
 
@@ -207,16 +227,25 @@ impl Classifier {
 
     async fn observe_permission(&self, name: &str, pane: &str, expected: Option<&crate::interactions::InteractionBinding>, revision: Option<crate::state::permission::MemoryRevision>) {
         let (Some(runtime), Some(memory), Some(mode)) = (&self.plugin_runtime, &self.permissions, crate::state::permission::parse_permission_mode(pane)) else { return };
-        match runtime.interaction_binding_readonly(name).await {
+        let mut bound = runtime.interaction_binding_readonly(name).await;
+        // O Claude com terminal sem ator (aberto ou restaurado antes de qualquer escrita) é adotado, com teto.
+        if bound.as_ref().is_err_and(|e| e.code == "runtime_binding") && adoption_due(name, std::time::Instant::now()) {
+            match runtime.adopt_claude_terminal(name).await {
+                Ok(()) => bound = runtime.interaction_binding_readonly(name).await,
+                Err(error) => bound = Err(error),
+            }
+        }
+        let failed = |code: String, reason: &'static str| if first_note(name, &code) { super::facts::note("rust.list_permission_failed", name, code, reason) };
+        match bound {
             Ok(binding) if expected == Some(&binding) => match memory.lock() {
                 Ok(mut memory) => match revision.ok_or("permission_frame_unavailable").and_then(|revision| memory.observe_capture(&binding.conversation, mode, revision)) {
-                    Ok(_) => {},
-                    Err(code) => super::facts::note("rust.list_permission_failed", name, code.into(), "captura de permissão recusada"),
+                    Ok(_) => clear_notes(name),
+                    Err(code) => failed(code.into(), "captura de permissão recusada"),
                 },
-                Err(_) => super::facts::note("rust.list_permission_failed", name, "permission_store_unavailable".into(), "memória de permissão indisponível"),
+                Err(_) => failed("permission_store_unavailable".into(), "memória de permissão indisponível"),
             },
-            Err(error) => super::facts::note("rust.list_permission_failed", name, error.code, "vínculo de permissão não confirmado"),
-            Ok(_) => super::facts::note("rust.list_permission_failed", name, "permission_binding_changed".into(), "captura pertence a outra vida"),
+            Err(error) => failed(error.code, "vínculo de permissão não confirmado"),
+            Ok(_) => failed("permission_binding_changed".into(), "captura pertence a outra vida"),
         }
     }
 
@@ -930,5 +959,22 @@ mod tests {
                             problems: &problems, stall_seconds: 300.0, monitors: &Published::default() };
         Classifier::default().classify(std::slice::from_mut(&mut row), &facts, &io).await;
         assert_eq!(row.problema.as_deref(), Some(RUNTIME_ABSENT));
+    }
+}
+
+#[cfg(test)]
+mod permission_notes {
+    use super::*;
+
+    /// A lista tenta adotar no máximo a cada 30 s por sessão, e a mesma falha vai ao diário uma vez.
+    #[test]
+    fn the_list_adopts_with_a_ceiling_and_notes_each_failure_once() {
+        let t0 = std::time::Instant::now();
+        assert!(adoption_due("pn-a", t0) && !adoption_due("pn-a", t0 + Duration::from_secs(29)) && adoption_due("pn-a", t0 + ADOPTION_EVERY));
+        assert!(adoption_due("pn-b", t0), "por sessão");
+        assert!(first_note("pn-a", "runtime_binding") && !first_note("pn-a", "runtime_binding"));
+        assert!(first_note("pn-a", "permission_binding_changed"), "outro código");
+        clear_notes("pn-a");
+        assert!(first_note("pn-a", "permission_binding_changed"), "de novo depois de um acerto");
     }
 }

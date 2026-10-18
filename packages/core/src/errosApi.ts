@@ -149,6 +149,8 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_plano_ilegivel: () => m.chat_plan_erro(),
   // Contas e cotas sem o servidor Rust de pé: não há reserva Python.
   accounts_need_rust_server: () => m.accounts_need_rust_server(),
+  session_open_needs_rust_server: () => m.session_open_needs_rust_server(),
+  session_open_uncertain: () => m.session_open_uncertain(),
   // /api/claude-configs — apagar conta recusado por alguma condicao da maquina
   erro_config_dirs_fixo: () => m.erro_config_dirs_fixo(),
   erro_conta_ativa_backend: () => m.erro_conta_ativa_backend(),
@@ -288,12 +290,17 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_sessao_opcao_nao_enviada: () => m.erro_sessao_opcao_nao_enviada(),
   erro_opcao_nao_convergiu: (p) => m.erro_opcao_nao_convergiu({ detalhe: String(p.detalhe) }),
   erro_opcao_fora_da_lista: () => m.erro_opcao_fora_da_lista(),
-  erro_lista_indisponivel: (p) => m.erro_lista_indisponivel({ detalhe: String(p.detalhe) }),
-  erro_mux_indisponivel: (p) => m.erro_mux_indisponivel({ detalhe: String(p.detalhe) }),
+  // O Rust manda estes dois sem `detalhe`.
+  erro_lista_indisponivel: (p) => p.detalhe == null ? m.erro_lista_indisponivel_sem_detalhe()
+    : m.erro_lista_indisponivel({ detalhe: String(p.detalhe) }),
+  erro_mux_indisponivel: (p) => p.detalhe == null ? m.erro_mux_indisponivel_sem_detalhe()
+    : m.erro_mux_indisponivel({ detalhe: String(p.detalhe) }),
   erro_workflow_inexistente: () => m.erro_workflow_inexistente(),
   erro_agente_inexistente: () => m.erro_agente_inexistente(),
   erro_subagente_inexistente: () => m.erro_subagente_inexistente(),
   erro_transcript_ausente: () => m.erro_transcript_ausente(),
+  erro_resume_so_claude: (p) => m.erro_resume_so_claude({ provider: String(p.provider) }),
+  erro_session_id_invalido: () => m.erro_session_id_invalido(),
 
   // Conflito: nome em uso, sessao viva, pane ocupado
   erro_nome_em_uso: () => m.erro_nome_em_uso(),
@@ -566,6 +573,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   // Troca de agente em curso: o Python recusa com este código, e o Rust o repassa nas rotas dos mods.
   session_transfer_busy: () => m.session_transfer_busy(),
   session_transfer_gate_unavailable: () => m.session_transfer_gate_unavailable(),
+  session_transfer_resume_unsupported: () => m.session_transfer_resume_unsupported(),
   // Falhas da ponte e do runtime que a tela mostra sem que se saiba se a ação aconteceu.
   codex_bridge_uncertain: () => m.codex_bridge_uncertain(),
   claude_bridge_uncertain: () => m.claude_bridge_uncertain(),
@@ -579,7 +587,48 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   queue_steer_question_open: () => m.queue_steer_question_open(),
   queue_steer_uncertain: () => m.queue_steer_uncertain(),
   queue_text_invalid: () => m.queue_text_invalid(),
+  // Abertura, reabertura e ciclo de vida da sessão no Rust (session_open, session_write, runtime).
+  codex_terminal_starting: () => m.codex_terminal_starting(),
+  runtime_unhealthy: () => m.runtime_unhealthy(),
+  erro_cliproxy_conta: () => m.erro_cliproxy_conta(),
+  erro_codex_catalogo_invalido: (p) => m.erro_codex_catalogo_invalido({ erro: String(p.erro ?? '') }),
+  erro_codex_escolha_invalida: (p) => m.erro_codex_escolha_invalida({ erro: String(p.erro ?? '') }),
+  erro_codex_nao_reiniciou: () => m.erro_codex_nao_reiniciou(),
+  erro_codex_reiniciando: () => m.erro_codex_reiniciando(),
+  erro_conta_criadora: () => m.erro_conta_criadora(),
+  erro_corpo_invalido: () => m.erro_corpo_invalido(),
+  erro_criadora_ilegivel: () => m.erro_criadora_ilegivel(),
+  erro_modo_desconhecido: () => m.erro_modo_desconhecido(),
+  erro_modo_padrao_ilegivel: () => m.erro_modo_padrao_ilegivel(),
+  erro_perfil_so_omp: () => m.erro_perfil_so_omp(),
+  erro_permissao_ocupada: () => m.erro_permissao_ocupada(),
+  erro_permissao_picker: () => m.erro_permissao_picker(),
+  erro_plano_fora_da_tela: () => m.erro_plano_fora_da_tela(),
+  erro_recarregar_so_sem_terminal: () => m.erro_recarregar_so_sem_terminal(),
+  erro_recarregar_sem_terminal: (p) => m.erro_recarregar_sem_terminal({ erro: String(p.erro ?? '') }),
+  erro_conversa_viva: (p) => m.erro_conversa_viva({ sessao: String(p.sessao ?? '') }),
+  erro_fast_indisponivel: () => m.erro_fast_indisponivel(),
+  account_busy: () => m.account_busy(),
+  session_open_fact_unavailable: () => m.session_open_fact_unavailable(),
+  session_open_name_needs_server: (p) => m.session_open_name_needs_server({ nome: String(p.nome ?? '') }),
+  session_patch_stale: () => m.session_record_failed(),
+  session_patch_owner: () => m.session_record_failed(),
+  session_patch_field: () => m.session_record_failed(),
+  session_clear_cano_pid: () => m.session_record_failed(),
+  lifecycle_busy: () => m.lifecycle_busy(),
+  heal_not_needed: () => m.heal_not_needed(),
+  relaunch_policy_forbids_bypass: () => m.relaunch_policy_forbids_bypass(),
+  relaunch_bypass_already_enabled: () => m.relaunch_bypass_already_enabled(),
+  relaunch_read_only: () => m.relaunch_read_only(),
+  relaunch_not_claude: () => m.relaunch_not_claude(),
 };
+
+// Etapas internas da troca de vida da sessão: uma frase por família basta a quem lê.
+const FAMILIAS: [string, () => string][] = [
+  ['lifecycle_', () => m.session_lifecycle_failed()],
+  ['relaunch_', () => m.session_relaunch_failed()],
+  ['heal_', () => m.session_heal_failed()],
+];
 
 // Falha com código do servidor (503 do dono único): a frase traduzida já está no `message`.
 // Erro sem código (rede, HTTP sem envelope) fica com a frase genérica de quem chama.
@@ -591,6 +640,6 @@ export function mensagemDeErro(code: string, params: Parametros = {}): string | 
   // Propriedade PROPRIA, nunca a leitura crua: nome herdado do prototipo (toString, constructor,
   // hasOwnProperty, __proto__) existe em todo objeto e chamaria a funcao errada — medido:
   // `ERROS['toString']` devolve a funcao herdada e a chamada retorna '[object Undefined]'.
-  if (!Object.prototype.hasOwnProperty.call(ERROS, code)) return undefined;
+  if (!Object.prototype.hasOwnProperty.call(ERROS, code)) return FAMILIAS.find(([prefixo]) => code.startsWith(prefixo))?.[1]();
   return ERROS[code](params);
 }
