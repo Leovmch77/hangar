@@ -484,4 +484,64 @@ async def forward_public(request, target: str = "/__hangar_server/accounts/publi
                     headers=kept)
 
 
+_HOP_BY_HOP = {"connection", "transfer-encoding", "keep-alive"}
+_STREAM_HEADERS = ("content-type", "x-filename", "range", "if-range", "if-none-match", "if-modified-since")
+
+
+async def forward_stream(request, *, guest: bool):
+    """Anexo, transcrição ou mídia da sessão que entrou por uma porta do Python, já autenticado:
+    segue ao Rust em fluxo nos dois sentidos (até 100 MiB) e o transporte fecha quando o cliente sai."""
+    import asyncio
+    import http.client
+    from starlette.responses import JSONResponse, StreamingResponse
+    config = _preparation_transport
+    if config is None:
+        return JSONResponse({"detail": {"code": "account_bridge_unavailable"}}, status_code=503)
+    connection = http.client.HTTPConnection(config[0], timeout=480)
+    query = request.url.query
+    headers = {"x-hangar-internal": config[1], "x-hangar-path": request.url.path}
+    if guest:
+        headers["x-hangar-forwarded-guest"] = "1"
+    for key in _STREAM_HEADERS:
+        if key in request.headers:
+            headers[key] = request.headers[key]
+    body = request.method == "POST"
+    chunked = body and "content-length" not in request.headers
+    if body:
+        headers.update({"transfer-encoding": "chunked"} if chunked else {"content-length": request.headers["content-length"]})
+
+    def open_headers():
+        connection.putrequest(request.method, "/__hangar_server/forwarded" + (f"?{query}" if query else ""))
+        for key, value in headers.items():
+            connection.putheader(key, value)
+        connection.endheaders()
+
+    try:
+        await asyncio.to_thread(open_headers)
+        if body:
+            async for chunk in request.stream():
+                if chunk:
+                    await asyncio.to_thread(connection.send, f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n" if chunked else chunk)
+            if chunked:
+                await asyncio.to_thread(connection.send, b"0\r\n\r\n")
+        response = await asyncio.to_thread(connection.getresponse)
+    except (OSError, http.client.HTTPException):
+        connection.close()
+        return JSONResponse({"detail": {"code": "account_bridge_unavailable"}}, status_code=503)
+    except BaseException:
+        connection.close()
+        raise
+
+    async def chunks():
+        try:
+            while chunk := await asyncio.to_thread(response.read, 64 * 1024):
+                yield chunk
+        finally:
+            response.close()
+            connection.close()
+
+    kept = {key: value for key, value in response.getheaders() if key.lower() not in _HOP_BY_HOP}
+    return StreamingResponse(chunks(), status_code=response.status, headers=kept)
+
+
 preparation_jobs = PreparationJobs()

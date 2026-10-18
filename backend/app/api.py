@@ -75,11 +75,9 @@ from app.adapters.codex import sessions as codex_sessions
 from app.adapters.orq import runs as orq_runs
 from app.sse import invalidate_recent_list, merged_events, nav_confirmar, nav_pendente
 from app.state import corrige_ocioso_kimi, forget_frame, menu_codex
-from app.uploads import (save_upload, resolve_upload, resolve_session_audio, prune_old, list_uploads,
-                         UploadError, MAX_BYTES)
-from app.video import is_video, extract_frames, extract_audio
-from app.transcribe import (transcribe, transcribe_with_provider, providers_status, Transcription,
-                            TranscribeError, DICTATION_LIMITS, FILE_LIMITS)
+from app.uploads import MAX_BYTES
+from app.transcribe import (transcribe_with_provider, providers_status, Transcription,
+                            TranscribeError, DICTATION_LIMITS)
 from app.config import (list_config_dirs, _backend_config_base, settings,
                         resolve_scan_roots,
                         automations_enabled, resolve_bind_ip, variaveis_env)
@@ -642,6 +640,33 @@ async def _planos_pelo_rust(request: Request, call_next):
         return await call_next(request)
     return await _repasse_ao_rust(request, erro("erro_planos_precisa_rust", "os planos precisam do servidor Rust, que não está rodando"),
                                   "/__hangar_server/forwarded")
+
+
+# Anexos, `/transcribe`, saída de ferramenta e imagem colada no terminal: o dono é o Rust
+# (`uploads`, `session_media`). A imagem de conversa transferida fica aqui, como o histórico dela.
+_MIDIA = re.compile(r"^/api/sessions/[^/]+/(upload|uploads|uploads/[^/]+|transcribe|bash-output|tool-progress/[^/]+|transcript-image/[^/]+/[^/]+)$")
+
+
+@app.middleware("http")
+async def _midia_pelo_rust(request: Request, call_next):
+    from app import account_bridge
+    match, metodo = _MIDIA.match(request.url.path), request.method
+    rota = match.group(1) if match else ""
+    owned = (metodo == "POST" and rota in ("upload", "transcribe", "bash-output")
+             or metodo in ("GET", "HEAD") and rota.startswith("uploads")
+             or metodo == "GET" and (rota.startswith("tool-progress/")
+                                     or rota.startswith("transcript-image/") and not rota.startswith("transcript-image/transfer:")))
+    if not owned:
+        return await call_next(request)
+    try:
+        require_auth(request)
+    except HTTPException as error:
+        return JSONResponse({"detail": error.detail}, status_code=error.status_code, headers=error.headers)
+    if account_bridge.owner_mode() == "python":
+        return JSONResponse({"detail": erro("erro_midia_precisa_rust", "anexos, transcrição e saída de ferramenta precisam do servidor Rust, que não está rodando")},
+                            status_code=503)
+    guest = guest_of(request) is not None or guest_users.current.get() is not None
+    return await account_bridge.forward_stream(request, guest=guest)
 
 
 # Cabeçalhos do PNG do diagrama que voltam do Rust; o tipo já volta sempre.
@@ -5321,44 +5346,6 @@ async def pergunta_lateral_precisa_do_rust(name: str):
     raise HTTPException(503, detail=erro("btw_needs_rust_server", "a pergunta lateral precisa do servidor Rust"))
 
 
-_TOOL_USE_ID = re.compile(r"^toolu_[A-Za-z0-9_-]{1,80}$")
-
-
-def _etapas_da_ferramenta(tool_use_id: str) -> list[dict]:
-    # O Claude sem terminal não repassa o progresso do MCP; o MCP grava as etapas aqui por conta própria.
-    arquivo = Path.home() / ".hangar" / "tool-progress" / f"{tool_use_id}.jsonl"
-    etapas = []
-    try:
-        linhas = arquivo.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        return etapas
-    for linha in linhas[-200:]:
-        try:
-            item = json.loads(linha)
-        except ValueError:
-            continue
-        if isinstance(item, dict) and isinstance(item.get("message"), str):
-            etapas.append({"t": item.get("t"), "message": item["message"][:500]})
-    return etapas
-
-
-class BashOutputBody(_StrictBody):
-    command: str = Field(max_length=200_000)
-
-
-# POST porque o comando vai inteiro no corpo: numa URL ele estoura o limite com heredoc.
-@app.post("/api/sessions/{name}/bash-output", dependencies=[Depends(require_auth), Depends(_transfer_check)])
-async def bash_output(name: str, body: BashOutputBody):
-    return {"text": await asyncio.to_thread(procinfo.saida_de_comando, body.command)}
-
-
-@app.get("/api/sessions/{name}/tool-progress/{tool_use_id}", dependencies=[Depends(require_auth)])
-async def tool_progress(name: str, tool_use_id: str):
-    if not _TOOL_USE_ID.match(tool_use_id):
-        raise HTTPException(400, detail="invalid tool_use_id")
-    return await asyncio.to_thread(_etapas_da_ferramenta, tool_use_id)
-
-
 def _normalize_rate_window(window: dict | None) -> dict | None:
     # RateLimitWindow (app-server) -> shape neutro do front: usedPercent/windowMins/resetsAt.
     # window None (secondary/credits costumam vir null) -> None, o front so mostra o que existe.
@@ -6295,135 +6282,6 @@ async def engine_cliproxy_management_key(body: CliproxyManagementBody):
     return await asyncio.to_thread(_cliproxy_naming)
 
 
-def _id_upload(info: SessionInfo) -> str:
-    """Id durável da sessão, que é como a pasta de anexos é chaveada — nome muda no rename, id não.
-    Sessão sem transcript ainda cai no nome: janela curta, e um anexo mandado nela fica para trás
-    se ela for renomeada depois."""
-    return session_key(info.jsonl) if info.jsonl else info.name
-
-
-@app.post("/api/sessions/{name}/upload", dependencies=[Depends(require_auth), Depends(_transfer_check)])
-async def upload(name: str, request: Request, audio_only: bool = False):
-    from app import upload_bridge
-    forwarded = await upload_bridge.forward(name, "save", request, audio_only=audio_only)
-    if forwarded is not None:
-        return forwarded
-    # Resolve o cwd da sessao (registry.list() ja traz cwd via tmux #{pane_current_path}).
-    # handler async -> registry.list() (subprocess tmux) no threadpool pra nao bloquear o loop.
-    sessions = await asyncio.to_thread(registry.list)
-    info = next((s for s in sessions if s.name == name), None)
-    if info is None:
-        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
-    if not info.cwd:
-        raise HTTPException(409, detail=erro("erro_cwd_indisponivel", "cwd da sessao indisponivel"))
-    clen = request.headers.get("content-length")
-    if clen and clen.isdigit() and int(clen) > 100 * 1024 * 1024:
-        raise HTTPException(413, detail=erro("erro_arquivo_grande", "arquivo maior que 100 MiB"))
-    data = await request.body()
-    # Filename do cliente (X-Filename, percent-encoded) ou ?name= -> so a EXTENSAO e usada
-    # (o nome final e gerado pelo servidor). Qualquer tipo de arquivo.
-    filename = request.headers.get("x-filename") or request.query_params.get("name")
-    try:
-        # write_bytes (ate 100 MiB) no threadpool pra nao bloquear o loop durante o disco.
-        path = await asyncio.to_thread(save_upload, info.cwd, _id_upload(info), data, filename)
-    except UploadError as e:
-        raise HTTPException(e.status, e.detail)
-
-    # Higiene: varre anexos velhos DESTA sessao. Barato (um listdir) e sem agendador pra manter.
-    # Falhar aqui nao pode custar o upload que acabou de dar certo.
-    try:
-        await asyncio.to_thread(prune_old, info.cwd, runtime_config.get("upload_retention_days"))
-    except Exception:
-        _log.exception("prune de uploads falhou (upload seguiu)")
-
-    # Video: o Read nao abre mp4, entao o anexo virava um caminho morto pro modelo. Extrai quadros
-    # ao longo da duracao + transcreve o audio -> vira coisa legivel. Best-effort: sem ffmpeg/sem
-    # audio/sem chave da Groq, devolve o que conseguiu e o upload segue igual.
-    frames: list[str] = []
-    fala = ""
-    # `audio_only`: o ditado manda o áudio aqui e transcreve no /transcribe?arquivo=; tratar o webm
-    # como vídeo extrairia quadros e pagaria uma segunda transcrição.
-    if is_video(path) and not audio_only:
-        try:
-            frames = await asyncio.to_thread(extract_frames, path)
-        except Exception:
-            _log.exception("extracao de quadros falhou (upload seguiu)")
-        try:
-            audio = await asyncio.to_thread(extract_audio, path)
-            if audio:
-                bytes_audio = await asyncio.to_thread(Path(audio).read_bytes)
-                fala = await asyncio.to_thread(transcribe, bytes_audio, "audio.m4a")
-        except TranscribeError as e:
-            _log.info("video sem transcricao: %s", e.detail)
-        except Exception:
-            _log.exception("transcricao do video falhou (upload seguiu)")
-    return {"path": path, "frames": frames, "transcript": fala.strip()}
-
-
-@app.post("/api/sessions/{name}/transcribe", dependencies=[Depends(require_auth), Depends(_transfer_check)])
-async def transcribe_audio(name: str, request: Request, limpar: bool = False, estilo: str | None = None,
-                           organization_mode: str | None = None, organization_model: str | None = None,
-                           generation: str | None = None,
-                           organization_account: str | None = None,
-                           include_recent_messages: bool | None = None,
-                           arquivo: str | None = None):
-    # Com corpo: salva o áudio (anexo de áudio/vídeo) e transcreve num round-trip, raw body +
-    # X-Filename. Com `arquivo`: transcreve um áudio já enviado pelo /upload, sem gravar outra cópia
-    # — o ditado faz assim para o cliente ter o caminho antes da transcrição e poder tentar de novo.
-    # `limpar` só o microfone manda: áudio ANEXADO (arquivo de até 10min) não pode pagar a limpeza.
-    sessions = await asyncio.to_thread(registry.list)
-    info = next((s for s in sessions if s.name == name), None)
-    if info is None:
-        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
-    if not info.cwd:
-        raise HTTPException(409, detail=erro("erro_cwd_indisponivel", "cwd da sessao indisponivel"))
-    from app import upload_bridge
-    if arquivo:
-        try:
-            forwarded = await asyncio.to_thread(upload_bridge.request_json, name, "resolve",
-                                                filename=arquivo, allow_absolute=not _convidado(request))
-            path = forwarded["path"] if forwarded is not None else await asyncio.to_thread(
-                resolve_session_audio, info.cwd, _id_upload(info), arquivo,
-                allow_absolute=not _convidado(request))
-        except UploadError as e:
-            if e.status == 404:
-                raise HTTPException(404, detail=erro("erro_upload_inexistente",
-                                                     "audio nao encontrado na pasta da sessao"))
-            if e.status == 403:
-                raise HTTPException(403, detail=erro("erro_arquivo_caminho_convidado",
-                                                     "convidado so transcreve audio da pasta da sessao"))
-            raise HTTPException(e.status, e.detail)
-        data = await asyncio.to_thread(Path(path).read_bytes)
-        filename = Path(path).name
-    else:
-        clen = request.headers.get("content-length")
-        if clen and clen.isdigit() and int(clen) > 100 * 1024 * 1024:
-            raise HTTPException(413, detail=erro("erro_arquivo_grande", "arquivo maior que 100 MiB"))
-        data = await request.body()
-        filename = request.headers.get("x-filename") or request.query_params.get("name")
-        try:
-            forwarded = await asyncio.to_thread(upload_bridge.request_json, name, "save",
-                                                data=data, filename=filename or "")
-            path = forwarded["path"] if forwarded is not None else await asyncio.to_thread(
-                save_upload, info.cwd, _id_upload(info), data, filename)
-        except UploadError as e:
-            raise HTTPException(e.status, e.detail)
-    limits = DICTATION_LIMITS if limpar else FILE_LIMITS
-    # Transcricao (chamada de rede bloqueante) no threadpool pra nao travar o loop.
-    try:
-        t = await asyncio.to_thread(transcribe_with_provider, data, filename, limits)
-    except TranscribeError as e:
-        raise HTTPException(e.status, e.payload())
-    if not limpar:
-        return _with_provider({"path": path, "text": t.text}, t)
-    result = await asyncio.to_thread(dictation_bridge.organize, t.text, estilo, mode=organization_mode,
-                                    model=organization_model, session=name, generation=generation,
-                                    account=organization_account,
-                                    include_recent_messages=include_recent_messages,
-                                    harness_allowed=not _convidado(request))
-    return {"path": path, **_with_provider(result, t)}
-
-
 @app.post("/api/dictation/transcribe", dependencies=[Depends(require_auth)])
 async def transcribe_dictation(request: Request, estilo: str | None = None, limpar: bool = True,
                                organization_mode: str | None = None, organization_model: str | None = None,
@@ -6556,42 +6414,6 @@ async def pensamento_para_pt(body: PensamentoPtBody):
         return {"textos": textos}
     saida = await asyncio.to_thread(pensamento_pt.traduzir_varios, textos)
     return {"textos": saida}
-
-
-@app.get("/api/sessions/{name}/uploads/{filename}", dependencies=[Depends(require_auth)])
-async def serve_upload(name: str, filename: str, request: Request, download: bool = False):
-    from app import upload_bridge
-    forwarded = await upload_bridge.forward(name, "download", request, filename=filename, download=download)
-    if forwarded is not None:
-        return forwarded
-
-    # O caminho local lê sessão e disco: fora do loop, como quando a rota era síncrona.
-    def local():
-        info = _cached_info_sync(name)
-        if info is None or not info.cwd:
-            raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
-        try:
-            path = resolve_upload(info.cwd, _id_upload(info), filename)
-        except UploadError as e:
-            raise HTTPException(e.status, e.detail)
-        return file_response(path, download=download)
-
-    return await asyncio.to_thread(local)
-
-
-@app.get("/api/sessions/{name}/uploads", dependencies=[Depends(require_auth)])
-def list_session_uploads(name: str):
-    from app import upload_bridge
-    forwarded = upload_bridge.request_json(name, "list")
-    if forwarded is not None:
-        return forwarded
-    # Galeria de anexos: a retencao vive no servidor, entao o prazo sai daqui pronto (o front so
-    # desenha). Le do runtime_config, nao do env cru — senao a galeria mostraria um prazo e o
-    # prune usaria outro.
-    info = _cached_info_sync(name)
-    if info is None or not info.cwd:
-        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
-    return {"files": list_uploads(info.cwd, _id_upload(info), runtime_config.get("upload_retention_days"))}
 
 
 class CheckoutBody(_StrictBody):
@@ -7513,8 +7335,11 @@ def transcript_image(name: str, uuid: str, idx: int):
     if got is None:
         raise HTTPException(404, detail=erro("erro_imagem_nao_encontrada", "image not found"))
     raw, media = got
+    # Só imagem raster passa, como no Rust: SVG executa script e o resto não é imagem.
+    media = media.lower() if media.lower() in {"image/png", "image/jpeg", "image/gif", "image/webp"} else "application/octet-stream"
     # immutable: o conteudo de um uuid+idx nunca muda -> cache agressivo no cliente.
-    return Response(content=raw, media_type=media, headers={"Cache-Control": "max-age=31536000, immutable"})
+    return Response(content=raw, media_type=media, headers={"Cache-Control": "max-age=31536000, immutable",
+                                                            "X-Content-Type-Options": "nosniff"})
 
 
 def _json_dict(linha: str) -> dict | None:
