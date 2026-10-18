@@ -10,6 +10,7 @@ vi.mock('expo-secure-store', () => ({
   setItemAsync: async (key: string, value: string) => { mocks.vault.set(key, value); },
 }));
 vi.mock('sonner-native', () => ({ toast: mocks.warning, Toaster: () => null }));
+vi.mock('react-native-mmkv', () => ({ createMMKV: () => ({ getString: () => undefined, set: vi.fn() }) }));
 
 const baseUrl = 'http://10.0.2.2:8765';
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), {
@@ -63,14 +64,14 @@ describe('verifyLoginMachine', () => {
     if (!resolveName) expect(useServers.getState().servers[0].label).toBe('fixture-preserved');
   });
 
-  test('falha auxiliar avisa sem rejeitar login nem remover máquina autenticada', async () => {
+  test('falha auxiliar fica silenciosa sem rejeitar login nem remover máquina autenticada', async () => {
     const machine = addMachine();
     mocks.fetch.mockImplementation(async (url: string) => url.endsWith('/api/sessions')
       ? json([]) : json({ detail: 'do-not-show-machine-token' }, 503));
     await expect(verifyLoginMachine(machine, false)).resolves.toBeUndefined();
     await new Promise<void>((r) => setImmediate(r));
     expect(useServers.getState().servers).toEqual([machine]);
-    expect(mocks.warning).toHaveBeenCalled();
+    expect(mocks.warning).not.toHaveBeenCalled();
     expect(JSON.stringify(mocks.warning.mock.calls)).not.toContain('do-not-show-machine-token');
   });
   test('autenticação recusada propaga o erro sem consultar identidade', async () => {

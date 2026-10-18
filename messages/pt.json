@@ -8648,6 +8648,7 @@
   "composer_colar_vazio": "A área de transferência está vazia.",
   "composer_colar_falhou": "Não foi possível ler a área de transferência.",
   "machine_import_warning_short": "Busca automática de máquinas: sem resposta de {hosts}. As salvas continuam iguais.",
+  "machine_discovery_unconfirmed": "Não foi possível confirmar novas máquinas: {hosts}. As máquinas salvas foram mantidas.",
   "mobile_git_publish_title": "Publicar os commits no remoto?",
   "mobile_git_publish_body": "{action} vai enviar os commits da branch desta sessão. Confira os arquivos e a mensagem antes de publicar.",
   "mobile_git_checkout_title": "Trocar para a branch {branch}?",
