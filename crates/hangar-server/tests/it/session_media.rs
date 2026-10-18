@@ -5,6 +5,7 @@ use hangar_server::{
     config::Config,
     locate::{BoxFuture, InfoFailed, Locate},
     routes::{AppState, router},
+    runtime::gateway::RuntimeRegistry,
     transcript::InternalInfo,
 };
 use serde_json::{Value, json};
@@ -27,6 +28,7 @@ struct Scene {
     dir: tempfile::TempDir,
     sessions: Arc<Sessions>,
     python: Arc<Fake>,
+    runtime: Arc<RuntimeRegistry>,
     address: SocketAddr,
     task: tokio::task::JoinHandle<()>,
 }
@@ -51,6 +53,8 @@ impl Scene {
         let mut state = AppState::new(cfg);
         state.side.locate = sessions.clone();
         state.hangar_dir = dir.path().join(".hangar");
+        let runtime = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "s".into(), "i".into()));
+        assert!(state.state.runtime.set(runtime.clone()).is_ok());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
@@ -58,7 +62,13 @@ impl Scene {
                 .await
                 .unwrap();
         });
-        Self { dir, sessions, python, address, task }
+        Self { dir, sessions, python, runtime, address, task }
+    }
+    async fn post(&self, path: &str, body: &str) -> (StatusCode, Value) {
+        let response = client().post(format!("http://{}{path}", self.address)).bearer_auth(OWNER)
+            .header("content-type", "application/json").body(body.to_owned()).send().await.unwrap();
+        let status = response.status();
+        (status, serde_json::from_str(&response.text().await.unwrap()).unwrap_or(Value::Null))
     }
     fn progress_file(&self, id: &str) -> PathBuf {
         let dir = self.dir.path().join(".hangar/tool-progress");
@@ -221,4 +231,146 @@ async fn transcript_image_of_a_transfer_stays_with_python() {
     assert_eq!(scene.python.hits_to(path), 1);
     let _ = scene.get_raw("/api/sessions/s/transcript-image/u/0").await;
     assert_eq!(scene.python.hits_to("/api/sessions/s/transcript-image/u/0"), 0);
+}
+
+// --- bash-output ---
+
+#[tokio::test]
+async fn bash_output_waits_for_no_body_while_the_session_is_held() {
+    let scene = Scene::new().await;
+    scene.runtime.ingress().hold("s", std::time::Duration::from_millis(10)).await.unwrap();
+    let (status, body) = scene.post("/api/sessions/s/bash-output", "não é json").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["detail"]["code"], "session_transfer_busy");
+}
+
+#[tokio::test]
+async fn bash_output_body_is_strict() {
+    let scene = Scene::new().await;
+    let long = json!({"command": "x".repeat(200_001)}).to_string();
+    for body in ["{}", r#"{"command": 3}"#, r#"{"command": "ls", "mais": 1}"#, "[]", long.as_str()] {
+        let (status, reply) = scene.post("/api/sessions/s/bash-output", body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", &body[..body.len().min(40)]);
+        assert!(reply["detail"].is_array(), "{reply}");
+    }
+    let exact = json!({"command": "é".repeat(200_000)}).to_string();
+    assert_eq!(scene.post("/api/sessions/s/bash-output", &exact).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn bash_output_of_unknown_session_is_null() {
+    let scene = Scene::new().await;
+    let (status, body) = scene.post("/api/sessions/nenhuma/bash-output", r#"{"command": "sleep 30"}"#).await;
+    assert_eq!((status, body), (StatusCode::OK, json!({"text": null})));
+    assert_eq!(scene.python.hits_to("/api/sessions/nenhuma/bash-output"), 0);
+}
+
+#[test]
+fn bash_output_tail_is_16000_bytes_decoded_with_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("x.output");
+    let mut bytes = "é".as_bytes().to_vec();
+    bytes.extend(std::iter::repeat_n(b'a', 15_999));
+    std::fs::write(&path, &bytes).unwrap();
+    let text = hangar_server::session_media::read_tail(&path, 16_000).unwrap();
+    assert!(text.starts_with('\u{fffd}'), "{:?}", &text[..4]);
+    assert_eq!(text.chars().filter(|&c| c == 'a').count(), 15_999);
+    assert_eq!(hangar_server::session_media::read_tail(&dir.path().join("sumiu"), 16_000), None);
+}
+
+#[test]
+fn task_output_paths_follow_the_claude_layout() {
+    use hangar_server::session_media::is_task_output;
+    assert!(is_task_output(Path::new("/tmp/claude-1000/-proj/abc/tasks/b1.output")));
+    #[cfg(windows)]
+    assert!(is_task_output(Path::new(r"C:\Users\x\AppData\Local\Temp\claude\proj\tasks\b1.output")));
+    assert!(!is_task_output(Path::new("/tmp/claude-1000/proj/outros/b1.output")));
+    assert!(!is_task_output(Path::new("/tmp/x/proj/tasks/b1.output")));
+    assert!(!is_task_output(Path::new("/tmp/claude-1000/proj/tasks/b1.log")));
+}
+
+#[test]
+fn stdout_files_of_a_child_include_its_redirected_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("out.txt");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut command = if cfg!(windows) {
+        let mut c = std::process::Command::new("ping");
+        c.args(["-n", "30", "127.0.0.1"]);
+        c
+    } else {
+        let mut c = std::process::Command::new("sleep");
+        c.arg("30");
+        c
+    };
+    let mut child = command.stdout(file).spawn().unwrap();
+    let files = hangar_server::session_media::stdout_files(child.id() as i64);
+    let _ = child.kill();
+    let _ = child.wait();
+    let wanted = std::fs::canonicalize(&path).unwrap();
+    assert!(files.iter().any(|f| std::fs::canonicalize(f).ok().as_ref() == Some(&wanted)), "{files:?}");
+}
+
+/// Agente de mentira: um `sh` que roda o Bash do Claude Code (`… && eval '<cmd>' && pwd`) com a
+/// saída num arquivo; o grupo inteiro morre no fim.
+#[cfg(unix)]
+struct Agent(std::process::Child);
+#[cfg(unix)]
+impl Agent {
+    fn spawn(mark: &str, out: &Path) -> Self {
+        use std::os::unix::process::CommandExt;
+        let script = format!("sh -c \"true && eval 'printenv MARK; sleep 30' && pwd\" > '{}'; true", out.display());
+        Self(std::process::Command::new("sh").arg("-c").arg(script).env("MARK", mark).process_group(0).spawn().unwrap())
+    }
+    fn pid(&self) -> i64 { self.0.id() as i64 }
+}
+#[cfg(unix)]
+impl Drop for Agent {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("kill").args(["-TERM", "--", &format!("-{}", self.0.id())]).status();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(unix)]
+fn native(cfg: &Path, sid: &str, pid: i64) {
+    std::fs::create_dir_all(cfg.join("sessions")).unwrap();
+    std::fs::write(cfg.join(format!("sessions/{pid}.json")), json!({"sessionId": sid, "pid": pid, "status": "busy", "updatedAt": 1000}).to_string()).unwrap();
+}
+
+#[cfg(unix)]
+fn written(path: &Path) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) == 0 {
+        assert!(std::time::Instant::now() < until, "o agente não escreveu em {}", path.display());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn bash_output_reads_only_the_command_under_the_session_agent() {
+    use hangar_server::{list::procs::SystemProcs, session_media::bash_output};
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("conta");
+    let tasks = dir.path().join("claude-1000/proj/sess/tasks");
+    let loose = dir.path().join("claude-1000/proj/sess/outros");
+    std::fs::create_dir_all(&tasks).unwrap();
+    std::fs::create_dir_all(&loose).unwrap();
+    let (a, b, c) = (Agent::spawn("a", &tasks.join("a.output")), Agent::spawn("b", &tasks.join("b.output")), Agent::spawn("c", &loose.join("c.output")));
+    native(&cfg, "sa", a.pid());
+    native(&cfg, "sb", b.pid());
+    native(&cfg, "sc", c.pid());
+    for f in [tasks.join("a.output"), tasks.join("b.output"), loose.join("c.output")] {
+        written(&f);
+    }
+    let procs = SystemProcs::default();
+    let dirs = [cfg];
+    let command = "  printenv MARK; sleep 30 ";
+    assert_eq!(bash_output(&dirs, "sa", command, &procs).as_deref(), Some("a\n"));
+    assert_eq!(bash_output(&dirs, "sb", command, &procs).as_deref(), Some("b\n"));
+    assert_eq!(bash_output(&dirs, "sc", command, &procs), None, "saída fora de tasks/ não conta");
+    assert_eq!(bash_output(&dirs, "sd", command, &procs), None, "sessão sem agente não lê a de outra");
+    assert_eq!(bash_output(&dirs, "sa", "outro comando", &procs), None);
+    assert_eq!(bash_output(&dirs, "sa", "   ", &procs), None);
 }

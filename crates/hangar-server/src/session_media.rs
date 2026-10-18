@@ -220,6 +220,236 @@ pub async fn transcript_image(
     }
 }
 
+const OUTPUT_TAIL: u64 = 16_000;
+const COMMAND_CHARS: usize = 200_000;
+/// Cada cartão de Bash aberto pergunta a cada 2 s: a árvore de processos é relida no máximo nisso.
+const SCAN_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// `<tmp>/claude-<uid>/…/tasks/<id>.output` no Linux, `%TEMP%\claude\…\tasks\<id>.output` no Windows.
+pub fn is_task_output(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "output")
+        && path.parent().and_then(Path::file_name).is_some_and(|n| n == "tasks")
+        && path.components().any(|c| c.as_os_str().to_string_lossy().starts_with("claude"))
+}
+
+/// Os últimos `max` bytes, com o caractere cortado no começo trocado por U+FFFD.
+pub fn read_tail(path: &Path, max: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(max))).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Para onde vai a saída padrão do processo.
+#[cfg(target_os = "linux")]
+pub fn stdout_files(pid: i64) -> Vec<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/fd/1")).into_iter().collect()
+}
+
+/// No Windows não há descritor 1 para ler: vale todo arquivo de disco que o processo tem aberto.
+#[cfg(windows)]
+pub fn stdout_files(pid: i64) -> Vec<std::path::PathBuf> {
+    open_files::of(pid)
+}
+
+// shortcut: no macOS a saída ao vivo do Bash fica vazia; ler os arquivos abertos por libproc quando houver servidor macOS.
+#[cfg(not(any(target_os = "linux", windows)))]
+pub fn stdout_files(_pid: i64) -> Vec<std::path::PathBuf> {
+    Vec::new()
+}
+
+/// A saída ao vivo de um Bash da sessão `sid`: só os processos abaixo do agente dela contam, e o
+/// comando é o texto do `eval` da linha de comando do shell.
+pub fn bash_output(dirs: &[std::path::PathBuf], sid: &str, command: &str, procs: &dyn crate::list::procs::ProcessView) -> Option<String> {
+    let wanted = command.trim();
+    if wanted.is_empty() || sid.is_empty() {
+        return None;
+    }
+    let roots = crate::list::facts_files::native_pids(dirs, sid);
+    if roots.is_empty() {
+        return None;
+    }
+    let children = procs.children(SCAN_TTL).ok()?;
+    let mut queue: Vec<i64> = roots.iter().filter_map(|r| children.get(r)).flatten().copied().collect();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(pid) = queue.pop() {
+        if !seen.insert(pid) {
+            continue;
+        }
+        queue.extend(children.get(&pid).into_iter().flatten().copied());
+        if crate::state::shells::requested(&procs.argv(pid).join(" ")) != wanted {
+            continue;
+        }
+        if let Some(file) = stdout_files(pid).into_iter().find(|f| is_task_output(f)) {
+            return read_tail(&file, OUTPUT_TAIL);
+        }
+    }
+    None
+}
+
+/// `psutil.Process.open_files()`: os handles do processo, duplicados aqui, e só os de arquivo em
+/// disco têm o caminho perguntado (pipe e console nunca chegam no `GetFinalPathNameByHandleW`).
+#[cfg(windows)]
+mod open_files {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::PathBuf, ptr::null_mut};
+    use windows_sys::{
+        Wdk::System::SystemInformation::NtQuerySystemInformation,
+        Win32::{
+            Foundation::{CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, STATUS_INFO_LENGTH_MISMATCH},
+            Storage::FileSystem::{FILE_NAME_NORMALIZED, FILE_TYPE_DISK, GetFileType, GetFinalPathNameByHandleW, VOLUME_NAME_DOS},
+            System::Threading::{GetCurrentProcess, OpenProcess, PROCESS_DUP_HANDLE},
+        },
+    };
+
+    const SYSTEM_EXTENDED_HANDLE_INFORMATION: i32 = 64;
+
+    /// `SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX`.
+    #[repr(C)]
+    struct Entry {
+        object: *mut core::ffi::c_void,
+        pid: usize,
+        handle: usize,
+        access: u32,
+        backtrace: u16,
+        type_index: u16,
+        attributes: u32,
+        reserved: u32,
+    }
+
+    struct Owned(HANDLE);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    /// A tabela de handles da máquina; cresce até caber (ela muda entre uma chamada e outra).
+    fn table() -> Option<Vec<u64>> {
+        let mut buffer = vec![0u64; 1 << 17];
+        for _ in 0..8 {
+            let mut needed = 0u32;
+            let bytes = u32::try_from(buffer.len() * 8).ok()?;
+            let status = unsafe { NtQuerySystemInformation(SYSTEM_EXTENDED_HANDLE_INFORMATION, buffer.as_mut_ptr().cast(), bytes, &mut needed) };
+            if status == STATUS_INFO_LENGTH_MISMATCH {
+                buffer = vec![0u64; (needed as usize).max(buffer.len() * 8) / 8 + (1 << 14)];
+                continue;
+            }
+            return (status >= 0).then_some(buffer);
+        }
+        None
+    }
+
+    fn path_of(handle: HANDLE) -> Option<PathBuf> {
+        if unsafe { GetFileType(handle) } != FILE_TYPE_DISK {
+            return None;
+        }
+        let mut wide = vec![0u16; 32768];
+        let length = unsafe { GetFinalPathNameByHandleW(handle, wide.as_mut_ptr(), wide.len() as u32, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS) } as usize;
+        if length == 0 || length >= wide.len() {
+            return None;
+        }
+        let text = OsString::from_wide(&wide[..length]).to_string_lossy().into_owned();
+        Some(PathBuf::from(match text.strip_prefix(r"\\?\UNC\") {
+            Some(rest) => format!(r"\\{rest}"),
+            None => text.strip_prefix(r"\\?\").map(str::to_owned).unwrap_or(text),
+        }))
+    }
+
+    pub fn of(pid: i64) -> Vec<PathBuf> {
+        let Ok(pid) = u32::try_from(pid) else { return Vec::new() };
+        let process = unsafe { OpenProcess(PROCESS_DUP_HANDLE, 0, pid) };
+        if process.is_null() {
+            return Vec::new();
+        }
+        let process = Owned(process);
+        let Some(buffer) = table() else { return Vec::new() };
+        let count = buffer[0] as usize;
+        let room = (buffer.len() * 8 - 16) / std::mem::size_of::<Entry>();
+        let entries = unsafe { std::slice::from_raw_parts(buffer.as_ptr().add(2).cast::<Entry>(), count.min(room)) };
+        let mut out = Vec::new();
+        for entry in entries.iter().filter(|e| e.pid == pid as usize) {
+            let mut copy: HANDLE = null_mut();
+            let ok = unsafe { DuplicateHandle(process.0, entry.handle as HANDLE, GetCurrentProcess(), &mut copy, 0, 0, DUPLICATE_SAME_ACCESS) };
+            if ok == 0 {
+                continue;
+            }
+            let copy = Owned(copy);
+            if let Some(path) = path_of(copy.0)
+                && !out.contains(&path)
+            {
+                out.push(path);
+            }
+        }
+        out
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BashBody {
+    command: String,
+}
+
+fn invalid_body(msg: &str) -> Response {
+    json_response(StatusCode::UNPROCESSABLE_ENTITY, json!({"detail": [{"type": "value_error", "loc": ["body"], "msg": msg, "input": null}]}))
+}
+
+pub async fn bash_output_route(
+    State(st): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    RoutePath(name): RoutePath<String>,
+    req: Request,
+) -> Response {
+    let (fwd, caller) = who(&st, peer, &req);
+    if !caller.is_some_and(|c| c.can(&name, req.method())) {
+        return pass(&st, req, &fwd).await;
+    }
+    // Só confere a troca de conversa e solta, antes do corpo, como o `_transfer_check`.
+    if let Some(runtime) = st.state.runtime.get()
+        && runtime.ingress().enter(&name, st.write_gate_wait).await.is_err()
+    {
+        return crate::diag::coded(json_response(StatusCode::CONFLICT, crate::session_write::busy_body()), "session_transfer_busy");
+    }
+    let headers = req.headers().clone();
+    let Ok(bytes) = axum::body::to_bytes(req.into_body(), 2 * 1024 * 1024).await else {
+        return invalid_body("corpo grande demais");
+    };
+    let command = match serde_json::from_slice::<BashBody>(&bytes) {
+        Ok(body) if body.command.chars().count() <= COMMAND_CHARS => body.command,
+        Ok(_) => return invalid_body("command passa de 200000 caracteres"),
+        Err(e) => return invalid_body(&e.to_string()),
+    };
+    let info = match st.info(&name).await {
+        Ok(info) => info,
+        Err(e) => {
+            st.diag.report("rust.bash_output_failed", &name, e.0, INFO_REASON);
+            return json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_lista_indisponivel",
+                "a lista de sessões está indisponível", json!({"detalhe": e.0})));
+        }
+    };
+    let Some(sid) = info.map(|i| i.session_key).filter(|s| !s.is_empty()) else {
+        return json_response(StatusCode::OK, json!({"text": null}));
+    };
+    let list = st.list.clone();
+    let found = tokio::task::spawn_blocking(move || {
+        let (dirs, _) = list.state_dirs_blocking().map_err(|e| e.code)?;
+        Ok::<_, &'static str>(bash_output(&dirs, &sid, &command, &*list.env().procs))
+    })
+    .await;
+    match found {
+        Ok(Ok(text)) => json_response(StatusCode::OK, json!({"text": text})),
+        Ok(Err(code)) => {
+            st.diag.report("rust.bash_output_failed", &name, code, "pastas das contas indisponíveis");
+            json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_lista_indisponivel",
+                "a lista de sessões está indisponível", json!({"detalhe": code})))
+        }
+        Err(_) => route_failed(&st, &headers, "rust.bash_output_failed", &name, "bash_output_panic", "a leitura da saída caiu no servidor"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
