@@ -20,7 +20,23 @@ pub enum Gate {
 #[derive(Default)]
 pub struct ProblemGate { shown: Option<String>, pending: Option<(String, Instant)> }
 
+/// O problema que a lista mostra de cada sessão: a conversa aberta depois começa do mesmo ponto, sem
+/// esconder de novo pelo prazo o que a lista já mostra.
+#[derive(Default)]
+pub struct Shown(std::sync::Mutex<std::collections::HashMap<String, String>>);
+impl Shown {
+    pub fn set(&self, name: &str, code: Option<&str>) {
+        let mut shown = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match code { Some(code) => { shown.insert(name.to_owned(), code.to_owned()); }, None => { shown.remove(name); } }
+    }
+    pub fn get(&self, name: &str) -> Option<String> { self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(name).cloned() }
+    pub fn retain(&self, keep: impl Fn(&str) -> bool) { self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).retain(|name, _| keep(name)); }
+}
+
 impl ProblemGate {
+    /// Já mostrando `code` (o que a lista mostra): o mesmo problema sai sem esperar de novo.
+    pub fn showing(code: Option<String>) -> Self { Self { shown: code, pending: None } }
+
     pub fn admit(&mut self, code: Option<&str>, now: Instant, hold: Duration) -> Gate {
         let Some(code) = code else { self.shown = None; self.pending = None; return Gate::Clear };
         if self.shown.as_deref() == Some(code) { return Gate::Show; }

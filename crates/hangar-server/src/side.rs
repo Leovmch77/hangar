@@ -225,6 +225,8 @@ pub struct SideCtx {
     pub queue_dir: Option<PathBuf>,
     /// Quanto um problema de estado espera antes de sair (`problem_gate::HOLD`; zero nos testes dos produtores).
     pub problem_hold: std::time::Duration,
+    /// O problema que a lista mostra de cada sessão (`ListBridge::gate_problems`): o hub nasce com ele.
+    pub shown_problems: Arc<crate::problem_gate::Shown>,
 }
 
 impl SideCtx {
@@ -444,6 +446,7 @@ impl Hub {
     fn start(name: &str, binding: Binding, ctx: SideCtx, owners: usize) -> Arc<Hub> {
         let (tx, _) = broadcast::channel(CHANNEL);
         let owned = ctx.runtime.get().is_some_and(|registry| registry.owns_codex_terminal(name));
+        let seed = ctx.shown_problems.get(name);
         let hub = Arc::new_cyclic(|weak| {
             let tail = FileTail::spawn(
                 binding.jsonl.clone(),
@@ -472,7 +475,7 @@ impl Hub {
                 queue_watch: Mutex::new(None),
                 queue_wake: Arc::new(Notify::new()),
                 queue_path: Mutex::new(None),
-                problems: Mutex::default(),
+                problems: Mutex::new(StateProblems { gate: crate::problem_gate::ProblemGate::showing(seed), ..Default::default() }),
                 me: weak.clone(),
             }
         });
@@ -832,7 +835,7 @@ impl Hub {
         *bound = Some(Bound { binding, generation, tail });
         *self.committed.lock().unwrap() = None;
         // O estado retido era da conversa anterior: não volta depois da troca.
-        { let mut problems = self.problems.lock().unwrap(); problems.epoch += 1; if let Some(timer) = problems.timer.take() { timer.abort(); } problems.gate = Default::default(); }
+        { let mut problems = self.problems.lock().unwrap(); problems.epoch += 1; if let Some(timer) = problems.timer.take() { timer.abort(); } problems.gate = crate::problem_gate::ProblemGate::showing(self.ctx.shown_problems.get(&self.name)); }
         // Os avisos de mod ficam (o `cache.toasts` os guarda): são da sessão, não do transcript. A faixa
         // do Rust também é da sessão: volta ao retrato antes do `reset`, senão quem religa depois de um
         // `/clear` fica sem ela até o mod redesenhar. Limpeza e semeadura sob uma trava só.
@@ -1511,6 +1514,7 @@ pub(crate) fn test_ctx() -> SideCtx {
         runtime: Default::default(),
         queue_dir: None,
         problem_hold: std::time::Duration::ZERO,
+        shown_problems: Arc::default(),
     }
 }
 
@@ -2654,6 +2658,21 @@ mod tests {
         tokio::time::advance(crate::problem_gate::HOLD + std::time::Duration::from_secs(1)).await;
         for _ in 0..5 { tokio::task::yield_now().await; }
         assert_ne!(state(&lease.hub)["problema"], "da_anterior", "o estado da conversa anterior não volta");
+    }
+
+    /// A conversa aberta depois começa do problema que a lista já mostra: o mesmo sai na hora, sem esperar.
+    #[tokio::test]
+    async fn a_hub_opens_with_the_problem_the_list_already_shows() {
+        let dir = tempfile::tempdir().unwrap();
+        let shown = Arc::new(crate::problem_gate::Shown::default());
+        shown.set("seed", Some("headless_processo_caiu"));
+        let ctx = SideCtx { queue_dir: Some(dir.path().to_path_buf()), problem_hold: crate::problem_gate::HOLD, shown_problems: shown, ..test_ctx() };
+        let lease = ctx.hubs.acquire("seed", queue_binding(dir.path(), "a"), &ctx);
+        let frames = |hub: &Hub| -> String { hub.cache.lock().unwrap().replay().iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect() };
+        assert!(lease.hub.publish_own("state", r#"{"state":"idle","problema":"headless_processo_caiu","problema_detalhe":"rc=143"}"#));
+        assert!(frames(&lease.hub).contains(r#""problema":"headless_processo_caiu""#), "a lista já mostra: a conversa também, sem prazo");
+        assert!(lease.hub.publish_own("state", r#"{"state":"idle","problema":"outro","problema_detalhe":null}"#));
+        assert!(!frames(&lease.hub).contains(r#""problema":"outro""#), "problema diferente espera o prazo");
     }
 
     /// Troca de conversa: o retrato perde a fila da anterior na hora, quadro da geração anterior não

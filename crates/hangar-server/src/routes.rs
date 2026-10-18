@@ -132,6 +132,7 @@ impl AppState {
             runtime: Default::default(),
             queue_dir: list.env().dirs.as_ref().map(|dirs| dirs.claude.join(".hangar-queue")),
             problem_hold: crate::problem_gate::HOLD,
+            shown_problems: list.shown_problems(),
         };
         mods.bind_hubs(side.hubs.downgrade());
         let diag = crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone());
@@ -1071,6 +1072,7 @@ mod tests {
             runtime: Default::default(),
             queue_dir: None,
             problem_hold: std::time::Duration::ZERO,
+            shown_problems: Default::default(),
         };
         let jsonl = dir.join("t.jsonl");
         std::fs::write(&jsonl, "").unwrap();

@@ -261,6 +261,7 @@ pub struct ListBridge {
     plugin_projection: Mutex<HashMap<String, (crate::interactions::InteractionBinding, hangar_api::state::StateEvent)>>,
     /// O `problema` de cada linha só sai depois de valer pelo prazo (`problem_gate`); o tique da lista reconfere.
     problems: Mutex<HashMap<String, crate::problem_gate::ProblemGate>>,
+    shown: Arc<crate::problem_gate::Shown>,
     problem_hold_ms: std::sync::atomic::AtomicU64,
     #[cfg(test)]
     test_plugins: Mutex<Option<BTreeMap<String, Result<crate::state::facts::PluginReading, String>>>>,
@@ -288,7 +289,7 @@ impl ListBridge {
             snapshot: tokio::sync::Mutex::new(None), git_running: Arc::default(),
             git_slots: Arc::new(tokio::sync::Semaphore::new(GIT_SLOTS)), epoch: AtomicU64::new(0),
             state_facts: Arc::default(), demoted, published: Arc::default(), live_jsonl: Mutex::default(),
-            plugin_runtime: std::sync::OnceLock::new(), plugin_projection: Mutex::default(), problems: Mutex::default(),
+            plugin_runtime: std::sync::OnceLock::new(), plugin_projection: Mutex::default(), problems: Mutex::default(), shown: Arc::default(),
             problem_hold_ms: std::sync::atomic::AtomicU64::new(if cfg!(test) { 0 } else { crate::problem_gate::HOLD.as_millis() as u64 }),
             #[cfg(test)] test_plugins: Mutex::default(),
         }
@@ -873,12 +874,19 @@ impl ListBridge {
         let hold = Duration::from_millis(self.problem_hold_ms.load(std::sync::atomic::Ordering::Relaxed));
         let now = tokio::time::Instant::now().into_std();
         let mut gates = lock(&self.problems);
-        if complete { gates.retain(|name, _| rows.iter().any(|row| &row.name == name)); }
+        if complete {
+            gates.retain(|name, _| rows.iter().any(|row| &row.name == name));
+            self.shown.retain(|name| rows.iter().any(|row| row.name == name));
+        }
         for row in rows.iter_mut() {
             let gate = gates.entry(row.name.clone()).or_default();
             if matches!(gate.admit(row.problema.as_deref(), now, hold), Gate::Hold(_)) { row.problema = None; }
+            self.shown.set(&row.name, row.problema.as_deref());
         }
     }
+
+    /// O que a lista mostra de cada sessão, para o hub da conversa nascer igual.
+    pub fn shown_problems(&self) -> Arc<crate::problem_gate::Shown> { self.shown.clone() }
 
     /// Prazo do portão de problemas da lista; os testes dos produtores o zeram.
     pub fn set_problem_hold(&self, hold: Duration) { self.problem_hold_ms.store(hold.as_millis() as u64, std::sync::atomic::Ordering::Relaxed); }
