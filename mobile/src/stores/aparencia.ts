@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { AccessibilityInfo } from 'react-native';
+import { AccessibilityInfo, Appearance } from 'react-native';
 import { UnistylesRuntime } from 'react-native-unistyles';
 import {
   PENSAMENTO_TOOLS,
@@ -102,9 +102,11 @@ function lerAgrupar(): GroupBy {
 }
 
 // Unistyles: `adaptiveThemes` segue o SO; fixar tema exige desligar o adaptativo antes de setTheme.
+// O nativo (vidro do iOS 26, teclado, menus) lê o esquema da janela, não o do Unistyles: sem fixar
+// a janela, app claro com iPhone escuro pintava o composer de vidro escuro.
 function aplicar(t: Tema) {
-  if (t === 'system') UnistylesRuntime.setAdaptiveThemes(true);
-  else { UnistylesRuntime.setAdaptiveThemes(false); UnistylesRuntime.setTheme(t); }
+  if (t === 'system') { Appearance.setColorScheme('unspecified'); UnistylesRuntime.setAdaptiveThemes(true); }
+  else { Appearance.setColorScheme(t); UnistylesRuntime.setAdaptiveThemes(false); UnistylesRuntime.setTheme(t); }
 }
 
 function lerFundo(): Fundo {

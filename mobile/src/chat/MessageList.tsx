@@ -398,12 +398,12 @@ export function MessageList({
 
 const styles = StyleSheet.create((theme) => ({
   area: { flex: 1 },
-  folha: { position: 'absolute', top: theme.base.space[2], bottom: 0, borderRadius: 16 },
+  folha: { position: 'absolute', top: theme.base.space[2], bottom: 0, borderRadius: theme.base.radius.lg },
   // Resposta sem bolha ocupa a largura: a margem lateral é o que separa o texto da borda da tela.
   content: {
     paddingHorizontal: theme.base.space[4],
     paddingVertical: theme.base.space[3],
-    gap: theme.base.space[3],
+    gap: theme.base.space[2],
   },
   footer: {
     gap: theme.base.space[3],
@@ -433,7 +433,7 @@ const styles = StyleSheet.create((theme) => ({
     right: theme.base.space[4],
     width: 40,
     height: 40,
-    borderRadius: 20,
+    borderRadius: theme.base.radius.full,
     borderWidth: 1,
     borderColor: theme.tokens.border.default,
     backgroundColor: superficie(theme, 0.9),
@@ -446,7 +446,7 @@ const styles = StyleSheet.create((theme) => ({
     right: -2,
     width: 10,
     height: 10,
-    borderRadius: 5,
+    borderRadius: theme.base.radius.full,
     borderWidth: 2,
   },
 }));

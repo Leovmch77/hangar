@@ -74,7 +74,7 @@ export function Glass({ variant = 'panel', style, children, ...rest }: Props) {
       borderBottomRightRadius: innerRadius(box.borderBottomRightRadius ?? box.borderRadius, Math.max(bottom, right)),
       borderBottomLeftRadius: innerRadius(box.borderBottomLeftRadius ?? box.borderRadius, Math.max(bottom, left)),
     };
-    fundo = <GlassView key={rt.themeName} glassEffectStyle="regular" tintColor={tinta} isInteractive={variant === 'chrome'} style={[StyleSheet.absoluteFillObject, corners]} pointerEvents="none" />;
+    fundo = <GlassView key={rt.themeName} colorScheme={rt.themeName === 'dark' ? 'dark' : 'light'} glassEffectStyle="regular" tintColor={tinta} isInteractive={variant === 'chrome'} style={[StyleSheet.absoluteFillObject, corners]} pointerEvents="none" />;
   } else {
     fundo = (
       <BlurView

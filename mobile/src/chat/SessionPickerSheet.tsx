@@ -120,7 +120,7 @@ function PickerList({ onClose, atual, serverId }: { onClose: () => void; atual: 
 const styles = StyleSheet.create((theme) => ({
   container: { flex: 1 },
   inner: { padding: theme.base.space[3] },
-  title: { fontSize: theme.base.text.base, fontWeight: '600', marginBottom: theme.base.space[2] },
+  title: { fontSize: theme.base.text.base, fontWeight: theme.base.weight.semibold, marginBottom: theme.base.space[2] },
   search: { fontSize: theme.base.text.sm, minHeight: 44, paddingHorizontal: theme.base.space[3], borderRadius: theme.base.radius.md, marginBottom: theme.base.space[2] },
   meta: { fontSize: theme.base.text.xs, flexShrink: 1 },
 }));

@@ -82,7 +82,7 @@ const styles = StyleSheet.create((theme) => ({
     alignSelf: 'flex-start',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: theme.base.space[1.5],
     paddingHorizontal: theme.base.space[2],
     paddingVertical: theme.base.space[1],
     borderRadius: theme.base.radius.full,
@@ -90,7 +90,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   selectorText: {
     fontSize: theme.base.text.sm,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
   },
   selectorArrow: {
     fontSize: theme.base.text.xxxs,

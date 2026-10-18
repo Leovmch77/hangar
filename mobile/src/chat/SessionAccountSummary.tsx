@@ -46,10 +46,10 @@ export function SessionAccountSummary({ server, session, label, onPress }: {
   </View>;
 }
 const styles = StyleSheet.create(theme => ({
-  row: { flexDirection: 'row', alignItems: 'center', gap: 10, borderRadius: theme.base.radius.lg, padding: 12, minHeight: 44, marginHorizontal: 4, marginVertical: 4 },
-  body: { flex: 1, minWidth: 0, gap: 4 },
-  name: { fontSize: theme.base.text.sm, fontWeight: '600', color: theme.tokens.text.primary },
+  row: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], borderRadius: theme.base.radius.lg, padding: theme.base.space[3], minHeight: 44, marginHorizontal: theme.base.space[1], marginVertical: theme.base.space[1] },
+  body: { flex: 1, minWidth: 0, gap: theme.base.space[1] },
+  name: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold, color: theme.tokens.text.primary },
   quota: { fontSize: theme.base.text.xxs, color: theme.tokens.text.secondary },
   pressed: { opacity: 0.7 },
-  retry: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 16 },
+  retry: { minHeight: 44, justifyContent: 'center', paddingHorizontal: theme.base.space[4] },
 }));

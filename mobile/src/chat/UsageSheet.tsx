@@ -146,17 +146,17 @@ const styles = StyleSheet.create((theme) => ({
   },
   title: {
     fontSize: theme.base.text.lg,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   section: {
     gap: theme.base.space[3],
   },
   sectionTitle: {
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   meter: {
-    gap: 6,
+    gap: theme.base.space[1.5],
   },
   meterHead: {
     flexDirection: 'row',
@@ -194,11 +194,11 @@ const styles = StyleSheet.create((theme) => ({
     flexShrink: 1,
     textAlign: 'right',
     fontSize: theme.base.text.sm,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
   },
   pct: {
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   sub: {
     fontSize: theme.base.text.xs,
@@ -214,7 +214,7 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.base.radius.full,
     overflow: 'hidden',
     paddingHorizontal: theme.base.space[2],
-    paddingVertical: 4,
+    paddingVertical: theme.base.space[1],
   },
   raw: {
     fontSize: theme.base.text.xs,
@@ -232,6 +232,6 @@ const styles = StyleSheet.create((theme) => ({
   linkText: {
     flex: 1,
     fontSize: theme.base.text.base,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
 }));

@@ -1792,14 +1792,14 @@ const styles = StyleSheet.create((theme) => ({
     alignSelf: 'flex-start',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
+    gap: theme.base.space[1],
     height: 30,
-    borderRadius: 15,
-    paddingHorizontal: 10,
+    borderRadius: theme.base.radius.full,
+    paddingHorizontal: theme.base.space[2],
   },
   steerText: {
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   steerCount: {
     fontSize: theme.base.text.xs,
@@ -1808,16 +1808,16 @@ const styles = StyleSheet.create((theme) => ({
     alignSelf: 'flex-start',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
+    gap: theme.base.space[1],
     height: 30,
     maxWidth: 240,
-    borderRadius: 15,
-    paddingHorizontal: 10,
+    borderRadius: theme.base.radius.full,
+    paddingHorizontal: theme.base.space[2],
   },
   pairChipLabel: {
     flexShrink: 1,
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   iconBtnPressed: {
     backgroundColor: theme.tokens.bg.hover,
@@ -1835,19 +1835,19 @@ const styles = StyleSheet.create((theme) => ({
   stopMark: {
     width: 13,
     height: 13,
-    borderRadius: 3,
+    borderRadius: theme.base.radius.xs,
   },
   autoChip: {
     minWidth: 44,
     height: 30,
     justifyContent: 'center',
     alignSelf: 'flex-start',
-    borderRadius: 15,
-    paddingHorizontal: 10,
+    borderRadius: theme.base.radius.full,
+    paddingHorizontal: theme.base.space[2],
   },
   autoText: {
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   undoRow: {
     flexDirection: 'row',
@@ -1864,11 +1864,11 @@ const styles = StyleSheet.create((theme) => ({
     borderWidth: 1,
     borderRadius: theme.base.radius.full,
     paddingHorizontal: theme.base.space[2],
-    paddingVertical: 4,
+    paddingVertical: theme.base.space[1],
   },
   undoText: {
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   editCancel: {
     minHeight: 30,
@@ -1893,11 +1893,11 @@ const styles = StyleSheet.create((theme) => ({
     borderWidth: 1,
     borderRadius: theme.base.radius.full,
     paddingHorizontal: theme.base.space[2],
-    paddingVertical: 4,
+    paddingVertical: theme.base.space[1],
   },
   retryText: {
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   attachStrip: {
     gap: theme.base.space[2],
@@ -1913,8 +1913,8 @@ const styles = StyleSheet.create((theme) => ({
   },
   versionBtn: {
     minHeight: 30,
-    borderRadius: 15,
-    paddingHorizontal: 10,
+    borderRadius: theme.base.radius.full,
+    paddingHorizontal: theme.base.space[2],
     justifyContent: 'center',
   },
   hint: {

@@ -55,7 +55,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   texto: {
     fontSize: theme.base.text.base,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
     color: theme.tokens.accent.base,
   },
 }));

@@ -133,8 +133,8 @@ const styles = StyleSheet.create((theme) => ({
   colVoz: { alignSelf: 'flex-start', alignItems: 'flex-start' },
   bubble: {
     backgroundColor: superficie(theme, 0.8),
-    borderRadius: 14,
-    paddingHorizontal: 13,
+    borderRadius: theme.base.radius.md,
+    paddingHorizontal: theme.base.space[3],
     paddingVertical: theme.base.space[2],
     gap: theme.base.space[2],
   },
@@ -143,8 +143,8 @@ const styles = StyleSheet.create((theme) => ({
   },
   // Delegação por voz: borda fina em vez de cor, que fica para estado e aviso.
   voice: { borderWidth: 1, borderColor: theme.tokens.border.default },
-  voiceLabel: { fontWeight: '600', fontSize: theme.base.text.sm },
-  peerChip: { alignSelf: 'flex-start', borderWidth: 1, borderRadius: theme.base.radius.full, paddingHorizontal: 8, paddingVertical: 2 },
+  voiceLabel: { fontWeight: theme.base.weight.semibold, fontSize: theme.base.text.sm },
+  peerChip: { alignSelf: 'flex-start', borderWidth: 1, borderRadius: theme.base.radius.full, paddingHorizontal: theme.base.space[2], paddingVertical: theme.base.space[0.5] },
   detailsButton: { minHeight: 44, justifyContent: 'center' },
   thumbs: {
     flexDirection: 'row',

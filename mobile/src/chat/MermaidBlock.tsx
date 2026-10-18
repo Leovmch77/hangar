@@ -99,5 +99,5 @@ const styles = StyleSheet.create((theme) => ({
     borderWidth: 1,
     justifyContent: 'center',
   },
-  retryTxt: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  retryTxt: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
 }));

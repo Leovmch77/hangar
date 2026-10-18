@@ -21,9 +21,9 @@ const styles = StyleSheet.create((theme) => ({
   chip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
+    gap: theme.base.space[1],
+    paddingHorizontal: theme.base.space[2],
+    paddingVertical: theme.base.space[0.5],
     borderRadius: theme.base.radius.full,
     backgroundColor: superficie(theme),
     alignSelf: 'flex-start',

@@ -42,6 +42,7 @@ export const Alert = { alert: (..._args: unknown[]) => {} };
 export const AppState = { currentState: 'active', addEventListener: () => ({ remove: () => {} }) };
 export const Keyboard ={ dismiss: () => {}, isVisible: () => false, addListener: () => ({ remove: () => {} }) };
 export const useWindowDimensions = () => ({ width: 390, height: 844, scale: 3, fontScale: 1 });
+export const Appearance = { setColorScheme: (_s: 'light' | 'dark' | 'unspecified') => {} };
 export const AccessibilityInfo = {
   isReduceTransparencyEnabled: () => Promise.resolve(false),
   addEventListener: () => ({ remove: () => {} }),

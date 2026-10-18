@@ -119,9 +119,9 @@ const styles = StyleSheet.create((theme) => ({
   // A altura vem do detent da sheet; sem o flex a ScrollView cresce com o conteúdo e a saída de um
   // comando longo escorre pra fora da sheet em vez de rolar dentro dela.
   body: { flex: 1, padding: theme.base.space[4], gap: theme.base.space[3] },
-  head: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  titulo: { flex: 1, fontSize: theme.base.text.sm, fontWeight: '600' },
+  head: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
+  titulo: { flex: 1, fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
   scroll: { flex: 1 },
-  arquivo: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xxs, marginBottom: 4 },
+  arquivo: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xxs, marginBottom: theme.base.space[1] },
   mono: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs, lineHeight: 18 },
 }));

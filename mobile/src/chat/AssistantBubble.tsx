@@ -46,12 +46,12 @@ export function mkMarkdownStyle(t: TemaApp): MarkdownStyle {
   const bloco = (size: number, lh: number) => ({ fontSize: size * texto, lineHeight: Math.round(lh * texto * linha) });
   return {
     paragraph: { color: t.tokens.text.primary, ...bloco(t.base.text.base, LH.p) },
-    h1: { color: t.tokens.text.primary, ...bloco(t.base.text.xl, LH.h1), fontWeight: '700' },
-    h2: { color: t.tokens.text.primary, ...bloco(t.base.text.lg, LH.h2), fontWeight: '700' },
-    h3: { color: t.tokens.text.primary, ...bloco(t.base.text.base, LH.h3), fontWeight: '600' },
-    h4: { color: t.tokens.text.primary, ...bloco(t.base.text.base, LH.h4), fontWeight: '600' },
-    h5: { color: t.tokens.text.primary, ...bloco(t.base.text.sm, LH.h5), fontWeight: '600' },
-    h6: { color: t.tokens.text.secondary, ...bloco(t.base.text.sm, LH.h6), fontWeight: '600' },
+    h1: { color: t.tokens.text.primary, ...bloco(t.base.text.xl, LH.h1), fontWeight: t.base.weight.bold },
+    h2: { color: t.tokens.text.primary, ...bloco(t.base.text.lg, LH.h2), fontWeight: t.base.weight.bold },
+    h3: { color: t.tokens.text.primary, ...bloco(t.base.text.base, LH.h3), fontWeight: t.base.weight.semibold },
+    h4: { color: t.tokens.text.primary, ...bloco(t.base.text.base, LH.h4), fontWeight: t.base.weight.semibold },
+    h5: { color: t.tokens.text.primary, ...bloco(t.base.text.sm, LH.h5), fontWeight: t.base.weight.semibold },
+    h6: { color: t.tokens.text.secondary, ...bloco(t.base.text.sm, LH.h6), fontWeight: t.base.weight.semibold },
     link: { color: t.tokens.accent.base, underline: true },
     strong: { color: t.tokens.text.primary },
     em: { color: t.tokens.text.primary },
@@ -297,7 +297,7 @@ export const AssistantBubble = memo(function AssistantBubble({
           ))}
         </View>
       ) : null}
-      <BubbleActions text={text} ts={ts} serverId={serverId} />
+      <View style={styles.meta}><BubbleActions text={text} ts={ts} serverId={serverId} /></View>
     </View>
   );
 });
@@ -306,7 +306,7 @@ const styles = StyleSheet.create((theme) => ({
   planLabel: {
     color: theme.tokens.accent.base,
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   // Sem bolha, como no nativo: texto corrido na largura toda. Só tabela, código e anexo têm caixa,
   // e essa caixa vem da superficie() para seguir Transparência e Solidez.
@@ -314,6 +314,8 @@ const styles = StyleSheet.create((theme) => ({
     alignSelf: 'stretch',
     gap: theme.base.space[2],
   },
+  // Hora e ⋯ pertencem ao texto de cima: colados nele, longe da próxima linha da conversa.
+  meta: { marginTop: -theme.base.space[1.5] },
   atts: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -353,6 +355,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   chartBtnText: {
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
 }));

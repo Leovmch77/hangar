@@ -71,7 +71,7 @@ const styles = StyleSheet.create((theme) => ({
     padding: theme.base.space[3],
     gap: theme.base.space[2],
   },
-  title: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  title: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
   row: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[2] },
   btn: {
     minHeight: 44,
@@ -82,7 +82,7 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.base.space[3],
   },
   ghost: { borderWidth: 1 },
-  btnText: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  btnText: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
   off: { opacity: 0.5 },
   error: { fontSize: theme.base.text.xs },
 }));

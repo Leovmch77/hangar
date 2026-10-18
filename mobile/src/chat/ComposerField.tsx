@@ -73,17 +73,17 @@ export function ComposerActions({ attach, mic, send, settings, beforeMic, afterM
 }
 
 const styles = StyleSheet.create((theme) => ({
-  box: { marginHorizontal: theme.base.space[2], borderRadius: 22, paddingHorizontal: 12, paddingTop: 12, paddingBottom: 8, gap: theme.base.space[1] },
+  box: { marginHorizontal: theme.base.space[2], borderRadius: theme.base.radius.xl, paddingHorizontal: theme.base.space[3], paddingTop: theme.base.space[3], paddingBottom: theme.base.space[2], gap: theme.base.space[1] },
   inputWrap: { minHeight: 40, justifyContent: 'center', paddingHorizontal: theme.base.space[1] },
   hidden: { opacity: 0 },
   wave: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', paddingHorizontal: theme.base.space[1] },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5] },
   spacer: { flex: 1, minWidth: 0 },
-  iconBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
+  iconBtn: { width: 34, height: 34, borderRadius: theme.base.radius.full, alignItems: 'center', justifyContent: 'center' },
   pressed: { backgroundColor: theme.tokens.bg.hover },
   disabled: { opacity: 0.5 },
   roundBtn: { width: 34, height: 34, borderRadius: theme.base.radius.full, alignItems: 'center', justifyContent: 'center' },
-  queueBadge: { position: 'absolute', top: 0, right: 0, minWidth: 15, height: 15, paddingHorizontal: 3, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
-  queueBadgeText: { fontSize: theme.base.text.xxxs, fontWeight: '700', lineHeight: 13 },
+  queueBadge: { position: 'absolute', top: 0, right: 0, minWidth: 15, height: 15, paddingHorizontal: theme.base.space[0.5], borderRadius: theme.base.radius.sm, alignItems: 'center', justifyContent: 'center' },
+  queueBadgeText: { fontSize: theme.base.text.xxxs, fontWeight: theme.base.weight.bold, lineHeight: 13 },
   sendPressed: { opacity: 0.8 },
 }));

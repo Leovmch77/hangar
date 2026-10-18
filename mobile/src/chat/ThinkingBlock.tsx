@@ -58,7 +58,7 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.base.space[1],
     borderRadius: theme.base.radius.sm,
   },
-  rotulo: { flexShrink: 0, fontSize: theme.base.text.xs, fontWeight: '500' },
+  rotulo: { flexShrink: 0, fontSize: theme.base.text.xs, fontWeight: theme.base.weight.medium },
   resumo: { flex: 1, minWidth: 0, fontSize: theme.base.text.xs, fontStyle: 'italic' },
   texto: {
     paddingHorizontal: theme.base.space[1],

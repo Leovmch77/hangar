@@ -213,7 +213,7 @@ export function CommandSheet({
 
 const styles = StyleSheet.create((theme) => ({
   inner: { gap: theme.base.space[1], padding: theme.base.space[3] },
-  title: { fontSize: theme.base.text.base, fontWeight: '600', marginBottom: theme.base.space[1] },
+  title: { fontSize: theme.base.text.base, fontWeight: theme.base.weight.semibold, marginBottom: theme.base.space[1] },
   search: {
     minHeight: 44,
     borderWidth: 1,
@@ -225,9 +225,9 @@ const styles = StyleSheet.create((theme) => ({
   muted: { fontSize: theme.base.text.sm, textAlign: 'center', paddingVertical: theme.base.space[3] },
   centro: { alignItems: 'center', gap: theme.base.space[1] },
   retry: { minHeight: 44, justifyContent: 'center' },
-  retryTxt: { fontSize: theme.base.text.sm, fontWeight: '600' },
-  group: { gap: 2, marginBottom: theme.base.space[2] },
-  groupLabel: { fontSize: theme.base.text.xs, fontWeight: '600', textTransform: 'uppercase', paddingHorizontal: theme.base.space[2] },
+  retryTxt: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
+  group: { gap: theme.base.space[0.5], marginBottom: theme.base.space[2] },
+  groupLabel: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.semibold, textTransform: 'uppercase', paddingHorizontal: theme.base.space[2] },
   item: {
     minHeight: 48,
     flexDirection: 'row',
@@ -244,7 +244,7 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.base.text.xxs,
     borderWidth: 1,
     borderRadius: theme.base.radius.full,
-    paddingHorizontal: 6,
+    paddingHorizontal: theme.base.space[1.5],
     paddingVertical: 1,
     overflow: 'hidden',
   },

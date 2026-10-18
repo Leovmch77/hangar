@@ -180,21 +180,21 @@ const styles = StyleSheet.create((theme) => ({
   },
   name: {
     fontSize: theme.base.text.base,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   pill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 9,
-    paddingVertical: 3,
+    gap: theme.base.space[1],
+    paddingHorizontal: theme.base.space[2],
+    paddingVertical: theme.base.space[0.5],
     borderRadius: theme.base.radius.full,
     flexShrink: 0,
   },
   ponto: {
     width: 6,
     height: 6,
-    borderRadius: 3,
+    borderRadius: theme.base.radius.full,
   },
   pillTxt: {
     fontSize: theme.base.text.xxs,
