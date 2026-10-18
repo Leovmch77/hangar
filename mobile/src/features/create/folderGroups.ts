@@ -24,6 +24,6 @@ export function groupFolders(entries: FsEntry[], repos: WorktreeRepo[]): FolderR
     (w.status.sessions.length || !w.status.merged ? row.visible : row.merged).push(w);
   }
   for (const row of rows.values()) row.visible.sort((a, b) => Number(!!b.status.sessions.length) - Number(!!a.status.sessions.length));
-  const latest = (r: FolderRow) => Math.max(time(r.entry), ...r.visible.map((w) => time(w.entry)), ...r.merged.map((w) => time(w.entry)));
-  return [...rows.values()].sort((a, b) => latest(b) - latest(a));
+  const latest = new Map([...rows.values()].map((r) => [r, Math.max(time(r.entry), ...[...r.visible, ...r.merged].map((w) => time(w.entry)))]));
+  return [...rows.values()].sort((a, b) => latest.get(b)! - latest.get(a)!);
 }

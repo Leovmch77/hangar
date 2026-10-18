@@ -13,6 +13,7 @@ import { useLiveVoice } from '../voice/liveVoiceStore';
 import { accountQuotaLine, recentSessions } from './drawerMenu';
 
 const RECENT = 5;
+const NO_ROWS: AggSession[] = [];
 
 // Menu da gaveta no padrão dos apps de chat: destinos, recentes só pelo nome e a ação principal
 // flutuando embaixo. A lista completa de sessões mora no Início. `onClose` roda antes de navegar.
@@ -20,10 +21,11 @@ export function DrawerMenu({ open, onClose, onOpenServers }: { open: boolean; on
   const { theme } = useUnistyles();
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const rows = useSessions((s) => s.rows);
+  // Fechada, a gaveta continua montada: sem assinar a lista, troca de estado das sessões não a redesenha.
+  const rows = useSessions((s) => (open ? s.rows : NO_ROWS));
   const recent = useMemo(() => recentSessions(rows, RECENT), [rows]);
-  const activeId = useServers((s) => s.activeId);
   const server = useServers((s) => s.servers.find((x) => x.id === s.activeId));
+  const activeId = server?.id;
   const voiceOk = !!server && !server.invite && !server.inviteEnded && !server.removed;
   const quota = useAccountQuota(server?.invite ? undefined : server, open);
 

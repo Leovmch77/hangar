@@ -1,14 +1,14 @@
-import { useEffect, useState, useCallback, useRef, type ComponentProps } from 'react';
+import { Children, Fragment, useEffect, useState, useCallback, useRef, type ComponentProps, type ReactNode } from 'react';
 import { Icon } from '../../ui/Icon';
 import { AccessibilityInfo, ActivityIndicator, BackHandler, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { getArchivePorCwd, getCodexAccountsForServer, defaultCodexAccount,
   getEnginesForServer, fetchSessionsForServer, listClaudeConfigsForServer, probeServerResponse,
-  modelOptionsForServer, resumeArchivedConversation, getProvidersForServer, createSessionForServer, sanitizeSessionName } from '@hangar/core';
+  modelOptionsForServer, resumeArchivedConversation, getProvidersForServer, createSessionForServer, sanitizeSessionName, getWorktreesForServer } from '@hangar/core';
 import { basename, ctxWindow, providerName, contaComFolga, cotaDaConta, cotaParada, janelaEsgotada, motivoCotaAntiga, resumoCota, CLAUDE_PERMISSION_MODES, EFFORT_LEVELS,
   SESSION_PROVIDERS, hasExecutionMode, effortLevels, contextRefsPlainText } from '@hangar/core';
-import type { ArchiveEntry, CodexAccount, ConfigDirInfo, Provider, ModelOption, CotaContaResumo, Server, WorktreeChoice } from '@hangar/core';
+import type { ArchiveEntry, CodexAccount, ConfigDirInfo, Provider, ModelOption, CotaContaResumo, Server, WorktreeChoice, WorktreeRepo } from '@hangar/core';
 import { SessionSettingsControl } from '../../chat/SessionSettings';
 import { semEsforco } from '../pills/pills';
 import { SettingsList } from '../../ui/SettingsList';
@@ -111,6 +111,7 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
   const [branchOpen, setBranchOpen] = useState(false);
   const [folderOpen, setFolderOpen] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [repos, setRepos] = useState<WorktreeRepo[]>([]);
   const [hasSameFolder, setHasSameFolder] = useState(false);
   const [error, setError] = useState('');
   const [configsError, setConfigsError] = useState('');
@@ -477,6 +478,17 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
     if (saved) void handlePick(saved.cwd);
   }, [layout, active.id, handlePick]);
 
+  // Uma leitura por abertura, para todos os seletores de pasta desta tela. Só agrupa worktrees: sem
+  // ela (convidado, falha) a lista sai plana como antes.
+  useEffect(() => {
+    if (!enabled) return;
+    const controller = new AbortController();
+    getWorktreesForServer(active, controller.signal, { sizes: false })
+      .then((r) => { if (!controller.signal.aborted) setRepos(r); })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [enabled, active.id]);
+
   // Android: o voltar do aparelho sai da subtela de pasta antes de fechar o formulário.
   useEffect(() => {
     if (!folderOpen || Platform.OS !== 'android') return;
@@ -585,7 +597,7 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
     <View style={styles.field}>
       <Text style={styles.label}>{active.label}</Text>
       <View style={styles.pickerWrap}>
-        <CwdPicker server={active} onPick={handlePick} selected={picked} />
+        <CwdPicker server={active} onPick={handlePick} selected={picked} repos={repos} />
       </View>
     </View>
   ) : null;
@@ -828,10 +840,10 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
     setCreating(true);
     setError('');
     const key = `${body.cwd}\n${name.trim()}`;
-    const retry = attemptName.current?.key === key;
-    const attempt = retry && attemptName.current ? attemptName.current : { key, name: name.trim() || defaultSessionName(body.cwd) };
-    attemptName.current = attempt;
-    const finalName = attempt.name;
+    const previous = attemptName.current;
+    const retry = previous?.key === key;
+    const finalName = retry ? previous.name : name.trim() || defaultSessionName(body.cwd);
+    attemptName.current = { key, name: finalName };
     // Quem cancelou já saiu: a sessão nasceu e fica na lista, sem puxar a pessoa de volta.
     const open = (session: string) => { if (mounted.current) router.replace(`/s/${active.id}/${session}` as never); };
     try {
@@ -856,7 +868,6 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
   };
 
   if (layout === 'form') {
-    const sep = <View style={styles.sep} />;
     const providerActions = SESSION_PROVIDERS.map((p) => {
       const probe = providerProbe?.[p];
       const off = !!probe && !probe.disponivel;
@@ -887,40 +898,38 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
         </View>
         {folderOpen ? (
           <View style={styles.folderScreen}>
-            <CwdPicker server={active} onPick={handlePick} selected={picked} autoSelect={false} onDone={() => setFolderOpen(false)} />
+            <CwdPicker server={active} onPick={handlePick} selected={picked} autoSelect={false} onDone={() => setFolderOpen(false)} repos={repos} />
           </View>
         ) : (
           <ScrollView contentContainerStyle={styles.formScroll} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
             {/* No topo: o Criar fica no cabeçalho e a falha dele precisa aparecer sem rolar. */}
             {notices}
-            <View style={styles.group}>
+            <RowGroup>
               <SettingRow icon="Monitor" label={m.native_new_chat_machine()} value={active.label}
                 actions={machines.map((sv) => ({ id: sv.id, title: sv.label, state: on(sv.id === active.id) }))}
                 onAction={(id) => { if (id !== active.id) onPickMachine(id); }} />
-              {sep}
               <SettingRow ref={folderRef} icon="Folder" label={m.native_new_chat_folder()} detail={picked ?? undefined}
                 value={picked ? basename(picked) : m.criar_escolher_pasta()} onPress={() => setFolderOpen(true)} />
-              {picked ? <>{sep}<SettingRow ref={branchRef} icon="GitBranch" label={m.native_create_checkout_branch()} value={branchLabel}
-                onPress={() => setBranchOpen(true)} /></> : null}
-            </View>
-            <View style={styles.group}>
+              {picked ? <SettingRow ref={branchRef} icon="GitBranch" label={m.native_create_checkout_branch()} value={branchLabel}
+                onPress={() => setBranchOpen(true)} /> : null}
+            </RowGroup>
+            <RowGroup>
               <SettingRow icon="Bot" label={m.criar_agente()} value={providerName(provider)} actions={providerActions}
                 onAction={(id) => chooseProvider(id as Provider)} />
-              {accountChoice ? <>{sep}<SettingRow icon={accountChoice.icon ?? 'CircleUser'} label={accountLabel} value={accountChoice.label}
+              {accountChoice ? <SettingRow icon={accountChoice.icon ?? 'CircleUser'} label={accountLabel} value={accountChoice.label}
                 tone={accountChoice.tone} disabled={accountChoice.disabled} actions={accountChoice.actions}
-                menuTitle={accountChoice.menuTitle} onAction={accountChoice.onAction} /></> : null}
-              {!retomavel ? <>{sep}<SettingRow icon="Sparkles" label={m.composer_modelo()} disabled={modelsLoading}
-                value={modelsLoading ? m.comum_carregando() : chipLabel} actions={modelActions} onAction={chooseModel} /></> : null}
-              {!retomavel && niveisEsforco.length ? <>{sep}<SettingRow icon="Gauge" label={m.composer_esforco()} value={esforco || m.criar_padrao()}
+                menuTitle={accountChoice.menuTitle} onAction={accountChoice.onAction} /> : null}
+              {!retomavel ? <SettingRow icon="Sparkles" label={m.composer_modelo()} disabled={modelsLoading}
+                value={modelsLoading ? m.comum_carregando() : chipLabel} actions={modelActions} onAction={chooseModel} /> : null}
+              {!retomavel && niveisEsforco.length ? <SettingRow icon="Gauge" label={m.composer_esforco()} value={esforco || m.criar_padrao()}
                 actions={[{ id: '', title: m.criar_padrao(), state: on(!esforco) }, ...niveisEsforco.map((lv) => ({ id: lv, title: lv, state: on(lv === esforco) }))]}
-                onAction={chooseEffort} /></> : null}
-              {provider === 'claude' ? <>{sep}<SettingRow icon="ShieldCheck" label={m.criar_permissao()} value={permissao || m.criar_padrao()}
+                onAction={chooseEffort} /> : null}
+              {provider === 'claude' ? <SettingRow icon="ShieldCheck" label={m.criar_permissao()} value={permissao || m.criar_padrao()}
                 actions={[{ id: '', title: m.criar_permissao_padrao(), state: on(!permissao) }, ...CLAUDE_PERMISSION_MODES.map((n) => ({ id: n, title: n, state: on(n === permissao) }))]}
-                onAction={setPermissao} /></> : null}
-              {sep}
+                onAction={setPermissao} /> : null}
               <SettingRow icon="SquareTerminal" label={m.criar_modo_exec()} value={terminalChoice.label} actions={terminalChoice.actions}
                 menuTitle={terminalChoice.menuTitle} onAction={terminalChoice.onAction} />
-            </View>
+            </RowGroup>
             {nameField}
             {quotaNotice}
             <Pressable accessibilityRole="button" accessibilityState={{ expanded: extrasOpen }}
@@ -957,7 +966,7 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
       destination={destination}
       destinationPending={!picked}
       providerLabel={providerName(provider)}
-      folderPanel={(close) => <CwdPicker server={active} onPick={handlePick} selected={picked} autoSelect={false} onDone={close} compact />}
+      folderPanel={(close) => <CwdPicker server={active} onPick={handlePick} selected={picked} autoSelect={false} onDone={close} compact repos={repos} />}
       topPills={(openFolder) => (
         <>
           <QuietPill
@@ -1063,3 +1072,13 @@ const styles = StyleSheet.create((theme) => ({
   ghostButton: { height: 44, borderWidth: 1, borderColor: theme.tokens.border.default, borderRadius: theme.base.radius.md, justifyContent: 'center', alignItems: 'center' },
   ghostTxt: { color: theme.tokens.text.secondary, fontSize: theme.base.text.sm },
 }));
+
+// Grupo de linhas do formulário: o fio entre elas sai sozinho, também quando uma linha condicional some.
+function RowGroup({ children }: { children: ReactNode }) {
+  const rows = Children.toArray(children);
+  return (
+    <View style={styles.group}>
+      {rows.map((row, i) => <Fragment key={i}>{i ? <View style={styles.sep} /> : null}{row}</Fragment>)}
+    </View>
+  );
+}
