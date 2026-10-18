@@ -9,7 +9,7 @@
 #  - flag que gerencia a própria sessão (--session-id, --resume/-r, --continue/-c, --session,
 #    --fork, --no-session) -> cru.
 #  - fora do tmux + terminal -> `hangar-open pi …`: o lançador do Hangar abre a sessão e o terminal
-#    anexa nela. Argumento que o pedido não cobre, ou sem hangar-server -> cru com o id abaixo.
+#    anexa nela. Argumento que o pedido não cobre, sem hangar-server ou sem hangar-open -> sessão tmux com o nome da pasta.
 #  - já no tmux / stdin sem tty -> cru com --session-id e CP_PI_SESSION (o mesmo uuid). O pi
 #    reescreve o próprio argv; o backend lê o id em /proc/<pid>/environ (registry.py:_pi_sid_of).
 #
@@ -63,9 +63,39 @@ function pi
         else
             echo "hangar: hangar-open não encontrado; abrindo o pi sem o Hangar" >&2
         end
+
+        # Sem o tmux o CLI ficaria invisível pro app: sessão com o nome da pasta, única.
+        # Acento -> ASCII antes do filtro, mesma regra do backend (app/names.py).
+        set -l base (basename "$PWD")
+        if command -v iconv >/dev/null 2>&1
+            set -l ascii (printf '%s' "$base" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null)
+            test $status -eq 0; and test -n "$ascii"; and set base $ascii
+        end
+        set base (string replace -ra '[^A-Za-z0-9_-]' '-' -- $base)
+        set base (string replace -ra '^-+|-+$' '' -- $base)
+        test -n "$base"; or set base session
+        set -l name $base
+        set -l i 2
+        while tmux has-session -t "=$name" 2>/dev/null
+            set name "$base-$i"
+            set i (math $i + 1)
+        end
+        set -l id (uuidgen 2>/dev/null)
+        test -n "$id"; or set id (cat /proc/sys/kernel/random/uuid 2>/dev/null)
+        # CP_PI_SESSION exportado dentro do pane: o servidor tmux não repassa o env de quem chama.
+        # Chamada duplicada: variável vazia na posição de comando é erro fatal no fish.
+        # CP_SESSION_NAME: identidade da sessão pro hangar-send de dentro do pane.
+        if command -q systemd-run; and set -q XDG_RUNTIME_DIR; and systemd-run --user --scope --collect -q -- true >/dev/null 2>&1
+            systemd-run --user --scope --collect -q -- tmux new-session -s $name -c "$PWD" -e "CP_SESSION_NAME=$name" \
+                sh -c 'export CP_PI_SESSION="$1"; shift; exec pi --session-id "$CP_PI_SESSION" "$@"' _ "$id" $argv
+        else
+            tmux new-session -s $name -c "$PWD" -e "CP_SESSION_NAME=$name" \
+                sh -c 'export CP_PI_SESSION="$1"; shift; exec pi --session-id "$CP_PI_SESSION" "$@"' _ "$id" $argv
+        end
+        return
     end
 
-    # CLI cru com o id: já no tmux, stdin sem tty, ou o Hangar não abriu acima.
+    # CLI cru com o id: já no tmux ou stdin sem tty.
     # Substituição que falha deixa a variável como LISTA VAZIA no fish (não como string vazia): sem o
     # fallback — o mesmo do pi.posix.sh — uma máquina sem uuidgen fazia `pi --session-id $id $argv`
     # colapsar pra `pi --session-id <primeiro argumento do usuário>`, comendo o argumento e exportando

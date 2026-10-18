@@ -10,7 +10,7 @@
 #  - flag que gerencia a própria sessão (--session-id, --resume/-r, --continue/-c, --session,
 #    --fork, --no-session) -> cru.
 #  - fora do tmux + terminal -> `hangar-open pi …`: o lançador do Hangar abre a sessão e o terminal
-#    anexa nela. Argumento que o pedido não cobre, ou sem hangar-server -> cru com o id abaixo.
+#    anexa nela. Argumento que o pedido não cobre, sem hangar-server ou sem hangar-open -> sessão tmux com o nome da pasta.
 #  - já no tmux / stdin sem tty -> cru com --session-id e CP_PI_SESSION (o mesmo uuid). O pi
 #    reescreve o próprio argv; o backend lê o id em /proc/<pid>/environ (registry.py:_pi_sid_of).
 #
@@ -68,9 +68,38 @@ pi() {
         else
             echo "hangar: hangar-open não encontrado; abrindo o pi sem o Hangar" >&2
         fi
+
+        # Sem o tmux o CLI ficaria invisível pro app: sessão com o nome da pasta, única.
+        # Acento -> ASCII antes do filtro, mesma regra do backend (app/names.py).
+        local base name i ascii run=()
+        base=$(basename "$PWD")
+        if command -v iconv >/dev/null 2>&1; then
+            ascii=$(printf '%s' "$base" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null) \
+                && [ -n "$ascii" ] && base=$ascii
+        fi
+        base=$(printf '%s' "$base" | tr -c 'A-Za-z0-9_-' '-')
+        while [ "${base#-}" != "$base" ]; do base=${base#-}; done
+        while [ "${base%-}" != "$base" ]; do base=${base%-}; done
+        [ -n "$base" ] || base=session
+        name=$base; i=2
+        while tmux has-session -t "=$name" 2>/dev/null; do
+            name="$base-$i"; i=$((i + 1))
+        done
+        # O probe confere que o systemd do usuário aceita scope transiente, não só que o binário existe.
+        if command -v systemd-run >/dev/null 2>&1 && [ -n "${XDG_RUNTIME_DIR:-}" ] \
+           && systemd-run --user --scope --collect -q -- true >/dev/null 2>&1; then
+            run=(systemd-run --user --scope --collect -q --)
+        fi
+        local id
+        id=$(uuidgen 2>/dev/null) || id=$(cat /proc/sys/kernel/random/uuid)
+        # CP_PI_SESSION exportado dentro do pane: o servidor tmux não repassa o env de quem chama.
+        # CP_SESSION_NAME: identidade da sessão pro hangar-send de dentro do pane.
+        "${run[@]}" tmux new-session -s "$name" -c "$PWD" -e "CP_SESSION_NAME=$name" \
+            sh -c 'export CP_PI_SESSION="$1"; shift; exec pi --session-id "$CP_PI_SESSION" "$@"' _ "$id" "$@"
+        return
     fi
 
-    # CLI cru com o id: já no tmux, stdin sem tty, ou o Hangar não abriu acima.
+    # CLI cru com o id: já no tmux ou stdin sem tty.
     local id
     id=$(uuidgen 2>/dev/null) || id=$(cat /proc/sys/kernel/random/uuid)
     export CP_PI_SESSION="$id"
