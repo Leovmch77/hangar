@@ -17,6 +17,7 @@ import { useSessions } from '../../stores/sessions';
 import { Icon } from '../../ui/Icon';
 import { ProviderGlyph } from '../../ui/ProviderGlyph';
 import { superficie } from '../../theme/superficie';
+import { HeadlessSignal } from './HeadlessSignal';
 import * as m from '../../paraglide/messages';
 
 const PILL_DO_ESTADO: Record<State, 'working' | 'idle' | 'input' | 'dead'> = {
@@ -129,7 +130,8 @@ export function ConversationList({ header, onClose }: { header: ReactElement; on
 
   const muted = theme.tokens.text.muted;
   const renderItem = useCallback(({ item }: { item: ConversationRow }) => {
-    const provider = item.kind === 'live' ? live.find((s) => s.serverId === item.serverId && s.name === item.name)?.provider : undefined;
+    const session = item.kind === 'live' ? live.find((s) => s.serverId === item.serverId && s.name === item.name) : undefined;
+    const provider = session?.provider;
     const estado = item.kind === 'live' ? (item.state as State) : null;
     const when = relativeTime(item.at);
     return (
@@ -137,7 +139,7 @@ export function ConversationList({ header, onClose }: { header: ReactElement; on
         onPress={() => open(item)}
         style={({ pressed }) => [styles.row, pressed && { backgroundColor: superficie(theme, 0.6) }]}
         accessibilityRole="button"
-        accessibilityLabel={[item.title, estado && PILL_DO_ESTADO[estado] ? rotuloEstado(estado) : '', when].filter(Boolean).join(', ')}
+        accessibilityLabel={[item.title, session?.headless === true ? m.criar_modo_exec_headless() : '', estado && PILL_DO_ESTADO[estado] ? rotuloEstado(estado) : '', when].filter(Boolean).join(', ')}
       >
         <View style={styles.lead}>
           {item.kind === 'live' ? (
@@ -151,7 +153,10 @@ export function ConversationList({ header, onClose }: { header: ReactElement; on
             <Icon name="MessageCircle" size={18} color={muted} />
           )}
         </View>
-        <Text style={[styles.title, { color: theme.tokens.text.primary }]} numberOfLines={1}>{item.title}</Text>
+        <View style={styles.titleRow}>
+          <Text style={[styles.title, { color: theme.tokens.text.primary }]} numberOfLines={1}>{item.title}</Text>
+          {session?.headless === true ? <HeadlessSignal /> : null}
+        </View>
         <Text style={[styles.when, { color: muted }]} numberOfLines={1}>{when}</Text>
       </Pressable>
     );
@@ -202,7 +207,8 @@ const styles = StyleSheet.create((theme) => ({
   row: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 48, paddingHorizontal: 12, borderRadius: theme.base.radius.lg },
   lead: { width: 22, alignItems: 'center' },
   dot: { position: 'absolute', right: -3, bottom: -3, width: 8, height: 8, borderRadius: 4, borderWidth: 1 },
-  title: { flex: 1, minWidth: 0, fontSize: theme.base.text.base },
+  titleRow: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1] },
+  title: { flexShrink: 1, minWidth: 0, fontSize: theme.base.text.base },
   when: { flexShrink: 0, fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
   empty: { alignItems: 'center', gap: 8, paddingTop: theme.base.space[6] },
   emptyTxt: { fontSize: theme.base.text.sm, textAlign: 'center' },

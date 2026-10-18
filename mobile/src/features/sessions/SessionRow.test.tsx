@@ -37,6 +37,7 @@ vi.mock('react-native-svg', async (original) => ({
   Path: (props: { d: string }) => createElement('path', props),
 }));
 vi.mock('../../paraglide/messages', () => ({
+  criar_modo_exec_headless: () => 'Sem terminal',
   ask_perguntas: () => 'ask_perguntas',
   conta_padrao: () => 'conta_padrao',
   sessao_conta: (p: { n: string }) => `conta ${p.n}`,
@@ -89,6 +90,25 @@ async function render(session: AggSession, extra: Record<string, unknown> = {}) 
 
 describe('SessionRow', () => {
   afterEach(() => { Platform.OS = 'android'; });
+
+  it.each([false, true])('sinal de sessão sem terminal acompanha o nome e o rótulo acessível (compact=%s)', async (compact) => {
+    for (const headless of [true, false, undefined]) {
+      const { container, root } = await render({ ...base, name: 'api', headless }, { compact });
+      try {
+        const name = Array.from(container.querySelectorAll('span')).find(el => el.textContent === 'api');
+        const signal = container.querySelector('[role="image"][aria-label="Sem terminal"]');
+        const label = container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label');
+        if (headless) {
+          expect(signal).not.toBeNull();
+          expect(name?.nextElementSibling).toBe(signal);
+          expect(label).toContain('Sem terminal');
+        } else {
+          expect(signal).toBeNull();
+          expect(label).not.toContain('Sem terminal');
+        }
+      } finally { act(() => root.unmount()); }
+    }
+  });
 
   it.each([false, true])('última resposta aparece abaixo do nome em uma linha discreta (compact=%s)', async (compact) => {
     const reply = 'Voz do Hangar: como funciona hoje e o que dá para fazer';
