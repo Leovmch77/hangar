@@ -9,6 +9,7 @@ import { WorkingLine } from '../../chat/LiveWork';
 import * as m from '../../paraglide/messages';
 import { superficie } from '../../theme/superficie';
 import { Icon } from '../../ui/Icon';
+import { ActivityTimeout, useActivityRequest } from './useActivityRequest';
 
 interface Props {
   server: Server;
@@ -46,6 +47,7 @@ export function SubagentLive(props: Props) {
 
 function SubagentConversation({ server, sessionName, agentId, paiRodando = null }: Props) {
   const { theme } = useUnistyles();
+  const readActivity = useActivityRequest();
   const [detail, setDetail] = useState<SubagentRun | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -74,7 +76,7 @@ function SubagentConversation({ server, sessionName, agentId, paiRodando = null 
     async function tick() {
       const myGen = ++gen;
       try {
-        const d = await getSubagent(sessionName, agentId, limit, server);
+        const d = await readActivity(getSubagent(sessionName, agentId, limit, server));
         if (!active || myGen !== gen) return;
         if (!d.ilegivel && d.events === undefined) {
           setDetail(previous => ({ ...d, events: previous?.events }));
@@ -92,9 +94,9 @@ function SubagentConversation({ server, sessionName, agentId, paiRodando = null 
       } catch (e) {
         if (!active || myGen !== gen) return;
         failCount += 1;
-        if ((e && typeof e === 'object' && 'status' in e && e.status === 404) || failCount >= 3) {
+        if (e instanceof ActivityTimeout || (e && typeof e === 'object' && 'status' in e && e.status === 404) || failCount >= 3) {
           stopped = true;
-          setError(m.atividade_erro_vivo());
+          setError(e instanceof ActivityTimeout ? e.message : m.atividade_erro_vivo());
           setLoading(false);
         }
       }
@@ -111,7 +113,7 @@ function SubagentConversation({ server, sessionName, agentId, paiRodando = null 
       active = false;
       if (timer) clearTimeout(timer);
     };
-  }, [server, sessionName, agentId, paiRodando, retry, limit]);
+  }, [server, sessionName, agentId, paiRodando, retry, limit, readActivity]);
 
   async function send() {
     if (!detail?.canMessage || !text.trim() || sendPending.current) return;

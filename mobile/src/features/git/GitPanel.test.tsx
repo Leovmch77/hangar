@@ -96,14 +96,15 @@ describe('iOS Git', () => {
   beforeEach(() => { Platform.OS = 'ios'; });
   afterEach(() => { Platform.OS = 'android'; });
 
-  it('usa cabeçalho nativo e mantém os controles abaixo dele com compensação do teclado', async () => {
+  it('usa cabeçalho local na folha e mantém a compensação do teclado', async () => {
     await render();
-    expect(boundary.header).toMatchObject({ headerShown: true, headerTransparent: true, headerBackButtonDisplayMode: 'minimal', title: m.sessao_git() });
-    expect(boundary.header.headerBackground).toBeTypeOf('function');
+    expect(boundary.header).toMatchObject({ headerShown: false, title: m.sessao_git() });
+    expect(el.querySelector('[role="header"]')?.textContent).toBe(m.sessao_git());
+    expect(button(m.native_close())).toBeTruthy();
     expect(boundary.header.headerLeft).toBeUndefined();
     expect(button(m.comum_voltar())).toBeUndefined();
     const content = button(m.native_git_reload())?.closest<HTMLElement>('[data-keyboard]');
-    expect(content?.style.paddingTop).toBe('64px');
+    expect(content?.style.paddingTop).toBe('0px');
     expect(content?.style.paddingBottom).toBe('0px');
     expect(content?.getAttribute('data-keyboard')).toBe('padding');
     expect(content?.getAttribute('data-automatic-offset')).toBe('true');
@@ -230,7 +231,7 @@ describe('Git pela rota explícita', () => {
       const content = button(m.native_git_reload())?.closest<HTMLElement>('[data-automatic-offset]');
       expect(content?.getAttribute('data-keyboard')).toBe('padding');
       expect(content?.getAttribute('data-automatic-offset')).toBe('true');
-      expect(content?.style.paddingTop).toBe('64px');
+      expect(content?.style.paddingTop).toBe(platform === 'ios' ? '0px' : '64px');
       expect(content?.style.paddingBottom).toBe('0px');
     } finally { Platform.OS = previous; }
   });

@@ -70,7 +70,7 @@ test.each(['android', 'ios'] as const)('registra Git com cabeçalho inicial e ap
     await act(async () => root.render(<Layout />));
     expect(mocks.screens['s/[server]/[name]/git']).toEqual(platform === 'android'
       ? { presentation: 'card', headerShown: true }
-      : { presentation: 'formSheet', headerShown: true, sheetAllowedDetents: [0.92], sheetGrabberVisible: true });
+      : { presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true });
   } finally { Platform.OS = previous; }
 });
 

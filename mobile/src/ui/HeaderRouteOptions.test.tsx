@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 const boundary = vi.hoisted(() => ({
   params: { server: 'machine', name: 'conversation' }, canGoBack: false, title: 'fixture-title',
+  os: 'ios' as 'ios' | 'android',
   publish: vi.fn(), replace: vi.fn(), back: vi.fn(),
 }));
 vi.mock('expo-router', () => {
@@ -26,11 +27,18 @@ vi.mock('react-native-unistyles', async original => {
   } };
 });
 vi.mock('expo-router/react-navigation', () => ({ useHeaderHeight: () => 64 }));
+vi.mock('react-native', async original => {
+  const actual = await original<typeof import('react-native')>();
+  return { ...actual, Platform: { ...actual.Platform, get OS() { return boundary.os; } },
+    View: ({ collapsable, ...props }: Record<string, unknown>) => createElement(actual.View as ComponentType<Record<string, unknown>>, { ...props, 'data-collapsable': collapsable }),
+  };
+});
 vi.mock('../stores/servers', () => ({ useServers: (selector: (value: unknown) => unknown) => selector({
   ready: true, servers: [{ id: boundary.params.server, label: 'fixture-machine', baseUrl: 'https://machine.test', token: 'fixture-token' }],
 }) }));
 vi.mock('../paraglide/messages', () => ({
   comum_voltar: () => 'fixture-back',
+  native_close: () => 'fixture-close',
   accounts_switch_title: () => boundary.title,
   sessao_git: () => boundary.title,
   compartilhar_titulo: ({ nome }: { nome: string }) => `${boundary.title}:${nome}`,
@@ -49,7 +57,7 @@ import GitRoute from '../../app/s/[server]/[name]/git';
 import ShareRoute from '../../app/s/[server]/[name]/share';
 import OrchestrationTeamRoute from '../../app/s/[server]/[name]/orchestration-team';
 
-type Options = { title: string; headerLeft?: () => ReactNode };
+type Options = { title: string; headerShown?: boolean; headerLeft?: () => ReactNode };
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let root: Root;
 let container: HTMLDivElement;
@@ -57,6 +65,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   boundary.params = { server: 'machine', name: 'conversation' };
   boundary.canGoBack = false;
+  boundary.os = 'ios';
   boundary.title = 'fixture-title';
   container = document.createElement('div');
   root = createRoot(container);
@@ -82,6 +91,7 @@ it.each([
 it.each([
   ['git', GitRoute], ['share', ShareRoute],
 ] as const)('%s atualiza o voltar com o histórico e a conversa atual', async (name, Route) => {
+  if (name === 'git') boundary.os = 'android';
   await render(Route);
   expect(options().headerLeft).toBeTypeOf('function');
   boundary.canGoBack = true;
@@ -94,4 +104,19 @@ it.each([
   await act(async () => root.render(createElement(Header)));
   await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="fixture-back"]')!.click());
   expect(boundary.replace).toHaveBeenLastCalledWith(name === 'share' ? '/' : '/s/next%20machine/next%2Fconversation');
+});
+
+it('git usa cabeçalho local, fecha com histórico e volta à conversa sem histórico', async () => {
+  await render(GitRoute);
+  expect(options().headerShown).toBe(false);
+  const title = container.querySelector('[role="header"]')!;
+  expect(title.textContent).toBe('fixture-title');
+  expect(title.parentElement?.getAttribute('data-collapsable')).toBe('false');
+  expect(title.closest('[style*="padding-top"]')).toBeNull();
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="fixture-close"]')!.click());
+  expect(boundary.replace).toHaveBeenLastCalledWith('/s/machine/conversation');
+  boundary.canGoBack = true;
+  await render(GitRoute);
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="fixture-close"]')!.click());
+  expect(boundary.back).toHaveBeenCalledOnce();
 });
