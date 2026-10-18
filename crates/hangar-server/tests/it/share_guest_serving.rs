@@ -693,12 +693,13 @@ async fn encoded_slash_in_the_session_name_is_refused() {
         }
         other => panic!("esperava recusa no aperto de mão, veio {:?}", other.map(|_| ())),
     }
-    // Espaço e acento seguem sendo a mesma sessão: passam o porteiro e chegam ao handler de anexos.
+    // Espaço e acento seguem sendo a mesma sessão: passam o porteiro e chegam ao handler de anexos,
+    // que procura a sessão na descoberta (vazia aqui).
     for name in ["a b", "ação"] {
         let a = srv.g.token(name, Kind::Share);
         let seg = percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC);
         let (status, body) = get_json(format!("http://{}/api/sessions/{seg}/uploads/a.png", srv.guest), &a).await;
-        assert_eq!((status, body["detail"]["code"].as_str()), (503, Some("upload_facts_unavailable")), "{name}");
+        assert_eq!((status, body["detail"]["code"].as_str()), (404, Some("erro_sessao_inexistente")), "{name}");
     }
     assert_eq!(srv.python.input_calls(), 0);
 }

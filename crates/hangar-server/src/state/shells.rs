@@ -13,7 +13,7 @@ const EVAL_START: &str = "&& eval '";
 const ESCAPED_QUOTE: [&str; 2] = ["'\"'\"'", "'\\''"];
 
 /// `_comando_pedido`: o texto do `eval` lido como string de shell, ou a linha inteira sem ele.
-fn requested(raw: &str) -> String {
+pub(crate) fn requested(raw: &str) -> String {
     let Some(i) = raw.find(EVAL_START) else { return raw.trim().to_owned() };
     let mut j = i + EVAL_START.len();
     let mut out = String::new();

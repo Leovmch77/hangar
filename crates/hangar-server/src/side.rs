@@ -1444,7 +1444,7 @@ impl Hubs {
     }
 
     pub(crate) fn rebind_claude(&self,name:&str,conversation:&str,jsonl:PathBuf,queue:PathBuf)->Result<(),crate::runtime::protocol::RuntimeError> {
-        self.rebind_claude_info(name,InternalInfo {provider:"claude".into(),jsonl:Some(jsonl),session_key:conversation.into(),history:serde_json::json!({"queue":queue}),headless:false,lifecycle_id:None})
+        self.rebind_claude_info(name,InternalInfo {provider:"claude".into(),jsonl:Some(jsonl),session_key:conversation.into(),history:serde_json::json!({"queue":queue}),headless:false,lifecycle_id:None,cwd:None})
     }
     pub(crate) fn rebind_claude_info(&self,name:&str,info:InternalInfo)->Result<(),crate::runtime::protocol::RuntimeError> {
         let binding=Binding::from_info(&info).filter(|b|matches!(b.provider,Provider::Claude|Provider::ClaudeHeadless)).ok_or_else(||crate::runtime::protocol::RuntimeError::new("lifecycle_hub_binding","vínculo do hub inválido"))?;
@@ -1777,7 +1777,7 @@ mod tests {
     async fn same_conversation_rebind_does_not_reset_the_chat() {
         let dir = tempfile::tempdir().unwrap();
         let info = |sid: &str| InternalInfo { provider: "claude".into(), jsonl: Some(dir.path().join(format!("{sid}.jsonl"))), session_key: sid.into(),
-            history: serde_json::json!({"queue": dir.path().join("s.jsonl")}), headless: false, lifecycle_id: None };
+            history: serde_json::json!({"queue": dir.path().join("s.jsonl")}), headless: false, lifecycle_id: None, cwd: None };
         let (spawn, _) = fake_monitors(IDLE_PANE);
         let ctx = SideCtx { monitors: Some(spawn), ..idle_ctx() };
         let lease = ctx.hubs.acquire("s", Binding::from_info(&info("a")).unwrap(), &ctx);

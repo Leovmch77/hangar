@@ -73,15 +73,41 @@ sem sobrescrever um arquivo anterior. Desconexão remove somente o temporário
 daquela operação. A galeria e a poda usam a mesma retenção configurada.
 
 O download mantém o descritor validado durante a resposta, suporta Range/If-Range
-e dispõe HTML em iframe isolado. SVG/XML mantêm o MIME informado pelo ambiente
-e bloqueiam scripts. A admissão de convidados continua no Python e encaminha
-os bytes à porta privada do Rust, sem outra implementação do cofre.
+e dispõe HTML em iframe isolado. SVG/XML mantêm o MIME do `mime_guess`
+e bloqueiam scripts.
 
 Vídeos geram seis quadros distribuídos pela duração e uma faixa de áudio.
 Sem duração legível, é tentado um quadro inicial. Cada subprocesso tem prazo,
 e os derivados só entram na galeria depois da publicação pelo cofre. Falha de
-extração ou transcrição preserva o upload original. A transcrição continua usando
-o provedor configurado no Python; `audio_only` evita extração e transcrição duplicadas.
+extração ou transcrição preserva o upload original. `audio_only` evita extração e
+transcrição duplicadas.
+
+Desde 18/10/2026 nenhum pedido de anexo pergunta ao Python. Antes, cada pedido buscava
+`/internal/sessions/{nome}/uploads-facts` (pasta, id, retenção, MIME, trava da troca) e o vídeo
+transcrevia por `/internal/.../upload-transcript`, que voltava ao Rust: uma volta Rust → Python
+→ Rust que prendia uma thread do Python. Agora a sessão e o `cwd` vêm da descoberta da lista
+(`side.locate`), o id é o `session_key` do transcript (o nome enquanto não há transcript), a
+retenção é a do `runtime-config.json`, depois `CP_UPLOAD_RETENTION_DAYS`, depois 30, e a
+transcrição do vídeo roda no serviço de transcrição, no perfil de vídeo. O `/transcribe` da
+sessão também é do Rust: grava ou resolve o áudio no cofre, transcreve e organiza dentro do
+processo; o corte de 180/270 s da ponte Python deixou de existir, vale o prazo do serviço.
+
+Connect (8768) e convidado com login entram pelo Python, que autentica e repassa em fluxo
+(`account_bridge.forward_stream`) a `/__hangar_server/forwarded`; `x-hangar-forwarded-guest: 1`
+mantém os limites do convidado (sem caminho absoluto no `/transcribe`, sem a conta do harness
+na organização). No modo `python` do Supervisor essas rotas respondem 503
+`erro_midia_precisa_rust`, sem reserva Python.
+
+## Saída ao vivo de ferramenta e imagem colada
+
+`bash-output` lê só os shells abaixo do agente da sessão (pid do registro nativo
+`<conta>/sessions/<pid>.json`), nunca a máquina inteira: antes, um convidado completo numa
+sessão lia a saída de outra que rodasse o mesmo comando. No Windows os arquivos abertos do
+shell vêm dos handles do processo (`NtQuerySystemInformation` + `GetFinalPathNameByHandleW`,
+só arquivo de disco). `tool-progress` recusa id com quebra de linha no fim e pula linha que não
+é UTF-8. A imagem colada só sai como `image/png`, `jpeg`, `gif` ou `webp`; qualquer outro tipo
+(SVG incluído) vai como `application/octet-stream`, sempre com `nosniff`. A imagem de conversa
+transferida (`transfer:`) e a do Arquivo seguem no Python, como o histórico delas.
 
 ## Verificação
 

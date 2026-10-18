@@ -27,6 +27,26 @@ async fn configuration(state: &AppState) -> Result<ConfigSnapshot, Transcription
     }).await.map_err(|_| failed())?
 }
 
+/// Transcrição pedida dentro do próprio servidor (anexo, vídeo): mesma vaga e mesma configuração da
+/// rota privada, sem passar pelo Python.
+pub(crate) async fn transcribe_here(state: &AppState, content: bytes::Bytes, filename: Option<String>, profile: Profile)
+    -> Result<super::model::Transcription, TranscriptionError> {
+    let result = match state.transcription_slots.clone().try_acquire_owned() {
+        Err(_) => Err(TranscriptionError { status: 503, code: "transcription_busy".into(), detail: "As vagas de transcrição estão ocupadas. Tente novamente.".into() }),
+        Ok(_slot) => match configuration(state).await {
+            Ok(snapshot) => {
+                state.transcription.configure(snapshot).await;
+                state.transcription.transcribe(content, filename, profile).await
+            }
+            Err(error) => Err(error),
+        },
+    };
+    if let Err(error) = &result {
+        state.diag.report("transcription.failed", "", &error.code, "A transcrição falhou.");
+    }
+    result
+}
+
 pub async fn private(State(state): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, request: Request) -> Response {
     if !crate::workspace_routes::private_ok(&state, peer, request.headers()) { return StatusCode::NOT_FOUND.into_response(); }
     let operation = request.uri().path().strip_prefix("/__hangar_server/transcription/").unwrap_or("").to_owned();

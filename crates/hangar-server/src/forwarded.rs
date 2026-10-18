@@ -39,6 +39,8 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
         Owned::ArchiveResume(project, sid)
     } else if let Some(name) = live_resume(method, &path) {
         Owned::Resume(name)
+    } else if crate::session_media::is_media(method, &path) {
+        Owned::Media(path.clone(), req.headers().get("x-hangar-forwarded-guest").is_some_and(|v| v == "1"))
     } else {
         return crate::session_write::json_response(StatusCode::NOT_FOUND, json!({"code": "forwarded_route_not_owned"}));
     };
@@ -50,7 +52,10 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
     *req.uri_mut() = uri;
     req.headers_mut().remove("x-hangar-internal");
     req.headers_mut().remove("x-hangar-path");
+    req.headers_mut().remove("x-hangar-forwarded-guest");
     match owned {
+        Owned::Media(path, guest) => crate::session_media::serve_forwarded(&st, &path, req, guest).await
+            .unwrap_or_else(|| crate::session_write::json_response(StatusCode::NOT_FOUND, json!({"code": "forwarded_route_not_owned"}))),
         Owned::JevDelivery => crate::session_write::delivery_timing::availability_reply(&st).await,
         Owned::Catalog => crate::claude_customizations::public_catalog(&st, req).await,
         Owned::Commands => crate::commands::serve(&st, req).await,
@@ -89,4 +94,4 @@ fn live_resume(method: &Method, path: &str) -> Option<String> {
 }
 
 /// As rotas do Rust que aceitam o repasse.
-enum Owned { Catalog, Commands, Mermaid, Plans, Worktrees, JevDelivery, ArchiveResume(String, String), Resume(String) }
+enum Owned { Catalog, Commands, Mermaid, Plans, Worktrees, JevDelivery, ArchiveResume(String, String), Resume(String), Media(String, bool) }
