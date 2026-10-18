@@ -430,6 +430,7 @@ where H: axum::handler::Handler<T, Arc<AppState>>, T: 'static {
         .route("/api/sessions/{name}/codex-permissions", get(crate::session_write::codex::permissions).fallback(fallback.clone()))
         // Mesmo caminho: o axum junta o POST à rota de cima (um repasse só, o dela).
         .route("/api/sessions/{name}/codex-permissions", axum::routing::post(crate::session_write::codex::set_permission))
+        .route("/api/sessions/{name}/transcribe", axum::routing::post(crate::uploads::transcribe::route).fallback(fallback.clone()))
         .route("/api/sessions/{name}/bash-output", axum::routing::post(crate::session_media::bash_output_route).fallback(fallback.clone()))
         .route("/api/sessions/{name}/tool-progress/{id}", get(crate::session_media::tool_progress).fallback(fallback.clone()))
         .route("/api/sessions/{name}/transcript-image/{uuid}/{idx}", get(crate::session_media::transcript_image).fallback(fallback.clone()))

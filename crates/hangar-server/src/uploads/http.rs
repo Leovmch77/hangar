@@ -24,7 +24,7 @@ pub struct Facts {
 fn response(value: Value, status: u16) -> Response {
     crate::session_write::json_response(StatusCode::from_u16(status).unwrap(), value)
 }
-fn failure(status: u16, code: &'static str, message: &str) -> Response {
+pub(super) fn failure(status: u16, code: &'static str, message: &str) -> Response {
     crate::diag::coded(
         crate::session_write::detail(
             StatusCode::from_u16(status).unwrap(),
@@ -96,7 +96,7 @@ async fn retention(st: &AppState) -> i64 {
 
 /// Sessão, pasta e configuração do cofre, pela descoberta da lista; o envio confere antes a troca
 /// de conversa e solta, como o `_transfer_check`.
-async fn facts(
+pub(super) async fn facts(
     st: &AppState,
     name: &str,
     filename: &str,
@@ -214,7 +214,7 @@ async fn blocking<T: Send + 'static>(
         .map_err(std::io::Error::other)?
 }
 
-async fn execute(
+pub(super) async fn execute(
     st: &AppState,
     tail: &str,
     req: Request,
@@ -329,7 +329,7 @@ async fn execute(
     response
 }
 
-fn boolean(value: Option<&String>) -> Result<bool, ()> {
+pub(super) fn boolean(value: Option<&String>) -> Result<bool, ()> {
     value
         .map_or(Some(false), |v| crate::query::fastapi_bool(v))
         .ok_or(())

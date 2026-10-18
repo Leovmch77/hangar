@@ -315,6 +315,173 @@ async fn video_transcription_never_goes_through_python() {
     assert_eq!(python.hits_to("/internal/sessions/s/upload-transcript"), 0);
 }
 
+// --- transcribe ---
+
+/// Servidor com um provedor de transcrição de mentira (devolve "ola mundo" e guarda o corpo) e a
+/// configuração servida pelo Python falso; qualquer outra chamada ao Python fica registrada.
+struct Speech {
+    scene: Scene,
+    heard: Arc<Mutex<Vec<Vec<u8>>>>,
+    python_paths: Arc<Mutex<Vec<String>>>,
+    _tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+async fn serve_router(router: axum::Router) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    (address, tokio::spawn(async move { axum::serve(listener, router).await.unwrap() }))
+}
+impl Speech {
+    async fn new(providers: Value) -> Self {
+        let heard: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
+        let keep = heard.clone();
+        let (provider, provider_task) = serve_router(axum::Router::new().route("/audio/transcriptions", axum::routing::post(move |body: axum::body::Bytes| {
+            keep.lock().unwrap().push(body.to_vec());
+            async { ([("content-type", "application/json")], r#"{"text":"ola mundo"}"#) }
+        }))).await;
+        let providers = if providers.is_null() {
+            json!([{"id": "p", "kind": "openai", "model": "m", "base_url": format!("http://{provider}")}])
+        } else { providers };
+        let config = json!({"providers": providers, "organization": {"dictation_organization_mode": "none"}}).to_string();
+        let python_paths: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = python_paths.clone();
+        let (upstream, upstream_task) = serve_router(axum::Router::new()
+            .route("/internal/transcription/config", axum::routing::get(move || { let c = config.clone(); async move { ([("content-type", "application/json")], c) } }))
+            .fallback(move |uri: axum::http::Uri| { seen.lock().unwrap().push(uri.path().to_owned()); async { StatusCode::NOT_FOUND } })).await;
+        let mut scene = Scene::new().await;
+        scene.task.abort();
+        let cfg = Config { listen: "127.0.0.1:0".parse().unwrap(), upstream, auth_token: OWNER.into(), internal_secret: "isolated".into(),
+            log_path: None, trusted: TrustedHosts::parse("127.0.0.1") };
+        let mut state = AppState::new(cfg);
+        state.side.locate = scene.sessions.clone();
+        state.hangar_dir = scene.dir.path().join(".hangar");
+        assert!(state.state.runtime.set(scene.runtime.clone()).is_ok());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        scene.address = listener.local_addr().unwrap();
+        scene.task = tokio::spawn(async move {
+            axum::serve(listener, router(Arc::new(state)).into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+        });
+        Self { scene, heard, python_paths, _tasks: vec![provider_task, upstream_task] }
+    }
+    async fn transcribe(&self, query: &str, body: &'static [u8], filename: Option<&str>) -> (StatusCode, Value) {
+        let mut req = client().post(format!("http://{}/api/sessions/s/transcribe{query}", self.scene.address)).bearer_auth(OWNER).body(body);
+        if let Some(f) = filename {
+            req = req.header("x-filename", f);
+        }
+        let response = req.send().await.unwrap();
+        let status = response.status();
+        (status, serde_json::from_str(&response.text().await.unwrap()).unwrap_or(Value::Null))
+    }
+    fn heard_contains(&self, needle: &[u8]) -> bool {
+        self.heard.lock().unwrap().iter().any(|b| b.windows(needle.len()).any(|w| w == needle))
+    }
+}
+
+#[tokio::test]
+async fn transcribe_saves_the_audio_and_answers_without_cleaning() {
+    let speech = Speech::new(Value::Null).await;
+    speech.scene.claude("s", &[]);
+    let (status, body) = speech.transcribe("", b"\x00audio-bytes", Some("gravacao.webm")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let path = body["path"].as_str().unwrap().to_owned();
+    assert!(path.ends_with(".webm"));
+    assert_eq!(std::fs::read(&path).unwrap(), b"\x00audio-bytes");
+    assert_eq!(body, json!({"path": path, "text": "ola mundo", "provider": body["provider"].clone()}));
+    assert!(body["provider"].is_string());
+    assert!(speech.heard_contains(b"\x00audio-bytes"));
+    assert_eq!(*speech.python_paths.lock().unwrap(), Vec::<String>::new(), "nada além da configuração vai ao Python");
+}
+
+#[tokio::test]
+async fn transcribe_without_a_provider_is_503_with_code() {
+    let speech = Speech::new(json!([])).await;
+    speech.scene.claude("s", &[]);
+    let (status, body) = speech.transcribe("", b"audio", Some("a.webm")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(body["detail"]["code"].as_str().unwrap().starts_with("transcription_"), "{body}");
+}
+
+#[tokio::test]
+async fn transcribe_with_cleaning_none_keeps_the_text_and_says_who_transcribed() {
+    let speech = Speech::new(Value::Null).await;
+    speech.scene.claude("s", &[]);
+    let (status, body) = speech.transcribe("?limpar=1&organization_mode=none", b"audio", Some("ditado.wav")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!((body["text"].clone(), body["raw"].clone(), body["organization_mode"].clone(), body["estilo_aplicado"].clone()),
+        (json!("ola mundo"), json!("ola mundo"), json!("none"), json!("cru")));
+    assert!(body["aviso"].is_null() && body["provider"].is_string() && body["path"].is_string(), "{body}");
+}
+
+#[tokio::test]
+async fn transcribe_with_an_unknown_style_keeps_the_text_with_the_request_code() {
+    let speech = Speech::new(Value::Null).await;
+    speech.scene.claude("s", &[]);
+    let (status, body) = speech.transcribe("?limpar=1&estilo=inexistente&organization_mode=external_api", b"audio", Some("a.wav")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!((body["text"].clone(), body["organization_code"].clone(), body["organization_mode"].clone(), body["estilo_aplicado"].clone()),
+        (json!("ola mundo"), json!("dictation_request_invalid"), json!("external_api"), json!("cru")));
+}
+
+#[tokio::test]
+async fn transcribe_by_file_reuses_the_upload_without_a_second_copy() {
+    let speech = Speech::new(Value::Null).await;
+    speech.scene.claude("s", &[]);
+    let saved = client().post(format!("http://{}/api/sessions/s/upload?audio_only=1", speech.scene.address)).bearer_auth(OWNER)
+        .header("x-filename", "ditado.webm").body(&b"audio-do-ditado"[..]).send().await.unwrap().text().await.unwrap();
+    let saved: Value = serde_json::from_str(&saved).unwrap();
+    let saved = saved["path"].as_str().unwrap().to_owned();
+    let name = Path::new(&saved).file_name().unwrap().to_str().unwrap().to_owned();
+    let (status, body) = speech.transcribe(&format!("?arquivo={name}"), b"", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["path"], json!(saved));
+    assert!(speech.heard_contains(b"audio-do-ditado"));
+    assert_eq!(std::fs::read_dir(Path::new(&saved).parent().unwrap()).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn transcribe_by_file_refuses_names_outside_the_folder_and_missing_files() {
+    let speech = Speech::new(Value::Null).await;
+    speech.scene.claude("s", &[]);
+    for name in ["..%2Fsegredo.webm", "a%2Fb.webm", "..", "x%5Cy.webm"] {
+        let (status, _) = speech.transcribe(&format!("?arquivo={name}"), b"", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}");
+    }
+    let (status, body) = speech.transcribe("?arquivo=1-abc.webm", b"", None).await;
+    assert_eq!((status, body["detail"]["code"].clone()), (StatusCode::NOT_FOUND, json!("erro_upload_inexistente")));
+    assert!(speech.heard.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn transcribe_checks_session_transfer_and_query_types() {
+    let speech = Speech::new(Value::Null).await;
+    speech.scene.claude("s", &[]);
+    let (status, body) = speech.transcribe("?limpar=talvez", b"audio", Some("a.wav")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let (status, body) = speech.transcribe("?include_recent_messages=x", b"audio", Some("a.wav")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    let response = client().post(format!("http://{}/api/sessions/nenhuma/transcribe", speech.scene.address)).bearer_auth(OWNER)
+        .body("a").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
+    assert_eq!(body["detail"]["code"], "erro_sessao_inexistente");
+    speech.scene.runtime.ingress().hold("s", std::time::Duration::from_millis(10)).await.unwrap();
+    let (status, body) = speech.transcribe("?limpar=talvez", b"audio", Some("a.wav")).await;
+    assert_eq!((status, body["detail"]["code"].clone()), (StatusCode::CONFLICT, json!("session_transfer_busy")));
+}
+
+#[test]
+fn transcription_warnings_join_the_fallback_and_the_cleaning() {
+    use hangar_server::uploads::transcribe::with_provider;
+    let fallback = Some("Transcrito pelo Groq: ElevenLabs não respondeu");
+    assert_eq!(with_provider(json!({"text": "t", "raw": "t", "aviso": "a limpeza devolveu texto vazio — ficou o original"}), "Groq", fallback),
+        json!({"text": "t", "raw": "t", "provider": "Groq", "aviso_transcricao": fallback,
+            "aviso": "Transcrito pelo Groq: ElevenLabs não respondeu · a limpeza devolveu texto vazio — ficou o original"}));
+    assert_eq!(with_provider(json!({"text": "Olá.", "aviso": null, "estilo_aplicado": "prosa"}), "Groq", fallback),
+        json!({"text": "Olá.", "aviso": fallback, "estilo_aplicado": "prosa", "provider": "Groq", "aviso_transcricao": fallback}));
+    assert_eq!(with_provider(json!({"path": "p", "text": "ola"}), "Groq", fallback),
+        json!({"path": "p", "text": "ola", "provider": "Groq", "aviso": fallback, "aviso_transcricao": fallback}));
+    assert_eq!(with_provider(json!({"path": "p", "text": "ola"}), "p", None), json!({"path": "p", "text": "ola", "provider": "p"}));
+}
+
 // --- bash-output ---
 
 #[tokio::test]
