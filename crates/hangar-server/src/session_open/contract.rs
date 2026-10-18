@@ -182,6 +182,7 @@ impl OpenFacts for Facts {
     }
     fn account_mode(&self, config_dir: Option<&str>) -> Result<Option<String>, String> { self.local.account_mode(config_dir) }
     fn name_in_use(&self, name: &str) -> Result<bool, OpenError> { self.local.name_in_use(name) }
+    fn name_has_leftovers(&self, name: &str) -> bool { self.local.name_has_leftovers(name) }
     fn transfer_busy(&self, name: &str) -> Result<bool, OpenError> { self.local.transfer_busy(name) }
     fn real_path(&self, path: &str) -> PathBuf { self.local.real_path(path) }
     fn new_key(&self) -> String { self.local.new_key() }

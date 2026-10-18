@@ -79,7 +79,7 @@ pub fn run(args: &[String]) -> ExitCode {
             Ask::Down(reason) => eprintln!("hangar-server: servidor fora do ar ({reason}); segue nesta máquina"),
         }
     }
-    let facts = LocalFacts::new(AccountEnvironment::from_map(server_env(std::env::vars(), &server)), runtime.handle().clone());
+    let facts = LocalFacts::new(AccountEnvironment::from_map(server_env(std::env::vars(), &server)), runtime.handle().clone()).without_server();
     // Quem roda o comando no terminal da máquina é o dono.
     let resolved = match resolve_open(&request, &OpenCaller::Owner, &facts) {
         Ok(resolved) => resolved,

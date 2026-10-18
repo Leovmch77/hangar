@@ -59,10 +59,7 @@ impl OpenHost for LocalHost {
     fn leave_old_group<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Vec<String>, OpenError>> {
         Box::pin(async move {
             let claude = crate::accounts::environment::AccountEnvironment::from_map(self.env.clone()).claude_base;
-            let stem = crate::groups::store::file_stem(name);
-            let left = [claude.join(".hangar-pair").join(format!("{stem}.json")), claude.join(".hangar-chain").join(format!("{stem}.json")),
-                crate::locate::queue_path(&claude, name)];
-            match left.iter().find(|path| path.try_exists().unwrap_or(true)) {
+            match leftover(&claude, name) {
                 Some(path) => Err(OpenError::new(409, "session_open_name_needs_server", format!(
                     "o nome '{name}' ainda tem estado da sessão antiga ({}); com o servidor fora ninguém o limpa — suba o servidor ou use outro nome",
                     path.display())).with_params(serde_json::json!({"nome": name}))),
@@ -89,4 +86,12 @@ impl OpenHost for LocalHost {
     fn live_sessions(&self) -> BoxFuture<'_, Result<Vec<(String, String)>, OpenError>> {
         Box::pin(async { Err(OpenError::new(503, "erro_lista_indisponivel", "retomar conversa precisa do servidor no ar")) })
     }
+}
+
+/// O primeiro arquivo que a sessão antiga deixou no nome; ilegível conta como presente.
+pub(super) fn leftover(claude: &Path, name: &str) -> Option<PathBuf> {
+    let stem = crate::groups::store::file_stem(name);
+    [claude.join(".hangar-pair").join(format!("{stem}.json")), claude.join(".hangar-chain").join(format!("{stem}.json")),
+        crate::locate::queue_path(claude, name)]
+        .into_iter().find(|path| path.try_exists().unwrap_or(true))
 }

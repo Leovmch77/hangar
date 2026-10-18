@@ -81,6 +81,8 @@ pub trait OpenFacts {
     fn account_mode(&self, config_dir: Option<&str>) -> Result<Option<String>, String>;
     /// Terminal, sidecar Codex ou sidecar sem terminal com este nome; `Err` = o multiplexador não respondeu.
     fn name_in_use(&self, name: &str) -> Result<bool, OpenError>;
+    /// Grupo, `then` ou fila de uma sessão antiga com este nome que ninguém vai limpar (servidor fora).
+    fn name_has_leftovers(&self, name: &str) -> bool;
     /// Troca de agente em curso no nome (`conversation_transfer.transfer_active`).
     fn transfer_busy(&self, name: &str) -> Result<bool, OpenError>;
     /// `os.path.realpath(os.path.expanduser(path))`.
@@ -539,7 +541,7 @@ fn folder_name(cwd: &str, facts: &dyn OpenFacts) -> Result<String, OpenError> {
     let fit = |suffix: &str| format!("{}{suffix}", base[..base.len().min(NAME_MAX - suffix.len())].trim_end_matches('-'));
     let mut name = fit("");
     for n in 2.. {
-        if !facts.name_in_use(&name)? && !super::open::NameClaim::opening(&name) { break; }
+        if !facts.name_in_use(&name)? && !super::open::NameClaim::opening(&name) && !facts.name_has_leftovers(&name) { break; }
         name = fit(&format!("-{n}"));
     }
     Ok(name)

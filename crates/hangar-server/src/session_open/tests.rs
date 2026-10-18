@@ -267,6 +267,8 @@ impl resolve::OpenFacts for FixtureFacts {
         Ok(self.tmux.iter().any(|s| s["name"] == name) || self.sidecar("claude-headless", name).is_some() || self.sidecar("codex-sessions", name).is_some())
     }
 
+    fn name_has_leftovers(&self, _name: &str) -> bool { false }
+
     fn transfer_busy(&self, _name: &str) -> Result<bool, OpenError> { Ok(self.busy) }
 
     fn real_path(&self, path: &str) -> std::path::PathBuf { path.into() }
@@ -805,6 +807,23 @@ fn a_headless_creator_without_a_mode_falls_back_to_its_transcript() {
     let request = SessionOpenRequest::parse(body.to_string().as_bytes()).unwrap();
     let resolved = resolve::resolve_open(&request, &OWNER, &local_facts(&home, &runtime)).unwrap();
     assert_eq!((resolved.spec.permission_mode, resolved.warnings.len()), (Some(PermissionMode::AcceptEdits), 0), "{:?}", resolved.warnings);
+}
+
+/// Sem o servidor, o nome automático pula o nome da pasta que ainda tem grupo, `then` ou fila da sessão
+/// antiga (ninguém os limparia); com o servidor, o nome segue o da pasta e a abertura limpa.
+#[test]
+fn the_folder_name_skips_leftovers_only_without_the_server() {
+    let runtime = test_runtime();
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path().canonicalize().unwrap();
+    std::fs::create_dir_all(home.join("work/sobra-antiga")).unwrap();
+    std::fs::create_dir_all(home.join(".claude/.hangar-pair")).unwrap();
+    std::fs::write(home.join(".claude/.hangar-pair/sobra-antiga.json"), "{}").unwrap();
+    let body = json!({"cwd": home.join("work/sobra-antiga"), "provider": "claude", "headless": false});
+    let request = SessionOpenRequest::parse(body.to_string().as_bytes()).unwrap();
+    let name = |facts: &facts::LocalFacts| resolve::resolve_open(&request, &OWNER, facts).unwrap().spec.name;
+    assert_eq!(name(&local_facts(&home, &runtime).without_server()), "sobra-antiga-2");
+    assert_eq!(name(&local_facts(&home, &runtime)), "sobra-antiga");
 }
 
 /// Não dar para listar as contas Codex é erro visível, não "nenhuma conta".

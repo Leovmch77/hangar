@@ -27,12 +27,19 @@ pub struct LocalFacts {
     slots: tokio::sync::Semaphore,
     mux: crate::list::mux::Mux,
     procs: std::sync::Arc<dyn ProcessView>,
+    serverless: bool,
 }
 
 impl LocalFacts {
     pub fn new(env: AccountEnvironment, runtime: tokio::runtime::Handle) -> Self {
         Self { accounts: AccountService::new(env), runtime, models: Default::default(), slots: tokio::sync::Semaphore::new(4),
-            mux: Default::default(), procs: std::sync::Arc::new(SystemProcs::default()) }
+            mux: Default::default(), procs: std::sync::Arc::new(SystemProcs::default()), serverless: false }
+    }
+
+    /// O comando do terminal com o servidor fora: ninguém limpa o que a sessão antiga deixou no nome.
+    pub fn without_server(mut self) -> Self {
+        self.serverless = true;
+        self
     }
 
     /// Só para teste: multiplexador e `/proc` de mentira, para nunca ler o tmux de quem roda o teste.
@@ -544,6 +551,10 @@ impl OpenFacts for LocalFacts {
             Err(e) => return Err(super::open::mux_unavailable(e.code)),
         };
         Ok(panes.iter().any(|p| p.session == name))
+    }
+
+    fn name_has_leftovers(&self, name: &str) -> bool {
+        self.serverless && super::local::leftover(&self.env().claude_base, name).is_some()
     }
 
     /// `transfer_active`: registro do índice da sessão com o mesmo nome e fase não terminal.
