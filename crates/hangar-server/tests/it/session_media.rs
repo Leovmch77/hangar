@@ -323,6 +323,7 @@ struct Speech {
     scene: Scene,
     heard: Arc<Mutex<Vec<Vec<u8>>>>,
     python_paths: Arc<Mutex<Vec<String>>>,
+    private: SocketAddr,
     _tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 async fn serve_router(router: axum::Router) -> (SocketAddr, tokio::task::JoinHandle<()>) {
@@ -355,12 +356,30 @@ impl Speech {
         state.side.locate = scene.sessions.clone();
         state.hangar_dir = scene.dir.path().join(".hangar");
         assert!(state.state.runtime.set(scene.runtime.clone()).is_ok());
+        let state = Arc::new(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         scene.address = listener.local_addr().unwrap();
+        let public = state.clone();
         scene.task = tokio::spawn(async move {
-            axum::serve(listener, router(Arc::new(state)).into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+            axum::serve(listener, router(public).into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
         });
-        Self { scene, heard, python_paths, _tasks: vec![provider_task, upstream_task] }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let private = listener.local_addr().unwrap();
+        let private_task = tokio::spawn(async move {
+            axum::serve(listener, hangar_server::routes::terminal_router(state).into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+        });
+        Self { scene, heard, python_paths, private, _tasks: vec![provider_task, upstream_task, private_task] }
+    }
+    /// O pedido que o Python repassa de uma porta dele, já autenticado lá.
+    async fn forwarded(&self, path: &str, query: &str, body: &'static [u8], guest: bool) -> (StatusCode, Value) {
+        let mut req = client().post(format!("http://{}/__hangar_server/forwarded{query}", self.private))
+            .header("x-hangar-internal", "isolated").header("x-hangar-path", path).header("x-filename", "a.webm").body(body);
+        if guest {
+            req = req.header("x-hangar-forwarded-guest", "1");
+        }
+        let response = req.send().await.unwrap();
+        let status = response.status();
+        (status, serde_json::from_str(&response.text().await.unwrap()).unwrap_or(Value::Null))
     }
     async fn transcribe(&self, query: &str, body: &'static [u8], filename: Option<&str>) -> (StatusCode, Value) {
         let mut req = client().post(format!("http://{}/api/sessions/s/transcribe{query}", self.scene.address)).bearer_auth(OWNER).body(body);
@@ -466,6 +485,23 @@ async fn transcribe_checks_session_transfer_and_query_types() {
     speech.scene.runtime.ingress().hold("s", std::time::Duration::from_millis(10)).await.unwrap();
     let (status, body) = speech.transcribe("?limpar=talvez", b"audio", Some("a.wav")).await;
     assert_eq!((status, body["detail"]["code"].clone()), (StatusCode::CONFLICT, json!("session_transfer_busy")));
+}
+
+#[tokio::test]
+async fn forwarded_from_python_ports_is_served_here_and_keeps_the_guest_limits() {
+    let speech = Speech::new(Value::Null).await;
+    speech.scene.claude("s", &[]);
+    let (status, saved) = speech.forwarded("/api/sessions/s/upload", "?audio_only=1", b"audio-antigo", false).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let absolute = saved["path"].as_str().unwrap().to_owned();
+    let query = format!("?arquivo={}", percent_encoding::utf8_percent_encode(&absolute, percent_encoding::NON_ALPHANUMERIC));
+    let (status, body) = speech.forwarded("/api/sessions/s/transcribe", &query, b"", true).await;
+    assert_eq!((status, body["detail"]["code"].clone()), (StatusCode::FORBIDDEN, json!("erro_arquivo_caminho_convidado")), "{body}");
+    let (status, body) = speech.forwarded("/api/sessions/s/transcribe", &query, b"", false).await;
+    assert_eq!((status, body["path"].clone()), (StatusCode::OK, json!(absolute)), "{body}");
+    let (status, body) = speech.forwarded("/api/sessions/nenhuma/bash-output", "", br#"{"command": "ls"}"#, true).await;
+    assert_eq!((status, body), (StatusCode::OK, json!({"text": null})));
+    assert_eq!(*speech.python_paths.lock().unwrap(), Vec::<String>::new());
 }
 
 #[test]

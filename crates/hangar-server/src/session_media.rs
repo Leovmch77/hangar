@@ -10,7 +10,7 @@ use std::{
 use axum::{
     body::Body,
     extract::{ConnectInfo, Path as RoutePath, Request, State},
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::Response,
 };
 use serde_json::{Value, json};
@@ -91,14 +91,18 @@ pub async fn tool_progress(
     if !caller.is_some_and(|c| c.can(&name, req.method())) {
         return pass(&st, req, &fwd).await;
     }
-    if !valid_tool_use_id(&id) {
+    serve_tool_progress(&st, &name, &id, req.headers()).await
+}
+
+async fn serve_tool_progress(st: &AppState, name: &str, id: &str, headers: &HeaderMap) -> Response {
+    if !valid_tool_use_id(id) {
         return json_response(StatusCode::BAD_REQUEST, json!({"detail": "invalid tool_use_id"}));
     }
     let file = st.hangar_dir.join("tool-progress").join(format!("{id}.jsonl"));
     match tokio::fs::read(&file).await {
         Ok(bytes) => json_response(StatusCode::OK, Value::Array(parse_steps(&bytes))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => json_response(StatusCode::OK, json!([])),
-        Err(_) => route_failed(&st, req.headers(), "rust.tool_progress_failed", &name, "tool_progress_io", "as etapas da ferramenta não puderam ser lidas"),
+        Err(_) => route_failed(st, headers, "rust.tool_progress_failed", name, "tool_progress_io", "as etapas da ferramenta não puderam ser lidas"),
     }
 }
 
@@ -184,24 +188,25 @@ pub async fn transcript_image(
     if !caller.is_some_and(|c| c.can(&name, req.method())) || uuid.starts_with("transfer:") {
         return pass(&st, req, &fwd).await;
     }
-    let Ok(idx) = idx.trim().parse::<i64>() else { return int_parsing(&idx) };
-    let info = match st.info(&name).await {
+    serve_transcript_image(&st, &name, uuid, &idx, req.headers()).await
+}
+
+async fn serve_transcript_image(st: &AppState, name: &str, uuid: String, idx: &str, headers: &HeaderMap) -> Response {
+    let Ok(idx) = idx.trim().parse::<i64>() else { return int_parsing(idx) };
+    let info = match st.info(name).await {
         Ok(info) => info,
         Err(e) => {
-            st.diag.report("rust.transcript_image_failed", &name, e.0, INFO_REASON);
+            st.diag.report("rust.transcript_image_failed", name, e.0, INFO_REASON);
             return json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_lista_indisponivel",
                 "a lista de sessões está indisponível", json!({"detalhe": e.0})));
         }
     };
-    if info.as_ref().is_some_and(|i| i.provider == "codex") {
-        return pass(&st, req, &fwd).await;
-    }
     let Some(jsonl) = info.as_ref().and_then(|i| i.jsonl.clone()) else {
         return json_response(StatusCode::NOT_FOUND, detail_body("erro_sessao_inexistente", "session or transcript not found", json!({})));
     };
     // Com o chat ao vivo aberto, vale o transcript que o hub já confirmou.
     let fresh = info.as_ref().and_then(Binding::from_info);
-    let jsonl = st.side.hubs.bound(&name)
+    let jsonl = st.side.hubs.bound(name)
         .filter(|b| fresh.as_ref().is_some_and(|f| !b.changes_at_once(f)))
         .map_or(jsonl, |b| b.jsonl);
     let found = tokio::task::spawn_blocking(move || find_image(&jsonl, &uuid, idx)).await;
@@ -216,7 +221,7 @@ pub async fn transcript_image(
         }
         Ok(Ok(None)) => json_response(StatusCode::NOT_FOUND, detail_body("erro_imagem_nao_encontrada", "image not found", json!({}))),
         Ok(Err(_)) => json_response(StatusCode::CONFLICT, detail_body("session_transfer_history_invalid", "histórico da transferência indisponível", json!({}))),
-        Err(_) => route_failed(&st, req.headers(), "rust.transcript_image_failed", &name, "transcript_image_panic", "a leitura da imagem caiu no servidor"),
+        Err(_) => route_failed(st, headers, "rust.transcript_image_failed", name, "transcript_image_panic", "a leitura da imagem caiu no servidor"),
     }
 }
 
@@ -407,9 +412,13 @@ pub async fn bash_output_route(
     if !caller.is_some_and(|c| c.can(&name, req.method())) {
         return pass(&st, req, &fwd).await;
     }
+    serve_bash_output(&st, &name, req).await
+}
+
+async fn serve_bash_output(st: &AppState, name: &str, req: Request) -> Response {
     // Só confere a troca de conversa e solta, antes do corpo, como o `_transfer_check`.
     if let Some(runtime) = st.state.runtime.get()
-        && runtime.ingress().enter(&name, st.write_gate_wait).await.is_err()
+        && runtime.ingress().enter(name, st.write_gate_wait).await.is_err()
     {
         return crate::diag::coded(json_response(StatusCode::CONFLICT, crate::session_write::busy_body()), "session_transfer_busy");
     }
@@ -422,10 +431,10 @@ pub async fn bash_output_route(
         Ok(_) => return invalid_body("command passa de 200000 caracteres"),
         Err(e) => return invalid_body(&e.to_string()),
     };
-    let info = match st.info(&name).await {
+    let info = match st.info(name).await {
         Ok(info) => info,
         Err(e) => {
-            st.diag.report("rust.bash_output_failed", &name, e.0, INFO_REASON);
+            st.diag.report("rust.bash_output_failed", name, e.0, INFO_REASON);
             return json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_lista_indisponivel",
                 "a lista de sessões está indisponível", json!({"detalhe": e.0})));
         }
@@ -442,12 +451,47 @@ pub async fn bash_output_route(
     match found {
         Ok(Ok(text)) => json_response(StatusCode::OK, json!({"text": text})),
         Ok(Err(code)) => {
-            st.diag.report("rust.bash_output_failed", &name, code, "pastas das contas indisponíveis");
+            st.diag.report("rust.bash_output_failed", name, code, "pastas das contas indisponíveis");
             json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_lista_indisponivel",
                 "a lista de sessões está indisponível", json!({"detalhe": code})))
         }
-        Err(_) => route_failed(&st, &headers, "rust.bash_output_failed", &name, "bash_output_panic", "a leitura da saída caiu no servidor"),
+        Err(_) => route_failed(st, &headers, "rust.bash_output_failed", name, "bash_output_panic", "a leitura da saída caiu no servidor"),
     }
+}
+
+/// Anexos, `/transcribe`, saída de ferramenta e imagem do transcript (fora a da conversa transferida).
+pub fn is_media(method: &axum::http::Method, path: &str) -> bool {
+    use axum::http::Method;
+    let Some((_, tail)) = path.strip_prefix("/api/sessions/").and_then(|p| p.split_once('/')) else { return false };
+    crate::uploads::http::matches(method, path)
+        || (*method == Method::POST && matches!(tail, "bash-output" | "transcribe"))
+        || (*method == Method::GET && (tail.starts_with("tool-progress/") || tail.starts_with("transcript-image/")))
+}
+
+/// Rotas de mídia da sessão que chegam pelas portas do Python (Connect, convidado com login), já
+/// autenticadas lá. `guest` diz se quem pediu é convidado.
+pub async fn serve_forwarded(st: &Arc<AppState>, path: &str, req: Request, guest: bool) -> Option<Response> {
+    let decode = |s: &str| percent_encoding::percent_decode_str(s).decode_utf8().ok().map(|s| s.into_owned());
+    let (name, tail) = path.strip_prefix("/api/sessions/")?.split_once('/')?;
+    let name = decode(name)?;
+    let method = req.method().clone();
+    let get = method == axum::http::Method::GET;
+    let parts: Vec<&str> = tail.split('/').collect();
+    Some(match (parts.as_slice(), method == axum::http::Method::POST) {
+        (["tool-progress", id], false) if get => serve_tool_progress(st, &name, &decode(id)?, &req.headers().clone()).await,
+        (["transcript-image", uuid, idx], false) if get => {
+            let uuid = decode(uuid)?;
+            // A conversa transferida o Python atende sem repassar.
+            if uuid.starts_with("transfer:") {
+                return None;
+            }
+            serve_transcript_image(st, &name, uuid, &decode(idx)?, &req.headers().clone()).await
+        }
+        (["bash-output"], true) => serve_bash_output(st, &name, req).await,
+        (["transcribe"], true) => crate::uploads::transcribe::serve(st, &name, req, guest).await,
+        _ if crate::uploads::http::matches(&method, path) => crate::uploads::http::public(st.clone(), req).await,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
