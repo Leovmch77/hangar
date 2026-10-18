@@ -81,8 +81,6 @@ pub trait TerminalServices: Send + Sync {
     fn abandon_publication<'a>(&'a self, _publication_id: &'a str) -> ServiceFuture<'a, ()> { Box::pin(async { Ok(()) }) }
 }
 
-fn epoch_now() -> f64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |t| t.as_secs_f64()) }
-
 /// `<config_dir>/.hangar-prompt/<conversa>.json` do `state_hook`: o SHA-1 do texto aparado cujos hooks
 /// `UserPromptSubmit` começaram e quando. Arquivo ausente ou torto não prova nada.
 pub(crate) fn prompt_started_in(config_dir: &std::path::Path, conversation: &str, since: f64, text: &str) -> bool {
@@ -1003,7 +1001,7 @@ impl TerminalDriver {
             _ => return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, "submission_blocked"),
         }
         let mark = if expected.is_none() && !text.trim_start().starts_with('/') { self.services.transcript_mark().await.ok().flatten() } else { None };
-        let since = epoch_now();
+        let since = crate::state::monitor::wall_now();
         if let Err(error) = self.key_guarded("Enter", expected.map(|expected| GuardedText { expected,closed:true,pane:None,input:Some((text,before)),allow_owned:true })).await {
             return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, if expected.is_some() { "erro_sem_confirmacao_resposta" } else { error.code });
         }
@@ -1120,11 +1118,10 @@ impl TerminalDriver {
             // ele ou o `enqueue` no transcript, como no Python.
             let user = mode == PluginMode::User;
             let mark = if user { self.services.transcript_mark().await.ok().flatten() } else { None };
-            let since = epoch_now();
+            let since = crate::state::monitor::wall_now();
             let publish = self.services.publish(&self.binding, request);
             tokio::pin!(publish);
-            let reply = loop {
-                if !user { break (&mut publish).await }
+            let reply = if !user { (&mut publish).await } else { loop {
                 tokio::select! {
                     reply = &mut publish => break reply,
                     _ = tokio::time::sleep(Duration::from_millis(50)) => {
@@ -1139,7 +1136,7 @@ impl TerminalDriver {
                         return DeliveryResult::new(Disposition::Accepted, DeliveryStage::Plugin, code);
                     }
                 }
-            };
+            } };
             match reply {
                 Ok(PluginReply::Unavailable | PluginReply::NotWritten) => refresh_guard = true,
                 Ok(PluginReply::Accepted) if mode == PluginMode::User => return DeliveryResult::new(Disposition::Accepted, DeliveryStage::Plugin, "plugin_accepted"),
