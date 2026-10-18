@@ -22,9 +22,10 @@ function colorOf(provider: string, dark: boolean): [string, string] {
 }
 
 // Na linha do nome, a marca fica sem o fundo do selo.
-export function ProviderGlyph({ provider, size = 16, inline = false }: { provider: string; size?: number; inline?: boolean }) {
+export function ProviderGlyph({ provider, size = 16, inline = false, color: tint }: { provider: string; size?: number; inline?: boolean; color?: string }) {
   const { rt, theme } = useUnistyles();
-  const [color, letter] = colorOf(provider, rt.themeName !== 'light');
+  const [providerColor, letter] = colorOf(provider, rt.themeName !== 'light');
+  const color = tint ?? providerColor;
   if (inline && letter === '?') return null;
   const d = LOGO[provider];
   const logoSize = inline ? size : size * 0.72;

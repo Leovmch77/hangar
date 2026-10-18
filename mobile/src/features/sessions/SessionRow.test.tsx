@@ -20,6 +20,8 @@ vi.mock('react-native', async (original) => {
   const native = await original<typeof import('react-native')>();
   return {
     ...native,
+    View: ({ testID, accessibilityElementsHidden, ...props }: import('react-native').ViewProps) =>
+      createElement(native.View, { ...props, ...{ 'data-testid': testID, 'aria-hidden': accessibilityElementsHidden } }),
     // O DOM não compõe linhas nativas; preserva o contrato de truncamento recebido pelo Text.
     Text: (props: import('react-native').TextProps) =>
       createElement(native.Text, { ...props, ...{ 'data-number-of-lines': props.numberOfLines } }),
@@ -28,7 +30,7 @@ vi.mock('react-native', async (original) => {
   };
 });
 vi.mock('expo-haptics', () => ({ impactAsync: () => Promise.resolve(), ImpactFeedbackStyle: { Medium: 'medium' } }));
-vi.mock('../../ui/HangarMark', () => ({ HangarMark: () => null }));
+
 vi.mock('react-native-svg', async (original) => ({
   ...await original<typeof import('react-native-svg')>(),
   default: ({ children, ...props }: { children?: ReactNode }) => createElement('svg', props, children),
@@ -63,6 +65,7 @@ vi.mock('../../paraglide/messages', () => ({
 
 import { useUnistyles } from 'react-native-unistyles';
 import { SessionRow } from './SessionRow';
+import { HANGAR_MARK_ARCS } from '../../ui/HangarMark';
 
 // O tema de teste não traz as pílulas de estado, que pintam a marca da linha.
 useUnistyles().theme.tokens.pill = {
@@ -93,14 +96,15 @@ describe('SessionRow', () => {
     { provider: 'kimi', label: 'Kimi', path: 'M21.765' },
     { provider: 'pi', label: 'Pi', letter: 'π' },
     { provider: 'omp', label: 'OMP', letter: 'Ω' },
-    { provider: undefined, label: 'Claude', path: 'm4.7144' },
-  ] as const)('marca de $label junto do nome, sem texto nos metadados, inclusive na linha compacta', async ({ provider, label, ...mark }) => {
+    { provider: undefined, label: 'Claude', path: 'M 4.00' },
+  ] as const)('marca de $label só no avatar, inclusive na linha compacta', async ({ provider, label, ...mark }) => {
     for (const compact of [false, true]) {
       const { container, root } = await render({ ...base, name: 'api', provider, cwd: '/repo', branch: 'main' }, { compact });
       try {
         const name = Array.from(container.querySelectorAll('span')).find(el => el.textContent === 'api');
-        const glyph = name?.previousElementSibling;
+        const glyph = container.querySelector('[data-testid="session-avatar"]');
         expect(glyph).not.toBeNull();
+        expect(name?.previousElementSibling).toBeNull();
         if ('path' in mark) expect(glyph?.querySelector('path')?.getAttribute('d')).toMatch(new RegExp(`^${mark.path}`));
         else expect(glyph?.textContent).toBe(mark.letter);
         expect(container.textContent).not.toContain(label);
@@ -110,12 +114,15 @@ describe('SessionRow', () => {
     }
   });
 
-  it.each(['gpt', 'local-gpt', 'gpt-6-1-sol', 'GPT-6', 'openai', 'codex'])('motor %s usa OpenAI ao lado do nome e preserva a engrenagem', async (engine) => {
+  it.each(['gpt', 'local-gpt', 'gpt-6-1-sol', 'GPT-6', 'openai', 'codex'])('motor %s usa OpenAI branco no avatar e preserva a engrenagem', async (engine) => {
     Platform.OS = 'ios';
     const { container, root } = await render({ ...base, name: 'api', provider: 'claude', engine });
     try {
       const name = Array.from(container.querySelectorAll('span')).find(el => el.textContent === 'api');
-      expect(name?.previousElementSibling?.querySelector('path')?.getAttribute('d')).toMatch(/^M22.2819/);
+      expect(name?.previousElementSibling).toBeNull();
+      const logo = container.querySelector('[data-testid="session-avatar"] svg');
+      expect(logo?.querySelector('path')?.getAttribute('d')).toMatch(/^M22.2819/);
+      expect(logo?.getAttribute('fill')).toBe('#ffffff');
       expect(container.querySelector('[data-symbol="gearshape"]')?.parentElement?.textContent).toBe(engine);
       const label = container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label');
       expect(label).toContain('Claude');
@@ -123,13 +130,13 @@ describe('SessionRow', () => {
     } finally { act(() => root.unmount()); }
   });
 
-  it.each(['unknown', 'orq'])('provider %s sem marca não cria ícone nem texto substituto', async (provider) => {
+  it.each(['unknown', 'orq'])('provider %s sem marca usa os arcos do Hangar no avatar', async (provider) => {
     Platform.OS = 'ios';
     const { container, root } = await render({ ...base, name: 'api', provider: provider as AggSession['provider'] });
     try {
       const name = Array.from(container.querySelectorAll('span')).find(el => el.textContent === 'api');
       expect(name?.previousElementSibling).toBeNull();
-      expect(container.querySelector('svg')).toBeNull();
+      expect(container.querySelector('[data-testid="session-avatar"] path')?.getAttribute('d')).toBe(HANGAR_MARK_ARCS[0].d);
       expect(container.textContent).not.toContain('unknown');
       expect(container.textContent).not.toContain('?');
     } finally { act(() => root.unmount()); }
@@ -364,19 +371,43 @@ describe('SessionRow', () => {
   });
 
   it.each([
-    { state: 'idle', limited: false, symbol: 'checkmark.circle' },
-    { state: 'awaiting_input', limited: false, symbol: 'questionmark.circle' },
-    { state: 'idle', limited: true, symbol: 'hourglass' },
-  ] as const)('ícone próprio para $state (limite=$limited) e sem linha só com o nome do estado', async ({ state, limited, symbol }) => {
+    { state: 'working', limited: false, ring: '#00f', badge: null, dot: true },
+    { state: 'awaiting_input', limited: false, ring: '#f90', badge: null, dot: false },
+    { state: 'idle', limited: false, ring: '#ccc', badge: 'checkmark', dot: false },
+    { state: 'idle', limited: true, ring: '#f90', badge: 'hourglass', dot: false },
+    { state: 'working', limited: true, ring: '#00f', badge: null, dot: true },
+    { state: 'awaiting_input', limited: true, ring: '#f90', badge: null, dot: false },
+    { state: 'dead', limited: true, ring: '#ccc', badge: null, dot: false },
+  ] as const)('avatar para $state (limite=$limited) conserva estado e limite no VoiceOver', async ({ state, limited, ring, badge, dot }) => {
     Platform.OS = 'ios';
     const { container, root } = await render({ ...base, name: 'api', provider: 'claude', state, limited, limit_reset: limited ? '14:00' : undefined });
     try {
-      expect(container.querySelector(`[data-symbol="${symbol}"]`)).not.toBeNull();
-      const linhas = [...container.querySelectorAll('span')].map((el) => el.textContent);
-      expect(linhas).not.toContain(rotuloEstado(state));
+      const avatar = container.querySelector<HTMLElement>('[data-testid="session-avatar"]');
+      expect(avatar).not.toBeNull();
+      expect(avatar?.querySelector<HTMLElement>('[data-testid="session-avatar-ring"]')?.style.borderColor).toBe(ring);
+      expect(!!avatar?.querySelector('[data-testid="session-avatar-dot"]')).toBe(dot);
+      const seal = avatar?.querySelector<HTMLElement>('[data-testid="session-avatar-badge"]');
+      if (badge) {
+        expect(seal?.querySelector(`[data-symbol="${badge}"]`)).not.toBeNull();
+        expect(seal?.style.backgroundColor).toBe(limited ? '#f90' : '#0a0');
+      } else expect(seal).toBeNull();
+      expect(avatar?.getAttribute('aria-hidden')).toBe('true');
+      const lines = [...container.querySelectorAll('span')].map((el) => el.textContent);
+      expect(lines).not.toContain(rotuloEstado(state));
       const label = container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label');
       expect(label).toContain(rotuloEstado(state));
-      if (limited) expect(label, 'o limite que o ícone mostra também vai ao leitor de tela').toContain('sessao_limite_volta 14:00');
+      if (limited) expect(label).toContain('sessao_limite_volta 14:00');
+    } finally { act(() => root.unmount()); }
+  });
+
+  it('separa servidor e branch de worktree mesmo quando a pasta repete o nome', async () => {
+    Platform.OS = 'ios';
+    const { container, root } = await render({ ...base, name: 'hangar-x', provider: 'codex', serverLabel: 'notebook-jefferson',
+      cwd: '/r/hangar-x', worktree: true, worktree_path: '/r/hangar-x', branch: 'feat/mobile-avatar-estado' }, { mostrarServidor: true });
+    try {
+      const server = [...container.querySelectorAll('span')].find(el => el.textContent === 'notebook-jefferson');
+      expect(server?.nextElementSibling?.textContent).toBe(' · ');
+      expect(server?.nextElementSibling?.nextElementSibling?.getAttribute('data-symbol')).toBe('arrow.triangle.branch');
     } finally { act(() => root.unmount()); }
   });
 

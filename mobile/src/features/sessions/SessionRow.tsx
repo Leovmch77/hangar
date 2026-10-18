@@ -3,11 +3,9 @@ import { ActionSheetIOS, Platform, Pressable, Text, View } from 'react-native';
 import { MenuView, type NativeActionEvent } from '@react-native-menu/menu';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import * as Haptics from 'expo-haptics';
-import { cwdParts, isOrq, loopBadge, pairExternals, providerName, relativeTime, rotuloEstado, untrackedReason, worktreeLabel, type AggSession, type PairExternal, type State } from '@hangar/core';
+import { cwdParts, isOrq, loopBadge, pairExternals, providerName, relativeTime, rotuloEstado, untrackedReason, worktreeLabel, type AggSession, type PairExternal } from '@hangar/core';
 import { Chip, type Tone } from '../../ui/Chip';
-import { HangarMark } from '../../ui/HangarMark';
-import { WorkingMark } from '../../ui/WorkingMark';
-import { ProviderGlyph } from '../../ui/ProviderGlyph';
+import { SessionAvatar } from './SessionAvatar';
 import { Icon } from '../../ui/Icon';
 import { superficie } from '../../theme/superficie';
 import { useWorktreeStatus } from '../worktrees/worktreeStatus';
@@ -34,15 +32,6 @@ function accountChip(account: string | null | undefined) {
   for (const char of base) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
   return { label, name: name || m.conta_padrao(), color: ACCOUNT_COLORS[hash % ACCOUNT_COLORS.length] };
 }
-
-// O ícone é a única pista visual de estado na linha (o nome do estado só vai ao leitor de tela):
-// lê a cor da pílula do tema, que acompanha tema claro/escuro e o acento escolhido na Aparência.
-const PILL_DO_ESTADO: Record<State, 'working' | 'idle' | 'input' | 'dead'> = {
-  working: 'working',
-  idle: 'idle',
-  awaiting_input: 'input',
-  dead: 'dead',
-};
 
 // Ações de par externo da linha: a lista decide o que cada uma faz (confirmação, servidor, folha).
 export type PairAction =
@@ -133,7 +122,6 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
   const pairLabel = peers.length ? (s.pair_task ?? (peers.length === 1 ? peers[0] : String(peers.length + 1))) : null;
   const engineLabel = !orq && s.provider === 'claude' ? s.engine : null;
   const providerLabel = orq ? null : [providerName(s.provider), engineLabel].filter(Boolean).join(', ');
-  const iconProvider = engineLabel && /gpt|openai|codex/i.test(engineLabel) ? 'codex' : s.provider ?? 'claude';
   const account = accountChip(s.conta);
   const juntada = useWorktreeStatus(s.serverId, wtPath)?.merged === true;
   // Na worktree a branch sai do texto e ganha o ícone de ramo; a pasta some quando repete o nome
@@ -151,7 +139,6 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
   const gitAdded = s.git_added || 0;
   const gitRemoved = s.git_removed || 0;
   const temGit = gitAhead > 0 || gitBehind > 0 || gitAdded > 0 || gitRemoved > 0;
-  const corEstado = theme.tokens.pill[PILL_DO_ESTADO[s.state]].fg;
   const muted = theme.tokens.text.muted;
 
   // iOS: o menu de contexto (MenuView) engolia o toque simples da linha dentro da gaveta; a folha de
@@ -205,15 +192,10 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
     >
       {fora ? <View style={[styles.faixa, { backgroundColor: theme.tokens.accent.base }]} /> : null}
       <View style={styles.lead}>
-        {s.state === 'working' ? <WorkingMark size={20} color={corEstado} />
-          : s.state === 'awaiting_input' ? <Icon name="CircleHelp" size={20} color={corEstado} />
-            : s.state === 'dead' ? <HangarMark size={20} color={corEstado} />
-              : s.limited ? <Icon name="Hourglass" size={20} color={theme.tokens.status.warning} />
-                : <Icon name="CircleCheck" size={20} color={corEstado} />}
+        <SessionAvatar session={s} />
       </View>
       <View style={styles.col}>
         <View style={styles.linha}>
-          {!orq ? <ProviderGlyph provider={iconProvider} size={theme.base.text.base} inline /> : null}
           <Text style={[styles.nome, { color: theme.tokens.text.primary }]} numberOfLines={1}>{s.name}</Text>
           {pendingQuestions > 0 ? <Chip tone="warning">{`? ${pendingQuestions}`}</Chip> : null}
           {orq ? <Chip>{m.orq_row_badge()}</Chip> : null}
@@ -234,7 +216,7 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
           <View style={styles.metaRow}>
             {mostrarServidor ? <>
               <Text style={[styles.meta, styles.metaRest, { color: s.serverColor }]} numberOfLines={1}>{s.serverLabel}</Text>
-              {meta.length || engineLabel ? <Text style={[styles.meta, styles.metaSeparator, { color: s.serverColor }]}>{' · '}</Text> : null}
+              {meta.length || engineLabel || branchWt ? <Text style={[styles.meta, styles.metaSeparator, { color: s.serverColor }]}>{' · '}</Text> : null}
             </> : null}
             {engineLabel ? (
               <View style={styles.engine}>
@@ -307,8 +289,8 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
 const styles = StyleSheet.create((theme) => ({
   row: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, minHeight: 56, paddingVertical: 10, paddingHorizontal: 12 },
   compact: { paddingVertical: 6, minHeight: 44 },
-  // a marca alinha com a linha do nome, não com o centro do bloco
-  lead: { width: 22, alignItems: 'center', paddingTop: 1 },
+  // O avatar acompanha o topo da linha para não saltar quando aparece uma pergunta.
+  lead: { width: 36, alignItems: 'center', paddingTop: 1 },
   col: { flex: 1, gap: 2, minWidth: 0 },
   linha: { flexDirection: 'row', alignItems: 'center', gap: 6, minWidth: 0 },
   nome: { fontSize: theme.base.text.base, lineHeight: 22, fontWeight: '600', flexShrink: 1 },
