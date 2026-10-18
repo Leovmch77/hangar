@@ -37,10 +37,6 @@ vi.mock('../ui/Sheet', () => ({ Sheet: ({ children, onDismiss }: { children: Rea
 } }));
 vi.mock('@react-native-menu/menu', () => ({ MenuView: ({ children }: React.PropsWithChildren) =>
   React.createElement('div', { 'data-menu': true }, children) }));
-vi.mock('../ui/HangarMark', () => ({ HangarMark: ({ color }: { color: string }) =>
-  React.createElement('span', { 'data-mark': 'idle', style: { color } }) }));
-vi.mock('../ui/WorkingMark', () => ({ WorkingMark: ({ color }: { color: string }) =>
-  React.createElement('span', { 'data-mark': 'working', style: { color } }) }));
 vi.mock('../ui/Icon', () => ({ Icon: ({ name, color }: { name: string; color: string }) =>
   React.createElement('span', { 'data-icon': name, style: { color } }) }));
 vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 34, left: 0, right: 0 }) }));
@@ -52,6 +48,8 @@ vi.mock('react-native', async (original) => {
   const native = await original<typeof import('react-native')>();
   return {
   ...native,
+  View: ({ testID, ...props }: import('react-native').ViewProps) =>
+    React.createElement(native.View, { ...props, ...{ 'data-testid': testID } }),
   ScrollView: ({ children, ...props }: React.PropsWithChildren<typeof calls.scroll>) => {
     calls.scroll = props;
     return React.createElement(native.View, { style: props.style as never }, children);
@@ -192,8 +190,8 @@ describe('SessionPickerSheet', () => {
       })));
       const current = container.querySelector<HTMLButtonElement>('button[aria-selected="true"]')!;
       const other = container.querySelector<HTMLButtonElement>('button[aria-selected="false"]')!;
-      expect(current.querySelector('[data-icon="Check"]')).not.toBeNull();
-      expect(other.querySelector('[data-icon="Check"]')).toBeNull();
+      expect(current.querySelector(':scope > [data-icon="Check"]')).not.toBeNull();
+      expect(other.querySelector(':scope > [data-icon="Check"]')).toBeNull();
       expect(current.getAttribute('aria-label')).toContain(m.switcher_atual());
       expect(current.style.backgroundColor).not.toBe('');
       expect(current.style.backgroundColor).not.toBe(other.style.backgroundColor);
@@ -203,9 +201,9 @@ describe('SessionPickerSheet', () => {
   });
 
   it.each([
-    ['working', 'working', '#70f', false],
-    ['idle', 'CircleCheck', '#080', false],
-    ['awaiting_input', 'CircleHelp', '#b70', false],
+    ['working', null, '#00f', false],
+    ['idle', 'Check', '#ccc', false],
+    ['awaiting_input', null, '#f90', false],
     ['idle', 'Hourglass', '#f90', true],
   ] as const)('reusa a linha da home com estado %s (%s), atividade e metadados', async (state, mark, color, limited) => {
     const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.UTC(2026, 9, 18, 12));
@@ -225,8 +223,11 @@ describe('SessionPickerSheet', () => {
       expect(current.textContent).not.toContain(state === 'working' ? m.estado_em_execucao() : state === 'awaiting_input' ? m.estado_aguardando() : m.estado_pronto());
       expect(current.textContent).toContain(m.tempo_min_atras({ n: 2 }));
       expect(current.getAttribute('aria-label')).toContain('test-engine');
-      const icon = current.querySelector<HTMLElement>(mark === 'working' ? '[data-mark="working"]' : `[data-icon="${mark}"]`);
-      expect(icon?.style.color).toBe(color);
+      const avatar = current.querySelector('[data-testid="session-avatar"]');
+      expect(avatar?.querySelector<HTMLElement>('[data-testid="session-avatar-ring"]')?.style.borderColor).toBe(color);
+      const badge = avatar?.querySelector('[data-testid="session-avatar-badge"]');
+      if (mark) expect(badge?.querySelector(`[data-icon="${mark}"]`)).not.toBeNull();
+      else expect(badge).toBeNull();
       if (state === 'working') expect(current.textContent).toContain('running-task');
       if (state === 'awaiting_input') expect(current.textContent).toContain('pending-question');
       expect(current.textContent).toContain('test-engine');
