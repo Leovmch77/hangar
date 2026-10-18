@@ -96,6 +96,17 @@ case('python-bug-task-integer-limit4301', line('aviso: T'+'9'*4301))
 case('python-bug-surrogate-timestamp-output', events='{"ts":"2026-09-25\\ud80013:00:00Z","tipo":"entrega"}\n')
 case('shadow-surrogate-timestamp', line('notify → arbiter: x'), '{"ts":"2026-09-25\\ud80013:00:00Z","text":"x","p":0.7}\n')
 case('journal-python-whitespace-class', line('aviso: x','2026-09-25\x1f13:00:00Z'))
+invalid_keys = ['NaN', 'Infinity', '-Infinity', '1e400', '-1e400', '18446744073709551616', '-9223372036854775809']
+for token in invalid_keys:
+    for space in ['', ' \t ']:
+        key = token + space + ':0'
+        label = token + ('-spaced' if space else '-tight')
+        case('invalid-unquoted-event-key-'+label, events='{"tipo":"entrega","ts":"'+TS+'",'+key+'}\n')
+        case('invalid-unquoted-shadow-key-'+label, line('notify → arbiter: x'), '{"ts":"'+TS+'","text":"x",'+key+'}\n')
+case('invalid-nested-unquoted-keys', events=''.join('{"tipo":"entrega","ts":"'+TS+'","resultado":[{'+token+' : 0}]}\n' for token in invalid_keys))
+case('invalid-shadow-veto-unquoted-keys', line('notify → arbiter: x'), ''.join('{"ts":"'+TS+'","text":"x","veto":{'+token+' : 0.9}}\n' for token in invalid_keys))
+case('quoted-special-keys-and-values-stay-valid', events='{"tipo":"entrega","ts":"'+TS+'","resultado":{"NaN":NaN,"Infinity":Infinity,"-Infinity":-Infinity,"18446744073709551616":18446744073709551616}}\n')
+case('quoted-shadow-special-keys-stay-valid', line('notify → arbiter: x'), row(text='x', veto={'NaN':0.4, 'Infinity':0.5, '-Infinity':None, '18446744073709551616':0.1}))
 case('python-bug-type-list', events=row(tipo=[]))
 case('python-bug-num-overflow', journal=line('notify → arbiter: x'), shadow=row(text='x', p=10**400))
 # Bytes inválidos precisam atravessar a leitura com replacement, não a escrita Unicode do fixture.

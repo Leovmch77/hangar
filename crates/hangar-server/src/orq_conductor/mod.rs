@@ -308,6 +308,12 @@ fn valid_number(text: &str) -> bool {
     });
     NUMBER.is_match(text)
 }
+fn key_follows(bytes: &[u8], after: usize) -> bool {
+    bytes[after..]
+        .iter()
+        .find(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+        == Some(&b':')
+}
 fn load(text: &str, marker: &str) -> Option<Value> {
     let bytes = text.as_bytes();
     let (mut i, mut inside, mut escape) = (0, false, false);
@@ -339,6 +345,11 @@ fn load(text: &str, marker: &str) -> Option<Value> {
                 i += 1
             }
             let token = &text[start..i];
+            // A expansão só representa valores; uma chave sem aspas precisa continuar inválida.
+            if key_follows(bytes, i) {
+                raw.push_str(token);
+                continue;
+            }
             let digits = token.strip_prefix('-').unwrap_or(token);
             let integer = !digits.is_empty()
                 && digits.bytes().all(|b| b.is_ascii_digit())
@@ -373,7 +384,11 @@ fn load(text: &str, marker: &str) -> Option<Value> {
             .into_iter()
             .find(|token| text[i..].starts_with(token))
         {
-            raw.push_str(&serde_json::to_string(&format!("{marker}{token}")).ok()?);
+            if key_follows(bytes, i + token.len()) {
+                raw.push_str(token)
+            } else {
+                raw.push_str(&serde_json::to_string(&format!("{marker}{token}")).ok()?)
+            }
             i += token.len()
         } else {
             let ch = text[i..].chars().next()?;
