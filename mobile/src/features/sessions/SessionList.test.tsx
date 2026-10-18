@@ -54,10 +54,10 @@ vi.mock('../../stores/aparencia', async () => {
 });
 vi.mock('expo-router', () => ({ useRouter: () => ({ push: calls.push }) }));
 vi.mock('@react-native-menu/menu', () => ({
-  MenuView: ({ children, actions, onPressAction }: { children: React.ReactNode; actions: { id: string; title: string }[];
-    onPressAction: (event: { nativeEvent: { event: string } }) => void }) =>
-    React.createElement('div', null, children, ...(calls.realRow ? actions.map((action) =>
-      React.createElement('button', { key: action.id, 'data-action': action.id,
+  MenuView: ({ children, actions, onPressAction, shouldOpenOnLongPress }: { children: React.ReactNode; actions: { id: string; title: string; state?: string }[];
+    onPressAction: (event: { nativeEvent: { event: string } }) => void; shouldOpenOnLongPress?: boolean }) =>
+    React.createElement('div', null, children, ...(calls.realRow || !shouldOpenOnLongPress ? actions.map((action) =>
+      React.createElement('button', { key: action.id, 'data-action': action.id, 'data-state': action.state,
         onClick: () => onPressAction({ nativeEvent: { event: action.id } }) }, action.title)) : [])),
 }));
 vi.mock('../../ui/HangarMark', () => ({ HangarMark: () => null }));
@@ -86,9 +86,10 @@ vi.mock('../../paraglide/messages', () => ({ ...Object.fromEntries((
   'native_new_chat_title native_sidebar_all_sessions lista_sessoes_plural sessao_expandir sessao_recolher ' +
   'lista_carregando lista_vazia_filtro lista_nenhuma_ativa comum_cancelar sessao_excluir sessao_excluir_curto servidor_nao_existe ' +
   'comum_carregando lista_nenhum_servidor lista_pareie_qr native_sidebar_awaiting home_sessions_awaiting home_sessions_working home_sessions_ready sessao_recolher ' +
-  'sessao_renomear sessao_git convite_parar orq_row_badge native_par_convidar native_par_menu'
+  'sessao_renomear sessao_git convite_parar orq_row_badge native_par_convidar native_par_menu sessao_worktree_abrir'
 ).split(' ').map((key) => [key, () => key])),
   home_sessions_more_ready: ({ n }: { n: number }) => `home_sessions_more_ready:${n}`,
+  lista_buscar_dentro: ({ q }: { q: string }) => `lista_buscar_dentro:${q}`,
   lista_servidor_offline: ({ label }: { label: string }) => `${label}:offline`,
   pair_leave_outside: ({ dono }: { dono: string }) => `leave-${dono}`,
   pair_from_owner: ({ dono }: { dono: string }) => `from-${dono}`,
@@ -243,13 +244,28 @@ describe('SessionList', () => {
     expect(calls.push).not.toHaveBeenCalled();
   });
 
-  it.each(['home', 'conversations', 'sessions'])('acesso à busca global permanece visível em %s', async (mode) => {
-    useAparencia.setState({ organizar: mode === 'conversations' ? 'conversations' : 'sessions' });
-    await mount({ variant: mode === 'home' ? 'home' : 'drawer' });
+  it.each(['conversations', 'sessions'] as const)('gaveta mantém o acesso à busca global visível em %s', async (mode) => {
+    useAparencia.setState({ organizar: mode });
+    await mount({ variant: 'drawer' });
     const search = container.querySelector<HTMLButtonElement>('[aria-label="switcher_buscar_conversas"]');
     expect(search, 'ação Buscar nas conversas').not.toBeNull();
     await act(async () => search!.click());
     expect(calls.push).toHaveBeenCalledExactlyOnceWith('/search');
+  });
+
+  it.each(['home', 'drawer'] as const)('%s tem uma busca só: o termo filtra e oferece buscar dentro das conversas', async (variant) => {
+    const onClose = vi.fn();
+    await mount({ variant, onClose });
+    if (variant === 'home') expect(container.querySelector('[aria-label="switcher_buscar_conversas"]'), 'sem segunda busca na home').toBeNull();
+    expect(container.querySelector('[aria-label^="lista_buscar_dentro"]'), 'sem termo, sem atalho').toBeNull();
+    const input = container.querySelector<HTMLInputElement>('input[aria-label="lista_filtrar"]')!;
+    await act(async () => { input.value = 'a b'; input.dispatchEvent(new Event('input', { bubbles: true })); });
+    expect(container.querySelector('[data-row]'), 'o termo filtra a lista').toBeNull();
+    const deep = container.querySelector<HTMLButtonElement>('[aria-label="lista_buscar_dentro:a b"]');
+    expect(deep).not.toBeNull();
+    await act(async () => deep!.click());
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(calls.push).toHaveBeenCalledExactlyOnceWith('/search?q=a%20b');
   });
 
   it.each(['sessions', 'conversations'] as const)('Custos fecha a gaveta e abre página inteira no modo %s', async (mode) => {
@@ -266,7 +282,7 @@ describe('SessionList', () => {
 
   it.each([
     ['home', 'server'], ['drawer', 'server'], ['home', 'none'], ['drawer', 'none'],
-  ] as const)('%s agrupa todos os estados por servidor em ordem alfabética com preferência %s', async (variant, agrupar) => {
+  ] as const)('%s sobe esperando e trabalhando para o topo e deixa o resto por servidor (preferência %s)', async (variant, agrupar) => {
     useAparencia.setState({ agrupar });
     useServers.setState({ servers: [server, { ...server, id: 'srv2', label: 'another-server', baseUrl: 'https://another.test' },
       { ...server, id: 'outside', invite: true, ephemeral: true, baseUrl: 'https://outside.test' }] });
@@ -276,48 +292,71 @@ describe('SessionList', () => {
       ...row, name, state, serverId, serverLabel: serverId === 'srv1' ? 'machine-z' : 'machine-a',
     });
     await act(async () => useSessions.setState({ loading: false, rows: [
-      session('waiting-z', 'awaiting_input', 'srv1'), session('working-z', 'working', 'srv1'),
+      session('waiting-z', 'awaiting_input', 'srv1'), session('working-z', 'working', 'srv1'), session('working-a', 'working', 'srv2'),
       session('ready-a', 'idle', 'srv2'), session('ready-z', 'idle', 'srv1'),
       { ...session('outside-partner', 'awaiting_input', 'outside'), serverLabel: 'outside-machine',
         outside: { alias: 'peer', owner: 'owner', localServerId: 'srv1', localSession: 'waiting-z' } },
       session('dead-a', 'dead', 'srv2'),
     ] }));
+    expect([...container.querySelectorAll('[data-section]')].map((el) => el.getAttribute('data-section')))
+      .toEqual(['state:awaiting_input', 'state:working', 'srv2', 'srv1']);
     expect([...container.querySelectorAll('button[aria-label$="lista_sessoes_plural"]')].map((el) => el.getAttribute('aria-label')))
-      .toEqual(['machine-a, 1 lista_sessoes_plural', 'machine-z, 4 lista_sessoes_plural']);
+      .toEqual(['home_sessions_awaiting, 2 lista_sessoes_plural', 'home_sessions_working, 2 lista_sessoes_plural',
+        'machine-a, 1 lista_sessoes_plural', 'machine-z, 1 lista_sessoes_plural']);
     const names = (id: string) => [...container.querySelectorAll(`[data-section="${id}"] [data-row]`)].map((el) => el.textContent);
-    expect(names('srv1')).toEqual(['waiting-z', 'outside-partner', 'ready-z', 'working-z']);
+    expect(names('state:awaiting_input')).toEqual(['waiting-z', 'outside-partner']);
+    expect(names('state:working')).toEqual(['working-a', 'working-z']);
+    expect(names('srv1')).toEqual(['ready-z']);
     expect(names('srv2')).toEqual(['ready-a']);
-    expect(container.querySelector('[data-section="outside"]')).toBeNull();
-    const group = container.querySelector<HTMLButtonElement>('[aria-label="machine-z, 4 lista_sessoes_plural"]')!;
-    await act(async () => group.click());
-    expect(names('srv1')).toEqual([]);
-    expect(names('srv2')).toEqual(['ready-a']);
-    expect(group.getAttribute('aria-label')).toBe('machine-z, 4 lista_sessoes_plural');
-    await act(async () => group.click());
-    expect(names('srv1')).toEqual(['waiting-z', 'outside-partner', 'ready-z', 'working-z']);
+    const working = container.querySelector<HTMLButtonElement>('[aria-label="home_sessions_working, 2 lista_sessoes_plural"]')!;
+    await act(async () => working.click());
+    expect(names('state:working')).toEqual([]);
+    expect(working.getAttribute('aria-label')).toBe('home_sessions_working, 2 lista_sessoes_plural');
+    await act(async () => working.click());
+    expect(names('state:working')).toEqual(['working-a', 'working-z']);
+    // Tudo parado: só os servidores.
+    await act(async () => useSessions.setState({ rows: useSessions.getState().rows.map((r) => r.state === 'dead' ? r : { ...r, state: 'idle' }) }));
+    expect([...container.querySelectorAll('[data-section]')].map((el) => el.getAttribute('data-section'))).toEqual(['srv2', 'srv1']);
+    expect(names('srv1')).toEqual(['ready-z', 'waiting-z', 'outside-partner', 'working-z']);
   });
 
-  it.each(['home', 'drawer'] as const)('%s alterna Servidor/Projeto no seletor visível e identifica servidor na linha do projeto', async (variant) => {
+  it.each(['home', 'drawer'] as const)('%s com uma máquina rotula as paradas só quando há sessão no topo', async (variant) => {
+    await mount({ variant });
+    const row = useSessions.getState().rows[0];
+    await act(async () => useSessions.setState({ loading: false, rows: [{ ...row, name: 'ready', state: 'idle' }] }));
+    expect(container.querySelector('button[aria-label$="lista_sessoes_plural"]')).toBeNull();
+    await act(async () => useSessions.setState({ rows: [{ ...row, name: 'ready', state: 'idle' }, { ...row, name: 'busy', state: 'working' }] }));
+    expect([...container.querySelectorAll('button[aria-label$="lista_sessoes_plural"]')].map((el) => el.getAttribute('aria-label')))
+      .toEqual(['home_sessions_working, 1 lista_sessoes_plural', 'home_sessions_ready, 1 lista_sessoes_plural']);
+  });
+
+  it.each(['home', 'drawer'] as const)('%s alterna Servidor/Projeto no menu ao lado da busca e identifica servidor fora do grupo de servidor', async (variant) => {
     calls.realRow = true;
     useAparencia.setState({ agrupar: 'none' });
     useServers.setState({ servers: [server, { ...server, id: 'srv2', label: 'another-server', baseUrl: 'https://another.test' }] });
     await mount({ variant });
     const row = useSessions.getState().rows[0];
     await act(async () => useSessions.setState({ loading: false, rows: [
-      { ...row, name: 'from-a', cwd: '/repo/shared', state: 'awaiting_input', serverLabel: 'machine-a' },
-      { ...row, name: 'from-b', cwd: '/repo/shared', state: 'working', serverId: 'srv2', serverLabel: 'machine-b' },
+      { ...row, name: 'from-a', cwd: '/repo/shared', state: 'idle', serverLabel: 'machine-a' },
+      { ...row, name: 'from-b', cwd: '/repo/shared', state: 'idle', serverId: 'srv2', serverLabel: 'machine-b' },
+      { ...row, name: 'top-a', cwd: '/repo/other', state: 'awaiting_input', serverLabel: 'machine-a' },
     ] }));
-    const radios = [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
-    expect(radios.map((radio) => radio.textContent)).toEqual(['lista_agrupar_servidor', 'lista_agrupar_projeto']);
-    expect(radios[0].getAttribute('aria-checked')).toBe('true');
+    expect(container.querySelector('[role="radio"]'), 'sem faixa Servidor/Projeto').toBeNull();
+    const menu = container.querySelector('[aria-label^="lista_agrupar:"]');
+    expect(menu?.getAttribute('aria-label')).toBe('lista_agrupar: lista_agrupar_servidor');
+    const option = (id: string) => container.querySelector<HTMLButtonElement>(`[data-action="group:${id}"]`)!;
+    expect([option('server'), option('project')].map((el) => [el.textContent, el.getAttribute('data-state')]))
+      .toEqual([['lista_agrupar_servidor', 'on'], ['lista_agrupar_projeto', 'off']]);
     const session = (name: string) => container.querySelector<HTMLButtonElement>(`button[aria-label^="${name},"]`)!;
     expect(session('from-a').textContent).not.toContain('machine-a');
-    await act(async () => radios[1].click());
+    expect(session('top-a').textContent, 'no topo a linha diz a máquina').toContain('machine-a');
+    await act(async () => option('project').click());
     expect(container.querySelector('button[aria-label="shared, 2 lista_sessoes_plural"]')).not.toBeNull();
-    expect(radios[1].getAttribute('aria-checked')).toBe('true');
+    expect(option('project').getAttribute('data-state')).toBe('on');
+    expect(container.querySelector('[aria-label^="lista_agrupar:"]')?.getAttribute('aria-label')).toBe('lista_agrupar: lista_agrupar_projeto');
     expect(session('from-a').textContent).toContain('machine-a');
     expect(session('from-b').textContent).toContain('machine-b');
-    await act(async () => radios[0].click());
+    await act(async () => option('server').click());
     expect(container.querySelector('button[aria-label="shared, 2 lista_sessoes_plural"]')).toBeNull();
     expect(container.querySelector('button[aria-label="machine-a, 1 lista_sessoes_plural"]')).not.toBeNull();
     expect(container.querySelector('button[aria-label="machine-b, 1 lista_sessoes_plural"]')).not.toBeNull();
@@ -329,7 +368,7 @@ describe('SessionList', () => {
     calls.sessions = [{ ...calls.sessions[0], cwd: '/repo/shared' }];
     useServers.setState({ servers: [server, { ...server, id: 'outside', invite: true, baseUrl: 'https://outside.test' }] });
     await mount({ variant });
-    expect(container.querySelector('[role="radio"]')).toBeNull();
+    expect(container.querySelector('[data-action^="group:"]')).toBeNull();
     expect(container.querySelector('[aria-label="shared, 2 lista_sessoes_plural"]')).not.toBeNull();
     await act(async () => useAparencia.getState().setAgrupar('server'));
     expect(container.querySelector('button[aria-label$="lista_sessoes_plural"]')).toBeNull();
@@ -340,7 +379,7 @@ describe('SessionList', () => {
     calls.realRow = true;
     useServers.setState({ servers: [server, { ...server, id: 'guest', label: 'guest-server', baseUrl: 'https://guest.test', invite: true }] });
     await mount({ variant });
-    expect(container.querySelector('[role="radio"]')).toBeNull();
+    expect(container.querySelector('[data-action^="group:"]')).toBeNull();
     expect(container.querySelector('button[aria-label$="lista_sessoes_plural"]')).toBeNull();
     const rows = [...container.querySelectorAll<HTMLButtonElement>('button[aria-label^="fixture,"]')];
     expect(rows).toHaveLength(2);
@@ -475,11 +514,11 @@ describe('SessionList', () => {
     await mount({ variant });
     const group = (label: string, n: number) => container.querySelector<HTMLButtonElement>(`[aria-label="${label}, ${n} lista_sessoes_plural"]`)!;
     await act(async () => group('fixture-server', 1).click());
-    await act(async () => container.querySelector<HTMLButtonElement>('[role="radio"]:last-child')!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-action="group:project"]')!.click());
     expect(group('srv1', 2).getAttribute('aria-expanded')).toBe('true');
     expect(container.querySelector('[data-row="srv1::fixture"]')).not.toBeNull();
     await act(async () => group('srv1', 2).click());
-    await act(async () => container.querySelector<HTMLButtonElement>('[role="radio"]:first-child')!.click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-action="group:server"]')!.click());
     expect(group('fixture-server', 1).getAttribute('aria-expanded')).toBe('false');
     expect(container.querySelector('[data-row="srv1::fixture"]')).toBeNull();
     expect(container.querySelector('[data-row="srv2::fixture"]')).not.toBeNull();
@@ -500,12 +539,12 @@ describe('SessionList', () => {
     ] as AggSession[];
     await act(async () => useSessions.setState({ rows, loading: false }));
     expect([...container.querySelectorAll('[data-row]')].map((el) => el.textContent))
-      .toEqual(['waiting-b', 'ready-b', 'ready-a', 'working-a']);
+      .toEqual(['waiting-b', 'working-a', 'ready-b', 'ready-a']);
     expect(container.querySelector('input[aria-label="lista_filtrar"]')).not.toBeNull();
     expect(container.textContent).not.toContain('native_brand');
     expect(container.textContent).not.toContain('native_sidebar_all_sessions');
     expect(container.querySelector('[aria-label="config_modal_titulo"]')).toBeNull();
-    const group = container.querySelector<HTMLButtonElement>('[aria-label="fixture-server, 2 lista_sessoes_plural"]')!;
+    const group = container.querySelector<HTMLButtonElement>('[aria-label="home_sessions_working, 1 lista_sessoes_plural"]')!;
     await act(async () => group.click());
     expect(container.querySelector('[data-row="srv1::working-a"]')).toBeNull();
     await act(async () => group.click());
@@ -530,14 +569,16 @@ describe('SessionList', () => {
       { ...row, name: 'ready-b', state: 'idle' }, external('ready-b-outside', 'ready-b'),
     ] }));
     const names = () => [...container.querySelectorAll('[data-section="srv1"] [data-row]')].map((el) => el.textContent);
-    expect(names()).toEqual(['ready-a', 'ready-a-outside', 'ready-b', 'ready-b-outside', 'working-anchor', 'working-outside']);
+    expect(names()).toEqual(['ready-a', 'ready-a-outside', 'ready-b', 'ready-b-outside']);
+    expect([...container.querySelectorAll('[data-section="state:working"] [data-row]')].map((el) => el.textContent))
+      .toEqual(['working-anchor', 'working-outside']);
     expect(container.querySelector('[data-section="outside"]')).toBeNull();
-    const group = container.querySelector<HTMLButtonElement>('[aria-label="fixture-server, 6 lista_sessoes_plural"]')!;
+    const group = container.querySelector<HTMLButtonElement>('[aria-label="fixture-server, 4 lista_sessoes_plural"]')!;
     await act(async () => group.click());
     expect(names()).toEqual([]);
-    expect(group.getAttribute('aria-label')).toBe('fixture-server, 6 lista_sessoes_plural');
+    expect(group.getAttribute('aria-label')).toBe('fixture-server, 4 lista_sessoes_plural');
     await act(async () => group.click());
-    expect(names()).toEqual(['ready-a', 'ready-a-outside', 'ready-b', 'ready-b-outside', 'working-anchor', 'working-outside']);
+    expect(names()).toEqual(['ready-a', 'ready-a-outside', 'ready-b', 'ready-b-outside']);
   });
 
   it('home mostra carregamento, vazio e falha identificada por máquina', async () => {

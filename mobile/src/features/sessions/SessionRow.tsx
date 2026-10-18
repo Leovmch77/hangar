@@ -34,8 +34,8 @@ function accountChip(account: string | null | undefined) {
   return { label, name: name || m.conta_padrao(), color: ACCOUNT_COLORS[hash % ACCOUNT_COLORS.length] };
 }
 
-// A marca é a única pista visual de estado na linha: lê a cor da pílula do tema, que acompanha
-// tema claro/escuro e o acento escolhido na Aparência.
+// O ícone é a única pista visual de estado na linha (o nome do estado só vai ao leitor de tela):
+// lê a cor da pílula do tema, que acompanha tema claro/escuro e o acento escolhido na Aparência.
 const PILL_DO_ESTADO: Record<State, 'working' | 'idle' | 'input' | 'dead'> = {
   working: 'working',
   idle: 'idle',
@@ -78,6 +78,10 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
   const fora = s.outside ?? null;
   const pares = useMemo(() => (fora ? [] : pairExternals(s)), [s, fora]);
   const parAtivo = !!onPair && !orq && !fora;
+  const wtPath = s.worktree_path ?? (s.worktree ? s.cwd ?? null : null);
+  const wtNome = worktreeLabel(s);
+  // Abrir a worktree mora no toque longo; convidado não tem (o backend recusa).
+  const wtAcao = onWorktree && !fora && !s.worktree_gone && wtNome && wtPath ? wtPath : null;
   // Vários pares: o dono sozinho não diz qual desfazer.
   const donoDo = (p: PairExternal) => (pares.length > 1 ? `${p.owner} · ${p.session}` : p.owner);
   // Sem o arrasto, o menu é o único caminho visível pro Git: o orquestrador fica só com ele.
@@ -86,6 +90,7 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
     () => fora ? [{ id: 'leave', title: m.pair_leave_outside({ dono: fora.owner }), attributes: { destructive: true } }] : [
       ...(orq ? [] : [{ id: 'rename', title: m.sessao_renomear(), image: Platform.select({ ios: 'pencil', android: 'ic_menu_edit' }) }]),
       ...(s.cwd && !s.serverInvite ? [{ id: 'git', title: m.sessao_git(), image: Platform.select({ ios: 'arrow.triangle.branch' }) }] : []),
+      ...(wtAcao ? [{ id: 'worktree', title: m.sessao_worktree_abrir(), image: Platform.select({ ios: 'folder' }) }] : []),
       ...(parAtivo ? [
         { id: 'pair-invite', title: m.native_par_convidar(), image: Platform.select({ ios: 'link' }) },
         { id: 'pair-accept', title: m.native_par_menu(), image: Platform.select({ ios: 'link.badge.plus' }) },
@@ -98,11 +103,12 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
         attributes: { destructive: true },
       }]),
     ],
-    [s.cwd, s.serverInvite, orq, fora, parAtivo, pares],
+    [s.cwd, s.serverInvite, orq, fora, parAtivo, pares, wtAcao],
   );
   const acao = (nome: string) => {
     if (nome === 'rename') onRenomear(s);
     else if (nome === 'git') onGit(s);
+    else if (nome === 'worktree' && wtAcao) onWorktree?.(s, wtAcao);
     else if (nome === 'delete' || nome === 'stop-following') onExcluir(s);
     else if (nome === 'leave') onPair?.(s, { kind: 'leave' });
     else if (nome === 'pair-invite') onPair?.(s, { kind: 'invite' });
@@ -126,15 +132,23 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
   const engineLabel = !orq && s.provider === 'claude' ? s.engine : null;
   const providerLabel = orq ? null : engineLabel || providerName(s.provider);
   const account = accountChip(s.conta);
+  const juntada = useWorktreeStatus(s.serverId, wtPath)?.merged === true;
+  // Na worktree a branch sai do texto e ganha o ícone de ramo; a pasta some quando repete o nome
+  // da sessão ou da worktree.
+  // Sem branch (HEAD destacado), o nome da worktree ocupa o lugar dela.
+  const branchWt = wtNome && !s.worktree_gone ? `${s.branch ?? wtNome}${juntada ? ' ✓' : ''}` : null;
   const meta = [
     engineLabel ? null : providerLabel,
-    s.cwd && cwd.base !== s.name ? cwd.base : null,
-    s.branch,
+    s.cwd && cwd.base !== s.name && cwd.base !== wtNome ? cwd.base : null,
+    branchWt ? null : s.branch,
     pairLabel,
   ].filter((p): p is string => !!p);
-  const wtPath = s.worktree_path ?? (s.worktree ? s.cwd ?? null : null);
-  const wtNome = worktreeLabel(s);
-  const juntada = useWorktreeStatus(s.serverId, wtPath)?.merged === true;
+  // Zero não desenha: a ausência de seta é "está em dia", como no PWA.
+  const gitAhead = s.git_ahead || 0;
+  const gitBehind = s.git_behind || 0;
+  const gitAdded = s.git_added || 0;
+  const gitRemoved = s.git_removed || 0;
+  const temGit = gitAhead > 0 || gitBehind > 0 || gitAdded > 0 || gitRemoved > 0;
   const corEstado = theme.tokens.pill[PILL_DO_ESTADO[s.state]].fg;
   const muted = theme.tokens.text.muted;
 
@@ -179,7 +193,7 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
       // estado e a pergunta sumiriam do leitor de tela.
       // Máquina e projeto entram mesmo quando a tela os esconde (lista agrupada, pasta = nome):
       // é o que distingue duas conversas de mesmo nome no leitor de tela.
-      accessibilityLabel={`${s.name}${fora ? `, ${m.pair_from_owner({ dono: fora.owner })}${s.guest_kind === 'share' ? '' : `, ${m.pair_level_view()}`}` : ''}, ${rotuloEstado(s.state)}${pendingQuestions > 0 ? `, ${m.ask_perguntas()}: ${pendingQuestions}` : ''}${sub ? `, ${sub}` : ''}${providerLabel ? `, ${providerLabel}` : ''}${account ? `, ${m.sessao_conta({ n: account.name })}` : ''}, ${s.serverLabel}${s.cwd ? `, ${cwd.base}` : ''}${s.branch ? `, ${s.branch}` : ''}`}
+      accessibilityLabel={`${s.name}${fora ? `, ${m.pair_from_owner({ dono: fora.owner })}${s.guest_kind === 'share' ? '' : `, ${m.pair_level_view()}`}` : ''}, ${rotuloEstado(s.state)}${s.limited ? `, ${s.limit_reset ? m.sessao_limite_volta({ n: s.limit_reset }) : m.sessao_limite()}` : ''}${pendingQuestions > 0 ? `, ${m.ask_perguntas()}: ${pendingQuestions}` : ''}${sub ? `, ${sub}` : ''}${providerLabel ? `, ${providerLabel}` : ''}${account ? `, ${m.sessao_conta({ n: account.name })}` : ''}, ${s.serverLabel}${s.cwd ? `, ${cwd.base}` : ''}${s.branch ? `, ${s.branch}` : ''}${gitAhead || gitBehind ? `, ${m.git_sync_titulo({ ahead: gitAhead, behind: gitBehind })}` : ''}`}
       accessibilityActions={acoesA11y}
       onAccessibilityAction={({ nativeEvent }) => {
         acao(nativeEvent.actionName);
@@ -187,7 +201,11 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
     >
       {fora ? <View style={[styles.faixa, { backgroundColor: theme.tokens.accent.base }]} /> : null}
       <View style={styles.lead}>
-        {s.state === 'working' ? <WorkingMark size={20} color={corEstado} /> : <HangarMark size={20} color={corEstado} />}
+        {s.state === 'working' ? <WorkingMark size={20} color={corEstado} />
+          : s.state === 'awaiting_input' ? <Icon name="CircleHelp" size={20} color={corEstado} />
+            : s.state === 'dead' ? <HangarMark size={20} color={corEstado} />
+              : s.limited ? <Icon name="Hourglass" size={20} color={theme.tokens.status.warning} />
+                : <Icon name="CircleCheck" size={20} color={corEstado} />}
       </View>
       <View style={styles.col}>
         <View style={styles.linha}>
@@ -196,30 +214,18 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
           {orq ? <Chip>{m.orq_row_badge()}</Chip> : null}
           {untracked ? <Chip tone="warning">{m.sessao_sem_id()}</Chip> : null}
           {fora ? <Chip tone="accent" icon={s.guest_kind === 'share' ? 'Link' : 'Eye'}>{m.pair_from_owner({ dono: fora.owner })}</Chip> : null}
-          {account ? (
-            <View style={[styles.account, { backgroundColor: superficie(theme, 0.5) }]} accessibilityLabel={m.sessao_conta({ n: account.name })}>
-              <View style={[styles.accountDot, { backgroundColor: account.color }]} />
-              <Text style={[styles.accountText, { color: theme.tokens.text.secondary }]} numberOfLines={1}>{account.label}</Text>
-            </View>
-          ) : null}
           <Text style={[styles.tempo, { color: muted }]} numberOfLines={1}>{relativeTime(s.last_activity)}</Text>
         </View>
-        {/* O que a sessão está fazendo: a pergunta (cor de input), a atividade (itálico) ou o estado. */}
-        <Text
-          style={[
-            styles.sub,
-            s.question
-              ? { color: theme.tokens.pill.input.fg }
-              : sub
-                ? { color: theme.tokens.text.secondary, fontStyle: 'italic' }
-                : { color: muted },
-          ]}
-          numberOfLines={1}
-        >
-          {sub ?? rotuloEstado(s.state)}
-        </Text>
-        {/* A pasta some quando repete o nome; a worktree tem seu próprio chip abaixo. */}
-        {meta.length || engineLabel || mostrarServidor ? (
+        {/* O que a sessão está fazendo: a pergunta (cor de input) ou a atividade (itálico). */}
+        {sub ? (
+          <Text
+            style={[styles.sub, s.question ? { color: theme.tokens.pill.input.fg } : { color: theme.tokens.text.secondary, fontStyle: 'italic' }]}
+            numberOfLines={1}
+          >
+            {sub}
+          </Text>
+        ) : null}
+        {meta.length || engineLabel || mostrarServidor || branchWt || account || temGit ? (
           <View style={styles.metaRow}>
             {mostrarServidor ? <>
               <Text style={[styles.meta, styles.metaRest, { color: s.serverColor }]} numberOfLines={1}>{s.serverLabel}</Text>
@@ -232,17 +238,35 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
               </View>
             ) : null}
             {meta.length ? <Text style={[styles.meta, styles.metaRest, { color: muted }]} numberOfLines={1}>{engineLabel ? ' · ' : ''}{meta.join(' · ')}</Text> : null}
+            {branchWt ? <>
+              {meta.length || engineLabel ? <Text style={[styles.meta, styles.metaSeparator, { color: muted }]}>{' · '}</Text> : null}
+              <Icon name="GitBranch" size={12} color={muted} />
+              <Text style={[styles.meta, styles.metaRest, styles.branchWt, { color: muted }]} numberOfLines={1}>{branchWt}</Text>
+            </> : null}
+            {temGit ? (
+              <View style={styles.git}>
+                {gitAhead > 0 ? <View style={styles.gitPar}>
+                  <Icon name="ArrowUp" size={11} color={theme.tokens.accent.base} />
+                  <Text style={[styles.meta, styles.gitSync, { color: theme.tokens.accent.base }]}>{gitAhead}</Text>
+                </View> : null}
+                {gitBehind > 0 ? <View style={styles.gitPar}>
+                  <Icon name="ArrowDown" size={11} color={theme.tokens.status.warning} />
+                  <Text style={[styles.meta, styles.gitSync, { color: theme.tokens.status.warning }]}>{gitBehind}</Text>
+                </View> : null}
+                {gitAdded > 0 ? <Text style={[styles.meta, { color: theme.tokens.status.success }]}>{`+${gitAdded}`}</Text> : null}
+                {gitRemoved > 0 ? <Text style={[styles.meta, { color: theme.tokens.status.error }]}>{`−${gitRemoved}`}</Text> : null}
+              </View>
+            ) : null}
+            {account ? (
+              <View style={styles.account} accessibilityLabel={m.sessao_conta({ n: account.name })}>
+                <View style={[styles.accountDot, { backgroundColor: account.color }]} />
+                <Text style={[styles.accountText, { color: theme.tokens.text.secondary }]} numberOfLines={1}>{account.label}</Text>
+              </View>
+            ) : null}
           </View>
         ) : null}
         {s.worktree_gone ? (
           <Text style={[styles.meta, { color: muted }]} numberOfLines={1}>{m.worktree_apagada()}</Text>
-        ) : wtNome && wtPath && onWorktree ? (
-          <Pressable onPress={() => onWorktree(s, wtPath)} accessibilityRole="button"
-            accessibilityLabel={`${m.sessao_worktree()}: ${wtNome}`} hitSlop={8} style={styles.wt}>
-            <Chip icon="GitBranch" mono>{`${wtNome}${juntada ? ' ✓' : ''}`}</Chip>
-          </Pressable>
-        ) : wtNome && wtPath ? (
-          <View style={styles.wt}><Chip icon="GitBranch" mono>{wtNome}</Chip></View>
         ) : null}
         {pendentes.length ? (
           <View style={styles.chips}>
@@ -275,14 +299,14 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
 });
 
 const styles = StyleSheet.create((theme) => ({
-  row: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, minHeight: 56, paddingVertical: 10, paddingHorizontal: 12, borderRadius: theme.base.radius.lg },
+  row: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, minHeight: 56, paddingVertical: 10, paddingHorizontal: 12 },
   compact: { paddingVertical: 6, minHeight: 44 },
   // a marca alinha com a linha do nome, não com o centro do bloco
   lead: { width: 22, alignItems: 'center', paddingTop: 1 },
   col: { flex: 1, gap: 2, minWidth: 0 },
   linha: { flexDirection: 'row', alignItems: 'center', gap: 6, minWidth: 0 },
   nome: { fontSize: theme.base.text.base, lineHeight: 22, fontWeight: '600', flexShrink: 1 },
-  account: { flexDirection: 'row', alignItems: 'center', gap: 4, minWidth: 0, maxWidth: 96, flexShrink: 1, paddingHorizontal: 6, paddingVertical: 1, borderRadius: theme.base.radius.full },
+  account: { flexDirection: 'row', alignItems: 'center', gap: 4, minWidth: 0, maxWidth: 96, flexShrink: 0, paddingLeft: 8 },
   accountDot: { width: 5, height: 5, borderRadius: theme.base.radius.full, flexShrink: 0 },
   accountText: { fontSize: theme.base.text.xxs, fontWeight: '500', minWidth: 0, flexShrink: 1 },
   tempo: { marginLeft: 'auto', paddingLeft: 4, flexShrink: 0, fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
@@ -295,7 +319,11 @@ const styles = StyleSheet.create((theme) => ({
   meta: { fontSize: theme.base.text.xs, lineHeight: 18 },
   metaTxt: { fontSize: theme.base.text.xs },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 },
-  wt: { alignSelf: 'flex-start', marginTop: theme.base.space[1] },
+  branchWt: { paddingLeft: 3 },
+  // O git pede ação (enviar, trazer): não encolhe, quem cede é o texto antes dele.
+  git: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0, paddingLeft: 8 },
+  gitPar: { flexDirection: 'row', alignItems: 'center', gap: 1 },
+  gitSync: { fontWeight: '600', fontVariant: ['tabular-nums'] },
   // Recuada e com a faixa do grupo, como a linha de fora no app de PC.
   fora: { marginLeft: 8 },
   faixa: { position: 'absolute', left: 0, top: 6, bottom: 6, width: 2, borderRadius: 1 },

@@ -3,6 +3,7 @@ import { Alert, Pressable, RefreshControl, SectionList, Text, TextInput, View, A
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { MenuView } from '@react-native-menu/menu';
 import {
   agruparSessoes,
   deleteSession,
@@ -11,7 +12,9 @@ import {
   renameSession,
   setPairAccess,
   resumeSession,
+  sortSessions,
   type AggSession,
+  type GroupBy,
   type Server,
 } from '@hangar/core';
 import { ownServers, useServers } from '../../stores/servers';
@@ -38,6 +41,9 @@ const mensagemDe = (e: unknown): string => (e instanceof Error ? e.message : Str
 
 // O formulário remonta a home ao trocar de máquina; a memória pertence à vista, não à gaveta.
 const homeView = { collapsedGroups: new Set<string>() as ReadonlySet<string>, contentOffset: { x: 0, y: 0 } };
+
+// Seções de estado não dependem do agrupamento: recolher "Trabalhando" vale nos dois modos.
+const chaveGrupo = (modo: GroupBy, id: string) => (id.startsWith('state:') ? id : `${modo}:${id}`);
 
 // `total` sobrevive ao grupo recolhido: `data` fica vazio, mas o cabeçalho continua contando.
 interface Section {
@@ -251,10 +257,19 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
     const visiveis = busca
       ? liveRows.filter((r) => r.name.toLowerCase().includes(busca) || (r.cwd ?? '').toLowerCase().includes(busca))
       : liveRows;
-    const groups = placeOutside(agruparSessoes(visiveis.filter((r) => !r.outside), modo), visiveis.filter((r) => r.outside), modo, liveRows);
-    if (modo === 'server') groups.sort((a, b) => a.label.localeCompare(b.label));
+    const proprias = visiveis.filter((r) => !r.outside);
+    // Quem espera você ou está trabalhando sobe para o topo; o resto fica no agrupamento escolhido.
+    const topo = [
+      { id: 'state:awaiting_input', label: m.home_sessions_awaiting(), color: null, sessions: sortSessions(proprias.filter((r) => r.state === 'awaiting_input')) },
+      { id: 'state:working', label: m.home_sessions_working(), color: null, sessions: sortSessions(proprias.filter((r) => r.state === 'working')) },
+    ];
+    const resto = agruparSessoes(proprias.filter((r) => r.state !== 'awaiting_input' && r.state !== 'working'), modo);
+    if (modo === 'server') resto.sort((a, b) => a.label.localeCompare(b.label));
+    // Sem rótulo, as paradas pareceriam continuação de "Trabalhando".
+    if (modo === 'none' && topo.some((g) => g.sessions.length)) resto[0].label = m.home_sessions_ready();
+    const groups = placeOutside([...topo, ...resto], visiveis.filter((r) => r.outside), modo, liveRows);
     return groups.filter((g) => g.sessions.length).map((g) => {
-      const collapsed = modo !== 'none' && recolhidos.has(`${modo}:${g.id}`);
+      const collapsed = !!g.label && recolhidos.has(chaveGrupo(modo, g.id));
       return { id: g.id, label: g.label, color: g.color, total: g.sessions.length, collapsed, data: collapsed ? [] : g.sessions };
     });
   }, [rows, busca, modo, recolhidos]);
@@ -264,7 +279,7 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
     (id: string) =>
       setRecolhidos((atual) => {
         const novo = new Set(atual);
-        const chave = `${modo}:${id}`;
+        const chave = chaveGrupo(modo, id);
         if (novo.has(chave)) novo.delete(chave);
         else novo.add(chave);
         if (home) homeView.collapsedGroups = novo;
@@ -303,11 +318,10 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
 
   const searchAction = <Pressable
     onPress={() => { onClose(); router.push('/search' as never); }}
-    style={home ? styles.searchHome : styles.icone}
+    style={styles.icone}
     accessibilityRole="button" accessibilityLabel={m.switcher_buscar_conversas()}
   >
     <Icon name="Search" size={20} color={theme.tokens.text.secondary} />
-    {home ? <Text style={styles.searchLabel}>{m.switcher_buscar_conversas()}</Text> : null}
   </Pressable>;
 
   const topo = (
@@ -346,19 +360,30 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
     </View>
   );
 
+  const rotuloAgrupar = (value: 'server' | 'project') => (value === 'server' ? m.lista_agrupar_servidor() : m.lista_agrupar_projeto());
   const groupControl = !conversas && variosServidores ? (
-    <View style={[styles.groupControl, { backgroundColor: superficie(theme, 0.4) }]}
-      accessibilityRole="radiogroup" accessibilityLabel={m.lista_agrupar()}>
-      {(['server', 'project'] as const).map((value) => (
-        <Pressable key={value} onPress={() => useAparencia.getState().setAgrupar(value)}
-          accessibilityRole="radio" accessibilityState={{ checked: groupBy === value }}
-          style={[styles.groupOption, groupBy === value && { backgroundColor: superficie(theme, 0.8) }]}>
-          <Text style={[styles.groupOptionText, { color: groupBy === value ? theme.tokens.text.primary : theme.tokens.text.secondary }]}>
-            {value === 'server' ? m.lista_agrupar_servidor() : m.lista_agrupar_projeto()}
-          </Text>
-        </Pressable>
-      ))}
-    </View>
+    <MenuView
+      title={m.lista_agrupar()}
+      actions={(['server', 'project'] as const).map((value) => ({ id: `group:${value}`, title: rotuloAgrupar(value), state: (groupBy === value ? 'on' : 'off') as 'on' | 'off' }))}
+      onPressAction={({ nativeEvent }) => useAparencia.getState().setAgrupar(nativeEvent.event === 'group:project' ? 'project' : 'server')}
+    >
+      {/* Sem Pressable aqui dentro: ele roubaria o toque que abre o menu nativo. */}
+      <View style={styles.icone} accessible accessibilityRole="button" accessibilityLabel={`${m.lista_agrupar()}: ${rotuloAgrupar(groupBy)}`}>
+        <Icon name="ListFilter" size={20} color={theme.tokens.accent.base} />
+      </View>
+    </MenuView>
+  ) : null;
+
+  const termo = filtro.trim();
+  const buscarDentro = termo ? (
+    <Pressable
+      onPress={() => { onClose(); router.push(`/search?q=${encodeURIComponent(termo)}` as never); }}
+      style={({ pressed }) => [styles.dentro, { backgroundColor: superficie(theme, pressed ? 0.6 : 0.4) }]}
+      accessibilityRole="button" accessibilityLabel={m.lista_buscar_dentro({ q: termo })}
+    >
+      <Icon name="Search" size={16} color={theme.tokens.accent.base} />
+      <Text style={[styles.dentroTxt, { color: theme.tokens.accent.base }]} numberOfLines={1}>{m.lista_buscar_dentro({ q: termo })}</Text>
+    </Pressable>
   ) : null;
 
   // `atual`: a gaveta só existe sobre a tela inicial, então "Nova conversa" é sempre o lugar atual.
@@ -453,7 +478,9 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
         )}
         renderSectionHeader={({ section }) => {
           if (!section.label) return null;
-          const cor = section.color ?? theme.tokens.text.muted;
+          const cor = section.id === 'state:awaiting_input' ? theme.tokens.pill.input.fg
+            : section.id === 'state:working' ? theme.tokens.pill.working.fg
+              : section.color ?? theme.tokens.text.muted;
           return (
             <Pressable
               onPress={() => alternarGrupo(section.id)}
@@ -464,7 +491,7 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
               accessibilityHint={section.collapsed ? m.sessao_expandir() : m.sessao_recolher()}
             >
               <View style={[styles.ponto, { backgroundColor: cor }]} />
-              <Text style={[styles.grupoTxt, { color: theme.tokens.text.secondary }]} numberOfLines={1}>{section.label}</Text>
+              <Text style={[styles.grupoTxt, { color: theme.tokens.text.primary }]} numberOfLines={1}>{section.label}</Text>
               <View style={[styles.groupBadge, { backgroundColor: superficie(theme, 0.5) }]}>
                 <Text style={[styles.grupoConta, { color: theme.tokens.text.muted }]}>{section.total}</Text>
               </View>
@@ -474,11 +501,16 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
             </Pressable>
           );
         }}
-        renderItem={({ item }) => (
+        renderItem={({ item, section, index }) => (
+          // Cartão por grupo, como as listas do iOS: só a primeira e a última linha arredondam.
+          <View style={[styles.cartao, { backgroundColor: superficie(theme, 0.4) }, index === 0 && styles.cartaoTopo,
+            index === section.data.length - 1 && styles.cartaoFim]}>
+            {index > 0 ? <View style={[styles.divisor, { backgroundColor: theme.tokens.border.subtle }]} /> : null}
             <SessionRow
               session={item}
               compact={home}
-              mostrarServidor={todos.length > 1 && modo !== 'server'}
+              // No topo as linhas vêm de máquinas diferentes, então dizem de qual são.
+              mostrarServidor={todos.length > 1 && (modo !== 'server' || section.id.startsWith('state:'))}
               onPress={abrir}
               onGit={abrirGit}
               onExcluir={excluir}
@@ -487,6 +519,7 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
               onWorktree={proprios.has(item.serverId) ? abrirWorktree : undefined}
               onPair={proprios.has(item.serverId) || item.outside ? fazerPar : undefined}
             />
+          </View>
         )}
         ListEmptyComponent={home && machineErrors.length ? null
           : busca ? vazio(m.lista_vazia_filtro(), null, true) : vazio(m.lista_nenhuma_ativa(), null)}
@@ -502,9 +535,9 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
       {/* Sem caixa: a lista fica direto sobre o fundo escolhido em Aparência, como no app de PC. */}
       {/* A gaveta passa por baixo da barra de status e do indicador de início: a margem segura é daqui. */}
       <View style={[styles.painel, !home && { paddingTop: insets.top + 8, paddingBottom: Math.max(insets.bottom, 8) }]}>
-        {home ? searchAction : topo}
-        {conversas ? null : campoBusca}
-        {groupControl}
+        {home ? null : topo}
+        {conversas ? null : <View style={styles.buscaLinha}>{campoBusca}{groupControl}</View>}
+        {conversas ? null : buscarDentro}
         {machineStatus}
         <View style={styles.corpo}>{corpo}</View>
         {home ? null : rodape}
@@ -527,13 +560,11 @@ const styles = StyleSheet.create((theme) => ({
   marca: { flexShrink: 1, fontSize: theme.base.text.xl, fontWeight: '700' },
   topoAcoes: { flexDirection: 'row', alignItems: 'center', marginLeft: 'auto' },
   icone: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-  searchHome: { alignSelf: 'flex-end', minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[3] },
-  searchLabel: { fontSize: theme.base.text.sm, color: theme.tokens.text.secondary },
-  campo: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4, marginBottom: 8, paddingHorizontal: 12, borderRadius: theme.base.radius.lg, minHeight: 40 },
+  buscaLinha: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4, marginBottom: 8 },
+  campo: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, borderRadius: theme.base.radius.lg, minHeight: 40 },
+  dentro: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 44, paddingHorizontal: 12, marginBottom: 8, borderRadius: theme.base.radius.lg },
+  dentroTxt: { flexShrink: 1, fontSize: theme.base.text.sm, fontWeight: '500' },
   input: { flex: 1, fontSize: theme.base.text.base, paddingVertical: 8 },
-  groupControl: { flexDirection: 'row', gap: 4, padding: 4, marginBottom: 8, borderRadius: theme.base.radius.full },
-  groupOption: { flex: 1, minHeight: 44, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 8, borderRadius: theme.base.radius.full },
-  groupOptionText: { fontSize: theme.base.text.sm, fontWeight: '600' },
   corpo: { flex: 1 },
   listContent: { flexGrow: 1, paddingBottom: theme.base.space[2] },
   navs: { paddingBottom: 8, gap: 2 },
@@ -542,8 +573,13 @@ const styles = StyleSheet.create((theme) => ({
   navTxt: { flexShrink: 1, fontSize: theme.base.text.base },
   navAtual: { fontWeight: '600' },
   navConta: { marginLeft: 'auto', fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
-  grupo: { flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 44, paddingVertical: 8, paddingHorizontal: 12, backgroundColor: 'transparent' },
-  grupoTxt: { flexShrink: 1, fontSize: theme.base.text.xs, fontWeight: '600' },
+  grupo: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 44, paddingTop: 14, paddingBottom: 6, paddingHorizontal: 6, backgroundColor: 'transparent' },
+  grupoTxt: { flexShrink: 1, fontSize: theme.base.text.lg, fontWeight: '700' },
+  cartao: { overflow: 'hidden' },
+  cartaoTopo: { borderTopLeftRadius: theme.base.radius.lg, borderTopRightRadius: theme.base.radius.lg },
+  cartaoFim: { borderBottomLeftRadius: theme.base.radius.lg, borderBottomRightRadius: theme.base.radius.lg },
+  // recua até o texto, como o separador das listas do iOS
+  divisor: { height: StyleSheet.hairlineWidth, marginLeft: 46 },
   groupBadge: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: theme.base.radius.full },
   grupoConta: { fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
   groupArrow: { marginLeft: 'auto' },
