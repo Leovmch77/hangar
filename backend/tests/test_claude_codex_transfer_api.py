@@ -19,7 +19,6 @@ from app.adapters.claude_headless.adapter import ClaudeHeadlessAdapter
 from app.adapters.codex import sessions as cs, transfer as importer
 from app.adapters.codex.adapter import CodexAdapter
 from app.models import SessionInfo
-from app.transcribe import Transcription
 
 
 @pytest.fixture
@@ -627,8 +626,7 @@ async def test_cancelled_common_send_keeps_participation_until_receipt(terminal_
         pass
 
 
-@pytest.mark.parametrize("slow_route", ["transcribe", "git/diff"])
-async def test_slow_query_does_not_exclude_input_or_interrupt(terminal_ingress, monkeypatch, slow_route):
+async def test_slow_query_does_not_exclude_input_or_interrupt(terminal_ingress, monkeypatch):
     import threading
     from httpx2 import ASGITransport, AsyncClient
     entered, release = threading.Event(), threading.Event()
@@ -638,15 +636,12 @@ async def test_slow_query_does_not_exclude_input_or_interrupt(terminal_ingress, 
         assert release.wait(5)
         return "resultado"
 
-    monkeypatch.setattr(api, "save_upload", lambda *args: str(terminal_ingress.source.parent / "audio.wav"))
-    monkeypatch.setattr(api, "transcribe_with_provider", lambda *args: Transcription(slow(*args), "p"))
     monkeypatch.setattr(api, "file_diff", slow)
     monkeypatch.setattr(api, "_session_cwd", lambda name: terminal_ingress.info.cwd)
     monkeypatch.setattr(api.terminal, "send_prompt", lambda *args, **kwargs: "deferred")
     headers = {"Authorization": "Bearer test-secret"}
     async with AsyncClient(transport=ASGITransport(app=api.app), base_url="http://test", headers=headers) as client:
-        kwargs = {"content": b"audio", "headers": {"X-Filename": "audio.wav"}} if slow_route == "transcribe" else {"json": {"path": "example.py"}}
-        pending = asyncio.create_task(client.post(f"/api/sessions/s/{slow_route}", **kwargs))
+        pending = asyncio.create_task(client.post("/api/sessions/s/git/diff", json={"path": "example.py"}))
         try:
             assert await asyncio.to_thread(entered.wait, 5)
             # Consulta pendente também não prende a operação exclusiva de troca.
@@ -703,14 +698,12 @@ async def test_transfer_still_refuses_queries_input_and_interrupt(terminal_ingre
                                   None, {**scenario.meta, "jsonl": str(scenario.source)}, None, None, None)
     store.save_transfer(record)
     never = Mock(side_effect=AssertionError("handler não deve executar durante a transferência"))
-    monkeypatch.setattr(api, "transcribe_with_provider", never)
     monkeypatch.setattr(api, "file_diff", never)
     monkeypatch.setattr(api.terminal, "send_prompt", never)
     monkeypatch.setattr(api.terminal, "interrupt", never)
     headers = {"Authorization": "Bearer test-secret"}
     async with AsyncClient(transport=ASGITransport(app=api.app), base_url="http://test", headers=headers) as client:
-        requests = [client.post("/api/sessions/s/transcribe", content=b"audio"),
-                    client.post("/api/sessions/s/git/diff", json={"path": "example.py"}),
+        requests = [client.post("/api/sessions/s/git/diff", json={"path": "example.py"}),
                     client.post("/api/sessions/s/input", json={"text": "mensagem"}),
                     client.post("/api/sessions/s/interrupt")]
         responses = await asyncio.gather(*requests)

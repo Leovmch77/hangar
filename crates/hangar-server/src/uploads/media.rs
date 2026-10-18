@@ -90,12 +90,7 @@ pub async fn extract(
     session: &str,
     path: &Path,
 ) -> (Vec<PathBuf>, Option<Vec<u8>>) {
-    let ext = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if !["mp4", "mov", "webm", "mkv", "m4v", "avi"].contains(&ext.as_str()) {
+    if !is_video(path) {
         return (vec![], None);
     }
     let scratch = std::env::temp_dir().join(format!(
@@ -114,6 +109,7 @@ pub async fn extract(
     let Ok((_, retained)) = store.open(project, session, name) else {
         return (vec![], None);
     };
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
     let src = scratch.join(format!("source.{ext}"));
     let Ok(mut output) = tokio::fs::File::create(&src).await else {
         return (vec![], None);
@@ -229,6 +225,11 @@ pub async fn extract(
     (frames, audio)
 }
 
+pub fn is_video(path: &Path) -> bool {
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    ["mp4", "mov", "webm", "mkv", "m4v", "avi"].contains(&ext.as_str())
+}
+
 pub fn frame_positions(duration: f64) -> Vec<f64> {
     if duration > 0.0 && duration.is_finite() {
         (0..6).map(|i| duration * (i as f64 + 0.5) / 6.0).collect()
@@ -236,37 +237,11 @@ pub fn frame_positions(duration: f64) -> Vec<f64> {
         vec![0.0]
     }
 }
-pub async fn transcribe(st: &crate::routes::AppState, name: &str, audio: Vec<u8>) -> String {
-    use base64::Engine;
-    use http_body_util::BodyExt;
-    let name = percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC);
-    // Base64 não tem caractere a escapar em JSON: o corpo é montado direto, sem serializar um valor.
-    let body = format!(
-        r#"{{"audio":"{}"}}"#,
-        base64::engine::general_purpose::STANDARD.encode(audio)
-    );
-    let Ok(request) = axum::http::Request::post(format!(
-        "http://{}/internal/sessions/{name}/upload-transcript",
-        st.cfg.upstream
-    ))
-    .header("x-hangar-internal", &st.cfg.internal_secret)
-    .header("content-type", "application/json")
-    .body(axum::body::Body::from(body)) else {
-        return String::new();
-    };
-    let bytes = tokio::time::timeout(Duration::from_secs(120), async {
-        let response = st.http.request(request).await.ok()?;
-        if !response.status().is_success() {
-            return None;
-        }
-        Some(response.into_body().collect().await.ok()?.to_bytes())
-    })
-    .await
-    .ok()
-    .flatten();
-    bytes
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|v| v["text"].as_str().map(str::to_owned))
+/// O áudio do vídeo, no perfil de vídeo; falha vira texto vazio e o anexo segue.
+pub async fn transcribe(st: &crate::routes::AppState, audio: Vec<u8>) -> String {
+    crate::transcription::routes::transcribe_here(st, audio.into(), Some("audio.m4a".into()), crate::transcription::model::Profile::Video)
+        .await
+        .map(|t| t.text.trim().to_owned())
         .unwrap_or_default()
 }
 

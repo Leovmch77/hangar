@@ -58,6 +58,9 @@ pub struct InternalInfo {
     pub headless: bool,
     #[serde(default)]
     pub lifecycle_id: Option<String>,
+    /// Pasta da sessão na lista; o cofre de anexos é chaveado por ela.
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]

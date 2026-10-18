@@ -93,5 +93,17 @@ pub(super) fn leftover(claude: &Path, name: &str) -> Option<PathBuf> {
     let stem = crate::groups::store::file_stem(name);
     [claude.join(".hangar-pair").join(format!("{stem}.json")), claude.join(".hangar-chain").join(format!("{stem}.json")),
         crate::locate::queue_path(claude, name)]
-        .into_iter().find(|path| path.try_exists().unwrap_or(true))
+        .into_iter().find(|path| probe(path).unwrap_or(true))
+}
+
+/// `try_exists` em que a pasta-mãe que existe e não é pasta é erro em todo sistema: no Windows o
+/// caminho sob um arquivo responde "não existe", e o nome passaria por livre.
+pub(super) fn probe(path: &Path) -> std::io::Result<bool> {
+    if let Some(parent) = path.parent()
+        && parent.try_exists()?
+        && !parent.is_dir()
+    {
+        return Err(std::io::ErrorKind::NotADirectory.into());
+    }
+    path.try_exists()
 }

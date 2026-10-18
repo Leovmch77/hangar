@@ -319,20 +319,22 @@ export default function ActivitySheet() {
   const headerTitle = level === 'list' ? m.ctx_atividade() : level === 'subagent' ? subTitle || m.atividade_subagente() : level === 'workflow' ? (detail?.name ?? m.atividade_workflow()) : (agentDetail?.label ?? m.atividade_agente());
   const countBadge = level === 'list' && activity.total > 0 ? `${activity.done}/${activity.total}` : null;
   const wfBadge = level === 'workflow' && detail ? detail.status : null;
-  // Opções novas a cada render fazem o Stack.Screen chamar setOptions a cada render; no iOS o cabeçalho
-  // nativo da folha remede, a tela redesenha e o laço estoura "Maximum update depth exceeded".
+  const headerSecondary = theme.tokens.text.secondary;
+  const headerSuccess = theme.tokens.status.success;
+  const headerAccent = theme.tokens.accent.base;
+  // O proxy do tema muda em todo render; só as cores podem invalidar as opções do cabeçalho.
   const headerOptions = useMemo(() => ({
     ...header,
     headerShown: Platform.OS !== 'android',
     title: headerTitle,
     headerLeft: level === 'list' ? undefined : () => <HeaderBack onPress={back} />,
-    headerRight: countBadge ? () => <Text style={[styles.count, { color: theme.tokens.text.secondary }]}>{countBadge}</Text> : wfBadge ? () => (
-      <Text style={[styles.wfStatus, wfBadge === 'completed' ? { color: theme.tokens.status.success } : wfBadge === 'running' ? { color: theme.tokens.accent.base } : { color: theme.tokens.text.secondary }]}>{wfBadge}</Text>
+    headerRight: countBadge ? () => <Text style={[styles.count, { color: headerSecondary }]}>{countBadge}</Text> : wfBadge ? () => (
+      <Text style={[styles.wfStatus, { color: wfBadge === 'completed' ? headerSuccess : wfBadge === 'running' ? headerAccent : headerSecondary }]}>{wfBadge}</Text>
     ) : undefined,
     sheetAllowedDetents: [0.92],
     sheetGrabberVisible: true,
     contentStyle: { backgroundColor: 'transparent' },
-  }), [header, headerTitle, level, back, countBadge, wfBadge, theme]);
+  }), [header, headerTitle, level, back, countBadge, wfBadge, headerSecondary, headerSuccess, headerAccent]);
 
   const androidHeader = Platform.OS === 'android' ? (
     <View style={styles.header}>

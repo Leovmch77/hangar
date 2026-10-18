@@ -75,6 +75,7 @@ pub fn info_of(row: &SessionRow, claude: &Path) -> InternalInfo {
         history: serde_json::json!({"queue": queue_path(claude, &row.name)}),
         headless: row.provider == "codex" && row.headless,
         lifecycle_id: row.lifecycle_id.clone(),
+        cwd: row.cwd.as_deref().filter(|c| !c.is_empty()).map(PathBuf::from),
     }
 }
 

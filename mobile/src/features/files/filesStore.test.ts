@@ -352,6 +352,32 @@ describe('filesStore', () => {
     expect(api.use.getState().selecionado).toBeNull();
   });
 
+  it('última folha fechada solta texto, diff e busca, preservando pastas abertas', async () => {
+    const text = '# retained-file\n'.repeat(4000);
+    vi.mocked(core.readFile).mockResolvedValue({ path: 'large.md', text, size: text.length, truncated: false, digest: 'd' });
+    vi.mocked(core.pathDiff).mockResolvedValue({
+      path: 'large.md', diff: '+retained-file', original: text,
+      truncated: false, escopo_pedido: 'branch', escopo_usado: 'branch', base: null, motivo: null,
+    });
+    vi.mocked(core.searchFiles).mockResolvedValue({ hits: [{ path: 'large.md', line: 1, text }], truncated: false, mode: 'contents' });
+    const api = apis();
+    api.retain();
+    api.retain();
+    await api.alternarPasta('docs');
+    await api.abrir('large.md');
+    await api.buscar('retained', 'contents');
+    api.release();
+    expect(api.use.getState().conteudo?.text).toBe(text);
+
+    api.release();
+    expect(api.use.getState().conteudo).toBeNull();
+    expect(api.use.getState().diff).toBeNull();
+    expect(api.use.getState().selecionado).toBeNull();
+    expect(api.use.getState().resultados).toEqual([]);
+    expect(api.use.getState().abertos.has('docs')).toBe(true);
+    expect(api.use.getState().porPasta.has('docs')).toBe(true);
+  });
+
   it('404 ao abrir remove hit dos resultados quando busca gravada ainda é a mesma', async () => {
     const api = apis();
     // simula busca prévia

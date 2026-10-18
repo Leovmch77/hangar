@@ -355,38 +355,6 @@ def test_descendant_pids_mapa_com_anel_termina():
     assert sorted(procinfo._descendant_pids(0, auto_loop)) == [0, 4, 9]
 
 
-def _bash_do_claude(tmp_path, comando):
-    """Um shell no formato em que o Claude Code roda o Bash: prólogo, `eval '...'`, saída em tasks/."""
-    import subprocess
-    import time
-    tarefas = tmp_path / "claude-teste" / "pasta" / "sessao" / "tasks"
-    tarefas.mkdir(parents=True)
-    escapado = comando.replace("'", """'"'"'""")
-    script = f"true && eval '{escapado}' < /dev/null && pwd -P >| /dev/null"
-    with open(tarefas / "t1.output", "wb") as saida:
-        proc = subprocess.Popen(["bash", "-c", script], stdout=saida, stderr=saida)
-    time.sleep(0.6)
-    return proc
-
-
-@pytest.mark.parametrize("ramo", ["proc", "psutil"])
-def test_saida_de_comando_acha_o_bash_pelo_eval(tmp_path, monkeypatch, ramo):
-    if ramo == "proc" and not procinfo._TEM_PROC:
-        pytest.skip("exercita o ramo /proc")
-    if ramo == "psutil":
-        monkeypatch.setattr(procinfo, "psutil", psutil, raising=False)
-        monkeypatch.setattr(procinfo, "_TEM_PROC", False)
-        monkeypatch.setattr(procinfo, "_comandos_cache", None)
-    comando = "echo \"it's vivo\"; sleep 3"
-    proc = _bash_do_claude(tmp_path, comando)
-    try:
-        assert procinfo.saida_de_comando(comando) == "it's vivo\n"
-        assert procinfo.saida_de_comando("outro comando") is None
-    finally:
-        proc.kill()
-        proc.wait()
-
-
 def test_taskkill_path_prefers_system32_and_falls_back_to_path(monkeypatch, tmp_path):
     monkeypatch.setenv("SystemRoot", str(tmp_path))
     monkeypatch.setattr(procinfo.shutil, "which", lambda n: r"C:\no-path\taskkill.exe")

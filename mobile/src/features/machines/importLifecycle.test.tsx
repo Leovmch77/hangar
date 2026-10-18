@@ -18,7 +18,7 @@ vi.mock('./importMachines', () => ({ discoverSavedMachines: mocks.discover }));
 vi.mock('react-native-url-polyfill/auto', () => ({}));
 vi.mock('../../theme/unistyles', () => ({}));
 vi.mock('../../net/configureCore', () => ({ configureCore: () => {} }));
-vi.mock('../../stores/prefs', () => ({ prefs: { getString: () => mocks.savedFatal } }));
+vi.mock('../../stores/prefs', () => ({ prefs: { getString: () => mocks.savedFatal, set: (_k: string, v: string) => { mocks.savedFatal = v; } } }));
 vi.mock('../../stores/chat', () => ({ setChatsForeground: () => {} }));
 vi.mock('../../stores/sessions', () => ({
   useSessions: { getState: () => ({ setForeground: () => {} }) },
@@ -57,6 +57,10 @@ test('erro fatal salvo mostra o caminho do relatório na próxima abertura', asy
   mocks.savedFatal = JSON.stringify({ report: { timestamp: '2026-10-18T10:26:00Z', message: 'Out of memory' }, pending: true });
   await act(async () => root.render(<Layout />));
   expect(mocks.warning).toHaveBeenCalledExactlyOnceWith(m.native_last_error_available(), { duration: 12_000 });
+  await act(async () => root.unmount());
+  root = createRoot(el);
+  await act(async () => root.render(<Layout />));
+  expect(mocks.warning).toHaveBeenCalledOnce();
 });
 
 test.each(['android', 'ios'] as const)('registra Git com cabeçalho inicial e apresentação adequada no %s', async (platform) => {

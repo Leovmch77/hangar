@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ScrollView, View } from 'react-native';
 import { useIsFocused, useRouter } from 'expo-router';
 import { custoDesconhecido, custoSemCacheDe, equivalenteDe, fillDayGaps, intlLocale, isFree, mergeReports, mergeUso, partirOcultos, precoParcial, tarifasPorModelo, type DimBucket } from '@hangar/core';
@@ -44,6 +44,7 @@ function ProjectRanking({ visible, buckets, cost, costParts, labelPrice, money, 
 
 export function CostsScreen() {
   const router = useRouter();
+  const back = useCallback(() => router.back(), [router]);
   const focused = useIsFocused();
   const { period, own, selected } = useReportSelection();
   const [filter, setFilter] = useState<CostFilter>({});
@@ -237,7 +238,7 @@ export function CostsScreen() {
   }
 
   const dayBucket = day ? view.days.find((item) => item.key === day) ?? { ...sumCombos([]), key: day } : undefined;
-  return <ReportFrame title={m.nav_custos()} back={() => router.back()} sibling={m.uso_painel_titulo()} onSibling={() => router.push('/stats' as never)}>
+  return <ReportFrame title={m.nav_custos()} back={back} sibling={m.uso_painel_titulo()} onSibling={() => router.push('/stats' as never)}>
     <Copy title>{m.custos_consumo_estimativa()}</Copy><Copy muted>{m.custos_aviso_estimativa()}</Copy>
     <ReportControls own={own} refresh={() => { load.refresh(); areaLoad.refresh(); }} />
     <ReportStatus {...load} selected={selected.length} />

@@ -1,4 +1,4 @@
-import { Children, Fragment as ReactFragment, useState, type ReactNode } from 'react';
+import { Children, Fragment as ReactFragment, useMemo, useState, type ReactNode } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useUnistyles } from 'react-native-unistyles';
 import { create } from 'zustand';
@@ -96,8 +96,10 @@ export function Choice({ label, options, values, onChange, max }: { label: strin
 export function ReportFrame({ title, back, sibling, onSibling, children }: { title: string; back: () => void; sibling: string; onSibling: () => void; children: ReactNode }) {
   const router = useRouter();
   const header = useGlassHeader();
+  const canGoBack = router.canGoBack();
+  const headerOptions = useMemo(() => ({ ...header, title, headerLeft: canGoBack ? undefined : () => <HeaderBack onPress={back} /> }), [header, title, canGoBack, back]);
   return <>
-    <Stack.Screen options={{ ...header, title, headerLeft: router.canGoBack() ? undefined : () => <HeaderBack onPress={back} /> }} />
+    <Stack.Screen options={headerOptions} />
     <Pagina>
       <Action label={sibling} icon="ChartNoAxesCombined" onPress={onSibling} />{children}
     </Pagina>

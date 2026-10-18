@@ -721,10 +721,27 @@ impl Drop for PartialUpload {
     }
 }
 
+/// Relógio e sufixo aleatório do nome publicado; o teste de contrato fixa os da referência Python.
+#[derive(Clone)]
+pub struct Naming {
+    pub now: Arc<dyn Fn() -> f64 + Send + Sync>,
+    pub suffix: Arc<dyn Fn() -> io::Result<String> + Send + Sync>,
+}
+
+impl Default for Naming {
+    fn default() -> Self {
+        Self {
+            now: Arc::new(crate::accounts::quotas::now),
+            suffix: Arc::new(|| random_hex(3)),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct UploadStore {
     root: Arc<Directory>,
     trusted_root: PathBuf,
+    naming: Naming,
 }
 
 impl UploadStore {
@@ -732,7 +749,13 @@ impl UploadStore {
         Ok(Self {
             trusted_root: absolute_lexical(root)?,
             root: Directory::open_root(root)?,
+            naming: Naming::default(),
         })
+    }
+
+    pub fn with_naming(mut self, naming: Naming) -> Self {
+        self.naming = naming;
+        self
     }
 
     fn session(&self, project: &str, session: &str, create: bool) -> io::Result<Arc<Directory>> {
@@ -804,11 +827,11 @@ impl UploadStore {
             .await
             .map_err(io::Error::other)??;
         let ext = extension(filename);
-        let timestamp = chrono::Utc::now().timestamp();
+        let timestamp = (self.naming.now)().floor() as i64;
         for _ in 0..128 {
             let final_name = match named {
                 Some(name) => name.to_owned(),
-                None => format!("{timestamp}-{}.{ext}", random_hex(3)?),
+                None => format!("{timestamp}-{}.{ext}", (self.naming.suffix)()?),
             };
             match partial.directory.publish(
                 &partial.name,
