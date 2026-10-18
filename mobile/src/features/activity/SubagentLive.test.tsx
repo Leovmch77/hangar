@@ -35,6 +35,7 @@ vi.mock('../../stores/servers', () => ({ useServers: (select: (s: typeof servers
 vi.mock('../../stores/aparencia', () => ({ useAparencia: (select: (s: unknown) => unknown) => select({ pensamentoTools: 'busca', ferramentas: 'tree', tarefas: false }) }));
 vi.mock('react-native-mmkv', () => ({ createMMKV: () => ({ getString: () => undefined, set: () => {}, remove: () => {} }) }));
 vi.mock('../../stores/chat', () => ({ chatStore: {} }));
+vi.mock('expo-router', () => ({ useFocusEffect: () => {} }));
 vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
 // Ramos fora deste fluxo não montam; a lista, bolha e miniatura usadas abaixo são reais.
 vi.mock('../../chat/AssistantBubble', () => ({ AssistantBubble: () => null, mkMarkdownStyle: () => ({}), mkMutedMarkdownStyle: () => ({}) }));

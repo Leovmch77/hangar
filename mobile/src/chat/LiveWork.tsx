@@ -1,12 +1,14 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ActivityIndicator, Animated, Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { formatElapsed, type AgentRun } from '@hangar/core';
+import { formatElapsed, type AgentRun, type ChatEvent } from '@hangar/core';
 import { WorkingMark } from '../ui/WorkingMark';
 import { Icon } from '../ui/Icon';
 import { superficie } from '../theme/superficie';
 import * as m from '../paraglide/messages';
 import { workingLabel } from './liveWork';
+import { agentIdentities, agentModel, matchAgentSubagent } from '../features/activity/agentModel';
+import { useAgentSubagents } from '../features/activity/useAgentSubagents';
 
 // Bloco "trabalhando" do fim da conversa (porte do fim do MessageList.svelte): linha de spinner com
 // o verbo do terminal e os segundos, o raciocínio chegando e os subagentes que ainda rodam.
@@ -73,17 +75,24 @@ export function PensamentoVivo({ texto }: { texto: string }) {
 
 /** Subagentes ainda rodando, grudados no fim até acabarem de verdade: um Agent em background
  *  devolve resultado na hora e o cartão dele subia com a conversa, com a sessão parecendo parada. */
-export function AgentesRodando({ agentes, inicio, onAbrir }: {
+export const AgentesRodando = memo(function AgentesRodando({ agentes, inicio, onAbrir, serverId, sessionName, events = EMPTY_EVENTS, eventsRevision }: {
   agentes: AgentRun[];
   inicio: (id: string) => number | null;
   onAbrir?: () => void;
+  serverId?: string;
+  sessionName?: string;
+  events?: ChatEvent[];
+  eventsRevision?: number;
 }) {
   const { theme } = useUnistyles();
   const agora = useAgora();
+  const { subs, error, retry } = useAgentSubagents(serverId, sessionName, agentes.length > 0);
+  const ids = useMemo(() => agentIdentities(events), [events, eventsRevision]);
   return (
     // Sem região viva: o rótulo de cada agente leva o relógio, e o leitor de tela anunciaria a cada segundo.
     <View style={styles.agentes}>
       {agentes.map((a) => {
+        const model = agentModel(a, matchAgentSubagent(subs, a, ids));
         const t0 = inicio(a.id);
         const tempo = t0 !== null ? m.tool_executando_ha({ tempo: formatElapsed(Math.max(0, agora - t0) / 1000) }) : m.estado_em_execucao();
         return (
@@ -93,7 +102,7 @@ export function AgentesRodando({ agentes, inicio, onAbrir }: {
             disabled={!onAbrir}
             style={({ pressed }) => [styles.agente, { borderColor: theme.tokens.border.subtle }, pressed && { backgroundColor: theme.tokens.bg.hover }]}
             accessibilityRole={onAbrir ? 'button' : undefined}
-            accessibilityLabel={[a.description, a.subagentType, tempo].filter(Boolean).join(', ')}
+            accessibilityLabel={[a.description, a.subagentType, model, tempo].filter(Boolean).join(', ')}
             accessibilityHint={onAbrir ? m.tool_abrir_agente() : undefined}
           >
             <ActivityIndicator size="small" color={theme.tokens.accent.base} />
@@ -108,15 +117,24 @@ export function AgentesRodando({ agentes, inicio, onAbrir }: {
                   </Text>
                 ) : null}
               </View>
+              {model ? <Text style={[styles.model, { color: theme.tokens.text.muted }]} numberOfLines={1}>{model}</Text> : null}
               <Text style={[styles.tempo, { color: theme.tokens.accent.base }]} numberOfLines={1}>{tempo}</Text>
             </View>
             {onAbrir ? <Icon name="ChevronRight" size={16} color={theme.tokens.text.muted} /> : null}
           </Pressable>
         );
       })}
+      {error ? <View>
+        <Text style={[styles.model, { color: theme.tokens.status.warning }]} accessibilityRole="alert">{error}</Text>
+        <Pressable onPress={retry} style={styles.retry} accessibilityRole="button">
+          <Text style={[styles.model, { color: theme.tokens.accent.base }]}>{m.sync_retry()}</Text>
+        </Pressable>
+      </View> : null}
     </View>
   );
-}
+});
+
+const EMPTY_EVENTS: ChatEvent[] = [];
 
 const styles = StyleSheet.create((theme) => ({
   linha: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], minHeight: 32 },
@@ -138,5 +156,7 @@ const styles = StyleSheet.create((theme) => ({
   agenteCorpo: { flex: 1, minWidth: 0, gap: theme.base.space[0.5] },
   agenteCab: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], minWidth: 0 },
   agenteDesc: { flexShrink: 1, fontSize: theme.base.text.sm },
+  model: { ...theme.type.caption, fontFamily: theme.base.fontMono },
+  retry: { minHeight: 44, minWidth: 44, justifyContent: 'center', alignSelf: 'flex-start' },
   tag: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xxxs, paddingHorizontal: theme.base.space[1.5], paddingVertical: 1, borderRadius: theme.base.radius.full, overflow: 'hidden' },
 }));

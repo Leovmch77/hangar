@@ -183,6 +183,42 @@ afterEach(async () => {
 });
 
 describe('ActivitySheet real', () => {
+  it('mostra o modelo real nas linhas do Agent e do disco e o apelido só antes da descoberta', async () => {
+    stores.chat.events = [...events.map(event => event.id === 'launch' ? { ...event, tool_input: { ...event.tool_input, model: 'opus' } } : event),
+      { id: 'waiting', kind: 'tool_use', tool_use_id: 'waiting', tool_name: 'Agent', tool_input: { description: 'Ainda não listado', prompt: 'Novo pedido', model: 'sonnet' } },
+    ];
+    api.getSubagents.mockResolvedValue([
+      { ...sub, state: 'running', model: 'gpt-6.1-sol' },
+      { ...sub, agentId: 'disk', prompt: 'Só no disco', model: 'gpt-6-astra', state: 'finished', endedAt: new Date().toISOString() },
+    ]);
+    const { el } = await mount();
+    expect(button(el, 'Conferir atividade').textContent).toContain('gpt-6.1-sol');
+    expect(button(el, 'Conferir atividade').textContent).not.toContain('opus');
+    expect(button(el, 'Só no disco').textContent).toContain('gpt-6-astra');
+    expect(el.textContent).toContain('sonnet');
+  });
+
+  it('não mostra o apelido na Atividade quando o registro listado não tem modelo', async () => {
+    stores.chat.events = events.map(event => event.id === 'launch' ? { ...event, tool_input: { ...event.tool_input, model: 'opus' } } : event);
+    api.getSubagents.mockResolvedValue([{ ...sub, state: 'running', ilegivel: true }]);
+    const { el } = await mount();
+    expect(el.textContent).not.toContain('opus');
+  });
+
+  it('a identidade escolhe uma única linha e abre o subagente certo com prompt repetido', async () => {
+    stores.chat.events = [...events, { id: 'launch-result', kind: 'tool_result', tool_use_id: 'launch', bg_agent_id: 'right' }];
+    api.getSubagents.mockResolvedValue([
+      { ...sub, state: 'finished', model: 'modelo-antigo', endedAt: new Date().toISOString() },
+      { ...sub, agentId: 'right', prompt: 'Prompt registrado diferente', state: 'running', model: 'gpt-6-astra' },
+    ]);
+    const { el } = await mount();
+    expect(el.textContent).toContain(m.atividade_grupo_rodando({ n: 1 }));
+    expect(button(el, 'Conferir atividade').textContent).toContain('gpt-6-astra');
+    expect([...el.querySelectorAll('button')].filter(node => node.textContent?.includes('gpt-6-astra'))).toHaveLength(1);
+    await click(el, 'Conferir atividade');
+    expect(api.getSubagent).toHaveBeenLastCalledWith('sess', 'right', expect.any(Number), stores.servers[0]);
+  });
+
   it.each(['pai encerrou', 'backend encerrou com pai rodando'])('mantém concluído em Terminados sem duplicar: %s', async (source) => {
     stores.chat.events = source === 'pai encerrou'
       ? [...events, { id: 'end', kind: 'tool_result', tool_use_id: 'launch', result: 'fim' }]
