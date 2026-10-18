@@ -48,7 +48,7 @@ export function RenameSheet({
             style={styles.botao}
             accessibilityRole="button"
           >
-            <Text style={{ color: limpo && limpo !== nome ? theme.tokens.accent.base : theme.tokens.text.muted, fontWeight: '600' }}>
+            <Text style={{ color: limpo && limpo !== nome ? theme.tokens.accent.base : theme.tokens.text.muted, fontWeight: theme.base.weight.semibold }}>
               {m.comum_confirmar()}
             </Text>
           </Pressable>
@@ -60,7 +60,7 @@ export function RenameSheet({
 
 const styles = StyleSheet.create((theme) => ({
   inner: { padding: theme.base.space[4], gap: theme.base.space[3] },
-  title: { fontSize: theme.base.text.lg, fontWeight: '600' },
+  title: { fontSize: theme.base.text.lg, fontWeight: theme.base.weight.semibold },
   campo: { borderRadius: theme.base.radius.md, borderWidth: 1 },
   botoes: { flexDirection: 'row', justifyContent: 'flex-end', gap: theme.base.space[2] },
   botao: { minHeight: 44, paddingHorizontal: theme.base.space[3], justifyContent: 'center' },

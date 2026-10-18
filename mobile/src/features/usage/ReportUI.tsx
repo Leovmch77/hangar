@@ -13,6 +13,7 @@ import { Icon, type IconName } from '../../ui/Icon';
 import { useSettingsColors } from '../config/colors';
 import type { ReportPart } from './useReports';
 import * as m from '../../paraglide/messages';
+import { RADIUS, SPACE } from '../../theme/scale';
 
 export const useUsagePreferences = create(() => ({ period: '30d', off: [] as string[] }));
 export const number = (value: number, digits = 0) => value.toLocaleString(intlLocale(), { maximumFractionDigits: digits });
@@ -38,7 +39,7 @@ export function Action({ label, accessibilityLabel, onPress, selected = false, d
   const { theme } = useUnistyles();
   const c = useSettingsColors();
   return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? label} accessibilityState={{ selected, disabled }} disabled={disabled} onPress={onPress}
-    style={{ minHeight: 44, paddingHorizontal: 12, paddingVertical: 10, borderRadius: theme.base.radius.md, backgroundColor: selected ? c.accentDim : 'transparent', flexDirection: 'row', alignItems: 'center', gap: 8, opacity: disabled ? 0.45 : 1 }}>
+    style={{ minHeight: 44, paddingHorizontal: theme.base.space[3], paddingVertical: theme.base.space[2], borderRadius: theme.base.radius.md, backgroundColor: selected ? c.accentDim : 'transparent', flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], opacity: disabled ? 0.45 : 1 }}>
     {icon && <Icon name={icon} size={18} color={c.accentText} />}
     <Text style={{ color: selected ? c.accentText : c.text, fontSize: theme.base.text.sm, flexShrink: 1 }}>{label}</Text>
   </Pressable>;
@@ -47,24 +48,24 @@ export function Action({ label, accessibilityLabel, onPress, selected = false, d
 export function Card({ children }: { children: ReactNode }) {
   const c = useSettingsColors();
   const { theme } = useUnistyles();
-  return <View style={{ padding: 16, gap: 10, backgroundColor: c.inset, borderRadius: theme.base.radius.lg }}>{children}</View>;
+  return <View style={{ padding: theme.base.space[4], gap: theme.base.space[2], backgroundColor: c.inset, borderRadius: theme.base.radius.lg }}>{children}</View>;
 }
 
 export function Grid({ children }: { children: ReactNode }) {
-  return <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>{Children.toArray(children).map((child, index) => <View key={index} style={{ flexGrow: 1, flexBasis: '45%', minWidth: 140 }}>{child}</View>)}</View>;
+  return <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: SPACE[2] }}>{Children.toArray(children).map((child, index) => <View key={index} style={{ flexGrow: 1, flexBasis: '45%', minWidth: 140 }}>{child}</View>)}</View>;
 }
 
 export function Search({ value, onChange }: { value: string; onChange: (text: string) => void }) {
   const c = useSettingsColors();
   const { theme } = useUnistyles();
   return <TextInput accessibilityLabel={m.uso_busca()} placeholder={m.uso_busca()} placeholderTextColor={c.muted} value={value} onChangeText={onChange}
-    style={{ color: c.text, fontSize: theme.base.text.sm, padding: 12, minHeight: 44, borderWidth: 1, borderColor: c.borderStrong, borderRadius: theme.base.radius.md }} />;
+    style={{ color: c.text, fontSize: theme.base.text.sm, padding: theme.base.space[3], minHeight: 44, borderWidth: 1, borderColor: c.borderStrong, borderRadius: theme.base.radius.md }} />;
 }
 
 export function Paged<T>({ items, render }: { items: T[]; render: (item: T, index: number) => ReactNode }) {
   const [limit, setLimit] = useState(20);
   if (!items.length) return <Copy muted>{m.uso_vazio_secao()}</Copy>;
-  return <View style={{ gap: 8 }}>{items.slice(0, limit).map((item, index) => <View key={index}>{render(item, index)}</View>)}
+  return <View style={{ gap: SPACE[2] }}>{items.slice(0, limit).map((item, index) => <View key={index}>{render(item, index)}</View>)}
     {items.length > limit && <Action label={m.uso_mostrar_mais({ n: items.length - limit })} onPress={() => setLimit((n) => n + 20)} />}
     {limit > 20 && <Action label={m.uso_mostrar_menos()} onPress={() => setLimit(20)} />}
   </View>;
@@ -80,7 +81,7 @@ export function Choice({ label, options, values, onChange, max }: { label: strin
     <Action label={label} icon="ListFilter" selected={values.length > 0} onPress={() => setOpen(true)} />
     {values.length > 0 && <Copy muted>{values.map((key) => all.find((item) => item.key === key)?.label ?? key).join(' · ')}</Copy>}
     {open && <Sheet open onDismiss={() => setOpen(false)} sizes={['large']} scrollable>
-      <ScrollView contentContainerStyle={{ padding: 16, gap: 10 }} keyboardShouldPersistTaps="handled">
+      <ScrollView contentContainerStyle={{ padding: SPACE[4], gap: SPACE[2] }} keyboardShouldPersistTaps="handled">
         <Copy title>{label}</Copy>
         <Search value={query} onChange={setQuery} />
         <Action label={m.uso_limpar()} onPress={() => onChange([])} />
@@ -118,7 +119,7 @@ export function ReportControls({ own, refresh }: { own: Server[]; refresh: () =>
 }
 
 export function ReportStatus<R>({ parts, loading, accepted, selected }: { parts: ReportPart<R>[]; loading: boolean; accepted: boolean; selected: number }) {
-  return <View accessibilityLiveRegion="polite" style={{ gap: 8 }}>
+  return <View accessibilityLiveRegion="polite" style={{ gap: SPACE[2] }}>
     {loading && <><ActivityIndicator /><Copy>{m.custos_carregando_maquinas({ n: parts.filter((p) => p.pending).length || selected })}</Copy></>}
     {parts.some((p) => p.error) && accepted && <Copy>{m.custos_total_parcial()}</Copy>}
     {parts.map((part) => part.warming ? <Copy key={part.id}>{m.custos_aquecendo_progresso({ maquina: part.label, lidos: part.warming.read, total: part.warming.total })}</Copy> : part.error ? <Copy key={part.id}>{`${part.label}: ${part.error}`}</Copy> : null)}
@@ -136,7 +137,7 @@ export function useChartColors() {
 export function Composition({ label, items }: { label: string; items: { label: string; value: number; color: string; detail?: string }[] }) {
   const c = useSettingsColors();
   const total = items.reduce((sum, item) => sum + Math.max(0, item.value), 0);
-  return <View accessible accessibilityRole="image" accessibilityLabel={`${label}: ${items.map((item) => `${item.label}: ${item.detail ?? number(item.value)} (${percent(item.value, total)})`).join(' · ')}`} style={{ flexDirection: 'row', height: 12, backgroundColor: c.hover, borderRadius: 6, overflow: 'hidden' }}>
+  return <View accessible accessibilityRole="image" accessibilityLabel={`${label}: ${items.map((item) => `${item.label}: ${item.detail ?? number(item.value)} (${percent(item.value, total)})`).join(' · ')}`} style={{ flexDirection: 'row', height: 12, backgroundColor: c.hover, borderRadius: RADIUS.full, overflow: 'hidden' }}>
     {items.map((item, index) => <View key={index} style={{ width: `${total > 0 ? Math.max(0, item.value) / total * 100 : 0}%`, height: 12, backgroundColor: item.color }} />)}
   </View>;
 }
@@ -158,7 +159,7 @@ export function Columns({ label, days, series, format = number, axisFormat = com
   const step = Math.max(64, 264 / days.length);
   const width = days.length * step;
   const height = 180;
-  return <View accessibilityLabel={label} style={{ gap: 8 }}><View style={{ flexDirection: 'row', gap: 8 }}>
+  return <View accessibilityLabel={label} style={{ gap: theme.base.space[2] }}><View style={{ flexDirection: 'row', gap: theme.base.space[2] }}>
     <View style={{ width: 64, flexShrink: 0, height, justifyContent: 'space-between' }}>{[maximum, maximum / 2, 0].map((value, index) => <Text key={index} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.65} style={{ color: c.muted, fontSize: theme.base.text.sm }}>{axisFormat(value)}</Text>)}</View>
     <ScrollView horizontal style={{ flex: 1, flexShrink: 1, minWidth: 0 }}><View style={{ width }}>
       <Svg width={width} height={height} accessible={false}>
@@ -184,15 +185,15 @@ export function Columns({ label, days, series, format = number, axisFormat = com
         })}
       </Svg>
       <View style={{ position: 'absolute', top: 0, left: 0, flexDirection: 'row' }}>{days.map((day) => <Pressable key={day.key} accessibilityRole="button" accessibilityLabel={describe(day)} onPress={() => onPress ? onPress(day.key) : setSelectedDay(day.key)} style={{ width: step, height, minHeight: 44 }} />)}</View>
-      <View style={{ flexDirection: 'row' }}>{days.map((day) => <Text key={day.key} numberOfLines={1} accessibilityLabel={day.key} style={{ width: step, paddingTop: 8, textAlign: 'center', color: c.muted, fontSize: theme.base.text.xxxs }}>{`${day.key.slice(8, 10)}/${day.key.slice(5, 7)}`}</Text>)}</View>
+      <View style={{ flexDirection: 'row' }}>{days.map((day) => <Text key={day.key} numberOfLines={1} accessibilityLabel={day.key} style={{ width: step, paddingTop: theme.base.space[2], textAlign: 'center', color: c.muted, fontSize: theme.base.text.xxxs }}>{`${day.key.slice(8, 10)}/${day.key.slice(5, 7)}`}</Text>)}</View>
     </View></ScrollView>
   </View>{!onPress && selected && <Copy>{describe(selected)}</Copy>}</View>;
 }
 
 export function Bar({ label, value, max, detail, onPress, color }: { label: string; value: number; max: number; detail: string; onPress?: () => void; color?: string }) {
   const c = useSettingsColors();
-  const body = <View style={{ gap: 6, paddingVertical: 8 }}><Copy>{label}</Copy><Copy>{detail}</Copy>
-    <View style={{ height: 5, backgroundColor: c.hover, borderRadius: 3 }}><View style={{ height: 5, width: `${Math.max(0, Math.min(100, max > 0 ? value / max * 100 : 0))}%`, backgroundColor: color ?? c.accent, borderRadius: 3 }} /></View>
+  const body = <View style={{ gap: SPACE[1.5], paddingVertical: SPACE[2] }}><Copy>{label}</Copy><Copy>{detail}</Copy>
+    <View style={{ height: 5, backgroundColor: c.hover, borderRadius: RADIUS.xs }}><View style={{ height: 5, width: `${Math.max(0, Math.min(100, max > 0 ? value / max * 100 : 0))}%`, backgroundColor: color ?? c.accent, borderRadius: RADIUS.xs }} /></View>
   </View>;
   return onPress ? <Pressable accessibilityRole="button" accessibilityLabel={`${label}: ${detail}`} onPress={onPress} style={{ minHeight: 44 }}>{body}</Pressable> : <View accessible accessibilityLabel={`${label}: ${detail}`}>{body}</View>;
 }

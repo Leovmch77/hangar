@@ -263,7 +263,7 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
             {onPair ? pendentes.map((p) => (
               <Pressable key={`${p.alias}::${p.session}`} onPress={() => onPair(s, { kind: 'release', pair: p })} hitSlop={8}
                 accessibilityRole="button" accessibilityLabel={m.pair_release({ dono: p.owner })} style={styles.release}>
-                <Text style={[styles.metaTxt, { color: theme.tokens.accent.base, fontWeight: '600' }]}>{m.pair_release({ dono: p.owner })}</Text>
+                <Text style={[styles.metaTxt, { color: theme.tokens.accent.base, fontWeight: theme.base.weight.semibold }]}>{m.pair_release({ dono: p.owner })}</Text>
               </Pressable>
             )) : null}
           </View>
@@ -289,34 +289,34 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
 });
 
 const styles = StyleSheet.create((theme) => ({
-  row: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, minHeight: 56, paddingVertical: 10, paddingHorizontal: 12 },
-  compact: { paddingVertical: 6, minHeight: 44 },
+  row: { flexDirection: 'row', alignItems: 'flex-start', gap: theme.base.space[3], minHeight: 56, paddingVertical: theme.base.space[2], paddingHorizontal: theme.base.space[3] },
+  compact: { paddingVertical: theme.base.space[1.5], minHeight: 44 },
   // O avatar acompanha o topo da linha para não saltar quando aparece uma pergunta.
   lead: { width: 36, alignItems: 'center', paddingTop: 1 },
-  col: { flex: 1, gap: 2, minWidth: 0 },
-  linha: { flexDirection: 'row', alignItems: 'center', gap: 6, minWidth: 0 },
-  nome: { fontSize: theme.base.text.base, lineHeight: 22, fontWeight: '600', flexShrink: 1 },
-  account: { flexDirection: 'row', alignItems: 'center', gap: 4, minWidth: 0, maxWidth: 96, flexShrink: 0, paddingLeft: 8 },
+  col: { flex: 1, gap: theme.base.space[0.5], minWidth: 0 },
+  linha: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5], minWidth: 0 },
+  nome: { fontSize: theme.base.text.base, lineHeight: 22, fontWeight: theme.base.weight.semibold, flexShrink: 1 },
+  account: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], minWidth: 0, maxWidth: 96, flexShrink: 0, paddingLeft: theme.base.space[2] },
   accountDot: { width: 5, height: 5, borderRadius: theme.base.radius.full, flexShrink: 0 },
-  accountText: { fontSize: theme.base.text.xxs, fontWeight: '500', minWidth: 0, flexShrink: 1 },
-  tempo: { marginLeft: 'auto', paddingLeft: 4, flexShrink: 0, fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
+  accountText: { fontSize: theme.base.text.xxs, fontWeight: theme.base.weight.medium, minWidth: 0, flexShrink: 1 },
+  tempo: { marginLeft: 'auto', paddingLeft: theme.base.space[1], flexShrink: 0, fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
   sub: { fontSize: theme.base.text.sm, lineHeight: 20 },
   metaRow: { flexDirection: 'row', alignItems: 'center', minWidth: 0 },
-  engine: { flexDirection: 'row', alignItems: 'center', gap: 4, minWidth: 0, flexShrink: 0 },
-  engineText: { fontWeight: '600', flexShrink: 0 },
+  engine: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], minWidth: 0, flexShrink: 0 },
+  engineText: { fontWeight: theme.base.weight.semibold, flexShrink: 0 },
   metaRest: { flexShrink: 1 },
   metaSeparator: { flexShrink: 0 },
   meta: { fontSize: theme.base.text.xs, lineHeight: 18 },
   metaTxt: { fontSize: theme.base.text.xs },
-  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 },
-  branchWt: { paddingLeft: 3 },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[1], marginTop: theme.base.space[1] },
+  branchWt: { paddingLeft: theme.base.space[0.5] },
   // O git pede ação (enviar, trazer): não encolhe, quem cede é o texto antes dele.
-  git: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0, paddingLeft: 8 },
+  git: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5], flexShrink: 0, paddingLeft: theme.base.space[2] },
   gitPar: { flexDirection: 'row', alignItems: 'center', gap: 1 },
-  gitSync: { fontWeight: '600', fontVariant: ['tabular-nums'] },
+  gitSync: { fontWeight: theme.base.weight.semibold, fontVariant: ['tabular-nums'] },
   // Recuada e com a faixa do grupo, como a linha de fora no app de PC.
-  fora: { marginLeft: 8 },
+  fora: { marginLeft: theme.base.space[2] },
   faixa: { position: 'absolute', left: 0, top: 6, bottom: 6, width: 2, borderRadius: 1 },
   release: { minHeight: 24, justifyContent: 'center' },
-  resume: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4, minHeight: 32, alignSelf: 'flex-start' },
+  resume: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], marginTop: theme.base.space[1], minHeight: 32, alignSelf: 'flex-start' },
 }));

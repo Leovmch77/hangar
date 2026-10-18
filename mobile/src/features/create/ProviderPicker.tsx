@@ -48,7 +48,7 @@ export function ProviderPicker({
 }
 
 const styles = StyleSheet.create((theme) => ({
-  reason: { fontSize: theme.base.text.xs, color: theme.tokens.text.muted, paddingHorizontal: 8, paddingVertical: 4 },
+  reason: { fontSize: theme.base.text.xs, color: theme.tokens.text.muted, paddingHorizontal: theme.base.space[2], paddingVertical: theme.base.space[1] },
   grid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -73,7 +73,7 @@ const styles = StyleSheet.create((theme) => ({
   tileDis: { opacity: 0.45 },
   txt: {
     fontSize: theme.base.text.sm,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
     color: theme.tokens.text.secondary,
   },
   txtOn: { color: theme.tokens.text.primary },

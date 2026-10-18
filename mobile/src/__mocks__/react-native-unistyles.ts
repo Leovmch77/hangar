@@ -25,6 +25,7 @@ const mockTheme: any = {
     radius: { sm: 4, md: 8, lg: 12, xl: 16, full: 999 } as any,
     fontMono: 'monospace',
   },
+  // Cópia de src/theme/scale.ts: importar de lá puxaria o Platform, que vários testes mockam sem ele.
   type: {
     title: { fontSize: 22, fontWeight: '700', lineHeight: 28 },
     heading: { fontSize: 19, fontWeight: '600', lineHeight: 24 },

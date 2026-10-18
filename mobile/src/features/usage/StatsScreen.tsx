@@ -7,6 +7,7 @@ import { Action, Bar, Card, Choice, Columns, Composition, Copy, dollars, Grid, n
 import { contextCategory, measure, toolsOf, usageTabs, type UsageTab } from './stats-model';
 import { useReports } from './useReports';
 import * as m from '../../paraglide/messages';
+import { SPACE } from '../../theme/scale';
 
 type FilterKey = 'conta' | 'projeto' | 'modelo' | 'plugin';
 type Sort = 'weight' | 'calls' | 'name' | 'cost' | 'perCall' | 'replies' | 'sessions';
@@ -40,7 +41,7 @@ function UsageDetail({ servers, period, filters, selection, presenceAvailable, a
   const item = load.accepted ? report[tab].find((bucket) => bucket.key === selectedItem.key) ?? selectedItem : selectedItem;
   const colors = useChartColors();
   const metric = tab === 'by_plugin' ? m.uso_col_chamadas() : held ? m.uso_col_peso() : tab === 'by_agente' ? m.uso_col_tokens() : m.uso_col_ctx();
-  return <Sheet open onDismiss={close} sizes={['large']} scrollable><ScrollView contentContainerStyle={{ padding: 16, gap: 12 }}>
+  return <Sheet open onDismiss={close} sizes={['large']} scrollable><ScrollView contentContainerStyle={{ padding: SPACE[4], gap: SPACE[3] }}>
     <Copy title>{`${m.uso_foco()}: ${label}`}</Copy>
     {item.plugin && <Copy muted>{groupName(item.plugin)}</Copy>}
     <Card>
@@ -178,7 +179,7 @@ export function StatsScreen() {
             <Copy muted>{presenceAvailable ? m.uso_grupo_n_skills({ n: group.itens.length, pct: number(totalWeight > 0 ? group.peso / totalWeight * 100 : 0) }) : '—'}</Copy>
             <Bar label={m.uso_col_peso()} value={presenceAvailable ? group.peso : 0} max={Math.max(1, ...groups.map((item) => item.peso))} detail={presenceAvailable ? `≈ ${number(group.peso)}` : '—'} color={colors[0]} />
             <Bar label={m.uso_col_cargas()} value={group.vezes} max={Math.max(1, ...groups.map((item) => item.vezes))} detail={number(group.vezes)} color={colors[1]} />
-            {open && <Paged key={groupSort} items={items} render={(item) => <Pressable accessibilityRole="button" accessibilityLabel={`${item.nome}: ${presenceAvailable ? `≈ ${number(item.peso)}` : '—'} · ${number(item.vezes)}`} onPress={() => setFocus({ tab: 'by_skill', item: report.by_skill.find((bucket) => bucket.key === item.keys[0])!, label: item.nome })} style={{ minHeight: 44, gap: 6, paddingVertical: 8 }}><Copy>{item.nome}</Copy>
+            {open && <Paged key={groupSort} items={items} render={(item) => <Pressable accessibilityRole="button" accessibilityLabel={`${item.nome}: ${presenceAvailable ? `≈ ${number(item.peso)}` : '—'} · ${number(item.vezes)}`} onPress={() => setFocus({ tab: 'by_skill', item: report.by_skill.find((bucket) => bucket.key === item.keys[0])!, label: item.nome })} style={{ minHeight: 44, gap: SPACE[1.5], paddingVertical: SPACE[2] }}><Copy>{item.nome}</Copy>
               <Bar label={m.uso_col_peso()} value={presenceAvailable ? item.peso : 0} max={Math.max(1, ...groups.flatMap((group) => group.itens.map((item) => item.peso)))} detail={presenceAvailable ? `≈ ${number(item.peso)}` : '—'} color={colors[0]} />
               <Bar label={m.uso_col_cargas()} value={item.vezes} max={Math.max(1, ...groups.flatMap((group) => group.itens.map((item) => item.vezes)))} detail={number(item.vezes)} color={colors[1]} />
             </Pressable>} />}
@@ -187,12 +188,12 @@ export function StatsScreen() {
       </Card>
       <Card><Copy title>{m.uso_rank_ferramentas()}</Copy><Copy muted>{m.uso_ferr_nota()}</Copy>{!tools.length && <Copy muted>{m.uso_vazio_secao()}</Copy>}{tools.slice(0, 12).map((item) => <View key={item.key}><Bar label={item.key} value={item.chamadas} max={tools[0]?.chamadas ?? 1} detail={`${number(item.chamadas)} · ${percent(item.chamadas, toolCalls)}`} onPress={() => setFocus({ tab: 'by_tool', item, label: item.label ?? item.key })} />{item.key === 'Bash' && commands && <Copy muted>{m.uso_ferr_bash({ lista: commands })}</Copy>}</View>)}{tools.length > 12 && <Copy muted>{m.uso_mais_na_tabela({ n: tools.length - 12 })}</Copy>}</Card>
       <Card><Copy title>{m.uso_sub_titulo()}</Copy><Copy muted>{m.uso_sub_nota()}</Copy><Paged items={agents} render={(group) => <Card><Copy title>{groupName(group.plugin)}</Copy><Copy muted>{m.uso_agentes_n({ n: group.agents.length })}</Copy>{agentValues(group.total, false)}
-        {group.agents.map((item) => <Pressable key={item.keys[0]} accessibilityRole="button" accessibilityLabel={`${item.nome}: ${dollars(item.total.cost)}`} onPress={() => setFocus({ tab: 'by_agente', item: report.by_agente.find((bucket) => bucket.key === item.keys[0])!, label: item.nome })} style={{ minHeight: 44, paddingVertical: 10, gap: 8 }}><Copy title>{item.nome}</Copy>{agentValues(item.total)}</Pressable>)}
+        {group.agents.map((item) => <Pressable key={item.keys[0]} accessibilityRole="button" accessibilityLabel={`${item.nome}: ${dollars(item.total.cost)}`} onPress={() => setFocus({ tab: 'by_agente', item: report.by_agente.find((bucket) => bucket.key === item.keys[0])!, label: item.nome })} style={{ minHeight: 44, paddingVertical: SPACE[2], gap: SPACE[2] }}><Copy title>{item.nome}</Copy>{agentValues(item.total)}</Pressable>)}
       </Card>} /><Copy muted>{m.uso_cache_legado_nota()}</Copy></Card>
       <Action label={m.uso_avancado()} icon={advanced ? 'ChevronDown' : 'ChevronRight'} selected={advanced} onPress={() => setAdvanced(!advanced)} />
       {advanced && <>
         <Card><Copy title>{m.uso_graf_chamadas_dia()}</Copy><Copy muted>{m.uso_graf_chamadas_dia_nota()}</Copy><Columns label={m.uso_graf_chamadas_dia()} days={[...report.by_day].sort((a, b) => a.key.localeCompare(b.key)).map((item) => ({ key: item.key, values: [item.chamadas] }))} series={[{ key: 'calls', label: m.uso_col_chamadas(), color: colors[0] }]} /></Card>
-        <Card><Copy title>{m.uso_graf_ctx()}</Copy><Copy muted>{m.uso_graf_ctx_nota()}</Copy><Copy>{`≈ ${number(contextTotal, 1)} ${m.uso_por_sessao()}`}</Copy><Composition label={m.uso_graf_ctx()} items={categoryTotals.map((item, index) => ({ ...item, color: colors[index] }))} />{categoryTotals.map((item, index) => <View key={item.label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}><View style={{ width: 8, height: 8, backgroundColor: colors[index] }} /><View style={{ flex: 1 }}><Copy>{item.label}</Copy><Copy muted>{`≈ ${number(item.value, 1)} · ${percent(item.value, contextTotal)}`}</Copy></View></View>)}</Card>
+        <Card><Copy title>{m.uso_graf_ctx()}</Copy><Copy muted>{m.uso_graf_ctx_nota()}</Copy><Copy>{`≈ ${number(contextTotal, 1)} ${m.uso_por_sessao()}`}</Copy><Composition label={m.uso_graf_ctx()} items={categoryTotals.map((item, index) => ({ ...item, color: colors[index] }))} />{categoryTotals.map((item, index) => <View key={item.label} style={{ flexDirection: 'row', alignItems: 'center', gap: SPACE[2] }}><View style={{ width: 8, height: 8, backgroundColor: colors[index] }} /><View style={{ flex: 1 }}><Copy>{item.label}</Copy><Copy muted>{`≈ ${number(item.value, 1)} · ${percent(item.value, contextTotal)}`}</Copy></View></View>)}</Card>
         <ScrollView horizontal showsHorizontalScrollIndicator={false}><View style={{ flexDirection: 'row' }}>{usageTabs.map((key) => <Action key={key} label={tabs[key]} selected={tab === key} onPress={() => setTab(key)} />)}</View></ScrollView>
         <View accessibilityLabel={tabs[tab]}><Card><Copy title>{tabs[tab]}</Copy>
           <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>{columns.map((column) => <Action key={column.key} label={m.uso_ordenar_por({ col: column.label })} selected={effectiveSort === column.key} disabled={!presenceAvailable && presenceTab && column.key === 'weight'} onPress={() => setSort(column.key)} />)}</View>

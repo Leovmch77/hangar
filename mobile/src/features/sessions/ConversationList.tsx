@@ -198,14 +198,14 @@ export function ConversationList({ header, onClose }: { header: ReactElement; on
 
 const styles = StyleSheet.create((theme) => ({
   content: { flexGrow: 1, paddingBottom: theme.base.space[2] },
-  section: { fontSize: theme.base.text.xs, fontWeight: '600', paddingTop: 12, paddingBottom: 4, paddingHorizontal: 12 },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 48, paddingHorizontal: 12, borderRadius: theme.base.radius.lg },
+  section: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.semibold, paddingTop: theme.base.space[3], paddingBottom: theme.base.space[1], paddingHorizontal: theme.base.space[3] },
+  row: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[3], minHeight: 48, paddingHorizontal: theme.base.space[3], borderRadius: theme.base.radius.lg },
   lead: { width: 22, alignItems: 'center' },
-  dot: { position: 'absolute', right: -3, bottom: -3, width: 8, height: 8, borderRadius: 4, borderWidth: 1 },
+  dot: { position: 'absolute', right: -3, bottom: -3, width: 8, height: 8, borderRadius: theme.base.radius.full, borderWidth: 1 },
   title: { flex: 1, minWidth: 0, fontSize: theme.base.text.base },
   when: { flexShrink: 0, fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
-  empty: { alignItems: 'center', gap: 8, paddingTop: theme.base.space[6] },
+  empty: { alignItems: 'center', gap: theme.base.space[2], paddingTop: theme.base.space[6] },
   emptyTxt: { fontSize: theme.base.text.sm, textAlign: 'center' },
   emptyPad: { padding: theme.base.space[6] },
-  failed: { fontSize: theme.base.text.sm, paddingVertical: 8, paddingHorizontal: 12 },
+  failed: { fontSize: theme.base.text.sm, paddingVertical: theme.base.space[2], paddingHorizontal: theme.base.space[3] },
 }));

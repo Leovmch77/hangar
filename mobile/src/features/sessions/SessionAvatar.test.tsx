@@ -40,18 +40,23 @@ vi.mock('react-native-reanimated', async () => {
   };
 });
 
+vi.mock('../../ui/ProviderGlyph', async () => {
+  const { createElement } = await import('react');
+  return { ProviderGlyph: ({ provider, color }: { provider: string; color?: string }) => createElement('span', { 'data-glyph': provider, 'data-color': color ?? '' }) };
+});
+
 import { SessionAvatar } from './SessionAvatar';
 import { WorkingMarkPaused } from '../../ui/WorkingMark';
 
 let root: ReturnType<typeof createRoot> | null = null;
 let container: HTMLDivElement;
 const session: AggSession = { name: 'api', provider: 'claude', state: 'working', last_activity: 0, serverId: 's1', serverLabel: 'casa', serverColor: '#00f' };
-function render(paused = false, state = session.state) {
+function render(paused = false, state = session.state, extra: Partial<AggSession> = {}) {
   if (!root) {
     container = document.createElement('div');
     root = createRoot(container);
   }
-  act(() => root!.render(createElement(WorkingMarkPaused.Provider, { value: paused }, createElement(SessionAvatar, { session: { ...session, state } }))));
+  act(() => root!.render(createElement(WorkingMarkPaused.Provider, { value: paused }, createElement(SessionAvatar, { session: { ...session, ...extra, state } }))));
 }
 afterEach(() => {
   act(() => root?.unmount());
@@ -120,4 +125,9 @@ it('mudar de trabalhando para pronta cancela os ciclos', () => {
   ui.cancel.mockClear();
   render(false, 'idle');
   for (const shared of ui.shared) expect(ui.cancel).toHaveBeenCalledWith(shared);
+});
+
+it('logo da OpenAI pinta na cor do texto do tema, não em branco fixo', () => {
+  render(false, 'idle', { provider: 'codex' });
+  expect(container.querySelector('[data-glyph="codex"]')?.getAttribute('data-color')).toBe('#000');
 });

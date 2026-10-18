@@ -50,7 +50,7 @@ export function ServerSheet({ open, onFechar }: { open: boolean; onFechar: () =>
 
 const styles = StyleSheet.create((theme) => ({
   inner: { padding: theme.base.space[3], gap: theme.base.space[1] },
-  title: { fontSize: theme.base.text.base, fontWeight: '600', marginBottom: theme.base.space[2] },
+  title: { fontSize: theme.base.text.base, fontWeight: theme.base.weight.semibold, marginBottom: theme.base.space[2] },
   item: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[3], minHeight: 48, paddingHorizontal: theme.base.space[2], borderRadius: theme.base.radius.md },
   nome: { flex: 1, fontSize: theme.base.text.base },
 }));

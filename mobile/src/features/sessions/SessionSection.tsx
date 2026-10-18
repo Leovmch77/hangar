@@ -41,10 +41,10 @@ export function SessionSectionCard({ index, total, children }: { index: number; 
 }
 
 const styles = StyleSheet.create((theme) => ({
-  group: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 44, paddingTop: 14, paddingBottom: 6, paddingHorizontal: 6, backgroundColor: 'transparent' },
-  label: { flexShrink: 1, fontSize: theme.base.text.lg, fontWeight: '700' },
-  dot: { width: 7, height: 7, borderRadius: 4 },
-  badge: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: theme.base.radius.full },
+  group: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], minHeight: 44, paddingTop: theme.base.space[3], paddingBottom: theme.base.space[1.5], paddingHorizontal: theme.base.space[1.5], backgroundColor: 'transparent' },
+  label: { flexShrink: 1, fontSize: theme.base.text.lg, fontWeight: theme.base.weight.bold },
+  dot: { width: 7, height: 7, borderRadius: theme.base.radius.xs },
+  badge: { paddingHorizontal: theme.base.space[1.5], paddingVertical: theme.base.space[0.5], borderRadius: theme.base.radius.full },
   count: { fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
   arrow: { marginLeft: 'auto' },
   card: { overflow: 'hidden' },

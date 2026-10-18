@@ -104,8 +104,8 @@ const styles = StyleSheet.create((theme) => ({
   bar: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: theme.base.space[1] },
   spacer: { flex: 1 },
   icon: { width: BAR, height: BAR, alignItems: 'center', justifyContent: 'center' },
-  sessions: { minHeight: BAR, minWidth: BAR, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 8, flexShrink: 1 },
-  sessionsLabel: { fontSize: theme.base.text.base, fontWeight: '600', color: theme.tokens.text.primary, flexShrink: 1 },
-  badge: { minWidth: 22, minHeight: 22, borderRadius: 11, paddingHorizontal: 6, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.tokens.bg.hover },
-  count: { fontSize: theme.base.text.xs, fontWeight: '600', color: theme.tokens.text.primary, fontVariant: ['tabular-nums'] },
+  sessions: { minHeight: BAR, minWidth: BAR, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[2], flexShrink: 1 },
+  sessionsLabel: { fontSize: theme.base.text.base, fontWeight: theme.base.weight.semibold, color: theme.tokens.text.primary, flexShrink: 1 },
+  badge: { minWidth: 22, minHeight: 22, borderRadius: theme.base.radius.full, paddingHorizontal: theme.base.space[1.5], alignItems: 'center', justifyContent: 'center', backgroundColor: theme.tokens.bg.hover },
+  count: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.semibold, color: theme.tokens.text.primary, fontVariant: ['tabular-nums'] },
 }));

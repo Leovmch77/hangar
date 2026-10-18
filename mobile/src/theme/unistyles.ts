@@ -1,8 +1,8 @@
-import { Platform } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { themeDark, themeLight, themeBase } from '@hangar/core';
 import { prefs } from '../stores/prefs';
 import { CONVERSA_PADRAO, type Conversa } from './aplicarMaterial';
+import { INK, MONO, RADIUS, SPACE, TEXT, TYPE, WEIGHT } from './scale';
 
 // Lê o MMKV cru, e não o store de aparência: este módulo é o primeiro import do _layout e precisa
 // rodar antes de qualquer coisa tocar o UnistylesRuntime — o store importa `aplicarMaterial`, que
@@ -13,23 +13,6 @@ const alphaSalvo = (chave: string, padrao: number, minimum = 0) => {
   return typeof v === 'number' && Number.isFinite(v) ? Math.max(minimum, Math.min(1, v)) : padrao;
 };
 
-const TEXT = { xxxs: 11, xxs: 12, xs: 13, sm: 15, base: 17, lg: 19, xl: 22 } as const;
-const MONO = Platform.select({ ios: 'Menlo', default: 'monospace' });
-
-// Papel de texto = tamanho + peso + entrelinha num lugar só; a tela espalha (`...theme.type.meta`)
-// e só acrescenta cor. Corpo da conversa não usa `body` direto: ele passa pela escala da Aparência.
-const TYPE = {
-  title: { fontSize: TEXT.xl, fontWeight: '700', lineHeight: 28 },
-  heading: { fontSize: TEXT.lg, fontWeight: '600', lineHeight: 24 },
-  body: { fontSize: TEXT.base, fontWeight: '400', lineHeight: 24 },
-  label: { fontSize: TEXT.sm, fontWeight: '500', lineHeight: 20 },
-  control: { fontSize: TEXT.sm, fontWeight: '600', lineHeight: 20 },
-  meta: { fontSize: TEXT.xs, fontWeight: '400', lineHeight: 18 },
-  caption: { fontSize: TEXT.xxs, fontWeight: '400', lineHeight: 16 },
-  badge: { fontSize: TEXT.xxxs, fontWeight: '700', lineHeight: 13 },
-  mono: { fontSize: TEXT.xs, fontWeight: '400', lineHeight: 18, fontFamily: MONO },
-} as const;
-
 const mk = (t: typeof themeDark) => ({
   tokens: t,
   // A JetBrains Mono do core não vem embutida no app: sem trocar, código cai na fonte proporcional.
@@ -38,13 +21,12 @@ const mk = (t: typeof themeDark) => ({
     fontMono: MONO,
     // Escala do celular um ponto acima da do desktop: corpo 17 é o padrão de leitura do iPhone.
     text: TEXT,
-    // Passo de 4 com dois meios-passos; valor fora daqui arredonda para o vizinho, não vira token.
-    space: { 0.5: 2, 1: 4, 1.5: 6, 2: 8, 3: 12, 4: 16, 5: 20, 6: 24, 8: 32, 10: 40 },
-    radius: { xs: 4, sm: 8, md: 12, lg: 18, xl: 24, full: 9999 },
+    space: SPACE,
+    radius: RADIUS,
+    weight: WEIGHT,
   },
   type: TYPE,
-  // Cores que não mudam com tema nem acento: texto sobre o destaque/estado e o véu sobre mídia.
-  ink: { onAccent: '#ffffff', scrim: 'rgba(0,0,0,0.6)' },
+  ink: INK,
   panelAlpha: alphaSalvo('aparencia.panelAlpha', t.glass.panelAlpha, 0.3),
   surfaceAlpha: alphaSalvo('aparencia.surfaceAlpha', 1),
   // O valor salvo chega no primeiro `aplicarMaterial()` do _layout, antes da primeira tela.

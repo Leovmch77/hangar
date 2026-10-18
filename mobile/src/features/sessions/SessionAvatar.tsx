@@ -49,7 +49,7 @@ export function SessionAvatar({ session, size = 36 }: { session: AvatarSession; 
       {working ? <Animated.View style={[styles.orbit, orbit]}>
         <View testID="session-avatar-dot" style={[styles.dot, { left: (size - 5) / 2, backgroundColor: accent }]} />
       </Animated.View> : null}
-      {known ? <ProviderGlyph provider={glyph} size={size * 20 / 36} inline color={glyph === 'codex' ? '#ffffff' : undefined} />
+      {known ? <ProviderGlyph provider={glyph} size={size * 20 / 36} inline color={glyph === 'codex' ? theme.tokens.text.primary : undefined} />
         : <HangarMark size={size * 20 / 36} color={theme.tokens.text.secondary} />}
       {ready ? <View testID="session-avatar-badge" style={[styles.badge, { backgroundColor: limited ? theme.tokens.status.warning : theme.tokens.status.success }]}>
         <Icon name={limited ? 'Hourglass' : 'Check'} size={10} color={theme.tokens.bg.base} />
@@ -58,11 +58,11 @@ export function SessionAvatar({ session, size = 36 }: { session: AvatarSession; 
   );
 }
 
-const styles = StyleSheet.create(() => ({
+const styles = StyleSheet.create((theme) => ({
   avatar: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center' },
-  ring: { position: 'absolute', inset: 1, borderWidth: 1.5, borderRadius: 18 },
-  glow: { position: 'absolute', inset: 3, borderRadius: 18 },
+  ring: { position: 'absolute', inset: 1, borderWidth: 1.5, borderRadius: theme.base.radius.full },
+  glow: { position: 'absolute', inset: 3, borderRadius: theme.base.radius.full },
   orbit: { position: 'absolute', inset: 0 },
-  dot: { position: 'absolute', top: -0.75, left: 15.5, width: 5, height: 5, borderRadius: 3 },
-  badge: { position: 'absolute', right: -1, bottom: -1, width: 14, height: 14, borderRadius: 7, alignItems: 'center', justifyContent: 'center' },
+  dot: { position: 'absolute', top: -0.75, left: 15.5, width: 5, height: 5, borderRadius: theme.base.radius.full },
+  badge: { position: 'absolute', right: -1, bottom: -1, width: 14, height: 14, borderRadius: theme.base.radius.full, alignItems: 'center', justifyContent: 'center' },
 }));
