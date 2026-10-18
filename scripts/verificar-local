@@ -362,6 +362,8 @@ passo_front_rapido() {
 passo_mobile_rapido() {
     local app f rel=()
     app="$(mudados '^mobile/')"
+    # O tsc do app lê o core: sem recompilar o dele, a árvore fixa guarda chaves de outra rodada.
+    npm run i18n:compile:core --prefix mobile > /dev/null || return 1
     npm run i18n:compile --prefix mobile > /dev/null || return 1
     # Dependência ou configuração do app mudou: não há "relacionado", vale tudo.
     if [[ -n "$(mudados '^mobile/(package(-lock)?\.json|tsconfig[^/]*\.json|vitest[^/]*\.ts|babel\.config\.js|metro\.config\.js|app\.json|eas\.json|plugins/.*)$')" ]]; then

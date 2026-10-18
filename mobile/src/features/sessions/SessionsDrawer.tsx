@@ -20,9 +20,12 @@ import { DrawerMenu } from './DrawerMenu';
 // status, como Claude/ChatGPT): quem usa monta numa `Screen edges={[]}`, e a margem segura fica só
 // no conteúdo, aqui dentro. `onClose` roda antes de toda navegação que a lista faz.
 // `edgeStart`: a faixa de arrasto começa a essa distância da borda, que fica com o voltar do iOS.
-export function SessionsDrawer({ ref, edgeStart, onClose, onOpenServers, children }: {
+// `openOnBack` (Início): o Back do Android abre a gaveta fechada; com ela aberta, segue o sistema
+// e sai do app, senão o Back nunca sairia dali.
+export function SessionsDrawer({ ref, edgeStart, openOnBack, onClose, onOpenServers, children }: {
   ref?: Ref<DrawerLayoutMethods>;
   edgeStart?: number;
+  openOnBack?: boolean;
   onClose: () => void;
   onOpenServers: () => void;
   children: ReactNode;
@@ -31,13 +34,15 @@ export function SessionsDrawer({ ref, edgeStart, onClose, onOpenServers, childre
   const inner = useRef<DrawerLayoutMethods | null>(null);
   const [open, setOpen] = useState(false);
   useFocusEffect(useCallback(() => {
-    if (Platform.OS !== 'android' || !open) return;
+    // Só fechada com `openOnBack` (abre) ou aberta sem ele (fecha); no resto o Back é do sistema.
+    if (Platform.OS !== 'android' || open === !!openOnBack) return;
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-      inner.current?.closeDrawer();
+      if (open) inner.current?.closeDrawer();
+      else inner.current?.openDrawer();
       return true;
     });
     return () => sub.remove();
-  }, [open]));
+  }, [open, openOnBack]));
   const setRef = (r: DrawerLayoutMethods | null) => {
     inner.current = r;
     if (typeof ref === 'function') ref(r);
@@ -79,7 +84,9 @@ export function SessionsDrawer({ ref, edgeStart, onClose, onOpenServers, childre
   );
 }
 
-const EDGE_WIDTH = 32;
+// Padrão do DrawerLayout do Android. Mais larga, a faixa cobria o começo do conteúdo (16 dp): com a
+// gaveta fechada o arrasto ativa no primeiro movimento e cancelava o toque ali.
+const EDGE_WIDTH = 20;
 
 export function drawerEdgeSlop(edgeStart: number) {
   return { left: -edgeStart, width: EDGE_WIDTH };

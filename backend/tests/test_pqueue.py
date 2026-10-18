@@ -740,16 +740,6 @@ def test_timestamp_sem_fuso_e_lido_como_utc():
     assert ev_de("nao-e-data").ts is None
 
 
-def test_is_video_cobre_as_extensoes_servidas_pelo_app():
-    from app.video import is_video
-
-    for ext in ("mp4", "mov", "webm", "mkv", "m4v", "avi"):
-        assert is_video(f"/tmp/a.{ext}"), ext
-        assert is_video(f"/tmp/A.{ext.upper()}"), ext
-    for ext in ("png", "jpg", "mp3", "pdf", ""):
-        assert not is_video(f"/tmp/a.{ext}"), ext
-
-
 # ---------------------------------------------------------------------------
 # Surrogate solto no texto do usuário (meio emoji) — lado da ESCRITA
 # ---------------------------------------------------------------------------

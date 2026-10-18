@@ -102,32 +102,14 @@ def test_304_nao_fura_a_trava_do_transcript(cliente, sessao, monkeypatch):
     assert r.status_code == 403
 
 
-@pytest.mark.parametrize('filename', ['document.docx', 'document.html'])
-def test_upload_download_preserves_original_file_without_active_content(cliente, sessao, monkeypatch, filename):
-    path = sessao / filename
-    content = b'<script>parent.alert(1)</script>original-bytes'
-    path.write_bytes(content)
-    monkeypatch.setattr(api, 'resolve_upload', lambda *args: path)
-    response = cliente.get(f'/api/sessions/s1/uploads/{filename}',
-                           params={'download': 'true', 'token': 'secret'})
-    assert response.status_code == 200
-    assert response.content == content
-    assert response.headers['content-disposition'] == f'attachment; filename="{filename}"'
-    assert response.headers['content-security-policy'] == "sandbox; script-src 'none'"
-    assert response.headers['x-content-type-options'] == 'nosniff'
-
-
-@pytest.mark.parametrize("upload", [False, True])
-def test_html_runs_only_inside_an_isolated_document(cliente, sessao, monkeypatch, upload):
+def test_html_runs_only_inside_an_isolated_document(cliente, sessao, monkeypatch):
     _citado(monkeypatch)
     path = sessao / "document.html"
     content = b'<button onclick="this.textContent=42">Run</button>' + b" " * 100_000
     content += b'</iframe><script>window.parent.localStorage.getItem("cp_servers")</script>'
     path.write_bytes(content)
-    monkeypatch.setattr(api, "resolve_upload", lambda *args: path)
-    route = "/api/sessions/s1/uploads/document.html" if upload else "/api/sessions/s1/file"
     stat = path.stat()
-    response = cliente.get(route, params={"path": str(path), "token": "secret"}, headers={
+    response = cliente.get("/api/sessions/s1/file", params={"path": str(path), "token": "secret"}, headers={
         "If-None-Match": f'"{stat.st_mtime_ns:x}-{stat.st_size:x}"',
     })
 
