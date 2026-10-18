@@ -534,6 +534,10 @@ if [[ "$1" == "--new" ]]; then
             provider="claude"
         elif [[ -n "$perfil" ]]; then
             provider="omp"
+        elif [[ -z "$remoto" && -z "$resume" ]] && criadora_provider=$(me) && [[ -n "$criadora_provider" && "$criadora_provider" != "cli" ]]; then
+            # Chamado de uma sessão: o backend usa o agente dela (a criadora). Escolher aqui o padrão
+            # lembrado mandaria um provider explícito, e a herança não acontecia.
+            provider=""
         else
             providers=$(api GET /api/providers) || exit 1
             provider=$(python3 -c 'import json,sys
@@ -656,8 +660,10 @@ r = json.load(sys.stdin); print((r.get("name") or sys.argv[1]) + "\t" + (r.get("
     fi
     body=$(python3 -c 'import json,sys
 d = {"name": sys.argv[1], "cwd": sys.argv[2],
-     "engine": sys.argv[3] or None,
-     "provider": sys.argv[4]}
+     "engine": sys.argv[3] or None}
+# Ausente, e não vazio: o backend escolhe pela criadora (vazio seria recusado como provider inválido).
+if sys.argv[4]:
+    d["provider"] = sys.argv[4]
 if sys.argv[5]:
     d["config_dir"] = sys.argv[5]
 if sys.argv[6]:

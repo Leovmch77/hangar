@@ -82,6 +82,17 @@ checa "aviso da criação aparece" '0' "$?"
 [[ "$resultado" == *"agente herdado: claude"* ]]
 checa "o agente herdado aparece na criação" '0' "$?"
 
+# 2b. Chamado de uma sessão, sem --provider: o agente fica para o backend herdar da criadora; o
+# padrão lembrado do servidor só vale de fora de uma sessão.
+mkdir -p "$TMP/hl" && printf '{"name":"criadora","key":"k-criadora"}' > "$TMP/hl/criadora.json"
+rm -f "$TMP/corpo.json"
+CP_SESSION_KEY=k-criadora HANGAR_HEADLESS_DIR="$TMP/hl" bash "$TMP/scripts/hangar-send" --new herda /tmp >/dev/null 2>&1
+checa "de uma sessão: sem provider no corpo" 'null' "$(campo provider 2>/dev/null)"
+checa "de uma sessão: a criadora vai" '"criadora"' "$(campo creator 2>/dev/null)"
+rm -f "$TMP/corpo.json"
+env -u TMUX -u TMUX_PANE -u CP_SESSION_KEY -u HANGAR_CANO_KEY -u CP_SESSION_NAME bash "$TMP/scripts/hangar-send" --new de-fora /tmp >/dev/null 2>&1
+checa "de fora: o padrão do servidor" '"claude"' "$(campo provider 2>/dev/null)"
+
 # 3. Codex também aceita o modo sem terminal.
 rm -f "$TMP/corpo.json"
 bash "$TMP/scripts/hangar-send" --new hl-codex /tmp --headless --provider codex --permissao "Full Access" >/dev/null 2>&1
