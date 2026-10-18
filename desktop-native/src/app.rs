@@ -1589,24 +1589,21 @@ impl Hangar {
                 return;
             }
             Payload::Saved(key, source, open, result) => {
-                let card = match &result {
-                    Ok((_, true)) => Some(FileCard::Empty),
-                    Ok(_) if open => None,
-                    Ok(_) => Some(FileCard::Saved),
-                    Err((_, true)) => Some(FileCard::Missing),
-                    Err((error, false)) => Some(FileCard::Failed(error.clone())),
+                let (card, note) = match result {
+                    Ok((path, empty)) if open => {
+                        cx.open_with_system(&path);
+                        (empty.then_some(FileCard::Empty), None)
+                    }
+                    Ok((path, empty)) => (Some(if empty { FileCard::Empty } else { FileCard::Saved }),
+                        Some((tr("saved").replace("{path}", &path.display().to_string()), false))),
+                    // O card já diz "não encontrado"; a frase do servidor vinha sem tradução.
+                    Err((_, true)) => (Some(FileCard::Missing), None),
+                    Err((error, false)) => (Some(FileCard::Failed(error.clone())), Some((error, true))),
                 };
                 match card {
                     Some(card) => { self.file_cards.insert((key.clone(), source), card); }
                     None => { self.file_cards.remove(&(key.clone(), source)); }
                 }
-                let note = match result {
-                    Ok((path, _)) if open => { cx.open_with_system(&path); None }
-                    Ok((path, _)) => Some((tr("saved").replace("{path}", &path.display().to_string()), false)),
-                    // O card já diz "não encontrado"; a frase do servidor vinha sem tradução.
-                    Err((_, true)) => None,
-                    Err((error, false)) => Some((error, true)),
-                };
                 if let Some(note) = note { self.action_feedback.insert(key, note); }
                 cx.notify();
                 return;
@@ -5258,7 +5255,7 @@ fn file_card(row: &str, n: usize, name: &str, state: Option<FileCard>, openable:
     let web = activity::web;
     let busy = matches!(state, Some(FileCard::Busy));
     let failed = matches!(state, Some(FileCard::Missing | FileCard::Failed(_)));
-    let ext = name.rsplit_once('.').map(|(_, ext)| ext.to_uppercase()).unwrap_or_default();
+    let ext = composer::extension(&name).to_uppercase();
     let (detail, color, role) = match &state {
         None => (ext, theme::faint(), None),
         Some(FileCard::Busy) => (web("file_card_downloading"), theme::muted(), Some(Role::Status)),

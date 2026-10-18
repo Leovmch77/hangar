@@ -3,18 +3,13 @@ import { ActivityIndicator, Platform, Pressable, Text, View } from 'react-native
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { deliverFile } from '../features/attachments/mediaCache';
 import { haptic } from '../ui/haptics';
-import { Icon, type IconName } from '../ui/Icon';
+import { SvgXml } from 'react-native-svg';
+import { svgIcone } from '@hangar/core';
+import { Icon } from '../ui/Icon';
 import { superficie } from '../theme/superficie';
 import * as m from '../paraglide/messages';
 
 type Status = 'idle' | 'loading' | 'done' | 'empty' | 'missing' | 'failed' | 'no-app';
-
-const ARCHIVE = /\.(zip|tar|gz|tgz|7z|rar)$/i;
-const SHEET = /\.(xls|xlsx|ods|csv|tsv)$/i;
-
-function iconFor(name: string): IconName {
-  return ARCHIVE.test(name) ? 'FileArchive' : SHEET.test(name) ? 'FileSpreadsheet' : 'FileText';
-}
 
 const statusText: Record<Status, (() => string) | null> = {
   idle: null,
@@ -64,7 +59,7 @@ export const FileCard = memo(function FileCard({ uri, headers, name }: {
   return (
     <View style={[styles.card, { backgroundColor: superficie(theme), borderColor: theme.tokens.border.subtle }]}>
       <View style={[styles.iconBox, { backgroundColor: theme.tokens.accent.dim }]}>
-        <Icon name={iconFor(name)} size={18} color={theme.tokens.accent.base} />
+        <SvgXml xml={svgIcone(name, false)} width={22} height={22} />
       </View>
       <View style={styles.texts}>
         <Text style={[styles.name, { color: theme.tokens.text.primary }]} numberOfLines={1}>{name}</Text>

@@ -452,26 +452,27 @@ export function hideAttachmentPaths(text: string, refs: FileRef[]): string {
   const re = new RegExp(
     `!?\\[([^\\]\\n]*)\\]\\(<?(?:${alt})>?\\)|\`([^\`\\n]*)\`|(?<![\\w.~/-])(${alt})(?![\\w-]|\\.\\w)`, 'g');
   const isPath = new Set(paths);
-  const name = (p: string) => p.split('/').filter(Boolean).pop() || p;
   const swap = (blank: boolean) => (whole: string, label?: string, code?: string, path?: string) =>
     label !== undefined ? (blank ? '' : label)
-      : code !== undefined ? (isPath.has(code) ? (blank ? '' : `\`${name(code)}\``) : whole)
-        : blank ? '' : name(path!);
+      : code !== undefined ? (isPath.has(code) ? (blank ? '' : `\`${basename(code)}\``) : whole)
+        : blank ? '' : basename(path!);
+  const [erase, show] = [swap(true), swap(false)];
   let fence = false;
   let squeeze = false;
   const out: string[] = [];
   for (const line of text.split('\n')) {
     if (squeeze && !line.trim()) continue;
     squeeze = false;
-    if (/^\s*(```|~~~)/.test(line)) fence = !fence;
-    if (fence || /^\s*(```|~~~)/.test(line)) { out.push(line); continue; }
+    const marker = /^\s*(```|~~~)/.test(line);
+    if (marker) fence = !fence;
+    if (fence || marker) { out.push(line); continue; }
     re.lastIndex = 0;
     if (!re.test(line)) { out.push(line); continue; }
-    if (!/[\p{L}\p{N}]/u.test(line.replace(re, swap(true)))) {
+    if (!/[\p{L}\p{N}]/u.test(line.replace(re, erase))) {
       squeeze = !out.length || !out[out.length - 1].trim();
       continue;
     }
-    out.push(line.replace(re, swap(false)));
+    out.push(line.replace(re, show));
   }
   return out.join('\n');
 }
