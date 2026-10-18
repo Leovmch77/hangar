@@ -505,6 +505,41 @@ async fn forwarded_from_python_ports_is_served_here_and_keeps_the_guest_limits()
 }
 
 #[test]
+fn dictation_uses_the_dictation_deadline_and_attachments_the_file_one() {
+    use hangar_server::uploads::transcribe::profile;
+    assert_eq!(serde_json::to_value(profile(true)).unwrap(), json!("dictation"));
+    assert_eq!(serde_json::to_value(profile(false)).unwrap(), json!("file"));
+}
+
+#[test]
+fn video_extensions_are_the_ones_the_app_serves() {
+    use hangar_server::uploads::media::is_video;
+    for ext in ["mp4", "mov", "webm", "mkv", "m4v", "avi"] {
+        assert!(is_video(Path::new(&format!("/tmp/a.{ext}"))), "{ext}");
+        assert!(is_video(Path::new(&format!("/tmp/A.{}", ext.to_uppercase()))), "{ext}");
+    }
+    for ext in ["png", "jpg", "mp3", "pdf", ""] {
+        assert!(!is_video(Path::new(&format!("/tmp/a.{ext}"))), "{ext}");
+    }
+}
+
+#[test]
+fn gallery_breaks_same_second_ties_by_name_not_directory_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("project/session");
+    std::fs::create_dir_all(&folder).unwrap();
+    let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    for name in ["c.bin", "a.bin", "b.bin"] {
+        std::fs::write(folder.join(name), b"x").unwrap();
+        std::fs::File::options().write(true).open(folder.join(name)).unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(when)).unwrap();
+    }
+    let store = hangar_server::uploads::store::UploadStore::new(dir.path()).unwrap();
+    let names: Vec<String> = store.list("project", "session", 0, 1_700_000_000.0).unwrap().into_iter().map(|e| e.filename).collect();
+    assert_eq!(names, ["a.bin", "b.bin", "c.bin"]);
+}
+
+#[test]
 fn transcription_warnings_join_the_fallback_and_the_cleaning() {
     use hangar_server::uploads::transcribe::with_provider;
     let fallback = Some("Transcrito pelo Groq: ElevenLabs não respondeu");

@@ -99,6 +99,32 @@ def test_guest_with_login_is_marked_for_the_rust_limits(rust):
     assert [s["guest"] for s in _Rust.seen] == ["1"]
 
 
+def test_transport_failure_is_503_without_a_second_attempt(rust, monkeypatch):
+    import socket
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(4)
+    accepted = []
+
+    def drop():
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            accepted.append(1)
+            conn.close()
+
+    threading.Thread(target=drop, daemon=True).start()
+    monkeypatch.setattr(account_bridge, "_preparation_transport", (f"127.0.0.1:{listener.getsockname()[1]}", "s"))
+    try:
+        response = TestClient(app).post("/api/sessions/s/upload", headers=AUTH, content=b"x")
+    finally:
+        listener.close()
+    assert (response.status_code, response.json()["detail"]["code"]) == (503, "account_bridge_unavailable")
+    assert accepted == [1]
+
+
 def test_unauthenticated_request_never_reaches_rust(rust):
     assert TestClient(app).post("/api/sessions/s/upload", content=b"x").status_code == 401
     assert _Rust.seen == []

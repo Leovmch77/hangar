@@ -560,8 +560,12 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   `?token=`, sem conferir Origin). Custos e uso têm índice próprio
   (`custos-rust.sqlite3`) no cache local; stats continuam no Python. Contas Claude/Codex e
   cotas são só do Rust: no modo `python` respondem `accounts_need_rust_server`, sem reserva
-  Python. Anexos de sessão pertencem ao Rust enquanto o supervisor estiver em `rust` ou
-  `pending`; nessa fase, falha da ponte não ativa um segundo escritor Python. O resto, convidado
+  Python. Anexos, o `/transcribe` da sessão, a saída ao vivo de ferramenta (`bash-output`,
+  `tool-progress`) e a imagem colada no terminal são só do Rust, com a sessão tirada da lista dele:
+  as portas do Python autenticam e repassam em fluxo por `/__hangar_server/forwarded`, e no modo
+  `python` respondem 503 `erro_midia_precisa_rust`. Só a imagem de conversa transferida
+  (`transfer:`) segue no Python. Evidência em
+  [accounts-uploads-rust.md](docs/decisoes/accounts-uploads-rust.md#anexos). O resto, convidado
   incluído, é repassado com `X-Forwarded-For`. A 8766 é do Rust e a 8768 fica no Python. Sem binário
   (`CP_RUST_SERVER_BIN`, `crates/target/release`, `~/.hangar/bin`), com `CP_RUST_SERVER=0`, com
   `protocol` da saúde diferente de `RUST_SERVER_PROTOCOL`, sem endereço privado válido ou com 3

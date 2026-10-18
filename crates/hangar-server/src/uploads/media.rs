@@ -90,12 +90,7 @@ pub async fn extract(
     session: &str,
     path: &Path,
 ) -> (Vec<PathBuf>, Option<Vec<u8>>) {
-    let ext = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if !["mp4", "mov", "webm", "mkv", "m4v", "avi"].contains(&ext.as_str()) {
+    if !is_video(path) {
         return (vec![], None);
     }
     let scratch = std::env::temp_dir().join(format!(
@@ -114,6 +109,7 @@ pub async fn extract(
     let Ok((_, retained)) = store.open(project, session, name) else {
         return (vec![], None);
     };
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
     let src = scratch.join(format!("source.{ext}"));
     let Ok(mut output) = tokio::fs::File::create(&src).await else {
         return (vec![], None);
@@ -227,6 +223,11 @@ pub async fn extract(
         None
     };
     (frames, audio)
+}
+
+pub fn is_video(path: &Path) -> bool {
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    ["mp4", "mov", "webm", "mkv", "m4v", "avi"].contains(&ext.as_str())
 }
 
 pub fn frame_positions(duration: f64) -> Vec<f64> {

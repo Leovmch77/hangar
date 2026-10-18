@@ -20,6 +20,11 @@ use crate::{
     transcription::{model::Profile, routes::transcribe_here},
 };
 
+/// Áudio anexado (arquivo de até 10 min) não paga a limpeza nem o prazo do ditado.
+pub fn profile(limpar: bool) -> Profile {
+    if limpar { Profile::Dictation } else { Profile::File }
+}
+
 /// `_with_provider`: quem transcreveu entra na resposta; o aviso da reserva vem antes do da
 /// limpeza e nenhum dos dois some.
 pub fn with_provider(mut result: Value, provider: &str, aviso: Option<&str>) -> Value {
@@ -117,9 +122,7 @@ pub async fn serve(st: &AppState, name: &str, req: Request, guest: bool) -> Resp
             (path, data.to_vec(), filename)
         }
     };
-    // Áudio anexado (arquivo de até 10 min) não paga a limpeza nem o prazo do ditado.
-    let profile = if limpar { Profile::Dictation } else { Profile::File };
-    let transcription = match transcribe_here(&st, data.into(), filename, profile).await {
+    let transcription = match transcribe_here(st, data.into(), filename, profile(limpar)).await {
         Ok(t) => t,
         Err(e) => {
             let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_GATEWAY);
