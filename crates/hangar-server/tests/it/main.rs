@@ -6,6 +6,7 @@
 
 mod common;
 mod artifacts;
+mod session_media;
 mod commands;
 mod dictation_routes;
 mod dictation_catalog;

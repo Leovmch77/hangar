@@ -1,0 +1,259 @@
+//! Leituras de mídia da sessão que o chat pede sob demanda: etapas ao vivo de uma ferramenta MCP
+//! (`tool-progress`) e a imagem colada no terminal, guardada em base64 no transcript.
+use std::{
+    io::{BufRead, BufReader},
+    net::SocketAddr,
+    path::Path,
+    sync::Arc,
+};
+
+use axum::{
+    body::Body,
+    extract::{ConnectInfo, Path as RoutePath, Request, State},
+    http::{HeaderValue, StatusCode, header},
+    response::Response,
+};
+use serde_json::{Value, json};
+
+use crate::{
+    routes::{AppState, INFO_REASON, pass, route_failed, who},
+    session_write::{detail_body, json_response},
+    side::Binding,
+};
+
+const STEPS_KEPT: usize = 200;
+const MESSAGE_CHARS: usize = 500;
+
+/// `toolu_` + 1 a 80 de `[A-Za-z0-9_-]`, a linha inteira: o id vira nome de arquivo.
+pub fn valid_tool_use_id(id: &str) -> bool {
+    id.strip_prefix("toolu_").is_some_and(|rest| {
+        (1..=80).contains(&rest.len()) && rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    })
+}
+
+/// `str.splitlines()` do Python: quebra também em `\r`, `\v`, `\f`, `\x1c`-`\x1e`, `\x85`, U+2028/9.
+fn py_splitlines(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if matches!(c, '\n' | '\r' | '\x0b' | '\x0c' | '\x1c' | '\x1d' | '\x1e' | '\u{85}' | '\u{2028}' | '\u{2029}') {
+            out.push(&text[start..i]);
+            let mut end = i + c.len_utf8();
+            if c == '\r' && chars.peek().is_some_and(|&(_, n)| n == '\n') {
+                chars.next();
+                end += 1;
+            }
+            start = end;
+        }
+    }
+    if start < text.len() {
+        out.push(&text[start..]);
+    }
+    out
+}
+
+/// As etapas gravadas: as últimas 200 linhas (contadas antes de descartar as inválidas), cada
+/// mensagem cortada em 500 caracteres. Linha que não é UTF-8 conta como uma linha inválida.
+pub fn parse_steps(bytes: &[u8]) -> Vec<Value> {
+    let mut chunks: Vec<&[u8]> = bytes.split(|&b| b == b'\n').collect();
+    if chunks.last().is_some_and(|c| c.is_empty()) {
+        chunks.pop();
+    }
+    let mut lines: Vec<Option<&str>> = Vec::new();
+    for chunk in chunks {
+        match std::str::from_utf8(chunk) {
+            Ok("") => lines.push(Some("")),
+            Ok(text) => lines.extend(py_splitlines(text).into_iter().map(Some)),
+            Err(_) => lines.push(None),
+        }
+    }
+    let skip = lines.len().saturating_sub(STEPS_KEPT);
+    lines[skip..]
+        .iter()
+        .flatten()
+        .filter_map(|line| {
+            let Ok(Value::Object(mut item)) = serde_json::from_str::<Value>(line) else { return None };
+            let Some(Value::String(message)) = item.remove("message") else { return None };
+            let message: String = message.chars().take(MESSAGE_CHARS).collect();
+            Some(json!({"t": item.remove("t").unwrap_or(Value::Null), "message": message}))
+        })
+        .collect()
+}
+
+pub async fn tool_progress(
+    State(st): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    RoutePath((name, id)): RoutePath<(String, String)>,
+    req: Request,
+) -> Response {
+    let (fwd, caller) = who(&st, peer, &req);
+    if !caller.is_some_and(|c| c.can(&name, req.method())) {
+        return pass(&st, req, &fwd).await;
+    }
+    if !valid_tool_use_id(&id) {
+        return json_response(StatusCode::BAD_REQUEST, json!({"detail": "invalid tool_use_id"}));
+    }
+    let file = st.hangar_dir.join("tool-progress").join(format!("{id}.jsonl"));
+    match tokio::fs::read(&file).await {
+        Ok(bytes) => json_response(StatusCode::OK, Value::Array(parse_steps(&bytes))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json_response(StatusCode::OK, json!([])),
+        Err(_) => route_failed(&st, req.headers(), "rust.tool_progress_failed", &name, "tool_progress_io", "as etapas da ferramenta não puderam ser lidas"),
+    }
+}
+
+/// `base64.b64decode` sem `validate`: ignora o que não é do alfabeto; `=` só vale depois do último
+/// caractere de dado, e falta de preenchimento é erro.
+pub fn py_b64decode(text: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let mut data = Vec::with_capacity(text.len());
+    let mut pads = 0;
+    for b in text.bytes() {
+        if b == b'=' {
+            pads += 1;
+        } else if b.is_ascii_alphanumeric() || b == b'+' || b == b'/' {
+            data.push(b);
+            pads = 0;
+        }
+    }
+    let ok = match data.len() % 4 {
+        0 => true,
+        2 => pads >= 2,
+        3 => pads >= 1,
+        _ => false,
+    };
+    ok.then(|| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&data).ok()).flatten()
+}
+
+/// Só imagem raster passa: SVG executa script e o resto não é imagem.
+fn served_media(media: Option<&str>) -> &'static str {
+    match media.map(str::to_ascii_lowercase).as_deref() {
+        None => "image/png",
+        Some("image/png") => "image/png",
+        Some("image/jpeg") => "image/jpeg",
+        Some("image/gif") => "image/gif",
+        Some("image/webp") => "image/webp",
+        Some(_) => "application/octet-stream",
+    }
+}
+
+/// A `idx`-ésima imagem base64 de topo da mensagem `uuid`: a primeira linha com esse uuid decide.
+pub fn find_image(jsonl: &Path, uuid: &str, idx: i64) -> std::io::Result<Option<(Vec<u8>, &'static str)>> {
+    let Ok(file) = std::fs::File::open(jsonl) else { return Ok(None) };
+    let needle = uuid.as_bytes();
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            return Ok(None);
+        }
+        // Só a linha que contém o uuid vira JSON: decodificar todas custava segundos por imagem.
+        if !line.windows(needle.len().max(1)).any(|w| w == needle) {
+            continue;
+        }
+        let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&line)) else { continue };
+        if obj.get("uuid").and_then(Value::as_str) != Some(uuid) {
+            continue;
+        }
+        let Some(content) = obj.get("message").and_then(|m| m.get("content")).and_then(Value::as_array) else {
+            return Ok(None);
+        };
+        let images: Vec<&Value> = content.iter().filter(|it| it.get("type").and_then(Value::as_str) == Some("image")).collect();
+        let Some(image) = usize::try_from(idx).ok().and_then(|i| images.get(i)) else { return Ok(None) };
+        let source = image.get("source");
+        let Some(data) = source.and_then(|s| s.get("data")).and_then(Value::as_str) else { return Ok(None) };
+        let media = served_media(source.and_then(|s| s.get("media_type")).and_then(Value::as_str));
+        return Ok(py_b64decode(data).map(|raw| (raw, media)));
+    }
+}
+
+fn int_parsing(input: &str) -> Response {
+    json_response(StatusCode::UNPROCESSABLE_ENTITY, json!({"detail": [{"type": "int_parsing", "loc": ["path", "idx"],
+        "msg": "Input should be a valid integer, unable to parse string as an integer", "input": input}]}))
+}
+
+pub async fn transcript_image(
+    State(st): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    RoutePath((name, uuid, idx)): RoutePath<(String, String, String)>,
+    req: Request,
+) -> Response {
+    let (fwd, caller) = who(&st, peer, &req);
+    // A imagem de uma conversa transferida é lida pelo Python, como o histórico dela.
+    if !caller.is_some_and(|c| c.can(&name, req.method())) || uuid.starts_with("transfer:") {
+        return pass(&st, req, &fwd).await;
+    }
+    let Ok(idx) = idx.trim().parse::<i64>() else { return int_parsing(&idx) };
+    let info = match st.info(&name).await {
+        Ok(info) => info,
+        Err(e) => {
+            st.diag.report("rust.transcript_image_failed", &name, e.0, INFO_REASON);
+            return json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_lista_indisponivel",
+                "a lista de sessões está indisponível", json!({"detalhe": e.0})));
+        }
+    };
+    if info.as_ref().is_some_and(|i| i.provider == "codex") {
+        return pass(&st, req, &fwd).await;
+    }
+    let Some(jsonl) = info.as_ref().and_then(|i| i.jsonl.clone()) else {
+        return json_response(StatusCode::NOT_FOUND, detail_body("erro_sessao_inexistente", "session or transcript not found", json!({})));
+    };
+    // Com o chat ao vivo aberto, vale o transcript que o hub já confirmou.
+    let fresh = info.as_ref().and_then(Binding::from_info);
+    let jsonl = st.side.hubs.bound(&name)
+        .filter(|b| fresh.as_ref().is_some_and(|f| !b.changes_at_once(f)))
+        .map_or(jsonl, |b| b.jsonl);
+    let found = tokio::task::spawn_blocking(move || find_image(&jsonl, &uuid, idx)).await;
+    match found {
+        Ok(Ok(Some((raw, media)))) => {
+            let mut response = Response::new(Body::from(raw));
+            let headers = response.headers_mut();
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(media));
+            headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("max-age=31536000, immutable"));
+            headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+            response
+        }
+        Ok(Ok(None)) => json_response(StatusCode::NOT_FOUND, detail_body("erro_imagem_nao_encontrada", "image not found", json!({}))),
+        Ok(Err(_)) => json_response(StatusCode::CONFLICT, detail_body("session_transfer_history_invalid", "histórico da transferência indisponível", json!({}))),
+        Err(_) => route_failed(&st, req.headers(), "rust.transcript_image_failed", &name, "transcript_image_panic", "a leitura da imagem caiu no servidor"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn splitlines_matches_python() {
+        assert_eq!(py_splitlines("a\r\nb\rc\u{2028}d\x1ce"), ["a", "b", "c", "d", "e"]);
+        assert_eq!(py_splitlines("a\r"), ["a"]);
+        assert_eq!(py_splitlines("\r"), [""]);
+    }
+
+    #[test]
+    fn b64_matches_python_cases() {
+        for (input, expected) in [("QUJD", Some(&b"ABC"[..])), ("QUJ", None), ("QUJD=", Some(b"ABC")), ("QQ=", None),
+            ("Q===", None), ("QQ==\n", Some(b"A")), ("=QUJD", Some(b"ABC")), ("QU=JD", Some(b"ABC")),
+            ("QUJDRA==extra", None), ("QQ==QQ==", Some(b"A\x04\x10"))] {
+            assert_eq!(py_b64decode(input).as_deref(), expected, "{input}");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn steps_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {
+            let _ = parse_steps(&bytes);
+        }
+
+        #[test]
+        fn image_scan_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..512), idx in -2i64..4) {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("t.jsonl");
+            std::fs::write(&path, &bytes).unwrap();
+            let _ = find_image(&path, "u", idx);
+            let _ = py_b64decode(&String::from_utf8_lossy(&bytes));
+        }
+    }
+}
