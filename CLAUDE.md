@@ -327,7 +327,7 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   - Voltar e setas são `Icon` (`ChevronLeft`…), nunca caractere (‹ ▸).
   - Formulário em folha usa o `KeyboardAvoidingView` do `react-native-keyboard-controller` com `automaticOffset`.
   - Vibração só por `src/ui/haptics.ts` (iOS): seleção ao marcar, sucesso/erro no resultado; `toast.ok`/`toast.erro` já vibram.
-  - Tela simples usa o cabeçalho nativo da pilha (`useGlassHeader`); só o chat tem cabeçalho próprio.
+  - Tela simples usa o cabeçalho nativo da pilha (`useGlassHeader`); chat e rota em `formSheet` usam cabeçalho local.
   - Conteúdo sob cabeçalho transparente: ScrollView com `contentInsetAdjustmentBehavior="automatic"` no iOS; o resto recua por `useHeaderHeight`.
   - Tamanho de texto vem de `theme.base.text.*`, mínimo 11 pt; `fontScaleGuard.test.ts` barra número solto.
   - Ícone Lucide novo ganha SF Symbol em `src/ui/sfSymbols.ts` quando houver um de mesmo sentido.

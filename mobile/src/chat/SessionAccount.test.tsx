@@ -1,18 +1,26 @@
 // @vitest-environment happy-dom
-import { act, createElement } from 'react';
+import { act, createElement, useLayoutEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { _limparEsfriamentoParaTestes, _resetRotasForTests, configureApi, type AggSession, type SessionInfo, type Server, type StateEvent } from '@hangar/core';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-const boundary = vi.hoisted(() => ({ params: { server: 'own', name: 'same-conversation' }, alert: vi.fn(), replace: vi.fn(), release: vi.fn() }));
+const boundary = vi.hoisted(() => ({ params: { server: 'own', name: 'same-conversation' }, alert: vi.fn(), replace: vi.fn(), release: vi.fn(), back: vi.fn(), canGoBack: false, options: vi.fn() }));
 vi.mock('expo-router', () => ({
   useLocalSearchParams: () => ({ ...boundary.params }),
-  useRouter: () => ({ replace: boundary.replace, canGoBack: () => false }),
-  Stack: { Screen: () => null },
+  useRouter: () => ({ replace: boundary.replace, back: boundary.back, canGoBack: () => boundary.canGoBack }),
+  Stack: { Screen: ({ options }: { options: unknown }) => {
+    useLayoutEffect(() => { boundary.options(options); }, [options]);
+    return null;
+  } },
 }));
-vi.mock('expo-router/react-navigation', () => ({ useHeaderHeight: () => 44 }));
-vi.mock('../ui/glassHeader', () => ({ useGlassHeader: () => ({}), HeaderBack: () => null }));
+vi.mock('react-native-unistyles', async original => {
+  const actual = await original<typeof import('react-native-unistyles')>();
+  return { ...actual, useUnistyles: () => {
+    const value = actual.useUnistyles();
+    return { ...value, theme: new Proxy(value.theme, {}) };
+  } };
+});
 vi.mock('expo-secure-store', () => ({ getItemAsync: async () => null, setItemAsync: async () => {} }));
 vi.mock('../stores/sessions', async () => {
   const { create } = await import('zustand');
@@ -29,9 +37,15 @@ vi.mock('../stores/chat', async () => {
 });
 vi.mock('react-native', async original => {
   const actual = await original<typeof import('react-native')>();
-  return { ...actual, View: ({ accessibilityValue, ...props }: Record<string, any>) => createElement(actual.View, { ...props, 'aria-valuenow': accessibilityValue?.now }), Alert: { alert: boundary.alert },
+  return { ...actual, Platform: { ...actual.Platform, OS: 'ios' }, View: ({ accessibilityValue, collapsable, ...props }: Record<string, any>) => {
+    const viewProps = { ...props, 'aria-valuenow': accessibilityValue?.now, 'data-collapsable': collapsable };
+    return createElement(actual.View, viewProps);
+  }, Alert: { alert: boundary.alert },
     Pressable: ({ accessibilityState, accessibilityValue, ...props }: Record<string, any>) => createElement(actual.Pressable, { ...props, 'aria-valuetext': accessibilityValue?.text }),
-    ScrollView: ({ contentInsetAdjustmentBehavior, contentContainerStyle, ...props }: Record<string, unknown>) => createElement(actual.View, props),
+    ScrollView: ({ contentInsetAdjustmentBehavior, contentContainerStyle, ...props }: Record<string, any>) => {
+      const viewProps = { ...props, style: props.style, 'data-inset-adjustment': contentInsetAdjustmentBehavior };
+      return createElement(actual.View, viewProps);
+    },
     Text: ({ selectable, ...props }: Record<string, unknown>) => createElement(actual.Text, props),
   };
 });
@@ -108,6 +122,7 @@ beforeEach(() => {
   _limparEsfriamentoParaTestes(); _resetRotasForTests();
   boundary.params = { server: 'own', name: source.name };
   boundary.alert.mockReset(); boundary.replace.mockReset(); boundary.release.mockReset();
+  boundary.back.mockReset(); boundary.options.mockReset(); boundary.canGoBack = false;
   useServers.setState({ servers: [own, other], activeId: other.id, ready: true });
   setSession();
   chatStore(own.id, source.name).use.setState({ stateEvent: null });
@@ -133,6 +148,40 @@ afterEach(() => {
   act(() => { roots.splice(0).forEach(root => root.unmount()); });
   vi.unstubAllGlobals();
   _limparEsfriamentoParaTestes(); _resetRotasForTests();
+});
+
+describe('Folha da conta no iOS', () => {
+  it('usa título e fechar locais, sem republicar cabeçalho nativo ao renderizar', async () => {
+    const pending = deferred<Response>(); listReply = () => pending.promise;
+    const { container, root } = await mount();
+    expect(boundary.options.mock.calls.at(-1)?.[0]).toMatchObject({ headerShown: false, contentStyle: { backgroundColor: '#fff' } });
+    expect((container.firstElementChild as HTMLElement).style.backgroundColor).toBe('');
+    expect(container.querySelector('[role="header"]')?.textContent).toBe(m.accounts_switch_title());
+    expect(container.querySelector('[role="header"]')?.parentElement?.dataset.collapsable).toBe('false');
+    const scroll = container.querySelector<HTMLElement>('[data-inset-adjustment]')!;
+    expect(scroll.dataset.insetAdjustment).toBe('never');
+    expect(scroll.style.flex).toBe('1 1 0%');
+    expect(container.textContent).toContain(m.comum_carregando());
+    await rerender(root);
+    expect(boundary.options).toHaveBeenCalledTimes(1);
+    expect(button(container, m.native_close())).not.toBeNull();
+    await click(container, m.native_close());
+    expect(boundary.replace).toHaveBeenCalledWith('/s/own/same-conversation');
+    expect(boundary.back).not.toHaveBeenCalled();
+    await act(async () => pending.resolve(json(targets)));
+    expect(button(container, 'beta')).not.toBeNull();
+  });
+
+  it('permite fechar pelo histórico mesmo com erro ao carregar as contas', async () => {
+    boundary.canGoBack = true;
+    listReply = async () => json({ detail: 'accounts-unavailable' }, 503);
+    const { container } = await mount();
+    expect(container.textContent).toContain('accounts-unavailable');
+    expect(button(container, m.native_close())).not.toBeNull();
+    await click(container, m.native_close());
+    expect(boundary.back).toHaveBeenCalledOnce();
+    expect(boundary.replace).not.toHaveBeenCalled();
+  });
 });
 
 describe('Contas com identificação e cota completa', () => {
@@ -164,7 +213,7 @@ describe('Contas com identificação e cota completa', () => {
     expect(content).toContain('same@test');
     expect(content).toContain('Max');
     expect(content.indexOf('.claude-claude-200-2')).toBeLessThan(content.indexOf('.claude-02-200'));
-    const spoken = container.querySelector('button')?.getAttribute('aria-valuetext');
+    const spoken = container.querySelector('button[aria-valuetext]')?.getAttribute('aria-valuetext');
     expect(spoken).toContain('.claude-claude-200-2');
     expect(spoken).toContain('5h 30%');
     expect(spoken).toContain('7d 12%');
