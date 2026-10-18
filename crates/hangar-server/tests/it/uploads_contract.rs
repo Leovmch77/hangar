@@ -652,22 +652,26 @@ fn assert_same(name: &str, diffs: Vec<String>) {
 }
 
 #[tokio::test]
+#[cfg_attr(target_os = "macos", ignore = "o Python só gravou referência de Linux e Windows")]
 async fn errors_and_isolation_match_python_reference() {
     assert_same("errors-and-isolation", replay("errors-and-isolation").await);
 }
 
 #[tokio::test]
+#[cfg_attr(target_os = "macos", ignore = "o Python só gravou referência de Linux e Windows")]
 async fn retention_and_audio_match_python_reference() {
     assert_same("retention-and-audio", replay("retention-and-audio").await);
 }
 
 #[tokio::test]
+#[cfg_attr(target_os = "macos", ignore = "o Python só gravou referência de Linux e Windows")]
 async fn active_content_range_matches_python_reference() {
     assert_same("active-content-range", replay("active-content-range").await);
 }
 
 /// Sem decodificador de verdade: o próprio executável roda de novo, só este teste, com o PATH vazio.
 #[tokio::test]
+#[cfg_attr(target_os = "macos", ignore = "o Python só gravou referência de Linux e Windows")]
 async fn video_without_ffmpeg_matches_python_reference() {
     if std::env::var_os(CHILD).is_some() {
         let missing = std::process::Command::new("ffmpeg").arg("-version").output();
