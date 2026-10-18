@@ -16,10 +16,15 @@ import type { EstadoVad, MotivoFim, Server } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 import { dictationStyleStore } from './ditadoEstiloStore';
 import { beginVoiceDictation } from '../voice/audioSession';
+import { toast } from '../../ui/Toast';
 
 const STOP_STATUS_TIMEOUT_MS = 5_000;
 // Servidor lento não segura o microfone: passado isto vale o último teto conhecido.
 const CEILING_REFRESH_TIMEOUT_MS = 1_000;
+// O nativo termina pelo `forDuration` um pouco antes do relógio JS: dentro desta folga ainda é o teto.
+const CEILING_TOLERANCE_MS = 500;
+// Um aviso por execução do app: repetir a cada gravação vira ruído.
+let foregroundOnlyWarned = false;
 
 // O serviço de segundo plano precisa existir no binário, não só na atualização JS.
 const backgroundRecording = () => Platform.OS === 'ios'
@@ -48,6 +53,8 @@ interface Recording {
   error?: Error;
   errorReported?: boolean;
   ceilingMs?: number;
+  /** Antes do `record()`: o teto nativo conta a partir dele. */
+  recordStartedAt?: number;
   background: boolean;
   subscription?: { remove(): void };
 }
@@ -174,6 +181,10 @@ export function useDitado({ onFim, onErroParada, server }: Opts) {
         if (recording.interrupted) return;
         // Sem a notificação do serviço, grava só com o app na frente.
         background = notifications.granted;
+        if (!background) {
+          registrarDiag({ evento: 'dictation.background_unavailable', nivel: 'aviso', codigo: 'notifications_denied' });
+          if (!foregroundOnlyWarned) { foregroundOnlyWarned = true; toast.aviso(m.composer_ditado_so_na_frente()); }
+        }
       }
       recording.background = background;
       recording.phase = 'preparing';
@@ -198,9 +209,10 @@ export function useDitado({ onFim, onErroParada, server }: Opts) {
         }
         if (status.isFinished || recording.error) {
           complete(status);
-          // Sem erro e sem parada pedida, o nativo só termina sozinho no teto (forDuration);
-          // interrupção do sistema pausa a captação e é vista na volta ao app.
-          if (recording.phase === 'recording') void finishRecording(recording, recording.error ? 'escondeu' : 'teto');
+          // Sem parada pedida, só é teto se o `forDuration` venceu; antes disso o sistema interrompeu.
+          const atCeiling = !recording.error && recording.ceilingMs !== undefined && recording.recordStartedAt !== undefined
+            && Date.now() - recording.recordStartedAt >= recording.ceilingMs - CEILING_TOLERANCE_MS;
+          if (recording.phase === 'recording') void finishRecording(recording, atCeiling ? 'teto' : 'escondeu');
         }
       });
       const styleStore = dictationStyleStore(server);
@@ -219,6 +231,7 @@ export function useDitado({ onFim, onErroParada, server }: Opts) {
       const ceilingMs = styleStore.getState().ceilingMs;
       recording.ceilingMs = ceilingMs;
       // O teto nativo continua valendo quando o sistema suspende os timers JS.
+      recording.recordStartedAt = Date.now();
       recorder.record({ forDuration: ceilingMs / 1000 });
       if (recording.interrupted) return;
       recording.phase = 'recording';

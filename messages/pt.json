@@ -1407,6 +1407,7 @@
   "composer_ditado_recuperavel": "Ditado guardado nesta conversa: “{text}”",
   "composer_ditado_aplicado": "Ditado já inserido. Não foi possível limpar o áudio guardado; tente descartar novamente.",
   "composer_ditado_indisponivel": "Serviço de transcrição indisponível",
+  "composer_ditado_so_na_frente": "Sem permissão de notificação, a gravação para quando você sai do app.",
   "composer_ditado_anterior": "A conversa mudou ou sua identidade ainda não foi confirmada. O áudio foi guardado; a transcrição não foi iniciada.",
   "composer_falha_transcricao": "Falha na transcrição",
   "composer_gravacao_vazia": "Gravação vazia, tente de novo",

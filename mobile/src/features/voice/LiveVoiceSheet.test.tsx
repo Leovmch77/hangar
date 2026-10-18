@@ -8,9 +8,12 @@ import { LiveVoiceButton } from './LiveVoiceButton';
 import * as m from '../../paraglide/messages';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-const native = vi.hoisted(() => ({ markdown: vi.fn(), scroll: vi.fn() }));
+const native = vi.hoisted(() => ({ markdown: vi.fn(), scroll: vi.fn(), announce: vi.fn(), os: 'android' }));
 vi.mock('react-native', async original => ({
   ...await original<typeof import('react-native')>(),
+  Platform: { get OS() { return native.os; }, select: (x: Record<string, unknown>) => x[native.os] ?? x.default },
+  AccessibilityInfo: { announceForAccessibility: native.announce, isReduceTransparencyEnabled: () => Promise.resolve(false),
+    addEventListener: () => ({ remove() {} }) },
   ScrollView: forwardRef(function VoiceScroll({ children }: { children?: ReactNode }, ref) {
     useImperativeHandle(ref, () => ({ scrollTo: native.scroll }));
     return createElement('div', { 'data-scroll-content': true }, children);
@@ -30,6 +33,11 @@ vi.mock('../../ui/AnchoredPanel', () => ({
   AnchoredPanel: ({ open, children }: { open: boolean; children: ReactNode }) => open
     ? createElement('div', { 'data-popup-layer': true }, children) : null,
 }));
+// Como o real: o `useUnistyles` devolve um Proxy novo do tema a cada render.
+vi.mock('react-native-unistyles', async original => {
+  const actual = await original<typeof import('react-native-unistyles')>();
+  return { ...actual, useUnistyles: () => { const ui = actual.useUnistyles(); return { ...ui, theme: new Proxy(ui.theme, {}) }; } };
+});
 // Fronteira do renderizador nativo; não monta a árvore de bolhas do chat.
 vi.mock('../../chat/AssistantBubble', () => ({ mkMarkdownStyle: () => ({ paragraph: {} }) }));
 vi.mock('react-native-enriched-markdown', () => ({
@@ -61,10 +69,11 @@ const initialView = (): LiveVoiceView => ({
   memory: { loading: false, entries: [], error: null, forgetError: null },
 });
 
+const staticLevels = { get: () => view.levels, subscribe: () => () => {} };
 let container: HTMLDivElement;
 let root: Root;
 let view: LiveVoiceView;
-let callbacks: Omit<LiveVoiceSheetProps, 'open' | 'view' | 'servers' | 'serverId'>;
+let callbacks: Omit<LiveVoiceSheetProps, 'open' | 'view' | 'levels' | 'servers' | 'serverId'>;
 const servers = [{ id: 'server-a', label: 'server-fixture' }, { id: 'server-b', label: 'other-server' }];
 let serverId: string;
 beforeEach(() => {
@@ -72,6 +81,8 @@ beforeEach(() => {
   vi.setSystemTime(new Date('2026-10-15T12:00:00Z'));
   native.markdown.mockClear();
   native.scroll.mockClear();
+  native.announce.mockClear();
+  native.os = 'android';
   container = document.createElement('div');
   root = createRoot(container);
   view = initialView();
@@ -80,7 +91,7 @@ beforeEach(() => {
     onSaveSettings: vi.fn(), onSettingsOpen: vi.fn(), onForgetMemory: vi.fn() };
 });
 afterEach(async () => { await act(async () => root.unmount()); vi.useRealTimers(); });
-const render = (open = true) => act(async () => root.render(createElement(LiveVoiceSheet, { open, view, servers, serverId, ...callbacks })));
+const render = (open = true) => act(async () => root.render(createElement(LiveVoiceSheet, { levels: staticLevels, open, view, servers, serverId, ...callbacks })));
 const button = (label: string) => [...container.querySelectorAll('button')].find(el => el.getAttribute('aria-label') === label)!;
 const click = (label: string) => act(async () => button(label).click());
 const choose = async (title: string, option: string) => {
@@ -101,7 +112,7 @@ describe('LiveVoiceSheet', () => {
       { id: 'server-d', label: 'vega-fixture' },
       { id: 'server-e', label: 'draco-fixture' },
     ];
-    await act(async () => root.render(createElement(LiveVoiceSheet, { open: true, view, servers: destinations, serverId, ...callbacks })));
+    await act(async () => root.render(createElement(LiveVoiceSheet, { levels: staticLevels, open: true, view, servers: destinations, serverId, ...callbacks })));
     expect(container.querySelector('[role="radiogroup"]')).toBeNull();
     for (const [label, id] of [['server-fixture', 'server-a'], ['draco-fixture', 'server-e']]) {
       await click(`${m.live_voice_server()}: server-fixture`);
@@ -136,7 +147,7 @@ describe('LiveVoiceSheet', () => {
   it('servidor removido após erro permite selecionar B sem oferecer A', async () => {
     view.phase = 'closed';
     view.error = { code: 'server_removed', detail: m.chat_servidor_removido() };
-    await act(async () => root.render(createElement(LiveVoiceSheet, { open: true, view, servers: [servers[1]], serverId, ...callbacks })));
+    await act(async () => root.render(createElement(LiveVoiceSheet, { levels: staticLevels, open: true, view, servers: [servers[1]], serverId, ...callbacks })));
     const trigger = button(`${m.live_voice_server()}: server-fixture`);
     expect(trigger).toBeDefined();
     expect(container.textContent).toContain(m.chat_servidor_removido());
@@ -372,7 +383,7 @@ describe('LiveVoiceSheet', () => {
     expect(container.textContent).toContain('draft-fixture');
     for (const text of ['action-fixture', 'progress-fixture', 'thought-fixture', 'future-mode', 'future-activity'])
       expect(container.textContent).not.toContain(text);
-    await click(m.native_live_voice_settings_memory());
+    await click(m.native_live_voice_details());
     for (const text of ['backstage-fixture', 'effective-model', '25%']) expect(container.textContent).toContain(text);
     await click(m.native_live_voice_settings_memory());
     expect(button(m.live_voice_mute()).disabled).toBe(false);
@@ -397,9 +408,67 @@ describe('LiveVoiceSheet', () => {
     expect(container.textContent).toContain(m.live_voice_status_working());
     expect(container.textContent).toContain('action-fixture');
     expect(container.textContent).not.toContain('future-action');
-    await click(m.native_live_voice_settings_memory());
+    await click(m.native_live_voice_details());
     expect(container.textContent).toContain('backstage-fixture');
     expect(container.textContent).not.toContain('future-backstage');
+  });
+
+  it('nível de quem fala chega pela assinatura e troca o estado sem nova vista', async () => {
+    view.phase = 'live';
+    view.state = { ...liveState(), plan: { path: '/plan-fixture.md', markdown: '# plan-fixture' } };
+    let current = { input: 0, output: 0 };
+    const listeners = new Set<() => void>();
+    const levels = { get: () => current, subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; } };
+    await act(async () => root.render(createElement(LiveVoiceSheet, { levels, open: true, view, servers, serverId, ...callbacks })));
+    expect(container.textContent).toContain(m.codex_voice_listening());
+    const markdownRenders = native.markdown.mock.calls.length;
+    await act(async () => { current = { input: 0.5, output: 0 }; listeners.forEach(listener => listener()); });
+    expect(container.textContent).toContain(m.live_voice_status_you());
+    // Quem fala troca só o orbe: o plano não é redesenhado.
+    expect(native.markdown.mock.calls.length).toBe(markdownRenders);
+  });
+
+  it('estado da chamada é região viva com o progresso, sem o cronômetro nem quem está falando', async () => {
+    view.phase = 'live';
+    view.liveSince = Date.now();
+    view.state = { ...liveState(), activity: 'working', action: { kind: 'tool', text: 'tool-action' }, progress: 'step-progress' };
+    view.levels = { input: 0.5, output: 0 };
+    await render();
+    expect(container.textContent).toContain(m.live_voice_status_you());
+    const live = () => container.querySelector('[accessibilityliveregion="polite"]');
+    const label = live()?.getAttribute('aria-label');
+    expect(label).toContain(m.live_voice_status_working());
+    expect(label).not.toContain(m.live_voice_status_you());
+    expect(label).toContain('tool-action');
+    expect(label).toContain('step-progress');
+    expect(label).not.toContain('00:00');
+    await act(async () => { vi.advanceTimersByTime(3000); });
+    expect(container.textContent).toContain('00:03');
+    expect(live()?.getAttribute('aria-label')).toBe(label);
+  });
+
+  it('no iOS a mudança de atividade é anunciada ao VoiceOver; o cronômetro não', async () => {
+    native.os = 'ios';
+    view.phase = 'live';
+    view.liveSince = Date.now();
+    view.state = { ...liveState(), activity: 'idle' };
+    await render();
+    await act(async () => { vi.advanceTimersByTime(2000); });
+    expect(native.announce).not.toHaveBeenCalled();
+    view = { ...view, state: { ...liveState(), activity: 'working', action: { kind: 'tool', text: 'tool-action' } } };
+    await render();
+    expect(native.announce).toHaveBeenCalledExactlyOnceWith(`${m.live_voice_status_working()}, tool-action`);
+  });
+
+  it('estilo do plano é o mesmo objeto entre renders com o tema inalterado', async () => {
+    view.phase = 'live';
+    view.state = { ...liveState(), plan: { path: '/plan-fixture.md', markdown: '# plan-fixture' } };
+    await render();
+    view = { ...view, liveSince: 1 };
+    await render();
+    const styles = native.markdown.mock.calls.map(([props]) => (props as { markdownStyle: unknown }).markdownStyle);
+    expect(styles.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(styles).size).toBe(1);
   });
 
   it('entrega plano ao renderizador Markdown e mostra pedido, atividade, seguidas e escolhas efetivas', async () => {
@@ -418,7 +487,7 @@ describe('LiveVoiceSheet', () => {
     }
     // Modelo, cota e bastidores ficam em Detalhes; a tela da chamada só mostra o estado.
     for (const data of ['heard-fixture', 'peer-fixture::session-fixture', 'effective-model', '25%']) expect(container.textContent).not.toContain(data);
-    await click(m.native_live_voice_settings_memory());
+    await click(m.native_live_voice_details());
     for (const data of ['heard-fixture', 'peer-fixture::session-fixture', 'effective-model', 'effective-effort', '25%']) {
       expect(container.textContent).toContain(data);
     }
@@ -429,9 +498,10 @@ describe('LiveVoiceSheet', () => {
     view.state = { ...liveState(), effective: { model: 'model-only', effort: null, tier: null },
       limits: { five_hour: null, seven_day: { used_percent: 19, resets_at: null } } };
     await render();
-    for (const label of [m.live_voice_mute(), m.native_live_voice_settings_memory(), m.live_voice_stop()]) expect(button(label)).toBeDefined();
+    // Nome acessível = texto visível (WCAG 2.5.3): quem fala "Detalhes" aciona o botão.
+    for (const label of [m.live_voice_mute(), m.native_live_voice_details(), m.live_voice_stop()]) expect(button(label)?.textContent).toBe(label);
     for (const text of ['model-only', m.ctx_limite_7d(), m.native_live_voice_effective()]) expect(container.textContent).not.toContain(text);
-    await click(m.native_live_voice_settings_memory());
+    await click(m.native_live_voice_details());
     expect(button(m.live_voice_stop())).toBeUndefined();
     const section = (title: string) => [...container.querySelectorAll('[role="header"]')]
       .find(el => el.textContent === title)?.parentElement?.textContent ?? '';
@@ -449,7 +519,7 @@ describe('LiveVoiceSheet', () => {
     view.phase = 'live';
     view.state = liveState();
     await render();
-    await click(m.native_live_voice_settings_memory());
+    await click(m.native_live_voice_details());
     view.phase = 'closed';
     view.error = { code: 'connection_lost' };
     await render();

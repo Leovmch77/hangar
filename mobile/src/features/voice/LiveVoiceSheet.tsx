@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, Text, View, useWindowDimensions } from 'react-native';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { AccessibilityInfo, ActivityIndicator, Platform, Pressable, ScrollView, Text, View, useWindowDimensions } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
 import type { Credencial, LiveVoiceState, LiveVoiceSettings, LiveVoiceSettingsReply, ModelOption, Server, VoiceMemory } from '@hangar/core';
@@ -37,9 +37,16 @@ export interface LiveVoiceView {
   memory: { loading: boolean; entries: VoiceMemory[]; error: string | null; forgetError: string | null };
 }
 
+/** Níveis chegam a 10 Hz: só quem desenha as barras assina; a folha lê apenas quem está falando. */
+export interface LiveVoiceLevels {
+  get(): LiveVoiceView['levels'];
+  subscribe(listener: () => void): () => void;
+}
+
 export interface LiveVoiceSheetProps {
   open: boolean;
-  view: LiveVoiceView;
+  view: Omit<LiveVoiceView, 'levels'>;
+  levels: LiveVoiceLevels;
   servers: Pick<Server, 'id' | 'label'>[];
   serverId: string | null;
   onSelectServer: (serverId: string) => void;
@@ -109,6 +116,24 @@ function barsMode(status: Status, levels: LiveVoiceView['levels']): VoiceBarsMod
   }
 }
 
+// Único ponto que assina os níveis: quem fala vira cor, barras e rótulo aqui, sem redesenhar a folha.
+function CallOrb({ levels, live, muted, activity }: {
+  levels: LiveVoiceLevels; live: boolean; muted: boolean; activity: LiveVoiceState['activity'] | undefined;
+}) {
+  const { theme } = useUnistyles();
+  const current = useSyncExternalStore(levels.subscribe, levels.get);
+  const status = liveVoiceStatus(live, liveVoiceSpeaker(current.input, current.output, muted), muted, activity);
+  const tone = statusColor(theme, status);
+  return <>
+    <View style={styles.orb}>
+      <View style={[styles.orbRing, { backgroundColor: tone }]} />
+      <View style={[styles.orbCore, { backgroundColor: tone }]} />
+      <VoiceBars mode={barsMode(status, current)} color={tone} count={7} height={64} width={7} gap={theme.base.space[1.5]} />
+    </View>
+    <Text style={[styles.status, { color: tone }]} numberOfLines={1}>{STATUS[status]()}</Text>
+  </>;
+}
+
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return <View style={styles.section}><Text accessibilityRole="header" style={styles.label}>{title}</Text>{children}</View>;
 }
@@ -146,7 +171,8 @@ function RoundAction({ title, label, icon, onPress, danger = false, selected = f
 }) {
   const { theme } = useUnistyles();
   return (
-    <Pressable onPress={onPress} disabled={disabled} accessibilityRole="button" accessibilityLabel={title}
+    <Pressable onPress={onPress} disabled={disabled} accessibilityRole="button" accessibilityLabel={label}
+      accessibilityHint={title === label ? undefined : title}
       accessibilityState={{ selected, disabled, expanded }} style={[styles.round, disabled && styles.disabled]}>
       <View style={[styles.roundFace, selected && styles.roundOn, danger && styles.roundDanger]}>
         <Icon name={icon} size={26} color={danger ? INK.onAccent : selected ? theme.tokens.bg.base : theme.tokens.text.primary} />
@@ -168,11 +194,13 @@ function Meter({ title, used }: { title: string; used: number }) {
   );
 }
 
-export function LiveVoiceSheet({ open, view, servers, serverId, onSelectServer, onDismiss, onStart, onStop, onToggleMute, onMode, onRetry,
+export function LiveVoiceSheet({ open, view, levels, servers, serverId, onSelectServer, onDismiss, onStart, onStop, onToggleMute, onMode, onRetry,
   onSaveSettings, onSettingsOpen, onForgetMemory }: LiveVoiceSheetProps) {
   const { theme } = useUnistyles();
   const { height } = useWindowDimensions();
-  const markdownStyle = useMemo(() => mkMarkdownStyle(theme), [theme]);
+  // O `theme` é um Proxy novo a cada render; tokens e conversa só trocam quando o tema muda.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const markdownStyle = useMemo(() => mkMarkdownStyle(theme), [theme.tokens, theme.conversa]);
   // Tela de chamada e Detalhes se revezam na mesma folha; a escondida não fica montada.
   const [details, setDetails] = useState(false);
   const [serverPickerOpen, setServerPickerOpen] = useState(false);
@@ -186,8 +214,6 @@ export function LiveVoiceSheet({ open, view, servers, serverId, onSelectServer, 
   const elapsed = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
   const thought = state?.activity && state.activity !== 'idle' ? liveVoiceThoughtTail(state.thought ?? '') : [];
   const muted = view.muted || !!view.dictating;
-  const status = liveVoiceStatus(view.phase === 'live', liveVoiceSpeaker(view.levels.input, view.levels.output, muted), muted, state?.activity);
-  const tone = inCall ? statusColor(theme, status) : theme.tokens.text.muted;
   const busy = state?.activity && state.activity !== 'idle';
   const doing = busy ? state.action?.text ?? state.progress ?? null : null;
   const effective = state?.effective;
@@ -243,6 +269,16 @@ export function LiveVoiceSheet({ open, view, servers, serverId, onSelectServer, 
   const idleStatus = settings.loading && !reply ? m.comum_carregando()
     : !reply ? null : !reply.codex ? m.live_voice_error_codex_missing() : !reply.enabled ? m.live_voice_error_no_account() : m.native_live_voice_ready();
   const canStart = !inCall && !!reply && reply.codex && reply.enabled;
+  // Anuncia o que muda de fato: nem o cronômetro (todo segundo) nem quem fala (a cada sílaba).
+  const announcement = [inCall ? STATUS[liveVoiceStatus(view.phase === 'live', 'idle', muted, state?.activity)]() : idleStatus ?? m.live_voice_error_failed(),
+    doing ?? '', busy && state.progress !== doing ? state.progress ?? '' : ''].filter(Boolean).join(', ');
+  const announced = useRef(announcement);
+  useEffect(() => {
+    // Região viva só existe no Android; no iOS o VoiceOver precisa do anúncio explícito.
+    if (announced.current === announcement) return;
+    announced.current = announcement;
+    if (Platform.OS === 'ios' && open && inCall) AccessibilityInfo.announceForAccessibility(announcement);
+  }, [announcement, open, inCall]);
 
   const callView = <>
     <ScrollView ref={scroll} style={styles.scroll} contentContainerStyle={styles.stageScroll} keyboardShouldPersistTaps="handled">
@@ -257,14 +293,13 @@ export function LiveVoiceSheet({ open, view, servers, serverId, onSelectServer, 
       </View> : null}
       {errors}
       <View style={styles.stage}>
-        <View style={styles.stage} accessible
-          accessibilityLabel={[inCall ? STATUS[status]() : idleStatus ?? m.live_voice_error_failed(), view.phase === 'live' ? elapsed : '', doing ?? ''].filter(Boolean).join(', ')}>
-          <View style={styles.orb}>
-            <View style={[styles.orbRing, { backgroundColor: tone }]} />
-            <View style={[styles.orbCore, { backgroundColor: tone }]} />
-            <VoiceBars mode={inCall ? barsMode(status, view.levels) : { kind: 'rest' }} color={tone} count={7} height={64} width={7} gap={theme.base.space[1.5]} />
-          </View>
-          {inCall ? <Text style={[styles.status, { color: tone }]} numberOfLines={1}>{STATUS[status]()}</Text>
+        <View style={styles.stage} accessible accessibilityLiveRegion="polite" accessibilityLabel={announcement}>
+          {inCall ? <CallOrb levels={levels} live={view.phase === 'live'} muted={muted} activity={state?.activity} /> : <View style={styles.orb}>
+            <View style={[styles.orbRing, { backgroundColor: theme.tokens.text.muted }]} />
+            <View style={[styles.orbCore, { backgroundColor: theme.tokens.text.muted }]} />
+            <VoiceBars mode={{ kind: 'rest' }} color={theme.tokens.text.muted} count={7} height={64} width={7} gap={theme.base.space[1.5]} />
+          </View>}
+          {inCall ? null
             : idleStatus ? <Text style={[styles.status, { color: reply && (!reply.codex || !reply.enabled) ? theme.tokens.status.error : theme.tokens.text.secondary }]}>{idleStatus}</Text>
               : <Text style={[styles.status, { color: theme.tokens.status.error }]} accessibilityRole="alert">{m.live_voice_error_failed()}</Text>}
           {view.phase === 'live' ? <Text style={styles.time}>{elapsed}</Text>
