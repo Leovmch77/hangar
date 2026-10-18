@@ -87,6 +87,11 @@ export function removeDraftRecording(serverId: string, name: string, id: string)
   const latest = readDraft(serverId, name);
   if (!latest) return null;
   const next = { ...latest, recordings: latest.recordings?.filter((recording) => recording.id !== id) };
+  // Vazio some, como no Composer: guardado, viraria rascunho a recuperar na sessão recriada.
+  if (!next.text && !next.attachments.length && !next.recordings?.length && !next.submission) {
+    clearDraft(serverId, name);
+    return null;
+  }
   writeDraft(serverId, name, next);
   return next;
 }

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { dictationCeilingMs, getConfig, getConfigForServer, patchConfig, patchConfigForServer, ehEstilo } from '@hangar/core';
+import { dictationCeilingMs, getConfig, getConfigForServer, patchConfig, patchConfigForServer, ehEstilo, registrarDiag } from '@hangar/core';
 import type { EstiloDitado, Server } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
@@ -62,8 +62,10 @@ function createDictationStyleStore(server?: Server | null) {
       try {
         const cfg = await (server ? getConfigForServer(server) : getConfig());
         set({ ceilingMs: dictationCeilingMs(cfg.campos) });
-      } catch {
+      } catch (e) {
         // Sem leitura fica o último teto conhecido; o ditado não espera a config.
+        registrarDiag({ evento: 'dictation.ceiling_stale', nivel: 'aviso', codigo: 'ceiling_refresh_failed',
+          detalhe: e instanceof Error ? e.message : undefined });
       }
     },
 

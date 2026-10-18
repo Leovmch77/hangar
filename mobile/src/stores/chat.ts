@@ -986,7 +986,9 @@ export async function submitConversationDraft(serverId: string, name: string, te
         || latest.submission?.draftRevision !== submission.draftRevision || latest.submission.text !== text) return;
       writeDraft(serverId, name, { ...latest,
         text: status === null && latest.revision === submission.draftRevision ? '' : latest.text,
-        ...(status === null && latest.revision === submission.draftRevision && latest.recordings ? { recordings: [] } : {}),
+        // Só saem os áudios do rascunho enviado; ditado gravado durante o envio continua.
+        ...(status === null && latest.recordings
+          ? { recordings: latest.recordings.filter((recording) => !current.recordings?.some((sent) => sent.id === recording.id)) } : {}),
         revision: status === null && latest.revision === submission.draftRevision ? latest.revision + 1 : latest.revision,
         submission: status === null ? null : { ...submission, status },
       });

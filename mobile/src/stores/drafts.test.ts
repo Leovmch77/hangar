@@ -291,6 +291,14 @@ describe('ditado conservado na origem', () => {
     expect(readDraft('linux', 'sessao')).toEqual(after);
   });
 
+  it('tirar o último áudio de um rascunho sem texto apaga o rascunho', () => {
+    writeDraft('linux', 'sessao', draft({ text: '', recordings: [{ id: 'recording-1', serverPath: '/uploads/a.m4a' }] }));
+    expect(removeDraftRecording('linux', 'sessao', 'recording-1')).toBeNull();
+    expect(readDraft('linux', 'sessao')).toBeNull();
+    // Sessão recriada não herda um rascunho vazio para recuperar.
+    expect(resolveDraftTranscript('linux', 'sessao', '/sessions/recriada.jsonl')).toEqual({ draft: null, recoverable: null });
+  });
+
   it('reabrir conserva áudio sem repetir automaticamente um POST pendente', async () => {
     writeDictation('linux', 'sessao', voice());
     vi.resetModules();
