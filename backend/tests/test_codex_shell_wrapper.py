@@ -49,7 +49,8 @@ def test_fish_cai_no_codex_oficial_quando_o_hangar_nao_abre(tmp_path, lancador, 
     assert (cru.read_text().strip() if cru.exists() else None) == esperado
 
 
-@pytest.mark.skipif(not shutil.which("pwsh"), reason="precisa do PowerShell (pwsh); conferir na DELPHI-02")
+# `.cmd` só executa no Windows: o runner Linux tem pwsh, mas lá o falso nunca roda.
+@pytest.mark.skipif(os.name != "nt" or not shutil.which("pwsh"), reason="precisa do Windows com PowerShell (pwsh); conferir na DELPHI-02")
 def test_powershell_cai_no_codex_oficial_quando_o_hangar_sai_com_3(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
