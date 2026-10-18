@@ -8648,6 +8648,7 @@
   "composer_colar_vazio": "The clipboard is empty.",
   "composer_colar_falhou": "Could not read the clipboard.",
   "machine_import_warning_short": "Automatic machine discovery: no answer from {hosts}. Saved machines are unchanged.",
+  "machine_discovery_unconfirmed": "Could not verify new machines: {hosts}. Saved machines were kept.",
   "mobile_git_publish_title": "Publish commits to the remote?",
   "mobile_git_publish_body": "{action} will send commits from this session's branch. Check the files and message before publishing.",
   "mobile_git_checkout_title": "Switch to branch {branch}?",

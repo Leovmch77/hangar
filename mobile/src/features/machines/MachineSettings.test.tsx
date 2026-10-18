@@ -8,6 +8,7 @@ import { configureApi } from '@hangar/core';
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const mocks = vi.hoisted(() => ({ vault: new Map<string, string>(), fetch: vi.fn(), alert: vi.fn(), push: vi.fn(), retain: vi.fn(() => () => {}) }));
 vi.mock('expo-router', () => ({ useRouter: () => ({ push: mocks.push }) }));
+vi.mock('react-native-mmkv', () => ({ createMMKV: () => ({ getString: () => undefined, set: vi.fn() }) }));
 vi.mock('expo-secure-store', () => ({
   getItemAsync: async (key: string) => mocks.vault.get(key) ?? null,
   setItemAsync: async (key: string, value: string) => { mocks.vault.set(key, value); },

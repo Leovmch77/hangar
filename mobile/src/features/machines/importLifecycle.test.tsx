@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   read: vi.fn(), replace: vi.fn(), discover: vi.fn(), segments: ['importar'],
   appState: null as null | ((state: string) => void), remove: vi.fn(),
   warning: vi.fn(), error: vi.fn(), screens: {} as Record<string, Record<string, unknown>>,
+  connected: null as null | ((server: any) => void),
 }));
 vi.mock('expo-secure-store', () => ({ getItemAsync: mocks.read, setItemAsync: vi.fn(async () => {}) }));
 vi.mock('./importMachines', () => ({ discoverSavedMachines: mocks.discover }));
@@ -16,7 +17,10 @@ vi.mock('react-native-url-polyfill/auto', () => ({}));
 vi.mock('../../theme/unistyles', () => ({}));
 vi.mock('../../net/configureCore', () => ({ configureCore: () => {} }));
 vi.mock('../../stores/chat', () => ({ setChatsForeground: () => {} }));
-vi.mock('../../stores/sessions', () => ({ useSessions: { getState: () => ({ setForeground: () => {} }) } }));
+vi.mock('../../stores/sessions', () => ({
+  useSessions: { getState: () => ({ setForeground: () => {} }) },
+  setMachineDiscovery: (fn: typeof mocks.connected) => { mocks.connected = fn; },
+}));
 vi.mock('../../stores/aparencia', () => ({ aplicarTemaSalvo: () => {}, useAparencia: { getState: () => ({}) } }));
 vi.mock('../../theme/aplicarMaterial', () => ({ aplicarMaterial: () => {} }));
 vi.mock('../../features/voice/LiveVoiceRoot', () => ({ LiveVoiceRoot: () => null }));
@@ -56,17 +60,21 @@ test.each(['android', 'ios'] as const)('registra Git com cabeçalho inicial e ap
   } finally { Platform.OS = previous; }
 });
 
-test('espera hidratação, descobre uma vez e não repete ao entrar máquina nova', async () => {
+test('espera hidratação e primeiro contato por máquina, sem buscar ao retomar com rede ainda indisponível', async () => {
   let resolve!: (raw: string) => void;
   mocks.read.mockReturnValueOnce(new Promise<string>((r) => { resolve = r; }));
   await act(async () => root.render(<Layout />));
   expect(mocks.discover).not.toHaveBeenCalled();
   const server = { id: 'saved', label: 'fixture-saved', baseUrl: 'https://saved.test', token: 'saved-token' };
   await act(async () => { resolve(JSON.stringify({ servers: [server], activeId: server.id })); });
-  expect(mocks.discover).toHaveBeenCalledTimes(1);
+  expect(mocks.discover).not.toHaveBeenCalled();
+  await act(async () => { mocks.connected?.(server); });
+  expect(mocks.discover).toHaveBeenCalledExactlyOnceWith([server]);
   await act(async () => { useServers.getState().appendImported([{ ...server, id: 'new', baseUrl: 'https://new.test' }]); });
   expect(mocks.discover).toHaveBeenCalledTimes(1);
   await act(async () => { mocks.appState?.('background'); mocks.appState?.('active'); });
+  expect(mocks.discover).toHaveBeenCalledTimes(1);
+  await act(async () => { mocks.connected?.(server); });
   expect(mocks.discover).toHaveBeenCalledTimes(2);
 });
 
