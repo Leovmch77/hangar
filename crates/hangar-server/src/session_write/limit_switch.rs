@@ -630,6 +630,18 @@ mod tests {
         assert!(!fake.log().contains(&"continue".to_owned()));
     }
 
+    /// Troca que falhou não marca o aviso como tratado: o mesmo aviso, relido, tenta de novo.
+    #[tokio::test]
+    async fn a_failed_switch_tries_again_with_the_same_notice() {
+        let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/c",20.0)]);
+        fake.reopens.lock().unwrap().push(Reopen::Failed("erro_troca".into()));
+        let switcher = Switcher::default();
+        switcher.handle(&fake,hit("/a",2000.0)).await;
+        switcher.handle(&fake,hit("/a",2000.0)).await;
+        assert_eq!(fake.log().iter().filter(|l|*l=="reopen /c").count(),2);
+        assert_eq!(fake.diary().last().map(String::as_str),Some("limit_switch_continue_delivered"));
+    }
+
     #[tokio::test]
     async fn a_session_busy_to_the_end_is_not_marked_handled_and_lets_the_queue_go() {
         let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/c",20.0)]);
