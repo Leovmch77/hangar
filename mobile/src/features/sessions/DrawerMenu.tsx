@@ -3,7 +3,7 @@ import { Pressable, ScrollView, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { listClaudeConfigsForServer, probeServerResponse, type AggSession, type CotaContaResumo } from '@hangar/core';
+import { listClaudeConfigsForServer, probeServerResponse, rotuloEstado, type AggSession, type CotaContaResumo } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 import { Icon, type IconName } from '../../ui/Icon';
 import { WorkingMark } from '../../ui/WorkingMark';
@@ -16,7 +16,7 @@ const RECENT = 5;
 
 // Menu da gaveta no padrão dos apps de chat: destinos, recentes só pelo nome e a ação principal
 // flutuando embaixo. A lista completa de sessões mora no Início. `onClose` roda antes de navegar.
-export function DrawerMenu({ onClose, onOpenServers }: { onClose: () => void; onOpenServers: () => void }) {
+export function DrawerMenu({ open, onClose, onOpenServers }: { open: boolean; onClose: () => void; onOpenServers: () => void }) {
   const { theme } = useUnistyles();
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -25,7 +25,7 @@ export function DrawerMenu({ onClose, onOpenServers }: { onClose: () => void; on
   const activeId = useServers((s) => s.activeId);
   const server = useServers((s) => s.servers.find((x) => x.id === s.activeId));
   const voiceOk = !!server && !server.invite && !server.inviteEnded && !server.removed;
-  const quota = useAccountQuota(server?.invite ? undefined : server);
+  const quota = useAccountQuota(server?.invite ? undefined : server, open);
 
   const go = (path: string) => { onClose(); router.push(path as never); };
   const ink = theme.tokens.text.primary;
@@ -79,7 +79,7 @@ function RecentRow({ session, onPress }: { session: AggSession; onPress: () => v
   const { theme } = useUnistyles();
   const waiting = session.state === 'awaiting_input';
   return (
-    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={session.name}
+    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={`${session.name}, ${rotuloEstado(session.state)}`}
       style={({ pressed }) => [styles.item, pressed && styles.pressed]}>
       {session.state === 'working'
         ? <WorkingMark size={20} color={theme.tokens.accent.base} />
@@ -91,9 +91,11 @@ function RecentRow({ session, onPress }: { session: AggSession; onPress: () => v
 }
 
 // A cota é só uma dica na linha: sem leitura, a linha fica sem ela e a tela de Contas mostra o motivo.
-function useAccountQuota(server: Parameters<typeof listClaudeConfigsForServer>[0] | undefined): string {
+// Relida a cada abertura: a gaveta fica montada e o número de horas atrás pareceria atual.
+function useAccountQuota(server: Parameters<typeof listClaudeConfigsForServer>[0] | undefined, open: boolean): string {
   const [line, setLine] = useState('');
   useEffect(() => {
+    if (!open) return;
     if (!server) { setLine(''); return; }
     let alive = true;
     const cotas = probeServerResponse(server, '/api/cotas')
@@ -103,7 +105,7 @@ function useAccountQuota(server: Parameters<typeof listClaudeConfigsForServer>[0
       .then(([configs, cs]) => { if (alive) setLine(accountQuotaLine(configs, cs)); })
       .catch(() => { if (alive) setLine(''); });
     return () => { alive = false; };
-  }, [server]);
+  }, [server, open]);
   return line;
 }
 

@@ -39,6 +39,7 @@ export const SettingRow = forwardRef<View, Props>(function SettingRow(
         disabled={disabled}
         accessibilityRole="button"
         accessibilityLabel={`${label}: ${value}`}
+        accessibilityHint={detail}
         accessibilityState={{ disabled: !!disabled }}
         style={({ pressed }) => [styles.row, pressed && styles.pressed, disabled && styles.disabled]}
       >

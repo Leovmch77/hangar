@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef, type ComponentProps } from 'react';
 import { Icon } from '../../ui/Icon';
-import { AccessibilityInfo, ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { AccessibilityInfo, ActivityIndicator, BackHandler, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { getArchivePorCwd, getCodexAccountsForServer, defaultCodexAccount,
@@ -467,12 +467,22 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
     }
   }, [active]);
 
-  // O formulário abre na última pasta usada nesta máquina, como a conversa nova.
+  // O formulário abre na última pasta usada nesta máquina, como a conversa nova. Uma vez por montagem:
+  // o objeto do servidor muda de identidade (rede local, token) e não pode desfazer a escolha da pessoa.
+  const prePicked = useRef(false);
   useEffect(() => {
-    if (layout !== 'form') return;
+    if (layout !== 'form' || prePicked.current) return;
+    prePicked.current = true;
     const saved = readProject(active.id);
     if (saved) void handlePick(saved.cwd);
   }, [layout, active.id, handlePick]);
+
+  // Android: o voltar do aparelho sai da subtela de pasta antes de fechar o formulário.
+  useEffect(() => {
+    if (!folderOpen || Platform.OS !== 'android') return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => { setFolderOpen(false); return true; });
+    return () => sub.remove();
+  }, [folderOpen]);
 
   // Nome em branco: o store gera projeto + sufixo da tentativa.
   const canHeadless = hasExecutionMode(provider);
@@ -808,19 +818,39 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
 
   const blocked = contextBusy || retomando || !!retomavel || (!!picked && !codexReady);
   const canCreate = !!body && !blocked && !creating;
-  // Sem primeira mensagem: cria e abre a conversa vazia, como o formulário do PWA.
+  // Sem primeira mensagem: cria e abre a conversa vazia, como o formulário do PWA. O nome sorteado vale
+  // para a mesma pasta e nome digitado: repetir depois de uma falha de rede não abre uma segunda sessão.
+  const createInFlight = useRef(false);
+  const attemptName = useRef<{ key: string; name: string } | null>(null);
   const createSession = async () => {
-    if (!body || !canCreate) return;
+    if (!body || !canCreate || createInFlight.current) return;
+    createInFlight.current = true;
     setCreating(true);
     setError('');
+    const key = `${body.cwd}\n${name.trim()}`;
+    const retry = attemptName.current?.key === key;
+    const attempt = retry && attemptName.current ? attemptName.current : { key, name: name.trim() || defaultSessionName(body.cwd) };
+    attemptName.current = attempt;
+    const finalName = attempt.name;
+    // Quem cancelou já saiu: a sessão nasceu e fica na lista, sem puxar a pessoa de volta.
+    const open = (session: string) => { if (mounted.current) router.replace(`/s/${active.id}/${session}` as never); };
     try {
-      const finalName = name.trim() || defaultSessionName(body.cwd);
       const session = await createSessionForServer(active, { ...body, name: finalName,
         ...(body.new_branch && !body.branch?.trim() ? { branch: sanitizeSessionName(finalName) } : {}) });
-      router.replace(`/s/${active.id}/${session.name}` as never);
+      open(session.name);
     } catch (cause: unknown) {
-      if (mounted.current) setError(cause instanceof Error ? cause.message : m.criar_sessao_erro());
+      // A resposta pode ter se perdido com a sessão já criada: a lista do servidor decide. Recusa
+      // definitiva (4xx) não criou nada; 409 só conta como "nasceu" na repetição da mesma tentativa.
+      const status = (cause as { status?: unknown } | null)?.status;
+      const lost = typeof status !== 'number' || status >= 500 || status === 408 || (status === 409 && retry);
+      const exists = !lost ? false : await fetchSessionsForServer(active)
+        .then((list) => list.some((session) => session.name === finalName), () => null);
+      if (exists) open(finalName);
+      else if (mounted.current) {
+        setError(exists === null ? m.nova_conversa_criacao_incerta() : cause instanceof Error ? cause.message : m.criar_sessao_erro());
+      }
     } finally {
+      createInFlight.current = false;
       if (mounted.current) setCreating(false);
     }
   };
@@ -842,7 +872,8 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
     return (
       <View style={styles.form}>
         <View style={styles.navbar}>
-          <Pressable onPress={folderOpen ? () => setFolderOpen(false) : onClose} hitSlop={8} style={styles.navSide}
+          <Pressable onPress={folderOpen ? () => setFolderOpen(false) : onClose} hitSlop={8} style={[styles.navSide, creating && styles.primaryDis]}
+            disabled={creating} accessibilityState={{ disabled: creating }}
             accessibilityRole="button" accessibilityLabel={folderOpen ? m.comum_voltar() : m.comum_cancelar()}>
             {folderOpen ? <Icon name="ChevronLeft" size={22} color={theme.tokens.accent.base} /> : <Text style={styles.navAction}>{m.comum_cancelar()}</Text>}
           </Pressable>
@@ -860,6 +891,8 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
           </View>
         ) : (
           <ScrollView contentContainerStyle={styles.formScroll} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
+            {/* No topo: o Criar fica no cabeçalho e a falha dele precisa aparecer sem rolar. */}
+            {notices}
             <View style={styles.group}>
               <SettingRow icon="Monitor" label={m.native_new_chat_machine()} value={active.label}
                 actions={machines.map((sv) => ({ id: sv.id, title: sv.label, state: on(sv.id === active.id) }))}
@@ -890,7 +923,6 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
             </View>
             {nameField}
             {quotaNotice}
-            {notices}
             <Pressable accessibilityRole="button" accessibilityState={{ expanded: extrasOpen }}
               onPress={() => setExtrasOpen((value) => !value)} style={styles.more}>
               <Text style={styles.hint}>{m.criar_mais_opcoes()}</Text>

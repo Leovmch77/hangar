@@ -3,6 +3,7 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import * as m from '../../paraglide/messages';
+import { rotuloEstado } from '@hangar/core';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const nav = vi.hoisted(() => ({ push: vi.fn(), order: [] as string[] }));
@@ -40,7 +41,7 @@ beforeEach(async () => {
   host = document.createElement('div');
   document.body.appendChild(host);
   root = createRoot(host);
-  await act(async () => root.render(createElement(DrawerMenu, { onClose, onOpenServers })));
+  await act(async () => root.render(createElement(DrawerMenu, { open: true, onClose, onOpenServers })));
 });
 afterEach(() => { act(() => root.unmount()); host.remove(); });
 
@@ -55,10 +56,11 @@ it('Nova sessão fecha a gaveta e abre o formulário completo', () => {
 });
 
 it('recentes: mais novas primeiro, sem encerradas', () => {
-  const names = ['mobile-menu', 'pm19016', 'antiga'].map((n) => byLabel(n));
+  const names = ['mobile-menu', 'pm19016', 'antiga'].map((n) => startsWith(`${n},`));
   expect(names.every(Boolean)).toBe(true);
-  expect(byLabel('encerrada')).toBeUndefined();
-  act(() => byLabel('pm19016')!.click());
+  expect(startsWith('encerrada')).toBeUndefined();
+  expect(startsWith('pm19016,')!.getAttribute('aria-label')).toBe(`pm19016, ${rotuloEstado('awaiting_input')}`);
+  act(() => startsWith('pm19016,')!.click());
   expect(nav.push).toHaveBeenLastCalledWith('/s/casa/pm19016');
 });
 

@@ -68,7 +68,7 @@ export function SessionsDrawer({ ref, edgeStart, onClose, onOpenServers, childre
       keyboardDismissMode={DrawerKeyboardDismissMode.ON_DRAG}
       renderNavigationView={(progress) => (
         <DrawerPanel progress={progress}>
-          <DrawerMenu onClose={onClose} onOpenServers={onOpenServers} />
+          <DrawerMenu open={open} onClose={onClose} onOpenServers={onOpenServers} />
         </DrawerPanel>
       )}
     >

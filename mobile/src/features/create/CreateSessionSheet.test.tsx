@@ -1884,7 +1884,7 @@ describe('CreateSessionSheet Codex', () => {
         await act(async () => Promise.resolve());
         expect(button(container, 'hangar')).toBeDefined();
         expect(button(container, 'hangar-menu')).toBeUndefined();
-        await act(async () => button(container, 'native_create_worktrees')!.click());
+        await act(async () => button(container, 'hangar: native_create_worktrees')!.click());
         expect(button(container, 'hangar-menu')).toBeDefined();
         expect(button(container, 'hangar-anim')).toBeUndefined();
         await act(async () => button(container, 'native_create_worktrees_merged')!.click());
@@ -1894,10 +1894,74 @@ describe('CreateSessionSheet Codex', () => {
       } finally { act(() => root.unmount()); }
     });
 
+    it('toque duplo em Criar cria uma sessão só', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      let release!: (v: { name: string; state: string }) => void;
+      calls.create.mockImplementation(() => new Promise((done) => { release = done; }));
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        const create = button(container, 'criar_criar')!;
+        await act(async () => { create.click(); create.click(); });
+        await act(async () => { release({ name: 'nova', state: 'idle' }); await Promise.resolve(); });
+        expect(calls.create).toHaveBeenCalledTimes(1);
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('rede cai depois do servidor criar: abre a sessão que nasceu em vez de criar outra', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      calls.create.mockRejectedValue(new Error('Network request failed'));
+      calls.sessions.mockImplementation(async () => calls.create.mock.calls.map((call) => ({ name: call[1].name, cwd: '/repo/hangar' })));
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        await act(async () => button(container, 'criar_criar')!.click());
+        await act(async () => Promise.resolve());
+        const created = calls.create.mock.calls[0][1].name;
+        expect(calls.replace).toHaveBeenCalledWith(`/s/server-b/${created}`);
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('rede cai e não dá para conferir: avisa que a criação ficou incerta e repete com o mesmo nome', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      calls.create.mockRejectedValue(new Error('Network request failed'));
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        calls.sessions.mockRejectedValue(new Error('offline'));
+        await act(async () => button(container, 'criar_criar')!.click());
+        await act(async () => Promise.resolve());
+        expect([...container.querySelectorAll('[role="alert"]')].map((n) => n.textContent)).toContain('nova_conversa_criacao_incerta');
+        await act(async () => button(container, 'criar_criar')!.click());
+        await act(async () => Promise.resolve());
+        expect(calls.create.mock.calls[1][1].name).toBe(calls.create.mock.calls[0][1].name);
+        expect(calls.replace).not.toHaveBeenCalled();
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('nome digitado que já existe (409 na primeira tentativa) mostra o erro e não abre a sessão antiga', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      calls.create.mockRejectedValue(Object.assign(new Error('nome em uso'), { status: 409 }));
+      calls.sessions.mockResolvedValue([{ name: 'antiga', cwd: '/repo/hangar' }]);
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        const field = container.querySelector('textarea[aria-label="comum_nome"]') as HTMLTextAreaElement;
+        await act(async () => { field.value = 'antiga'; field.dispatchEvent(new Event('input', { bubbles: true })); });
+        await act(async () => button(container, 'criar_criar')!.click());
+        await act(async () => Promise.resolve());
+        expect(calls.replace).not.toHaveBeenCalled();
+        expect([...container.querySelectorAll('[role="alert"]')].map((n) => n.textContent)).toContain('nome em uso');
+      } finally { act(() => root.unmount()); }
+    });
+
     it('Cancelar fecha sem criar', async () => {
       const { container, root, onClose } = await renderForm();
       try {
-        await act(async () => button(container, 'comum_cancelar')!.click());
+        const cancel = button(container, 'comum_cancelar')!;
+        expect(parseFloat(cancel.style.minHeight)).toBeGreaterThanOrEqual(44);
+        expect(parseFloat(cancel.style.minWidth)).toBeGreaterThanOrEqual(44);
+        await act(async () => cancel.click());
         expect(onClose).toHaveBeenCalledTimes(1);
         expect(calls.create).not.toHaveBeenCalled();
       } finally { act(() => root.unmount()); }

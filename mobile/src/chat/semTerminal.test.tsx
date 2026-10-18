@@ -51,6 +51,7 @@ const focusNavigation = vi.hoisted(() => ({
 }));
 const nativeNavigation = {
   isFocused: () => focusNavigation.focused,
+  getState: () => ({ routes: Array.from({ length: navigation.depth + 1 + navigation.above }, (_, i) => ({ key: i === navigation.depth ? 'chat' : `tela-${i}` })) }),
   addListener: (name: string, listener: (event: { data: { closing: boolean } }) => void) => {
     const listeners = focusNavigation.listeners.get(name) ?? new Set();
     listeners.add(listener);
@@ -60,7 +61,7 @@ const nativeNavigation = {
 };
 const routerPush = vi.hoisted(() => vi.fn());
 const chatRow = vi.hoisted(() => ({ extra: {} as Record<string, unknown> }));
-const navigation = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), dismissTo: vi.fn(), canGoBack: true, depth: 1 }));
+const navigation = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), dismissTo: vi.fn(), canGoBack: true, depth: 1, above: 0 }));
 const route = vi.hoisted(() => ({ params: { server: 's1', name: 'sess' }, segments: ['s'] }));
 const realSettings = vi.hoisted(() => ({ enabled: false, models: vi.fn(), permissions: vi.fn(), commands: vi.fn() }));
 const realFirstInput = vi.hoisted(() => ({ enabled: false, send: vi.fn(), steer: vi.fn(), history: vi.fn(), transcribe: vi.fn(), relimpar: vi.fn(),
@@ -75,7 +76,7 @@ vi.mock('expo-router', () => ({
   useNavigation: () => nativeNavigation,
   useRouter: () => ({ push: routerPush, back: navigation.back, replace: navigation.replace, dismissTo: navigation.dismissTo, canGoBack: () => navigation.canGoBack }),
   useLocalSearchParams: () => route.params, useSegments: () => route.segments,
-  useRootNavigationState: () => ({ index: navigation.depth }),
+  useRoute: () => ({ key: 'chat' }),
 }));
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
@@ -123,7 +124,8 @@ vi.mock('./RecarregarPill', () => ({ RecarregarPill: () => null }));
 vi.mock('./PendingPlan', () => ({ PendingPlan: () => null }));
 vi.mock('./SessionProblem', () => ({ SessionProblem: () => null }));
 vi.mock('./SessionPickerSheet', () => ({ SessionPickerSheet: () => null }));
-vi.mock('../features/create/CreateSessionSheet', () => ({ CreateSessionSheet: () => createElement('div', { 'data-create': true }) }));
+vi.mock('../features/create/CreateSessionSheet', () => ({ CreateSessionSheet: ({ onClose, layout }: { onClose?: () => void; layout?: string }) =>
+  createElement('div', { 'data-create': layout }, createElement('button', { 'aria-label': 'comum_cancelar', onClick: onClose })) }));
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('../ui/HangarMark', () => ({ HangarMark: () => null }));
 const sheetEvents = vi.hoisted(() => ({ presented: undefined as (() => void) | undefined, dismissed: undefined as (() => void) | undefined }));
@@ -567,6 +569,12 @@ describe('ações e atualização da conversa na rota', () => {
     try {
       expect(button(first.container, 'chat_ir_inicio')).toBeUndefined();
     } finally { act(() => first.root.unmount()); }
+    // Folha aberta por cima do chat não conta: a posição é a deste chat.
+    navigation.above = 2;
+    const sheet = await render(createElement(ChatScreen));
+    try {
+      expect(button(sheet.container, 'chat_ir_inicio')).toBeUndefined();
+    } finally { act(() => sheet.root.unmount()); navigation.above = 0; }
     navigation.depth = 2;
     const { container, root } = await render(createElement(ChatScreen));
     try {
@@ -2303,10 +2311,9 @@ describe('handoff nas rotas reais', () => {
   it.each([true, false])('Nova conversa tem saída acessível com ou sem tela anterior: %s', async (canGoBack) => {
     route.segments = ['create']; navigation.canGoBack = canGoBack;
     const { container, root } = await render(createElement(CreateRoute));
+    expect(container.querySelector('[data-create]')?.getAttribute('data-create')).toBe('form');
     const cancel = container.querySelector<HTMLButtonElement>('[aria-label="comum_cancelar"]');
     expect(cancel).not.toBeNull();
-    expect(cancel!.style.minHeight).toBe('44px');
-    expect(cancel!.style.minWidth).toBe('44px');
     act(() => cancel!.click());
     if (canGoBack) {
       expect(navigation.back).toHaveBeenCalledTimes(1);

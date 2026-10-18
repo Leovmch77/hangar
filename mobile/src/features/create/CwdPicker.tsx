@@ -223,7 +223,7 @@ export function CwdPicker({
     const open = openGroups.has(row.entry.path);
     return (
       <Pressable onPress={() => toggle(setOpenGroups, row.entry.path)} hitSlop={6} accessibilityRole="button"
-        accessibilityLabel={m.native_create_worktrees({ n: row.visible.length + row.merged.length })} accessibilityState={{ expanded: open }}
+        accessibilityLabel={`${row.entry.name}: ${m.native_create_worktrees({ n: row.visible.length + row.merged.length })}`} accessibilityState={{ expanded: open }}
         style={({ pressed }) => [compactStyle ? styles.cGroup : styles.group, pressed && { backgroundColor: c.hover }]}>
         <Icon name={open ? 'ChevronDown' : 'ChevronRight'} size={12} color={c.faint} />
         <Text style={[styles.groupTxt, { color: c.muted }]}>{row.visible.length + row.merged.length}</Text>

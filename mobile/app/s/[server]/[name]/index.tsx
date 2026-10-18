@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from 'react';
 import { AccessibilityInfo, ActivityIndicator, AppState, Platform, ScrollView, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { useIsFocused, useLocalSearchParams, useRootNavigationState, useRouter } from 'expo-router';
+import { useIsFocused, useLocalSearchParams, useNavigation, useRoute, useRouter } from 'expo-router';
 import { useShallow } from 'zustand/react/shallow';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { chatStore } from '../../../../src/stores/chat';
@@ -472,8 +472,8 @@ export default function ChatScreen() {
     if (router.canGoBack()) router.back();
     else router.replace('/');
   }, [router]);
-  // Índice 1 = chat logo acima do Início: o ‹ já leva lá e a casa sobraria.
-  const deepStack = (useRootNavigationState()?.index ?? 0) >= 2;
+  // Posição 1 = chat logo acima do Início: o ‹ já leva lá e a casa sobraria.
+  const deepStack = useStackPosition() >= 2;
   const onHome = useCallback(() => router.dismissTo('/'), [router]);
   const onMore = useCallback(() => setMoreOpen(true), []);
   const onTitlePress = useCallback(() => setPickerOpen(true), []);
@@ -760,3 +760,17 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.base.space[4],
   },
 }));
+
+// Posição DESTA tela na pilha, não a do topo: folha empilhada sobre o chat não muda a dele. Só
+// re-renderiza quando o número muda (o chat é pesado e fica montado sob as outras telas).
+function useStackPosition(): number {
+  const navigation = useNavigation();
+  const { key } = useRoute();
+  const read = useCallback(() => navigation.getState()?.routes.findIndex((r) => r.key === key) ?? 0, [navigation, key]);
+  const [position, setPosition] = useState(read);
+  useEffect(() => {
+    setPosition(read());
+    return navigation.addListener('state', () => setPosition(read()));
+  }, [navigation, read]);
+  return position;
+}
