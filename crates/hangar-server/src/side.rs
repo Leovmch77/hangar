@@ -412,7 +412,7 @@ pub struct Hub {
 }
 
 #[derive(Default)]
-struct StateProblems { gate: crate::problem_gate::ProblemGate, timer: Option<tokio::task::AbortHandle> }
+struct StateProblems { gate: crate::problem_gate::ProblemGate, timer: Option<tokio::task::AbortHandle>, epoch: u64 }
 
 /// O que um aparelho recebe ao entrar: cauda + retrato, e o canal para o resto. `ui`: a versão do
 /// `plugin_ui` que já vai no retrato; marcador dela ou anterior não precisa sair de novo.
@@ -832,7 +832,7 @@ impl Hub {
         *bound = Some(Bound { binding, generation, tail });
         *self.committed.lock().unwrap() = None;
         // O estado retido era da conversa anterior: não volta depois da troca.
-        { let mut problems = self.problems.lock().unwrap(); if let Some(timer) = problems.timer.take() { timer.abort(); } problems.gate = Default::default(); }
+        { let mut problems = self.problems.lock().unwrap(); problems.epoch += 1; if let Some(timer) = problems.timer.take() { timer.abort(); } problems.gate = Default::default(); }
         // Os avisos de mod ficam (o `cache.toasts` os guarda): são da sessão, não do transcript. A faixa
         // do Rust também é da sessão: volta ao retrato antes do `reset`, senão quem religa depois de um
         // `/clear` fica sem ela até o mod redesenhar. Limpeza e semeadura sob uma trava só.
@@ -873,7 +873,10 @@ impl Hub {
 
     fn deliver_bound(&self, event: &str, data: &str, pane_question: bool) {
         let gated = if event == "state" { self.gate_problem(data, pane_question) } else { None };
-        let data = gated.as_deref().unwrap_or(data);
+        self.deliver_frame(event, gated.as_deref().unwrap_or(data), pane_question);
+    }
+
+    fn deliver_frame(&self, event: &str, data: &str, pane_question: bool) {
         let frame = sse_frame(event, data, None);
         // Retrato antes do envio: quem assina entre os dois recebe repetido, nunca nada.
         let mut cache = self.cache.lock().unwrap();
@@ -898,20 +901,32 @@ impl Hub {
     fn gate_problem(&self, data: &str, pane_question: bool) -> Option<String> {
         use crate::problem_gate::Gate;
         let mut value: serde_json::Value = serde_json::from_str(data).ok()?;
+        // Fora de um runtime não há como reenviar: o problema sai como chegou, sem contar prazo.
+        let runtime = tokio::runtime::Handle::try_current().ok()?;
         let mut problems = self.problems.lock().unwrap();
+        problems.epoch += 1;
         if let Some(timer) = problems.timer.take() { timer.abort(); }
         let now = tokio::time::Instant::now();
         let Gate::Hold(at) = problems.gate.admit(value["problema"].as_str(), now.into_std(), self.ctx.problem_hold) else { return None };
-        // Fora de um runtime não há como reenviar: o problema sai como chegou.
-        let runtime = tokio::runtime::Handle::try_current().ok()?;
-        let (hub, original) = (self.me.clone(), data.to_owned());
+        let (hub, original, epoch) = (self.me.clone(), data.to_owned(), problems.epoch);
         problems.timer = Some(runtime.spawn(async move {
             tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
-            if let Some(hub) = hub.upgrade() { hub.deliver_bound("state", &original, pane_question); }
+            if let Some(hub) = hub.upgrade() { hub.redeliver_problem(epoch, &original, pane_question); }
         }).abort_handle());
         value["problema"] = serde_json::Value::Null;
         value["problema_detalhe"] = serde_json::Value::Null;
         Some(value.to_string())
+    }
+
+    /// O estado retido sai com o problema, se nenhum estado mais novo nem troca de conversa veio depois. Conferir
+    /// e entregar sob a mesma trava: um estado novo espera e sai depois deste, nunca por baixo dele.
+    fn redeliver_problem(&self, epoch: u64, original: &str, pane_question: bool) {
+        let mut problems = self.problems.lock().unwrap();
+        if problems.epoch != epoch { return; }
+        problems.timer = None;
+        let code = serde_json::from_str::<serde_json::Value>(original).ok().and_then(|v| v["problema"].as_str().map(str::to_owned));
+        let _ = problems.gate.admit(code.as_deref(), tokio::time::Instant::now().into_std(), self.ctx.problem_hold);
+        self.deliver_frame("state", original, pane_question);
     }
 
     /// O `plugin_ui` sai pelo canal só como marcador da versão gravada no retrato.
@@ -2633,6 +2648,12 @@ mod tests {
         tokio::time::advance(std::time::Duration::from_secs(5)).await;
         for _ in 0..5 { tokio::task::yield_now().await; }
         assert!(state(&lease.hub)["problema"].is_null(), "o passageiro nunca saiu");
+        // Retido na conversa anterior: a troca o descarta, e o prazo vencido não o põe de volta.
+        assert!(lease.hub.publish_own("state", &with(Some("da_anterior"))));
+        lease.hub.rebind(queue_binding(dir.path(), "b"));
+        tokio::time::advance(crate::problem_gate::HOLD + std::time::Duration::from_secs(1)).await;
+        for _ in 0..5 { tokio::task::yield_now().await; }
+        assert_ne!(state(&lease.hub)["problema"], "da_anterior", "o estado da conversa anterior não volta");
     }
 
     /// Troca de conversa: o retrato perde a fila da anterior na hora, quadro da geração anterior não
