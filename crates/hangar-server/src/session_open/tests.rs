@@ -267,7 +267,7 @@ impl resolve::OpenFacts for FixtureFacts {
         Ok(self.tmux.iter().any(|s| s["name"] == name) || self.sidecar("claude-headless", name).is_some() || self.sidecar("codex-sessions", name).is_some())
     }
 
-    fn name_has_leftovers(&self, _name: &str) -> bool { false }
+    fn name_has_leftovers(&self, _name: &str) -> Result<bool, OpenError> { Ok(false) }
 
     fn transfer_busy(&self, _name: &str) -> Result<bool, OpenError> { Ok(self.busy) }
 
@@ -824,6 +824,26 @@ fn the_folder_name_skips_leftovers_only_without_the_server() {
     let name = |facts: &facts::LocalFacts| resolve::resolve_open(&request, &OWNER, facts).unwrap().spec.name;
     assert_eq!(name(&local_facts(&home, &runtime).without_server()), "sobra-antiga-2");
     assert_eq!(name(&local_facts(&home, &runtime)), "sobra-antiga");
+}
+
+/// Pasta de estado que não se lê não prende o nome automático num laço: a abertura recusa com o código.
+#[test]
+fn an_unreadable_leftover_refuses_instead_of_looping() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path().canonicalize().unwrap();
+    std::fs::create_dir_all(home.join("work/sobra-ilegivel")).unwrap();
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::write(home.join(".claude/.hangar-pair"), "não é pasta").unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let runtime = test_runtime();
+        let body = json!({"cwd": home.join("work/sobra-ilegivel"), "provider": "claude", "headless": false});
+        let request = SessionOpenRequest::parse(body.to_string().as_bytes()).unwrap();
+        let result = resolve::resolve_open(&request, &OWNER, &local_facts(&home, &runtime).without_server());
+        let _ = tx.send(result.err().map(|e| (e.status, e.code)));
+    });
+    let answer = rx.recv_timeout(std::time::Duration::from_secs(20)).expect("o nome automático ficou em laço");
+    assert_eq!(answer, Some((409, Some("session_open_name_needs_server"))));
 }
 
 /// Não dar para listar as contas Codex é erro visível, não "nenhuma conta".
