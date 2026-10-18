@@ -501,6 +501,8 @@ export function parseMediaUrls(text: string): FileRef[] {
 // "<legenda> — 📎 imagem: <path1> 📎 imagem: <path2> ..." (1+ imagens, ou sem legenda).
 // Devolve { caption, filenames } ou null. Cada filename e o basename do path (sem espaco,
 // nome gerado), entao da pra separar varias numa linha so pelo proprio marcador.
+const isImageMark = (mark: string) => mark === 'imagem' || mark === 'image';
+
 export function parseImageMessage(text: string): { caption: string; filenames: string[]; files: string[]; marcadores: number } | null {
   // O separador e uma REGEX, nao a string "📎 imagem: ": o que a fila digita numa linha so volta do
   // transcript reescrito pelo Claude Code — quebra de linha depois do marcador, prefixo "[Image #N]"
@@ -508,7 +510,8 @@ export function parseImageMessage(text: string): { caption: string; filenames: s
   // sozinho no fim). Com o indexOf da string exata nada disso casava e a bolha real caia no texto
   // cru: o usuario via os paths escritos no chat em vez das miniaturas (medido em 03/08/2026).
   // `arquivo:` é o anexo que não é foto (o Composer marca pelo tipo): vai para `files`, nunca miniatura.
-  const marker = /📎\s*(imagem|arquivo):\s*/g;
+  // O marcador sai no idioma da tela de quem enviou: `image:`/`file:` em inglês.
+  const marker = /📎\s*(imagem|arquivo|image|file):\s*/g;
   // Marcador dentro de um bloco `<hangar-ref>` (trecho citado, comentário) é texto: só vale depois do
   // último bloco lido.
   const tail = contextRefsEnd(text);
@@ -528,7 +531,7 @@ export function parseImageMessage(text: string): { caption: string; filenames: s
   // (`<epoch>-<hex>.<ext>`, uploads.py:30) e nunca contém separador.
   for (let i = 1; i < parts.length; i += 2) {
     const name = parts[i + 1].trim().split(/[\\/]/).filter(Boolean).pop();
-    if (name) (parts[i] === 'imagem' ? filenames : files).push(name);
+    if (name) (isImageMark(parts[i]) ? filenames : files).push(name);
   }
   // `filenames` VAZIO nao e "nao e mensagem de imagem": e o caso mais comum do celular — UMA foto,
   // que o Claude Code absorve como anexo de verdade e cujo path ele apaga, deixando so o marcador
@@ -539,7 +542,7 @@ export function parseImageMessage(text: string): { caption: string; filenames: s
   // `marcadores` > `filenames.length` = o Claude Code apagou o path da foto que absorveu como
   // anexo (comportamento antigo); iguais = o path ficou escrito E a foto veio no transcript, e
   // quem desenha precisa descontar uma delas — senão a mesma imagem sai duas vezes na bolha.
-  const marcadores = parts.filter((p, i) => i % 2 === 1 && p === 'imagem').length;
+  const marcadores = parts.filter((p, i) => i % 2 === 1 && isImageMark(p)).length;
   return { caption, filenames, files, marcadores };
 }
 

@@ -1029,6 +1029,8 @@ describe('parseImageMessage', () => {
     expect(out.filenames).toEqual(['1-a.png']);
     expect(out.files).toEqual(['2-b.txt']);
     expect(out.marcadores).toBe(1);
+    const en = parseImageMessage('look — 📎 image: /up/1-a.png 📎 file: /up/2-b.txt')!;
+    expect([en.caption, en.filenames, en.files, en.marcadores]).toEqual(['look', ['1-a.png'], ['2-b.txt'], 1]);
     const so = parseImageMessage('📎 arquivo: C:\\up\\3-c.zip')!;
     expect(so.filenames).toEqual([]);
     expect(so.files).toEqual(['3-c.zip']);

@@ -83,11 +83,14 @@ pub fn compose_prompt(caption: &str, uploads: &[(bool, Uploaded)], speech: impl 
     if caption.is_empty() { attached } else if attached.is_empty() { caption.to_owned() } else { format!("{caption} — {attached}") }
 }
 
+/// Marcadores de anexo e se são foto. O web grava no idioma da tela de quem enviou (`image:`/`file:` em inglês).
+const MARKS: [(&str, bool); 4] = [("imagem:", true), ("image:", true), ("arquivo:", false), ("file:", false)];
+
 /// Legenda canônica (porta de `_cap` do core): o transcript pode gravar só ela.
 pub fn caption(text: &str) -> &str {
     let floor = crate::context_refs::refs_end(text);
-    let at = text[floor..].find("📎").map(|i| i + floor).filter(|&i| text[i..].trim_start_matches("📎").trim_start().starts_with("imagem:")
-        || text[i..].trim_start_matches("📎").trim_start().starts_with("arquivo:"));
+    let at = text[floor..].find("📎").map(|i| i + floor)
+        .filter(|&i| { let rest = text[i..].trim_start_matches("📎").trim_start(); MARKS.iter().any(|(mark, _)| rest.starts_with(mark)) });
     let Some(at) = at else { return text.trim(); };
     let head = text[..at].trim_end();
     head.strip_suffix('—').unwrap_or(head).trim()
@@ -100,7 +103,7 @@ pub fn parse_marked(text: &str) -> Option<Marked> {
     // Um `📎` dentro de um trecho citado é texto: só valem os marcadores depois do último bloco de referência.
     let floor = crate::context_refs::refs_end(text);
     let mut found = Vec::new();
-    for (mark, image) in [("imagem:", true), ("arquivo:", false)] {
+    for (mark, image) in MARKS {
         let mut from = floor;
         while let Some(i) = text[from..].find("📎").map(|i| i + from) {
             let rest = text[i + "📎".len()..].trim_start();
@@ -658,6 +661,10 @@ mod tests {
         assert_eq!(marked.caption, "veja");
         assert_eq!(marked.files, vec![(true, "1.png".into()), (false, "2.zip".into())]);
         assert!(parse_marked("texto").is_none());
+        // Composer em inglês: o marcador sai traduzido.
+        let en = parse_marked("look — 📎 image: /a/1.png 📎 file: /a/2.txt").unwrap();
+        assert_eq!((en.caption.as_str(), en.files.clone(), en.image_marks), ("look", vec![(true, "1.png".into()), (false, "2.txt".into())], 1));
+        assert_eq!(caption("look — 📎 file: /a/2.txt"), "look");
     }
 
     #[test]

@@ -15,6 +15,8 @@ describe('covers — dedup eco<->fila', () => {
   it('casa pela legenda canonica (msg com anexo)', () => {
     expect(covers('legenda', 'legenda — 📎 imagem: /x.png')).toBe(true);
     expect(covers('legenda — 📎 imagem: /x.png', 'legenda')).toBe(true);
+    // Composer em inglês: o marcador sai traduzido.
+    expect(covers('legenda', 'legenda — 📎 image: /x.png 📎 file: /y.txt')).toBe(true);
   });
 
   it('casa quando o real tem sufixo apos o texto da fila (defeito B)', () => {
