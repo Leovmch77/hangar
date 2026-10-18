@@ -3,12 +3,10 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use axum::{
-    body::Body,
     extract::{ConnectInfo, Path as RoutePath, Request, State},
     http::StatusCode,
     response::Response,
 };
-use http_body_util::BodyExt;
 use serde_json::{Value, json};
 
 use super::{http, store::MAX_UPLOAD_BYTES};
@@ -41,25 +39,9 @@ pub fn with_provider(mut result: Value, provider: &str, aviso: Option<&str>) -> 
     result
 }
 
-/// O caminho gravado ou resolvido pelo cofre, ou a própria resposta de erro dele.
-async fn saved_path(st: &AppState, name: &str, response: Response) -> Result<String, Response> {
-    if response.status() != StatusCode::OK {
-        return Err(response);
-    }
-    let bytes = response.into_body().collect().await.map_err(|_| unavailable(st, name, "upload_storage_reply_lost"))?.to_bytes();
-    serde_json::from_slice::<Value>(&bytes).ok()
-        .and_then(|v| v["path"].as_str().filter(|p| !p.is_empty()).map(str::to_owned))
-        .ok_or_else(|| unavailable(st, name, "upload_storage_reply_invalid"))
-}
-
 fn unavailable(st: &AppState, name: &str, cause: &'static str) -> Response {
     st.diag.report("rust.uploads_failed", name, cause, "o cofre de anexos não respondeu ao transcrever");
     json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body("upload_storage_unavailable", "não foi possível acessar o cofre de anexos", json!({})))
-}
-
-fn invalid_query(field: &str) -> Response {
-    json_response(StatusCode::UNPROCESSABLE_ENTITY, json!({"detail": [{"type": "bool_parsing", "loc": ["query", field],
-        "msg": "Input should be a valid boolean, unable to interpret input", "input": null}]}))
 }
 
 pub async fn route(
@@ -79,36 +61,39 @@ pub async fn route(
 pub async fn serve(st: &AppState, name: &str, req: Request, guest: bool) -> Response {
     let query: HashMap<String, String> = form_urlencoded::parse(req.uri().query().unwrap_or("").as_bytes()).into_owned().collect();
     // A sessão (e a trava da troca de conversa) vem antes da validação da query, como no FastAPI.
-    let facts = match http::facts(&st, &name, "", true).await {
+    let facts = match http::facts(st, name, "", true).await {
         Ok(facts) => facts,
         Err(response) => return *response,
     };
-    let Ok(limpar) = http::boolean(query.get("limpar")) else { return invalid_query("limpar") };
-    let include_recent = match query.get("include_recent_messages") {
-        None => None,
-        Some(v) => match crate::query::fastapi_bool(v) {
-            Some(b) => Some(b),
-            None => return invalid_query("include_recent_messages"),
-        },
+    let limpar = match crate::query::bool_param(&query, "limpar") {
+        Ok(v) => v,
+        Err(response) => return *response,
+    };
+    let include_recent = match query.contains_key("include_recent_messages")
+        .then(|| crate::query::bool_param(&query, "include_recent_messages")).transpose() {
+        Ok(v) => v,
+        Err(response) => return *response,
+    };
+    let (store, project) = match http::vault(st, &facts) {
+        Ok(v) => v,
+        Err(response) => return response,
     };
     let text = |key: &str| query.get(key).cloned();
     let (path, data, filename) = match text("arquivo").filter(|a| !a.is_empty()) {
         Some(arquivo) => {
-            let allow = HashMap::from([("allow_absolute".to_owned(), (!guest).to_string())]);
-            let resolved = http::execute(&st, "resolve", Request::new(Body::empty()), facts, &arquivo, allow).await;
-            let path = match saved_path(st, name, resolved).await {
+            let path = match http::resolve_audio(&store, &project, &facts, &arquivo, !guest).await {
                 Ok(path) => path,
                 Err(response) => return response,
             };
             let data = match tokio::fs::read(&path).await {
-                Ok(data) => data,
+                Ok(data) => bytes::Bytes::from(data),
                 // A poda pode tirar o áudio entre a resolução e a leitura.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     return http::failure(404, "erro_upload_inexistente", "arquivo não encontrado");
                 }
                 Err(_) => return unavailable(st, name, "upload_audio_unreadable"),
             };
-            let filename = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned());
+            let filename = path.file_name().map(|n| n.to_string_lossy().into_owned());
             (path, data, filename)
         }
         None => {
@@ -124,16 +109,15 @@ pub async fn serve(st: &AppState, name: &str, req: Request, guest: bool) -> Resp
                 }
                 Err(_) => return http::failure(400, "erro_upload_interrompido", "o envio do áudio foi interrompido"),
             };
-            let audio = HashMap::from([("audio_only".to_owned(), "true".to_owned())]);
-            let saved = http::execute(st, "upload", Request::new(Body::from(data.clone())), facts, filename.as_deref().unwrap_or(""), audio).await;
-            let path = match saved_path(st, name, saved).await {
+            let body = futures_util::stream::iter([Ok::<_, std::io::Error>(data.clone())]);
+            let path = match http::publish(st, &store, &project, &facts, filename.as_deref().unwrap_or(""), Some(data.len() as u64), body).await {
                 Ok(path) => path,
                 Err(response) => return response,
             };
-            (path, data.to_vec(), filename)
+            (path, data, filename)
         }
     };
-    let transcription = match transcribe_here(st, data.into(), filename, profile(limpar)).await {
+    let transcription = match transcribe_here(st, data, filename, profile(limpar)).await {
         Ok(t) => t,
         Err(e) => {
             let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_GATEWAY);

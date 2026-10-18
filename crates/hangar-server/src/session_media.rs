@@ -148,7 +148,7 @@ pub fn find_image(jsonl: &Path, uuid: &str, idx: i64) -> std::io::Result<Option<
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    let needle = uuid.as_bytes();
+    let needle = memchr::memmem::Finder::new(uuid.as_bytes());
     let mut reader = BufReader::new(file);
     let mut line = Vec::new();
     loop {
@@ -157,7 +157,7 @@ pub fn find_image(jsonl: &Path, uuid: &str, idx: i64) -> std::io::Result<Option<
             return Ok(None);
         }
         // Só a linha que contém o uuid vira JSON: decodificar todas custava segundos por imagem.
-        if !line.windows(needle.len().max(1)).any(|w| w == needle) {
+        if needle.find(&line).is_none() {
             continue;
         }
         let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&line)) else { continue };
@@ -195,15 +195,17 @@ pub async fn transcript_image(
     serve_transcript_image(&st, &name, uuid, &idx, req.headers()).await
 }
 
+/// O 503 `erro_lista_indisponivel` do Python, com a causa no diário.
+fn list_unavailable(st: &AppState, event: &'static str, name: &str, code: &'static str, reason: &'static str) -> Response {
+    st.diag.report(event, name, code, reason);
+    json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_lista_indisponivel", "a lista de sessões está indisponível", json!({"detalhe": code})))
+}
+
 async fn serve_transcript_image(st: &AppState, name: &str, uuid: String, idx: &str, headers: &HeaderMap) -> Response {
     let Ok(idx) = idx.trim().parse::<i64>() else { return int_parsing(idx) };
     let info = match st.info(name).await {
         Ok(info) => info,
-        Err(e) => {
-            st.diag.report("rust.transcript_image_failed", name, e.0, INFO_REASON);
-            return json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_lista_indisponivel",
-                "a lista de sessões está indisponível", json!({"detalhe": e.0})));
-        }
+        Err(e) => return list_unavailable(st, "rust.transcript_image_failed", name, e.0, INFO_REASON),
     };
     let Some(jsonl) = info.as_ref().and_then(|i| i.jsonl.clone()) else {
         return json_response(StatusCode::NOT_FOUND, detail_body("erro_sessao_inexistente", "session or transcript not found", json!({})));
@@ -445,11 +447,7 @@ async fn serve_bash_output(st: &AppState, name: &str, req: Request) -> Response 
     };
     let info = match st.info(name).await {
         Ok(info) => info,
-        Err(e) => {
-            st.diag.report("rust.bash_output_failed", name, e.0, INFO_REASON);
-            return json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_lista_indisponivel",
-                "a lista de sessões está indisponível", json!({"detalhe": e.0})));
-        }
+        Err(e) => return list_unavailable(st, "rust.bash_output_failed", name, e.0, INFO_REASON),
     };
     let Some(sid) = info.map(|i| i.session_key).filter(|s| !s.is_empty()) else {
         return json_response(StatusCode::OK, json!({"text": null}));
@@ -466,11 +464,7 @@ async fn serve_bash_output(st: &AppState, name: &str, req: Request) -> Response 
             st.diag.report("rust.bash_output_failed", name, code, "a saída do comando não pôde ser lida");
             json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body(code, "a saída do comando não pôde ser lida", json!({})))
         }
-        Ok(Err(code)) => {
-            st.diag.report("rust.bash_output_failed", name, code, "pastas das contas indisponíveis");
-            json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_lista_indisponivel",
-                "a lista de sessões está indisponível", json!({"detalhe": code})))
-        }
+        Ok(Err(code)) => list_unavailable(st, "rust.bash_output_failed", name, code, "pastas das contas indisponíveis"),
         Err(_) => route_failed(st, &headers, "rust.bash_output_failed", name, "bash_output_panic", "a leitura da saída caiu no servidor"),
     }
 }
@@ -494,14 +488,14 @@ pub async fn serve_forwarded(st: &Arc<AppState>, path: &str, req: Request, guest
     let get = method == axum::http::Method::GET;
     let parts: Vec<&str> = tail.split('/').collect();
     Some(match (parts.as_slice(), method == axum::http::Method::POST) {
-        (["tool-progress", id], false) if get => serve_tool_progress(st, &name, &decode(id)?, &req.headers().clone()).await,
+        (["tool-progress", id], false) if get => serve_tool_progress(st, &name, &decode(id)?, req.headers()).await,
         (["transcript-image", uuid, idx], false) if get => {
             let uuid = decode(uuid)?;
             // A conversa transferida o Python atende sem repassar.
             if uuid.starts_with("transfer:") {
                 return None;
             }
-            serve_transcript_image(st, &name, uuid, &decode(idx)?, &req.headers().clone()).await
+            serve_transcript_image(st, &name, uuid, &decode(idx)?, req.headers()).await
         }
         (["bash-output"], true) => serve_bash_output(st, &name, req).await,
         (["transcribe"], true) => crate::uploads::transcribe::serve(st, &name, req, guest).await,

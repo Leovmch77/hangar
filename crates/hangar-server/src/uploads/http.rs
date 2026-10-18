@@ -169,11 +169,8 @@ async fn handle(st: &AppState, name: &str, tail: &str, req: Request) -> Response
             .or_else(|| query.get("name").cloned())
             .unwrap_or_default()
     } else {
-        let raw = tail
-            .strip_prefix("uploads/")
-            .map(str::to_owned)
-            .unwrap_or_else(|| query.get("filename").cloned().unwrap_or_default());
-        match percent_encoding::percent_decode_str(&raw).decode_utf8() {
+        let raw = tail.strip_prefix("uploads/").unwrap_or_default();
+        match percent_encoding::percent_decode_str(raw).decode_utf8() {
             Ok(v) => v.into_owned(),
             Err(_) => return StatusCode::BAD_REQUEST.into_response(),
         }
@@ -195,7 +192,35 @@ async fn blocking<T: Send + 'static>(
         .map_err(std::io::Error::other)?
 }
 
-pub(super) async fn execute(
+/// O cofre e a chave do projeto da sessão.
+pub(super) fn vault(st: &AppState, facts: &Facts) -> Result<(UploadStore, String), Response> {
+    let project = project_key(&facts.cwd).map_err(|e| storage_error(e, false))?;
+    let store = UploadStore::new(&facts.root).map_err(|e| storage_error(e, false))?;
+    Ok((store.with_naming(st.upload_naming.clone()), project))
+}
+
+/// Publica o anexo e poda o projeto; falha da poda não custa o anexo que acabou de entrar.
+pub(super) async fn publish<S>(st: &AppState, store: &UploadStore, project: &str, facts: &Facts, filename: &str, length: Option<u64>, stream: S)
+    -> Result<PathBuf, Response>
+where S: futures_util::Stream<Item = std::io::Result<bytes::Bytes>> + Send + Unpin {
+    let path = store.publish(project, &facts.session, filename, length, stream).await.map_err(|e| storage_error(e, true))?;
+    let (store, project, retention, now) = (store.clone(), project.to_owned(), facts.retention, (st.upload_naming.now)());
+    if blocking(move || store.prune(&project, retention, now)).await.is_err() {
+        tracing::warn!(code = "upload_prune_failed", "poda de anexos falhou após o upload");
+    }
+    Ok(path)
+}
+
+/// Áudio já enviado, por nome solto ou caminho absoluto do mesmo projeto (só o dono).
+pub(super) async fn resolve_audio(store: &UploadStore, project: &str, facts: &Facts, filename: &str, allow_absolute: bool) -> Result<PathBuf, Response> {
+    let (store, project, session, filename) = (store.clone(), project.to_owned(), facts.session.clone(), filename.to_owned());
+    blocking(move || store.resolve_audio(&project, &session, &filename, allow_absolute)).await.map_err(|e| match e.kind() {
+        std::io::ErrorKind::PermissionDenied => failure(403, "erro_arquivo_caminho_convidado", "convidado só transcreve áudio da pasta da sessão"),
+        _ => storage_error(e, false),
+    })
+}
+
+async fn execute(
     st: &AppState,
     tail: &str,
     req: Request,
@@ -203,17 +228,12 @@ pub(super) async fn execute(
     filename: &str,
     query: HashMap<String, String>,
 ) -> Response {
-    let writing = tail == "upload";
-    let project = match project_key(&facts.cwd) {
-        Ok(p) => p,
-        Err(e) => return storage_error(e, false),
+    let (store, project) = match vault(st, &facts) {
+        Ok(v) => v,
+        Err(r) => return r,
     };
     let now = st.upload_naming.now.clone();
-    let store = match UploadStore::new(&facts.root) {
-        Ok(s) => s.with_naming(st.upload_naming.clone()),
-        Err(e) => return storage_error(e, false),
-    };
-    if writing {
+    if tail == "upload" {
         let audio_only = match boolean(query.get("audio_only")) {
             Ok(value) => value,
             Err(()) => return response(json!({"detail":"valor booleano inválido"}), 422),
@@ -227,24 +247,10 @@ pub(super) async fn execute(
             .into_body()
             .into_data_stream()
             .map(|item| item.map_err(std::io::Error::other));
-        let path = match store
-            .publish(&project, &facts.session, filename, length, stream)
-            .await
-        {
+        let path = match publish(st, &store, &project, &facts, filename, length, stream).await {
             Ok(path) => path,
-            Err(e) => return storage_error(e, true),
+            Err(r) => return r,
         };
-        let prune = {
-            let (store, project, retention) = (store.clone(), project.clone(), facts.retention);
-            let now = now();
-            blocking(move || store.prune(&project, retention, now)).await
-        };
-        if prune.is_err() {
-            tracing::warn!(
-                code = "upload_prune_failed",
-                "poda de anexos falhou após o upload"
-            );
-        }
         let (frames, audio) = if audio_only {
             (vec![], None)
         } else {
@@ -263,23 +269,6 @@ pub(super) async fn execute(
         let (session, retention, now) = (facts.session.clone(), facts.retention, now());
         return match blocking(move || store.list(&project, &session, retention, now)).await {
             Ok(files) => response(json!({"files":files}), 200),
-            Err(e) => storage_error(e, false),
-        };
-    }
-    if tail == "resolve" {
-        let allow_absolute = query.get("allow_absolute").is_some_and(|s| s == "true");
-        let (session, filename) = (facts.session.clone(), filename.to_owned());
-        return match blocking(move || {
-            store.resolve_audio(&project, &session, &filename, allow_absolute)
-        })
-        .await
-        {
-            Ok(path) => response(json!({"path":path}), 200),
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => failure(
-                403,
-                "erro_arquivo_caminho_convidado",
-                "convidado só transcreve áudio da pasta da sessão",
-            ),
             Err(e) => storage_error(e, false),
         };
     }
@@ -524,37 +513,15 @@ mod tests {
     async fn audio_resolution_refuses_guest_absolute_path_and_traversal() {
         let tmp = tempfile::tempdir().unwrap();
         let st = state();
-        let req = Request::new(Body::empty());
         let path = tmp
             .path()
             .join("uploads/outside.wav")
             .to_string_lossy()
             .into_owned();
-        assert_eq!(
-            execute(
-                &st,
-                "resolve",
-                req,
-                facts(tmp.path()),
-                &path,
-                Default::default()
-            )
-            .await
-            .status(),
-            StatusCode::FORBIDDEN
-        );
-        assert_eq!(
-            execute(
-                &st,
-                "resolve",
-                Request::new(Body::empty()),
-                facts(tmp.path()),
-                "../outside",
-                Default::default()
-            )
-            .await
-            .status(),
-            StatusCode::BAD_REQUEST
-        );
+        let facts = facts(tmp.path());
+        let Ok((store, project)) = vault(&st, &facts) else { panic!("cofre de teste") };
+        let status = |r: Result<PathBuf, Response>| r.unwrap_err().status();
+        assert_eq!(status(resolve_audio(&store, &project, &facts, &path, false).await), StatusCode::FORBIDDEN);
+        assert_eq!(status(resolve_audio(&store, &project, &facts, "../outside", false).await), StatusCode::BAD_REQUEST);
     }
 }
