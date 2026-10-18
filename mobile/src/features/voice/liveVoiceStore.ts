@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import {
   baseOf, loadLiveVoiceSettings, saveLiveVoiceSettings, listVoiceMemory, forgetVoiceMemory,
-  listarCredenciais, modelOptionsForServer, probeServerResponse, registrarDiag,
+  listarCredenciais, modelOptionsForServer, probeServerResponse, registrarDiag, motivoDoServidor,
 } from '@hangar/core';
 import type { LiveVoiceAction, LiveVoiceHandlers, LiveVoiceScreen, LiveVoiceSettings, Server } from '@hangar/core';
 import { useServers } from '../../stores/servers';
@@ -30,6 +30,7 @@ interface LiveVoiceStore {
   route: LiveVoiceRoute;
   chatControls: { serverId: string; name: string } | null;
   openFor(serverId: string, name: string): void;
+  selectServer(serverId: string): void;
   dismiss(): void;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -55,10 +56,10 @@ const emptyView = (): LiveVoiceView => ({ phase: 'idle', serverLabel: '', state:
   dictating: false, levels: { input: 0, output: 0 }, liveSince: null, settings: emptySettings(), memory: emptyMemory() });
 const snapshot = (server: Server): Server => ({ ...server, ...(server.lan ? { lan: { ...server.lan } } : {}) });
 const sameServer = (a: Server | null | undefined, b: Server) => a?.id === b.id && a.baseUrl === b.baseUrl && a.token === b.token;
-const callable = (server: Server) => !server.invite && !server.inviteEnded && !server.removed && !!server.token;
+const callable = (server: Server) => !server.invite && !server.inviteEnded && !server.removed && !server.disabled && !!server.token;
 const inCall = (view: LiveVoiceView) => view.phase === 'connecting' || view.phase === 'live';
 const errorCode = (error: unknown) => typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string' ? error.code : 'connection_lost';
-const errorText = (error: unknown) => error instanceof Error ? error.message : m.live_voice_error_failed();
+const errorText = (error: unknown) => motivoDoServidor(error) ?? (error instanceof Error && 'status' in error && typeof error.status === 'number' ? error.message : m.native_network_error());
 const CONFIG_SECTIONS = new Set(['geral', 'aparencia', 'usage-log', 'sobre', 'maquinas', 'sync', 'shared-config',
   'contas', 'orchestration', 'harnesses', 'voice', 'jev', 'notifications', 'shortcuts', 'attachments', 'worktrees', 'advanced']);
 
@@ -84,6 +85,7 @@ export const useLiveVoice = create<LiveVoiceStore>((set, get) => {
   let opening: { token: number; deadline?: number; timer: ReturnType<typeof setTimeout>; cancel(): void } | null = null;
   let userMuted = false;
   let settingsOpen = false;
+  let selectedServerId: string | null = null;
   let navigator: { navigate: Navigation } | null = null;
   let chat: { serverId: string; name: string; terminal: boolean } | null = null;
   let peers: Peer[] = [];
@@ -273,6 +275,24 @@ export const useLiveVoice = create<LiveVoiceStore>((set, get) => {
     }
   }
 
+  function availableServer(preferredId: string | null): Server | undefined {
+    const { servers, activeId } = useServers.getState();
+    const own = servers.filter(callable);
+    return own.find(s => s.id === preferredId) ?? own.find(s => s.id === activeId) ?? own[0];
+  }
+  function captureServer(saved: Server): void {
+    const server = snapshot(saved);
+    generation++;
+    settingsOpen = false;
+    memorySequence++;
+    detailsSequence++;
+    modelsSequence++;
+    peersGeneration++;
+    peers = [];
+    set({ server, view: { ...emptyView(), serverLabel: server.label, settings: settingsFor(server) } });
+    void get().loadSettings(server, true);
+  }
+
   useVoiceAudioState.subscribe((state, previous) => {
     if (state.dictations === previous.dictations || !inCall(get().view)) return;
     const muted = userMuted || state.dictations > 0;
@@ -283,15 +303,18 @@ export const useLiveVoice = create<LiveVoiceStore>((set, get) => {
   return {
     open: false, server: null, view: emptyView(), settingsByServer: {}, foreground: true, route: null, chatControls: null,
     openFor(serverId, _name) {
-      if (inCall(get().view) || get().view.error) { set({ open: true }); return; }
-      const saved = useServers.getState().servers.find(s => s.id === serverId);
-      if (!saved || !callable(saved)) return;
-      const server = snapshot(saved);
-      settingsOpen = false;
-      memorySequence++;
-      detailsSequence++;
-      set({ open: true, server, view: { ...emptyView(), serverLabel: server.label, settings: settingsFor(server) } });
-      void get().loadSettings(server, true);
+      if (inCall(get().view) || get().view.error && currentServer()) { set({ open: true }); return; }
+      const saved = availableServer(selectedServerId ?? serverId);
+      if (!saved) return;
+      captureServer(saved);
+      set({ open: true });
+    },
+    selectServer(serverId) {
+      if (inCall(get().view)) return;
+      const saved = useServers.getState().servers.find(s => s.id === serverId && callable(s));
+      if (!saved) return;
+      selectedServerId = saved.id;
+      captureServer(saved);
     },
     dismiss() {
       settingsOpen = false;
@@ -462,7 +485,12 @@ export const useLiveVoice = create<LiveVoiceStore>((set, get) => {
     },
     reconcileServers() {
       if (!get().server || currentServer()) return;
-      if (inCall(get().view)) void end({ code: 'server_removed', detail: m.chat_servidor_removido() });
+      if (inCall(get().view)) { void end({ code: 'server_removed', detail: m.chat_servidor_removido() }); return; }
+      if (get().view.error) return;
+      const saved = availableServer(get().server!.id);
+      selectedServerId = saved?.id ?? null;
+      if (saved) captureServer(saved);
+      else set({ server: null, view: emptyView() });
     },
   };
 });

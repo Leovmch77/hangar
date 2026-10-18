@@ -36,7 +36,6 @@ from app.send_executor import send_thread as _send_thread
 from app.internal_pool import internal_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
 from app.bastao import montar as bastao_montar
-from app.commands import comandos_da_cli, list_commands
 from app.fs import FsError, allowed_roots, list_roots, make_dir, scan_dir
 from app.model_picker import PickerError
 from app.mensagens import erro
@@ -426,7 +425,7 @@ class _RustReply(Exception):
 
 async def _codex_rust_port(name: str, request: Request):
     """Escrita que entrou pelo convite ou pelo Connect num Codex com terminal do Rust: a autenticação foi a
-    desta porta, e o pedido vai inteiro à ponte dele, num sentido só. A pergunta do Claude vai do mesmo
+    desta porta, e o pedido vai inteiro à ponte dele, num sentido só. A entrada e a pergunta do Claude vão do mesmo
     jeito à ponte do Claude. Fora disso (421 do Rust) não faz nada."""
     from app import runtime_coordinator
     from app.config import GUEST_PORT
@@ -441,7 +440,7 @@ async def _codex_rust_port(name: str, request: Request):
         # O painel da fila (`queue/...`) é do Rust também: o Python só repassa.
         rota = route.split("?")[0]
         # A pergunta lateral vai sempre: a rota do Rust decide provedor e sessão.
-        if reply is None and (rota == "btw" or (rota in {"answer", "select", "select/submit", "permission-mode", "permission-modes", "model-effort"} or rota.startswith("queue/"))
+        if reply is None and (rota == "btw" or (rota in {"input", "answer", "select", "select/submit", "permission-mode", "permission-modes", "model-effort"} or rota.startswith("queue/"))
                 and getattr(await _cached_info(name), "provider", "claude") == "claude"):
             # O fork sem terminal tem 180 s; o prazo padrão da ponte cortaria a resposta.
             prazo = (200,) if rota == "btw" else ()
@@ -606,12 +605,15 @@ async def _worktrees_pelo_rust(request: Request, call_next):
 
 @app.middleware("http")
 async def _jev_aux_pelo_rust(request: Request, call_next):
-    """A busca de modelos do Jev é do Rust; sem ele, o erro diz isso em vez de um 404 que a tela
+    """A busca de modelos e a disponibilidade do Jev são do Rust; sem ele, o erro diz isso em vez de um 404 que a tela
     leria como servidor antigo."""
-    if not request.url.path.startswith("/api/jev/aux/"):
+    delivery = request.url.path == "/api/jev/delivery"
+    if not delivery and not request.url.path.startswith("/api/jev/aux/"):
         return await call_next(request)
+    if delivery and (guest_of(request) is not None or guest_users.current.get() is not None):
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
     return await _repasse_ao_rust(request, erro("erro_jev_aux_precisa_rust", "o servidor está sem o processo Rust; reinicie o Hangar"),
-                                  "/__hangar_server/jev/aux")
+                                  "/__hangar_server/forwarded" if delivery else "/__hangar_server/jev/aux")
 
 
 # Rotas de plano e o catálogo de plugins e skills: o dono é o Rust (`plans::routes`, `claude_customizations`).
@@ -5662,10 +5664,11 @@ def _origem_do_terminal_ok(request: Request) -> bool:
 
     Sem `Origin` (cliente que nao e navegador) e True: o handshake tambem so cobra origem quando o
     cabecalho existe, e responder False aqui poria um aviso de recusa numa tela que abre normal.
+    O dono abre com `?token=` e o handshake nao confere a Origin dele: so o login de convidado cobra.
     """
     from app import termsock
     origem = request.headers.get("origin")
-    if not origem:
+    if not origem or guest_users.current.get() is None:
         return True
     return termsock._origem_aceita(origem, request.headers.get("host"))
 
@@ -5673,9 +5676,26 @@ def _origem_do_terminal_ok(request: Request) -> bool:
 # ─── Atualizar ─────────────────────────────────────────────────────────────────────────────────
 
 _ALVOS_AUSENTES_AVISADOS: set[str] = set()
+# Por alvo: (instante, até onde o código pode ir, binário instalado diferente do publicado). Rede e o
+# hash do binário não cabem no polling de 2 s da tela.
+_PUBLICADO: dict[str, tuple[float, str, bool]] = {}
+_PUBLICADO_TTL_S = 300
 
 
-def _mudancas_pendentes() -> list[dict] | None:
+def _publicado(destino: str, procurar: bool) -> tuple[str, bool]:
+    """O commit do binário Rust publicado para este sistema e se o instalado aqui é outro."""
+    agora = time.monotonic()
+    guardado = _PUBLICADO.get(destino)
+    if guardado and not procurar and agora - guardado[0] < _PUBLICADO_TTL_S:
+        return guardado[1], guardado[2]
+    ate, release = atualizar.pinned_target(destino)
+    # Sem como conferir, a lista mostra o topo, como antes; é o motor que avisa o motivo.
+    valor = (ate or f"origin/{destino}", atualizar.rust_release.stale(release))
+    _PUBLICADO[destino] = (agora, *valor)
+    return valor
+
+
+def _mudancas_pendentes(ate: str | None = None) -> list[dict] | None:
     """Os commits que entraram em `origin/<alvo>` e ainda não estão aqui — o changelog da tela.
 
     Título de commit, e não um `CHANGELOG.md` mantido à mão: as mensagens deste repo já são
@@ -5686,7 +5706,7 @@ def _mudancas_pendentes() -> list[dict] | None:
     é o motor que diz o motivo. Lista vazia ali seria "Tudo em dia" sem sinal nenhum.
     """
     destino = atualizar.alvo()
-    p = atualizar._git("log", "--format=%h%x00%s", f"HEAD..origin/{destino}", timeout=30)
+    p = atualizar._git("log", "--format=%h%x00%s", f"HEAD..{ate or f'origin/{destino}'}", timeout=30)
     if p.returncode != 0:
         # Uma vez por alvo enquanto falhar: o polling da tela passa aqui a cada 2s.
         if destino not in _ALVOS_AUSENTES_AVISADOS:
@@ -5724,11 +5744,14 @@ async def get_atualizacao(procurar: bool = False):
         if procurar:
             atualizar._git("fetch", "origin", timeout=120)
         pre = atualizar.checar()
-        mudancas = _mudancas_pendentes()
+        # Só até o commit do binário Rust publicado: o código depois dele rodaria com o binário de antes.
+        ate, servidor_velho = _publicado(atualizar.alvo(), procurar)
+        mudancas = _mudancas_pendentes(ate)
         # Checkout fora da branch do alvo (campo esvaziado na branch de teste, ou branch já contida
         # na main) não tem commit a puxar, mas tem troca a fazer.
         troca = atualizar._troca_de_branch(pre) and not pre.get("branch_de_trabalho")
-        disponivel = mudancas is None or bool(mudancas) or troca
+        # Código em dia com o binário publicado depois dele: a atualização só troca o binário.
+        disponivel = mudancas is None or bool(mudancas) or troca or servidor_velho
         mudancas = mudancas or []
         return {
             "versoes": {"repo": diag._git_describe(), "backend": diag.VERSAO_EM_EXECUCAO},
@@ -5739,6 +5762,7 @@ async def get_atualizacao(procurar: bool = False):
                                "remoto": diag.versao_legivel(f"origin/{atualizar.alvo()}")},
             "atras": len(mudancas),
             "atualizacao_disponivel": disponivel,
+            "servidor_desatualizado": servidor_velho,
             "mudancas": mudancas,
             "passos": [{"id": s["id"], "titulo": s["titulo"], "texto": s["texto"]}
                        for s in atualizacoes.pendentes()],
@@ -5767,6 +5791,8 @@ async def post_atualizacao_iniciar():
         raise HTTPException(409, detail=erro(
             "erro_atualizacao_dependencia", f"falta o que a atualizacao precisa: {', '.join(faltando)}",
             faltando=faltando))
+    # A resposta guardada é de antes desta atualização.
+    _PUBLICADO.clear()
     r = await asyncio.to_thread(atualizar.iniciar, settings.port)
     if not r.get("ok"):
         raise HTTPException(409, detail=erro("erro_atualizacao_ja_rodando",
@@ -9440,7 +9466,7 @@ def navegador_da_sessao(name: str):
 
 
 @app.get("/api/sessions/{name}/commands", dependencies=[Depends(require_auth), Depends(_codex_rust_port)])
-async def commands(name: str):
+async def commands(name: str, request: Request):
     if _provider_of(name) == "codex":
         try:
             return [{"name": "compact", "display": "/compact", "source": "builtin",
@@ -9450,75 +9476,8 @@ async def commands(name: str):
                       if s["name"] != "compact"]]
         except RuntimeError:
             raise HTTPException(409, detail=erro("erro_codex_controle", "O Codex não aceitou a alteração; atualize a sessão e tente novamente.")) from None
-    return await asyncio.to_thread(_commands_claude, name)
-
-
-def _commands_claude(name: str):
-    # Nomes vêm da CLI: sessão sem terminal usa o que o processo dela informou; as demais, a sonda
-    # cacheada por (binário, config_dir). Enquanto nenhum dos dois existe, lista fixa + scans.
-    if _headless(name):
-        meta = headless_sessions.load(name) or {}
-        cli, so_tui = get_adapter(CLAUDE_HEADLESS).comandos(name)
-        if not cli:
-            cli = comandos_da_cli(meta.get("config_dir"))
-        # Sem o `init` ainda, os só-de-TUI conhecidos saem mesmo assim: não rodam sem terminal.
-        return _sem_os_desligados(
-            name, list_commands(meta.get("cwd"), cli, so_tui or frozenset({"color", "doctor", "reload-plugins"}), com_tui=False),
-            meta.get("cwd"), meta.get("config_dir"), _escolha_da_sessao(name, meta))
-    cdir = _session_config_dir(name)
-    config_dir = str(cdir) if cdir else None
-    cli = comandos_da_cli(config_dir)
-    # cwd vem do registry/tmux; se a sessao nao for achada, ainda devolvemos os built-ins
-    # + skills globais (lista util mesmo sem cwd casado).
-    #
-    # `tmux.cwd_de` antes do `registry.list()`: esta rota so quer o cwd de UMA sessao, e a varredura
-    # completa cobra tmux de todas as sessoes + /proc + `git` por sessao pra devolver tudo o mais.
-    # Medido em 28/08/2026, ela era o companheiro mais caro da abertura de sessao — sozinha levava
-    # o `/history` de 0,29s pra 0,53s. A varredura fica como plano B pros dois casos em que ela sabe
-    # mais: a sessao Codex (vive num sidecar duravel, pode nao ter pane nenhum) e a sessao com 2+
-    # panes (ali quem escolhe o cwd e o `_agent_pane`, que acha o pane do AGENTE — ver `cwd_de`).
-    cwd = tmux.cwd_de(name)
-    if cwd is None:
-        cwd = next((s.cwd for s in registry.list() if s.name == name), None)
-    if cwd is None:
-        # Nem o tmux nem a varredura acharam a sessao. A lista SAI MESMO ASSIM (built-ins + skills
-        # globais), que e util e e o comportamento de sempre — mas nao pode sair calada: sem cwd
-        # faltam as skills e comandos DO PROJETO, e do lado de fora isso e indistinguivel de um
-        # projeto que nao tem nenhuma.
-        _log.warning("commands: sem cwd pra '%s' (tmux e registry nao acharam) — lista sem o que "
-                     "e do projeto", name)
-    return _sem_os_desligados(name, list_commands(cwd, cli), cwd, config_dir, _escolha_da_sessao(name, None))
-
-
-def _sem_os_desligados(name: str, comandos: list, cwd: str | None, config_dir: str | None,
-                       escolha: dict | None) -> list:
-    # A sonda e os scans são da conta: quem decide o que a conta, o projeto e a sessão desligaram é o Rust.
-    try:
-        ocultos = claude_customizations.hidden_commands(
-            cwd, tmux.config_dir_de(config_dir), escolha,
-            [c.name for c in comandos if c.source not in ("builtin", "plugin")],
-            [c.name for c in comandos if c.source == "plugin"])
-    except claude_customizations.CustomizationsError as exc:
-        _log.warning("commands: filtro de plugins/skills de '%s' indisponível (%s); lista sem filtro", name, exc.code)
-        return comandos
-    return [c for c in comandos if c.name not in ocultos]
-
-
-def _escolha_da_sessao(name: str, meta: dict | None) -> dict | None:
-    # Vale o que o processo vivo recebeu: o arquivo guardado pode já ser de outra abertura.
-    try:
-        if meta is not None:
-            return claude_customizations._validated_settings(meta.get("claude_settings"))
-        pane = tmux.pane_pid(name)
-        if pane is None:
-            _log.warning("commands: pane de '%s' não achado; lista sem o filtro das escolhas da sessão", name)
-            return None
-        from app import registry as registry_mod
-        return claude_customizations.from_environment(
-            procinfo._env_var_of(registry_mod._pid_do_agente(pane), claude_customizations.SESSION_SETTINGS_ENV))
-    except ValueError as exc:
-        _log.warning("commands: escolhas de plugins/skills inválidas em '%s' (%s); lista sem filtro", name, exc)
-        return None
+    return await _repasse_ao_rust(request, erro("commands_need_rust_server", "os comandos precisam do servidor Rust, que não está rodando"),
+                                  "/__hangar_server/forwarded")
 
 
 _TTS_LIMITE_PADRAO = 5000

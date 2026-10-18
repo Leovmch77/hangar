@@ -36,6 +36,18 @@ async fn owner_opens_call_and_gets_answer() {
     assert!(!tools.as_array().unwrap().iter().any(|x| x["name"] == "read_screen"));
 }
 
+/// O token na query não é credencial ambiente: a Origin do app (Connect, iOS) não é conferida.
+#[tokio::test]
+async fn owner_token_opens_from_any_origin() {
+    let t = voice_support::voice_server().await;
+    let mut req = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
+        format!("ws://{}/api/voice?token={}", t.addr, fake::OWNER)).unwrap();
+    req.headers_mut().insert("origin", "https://app.hangar.dev.br".parse().unwrap());
+    let (mut a, _) = tokio_tungstenite::connect_async(req).await.expect("Origin estranha com token abre");
+    hello(&mut a, "pwa", json!(["switch_session"])).await;
+    assert!(until(&mut a, "answer").await["sdp"].is_string());
+}
+
 #[tokio::test]
 async fn guest_and_wrong_token_never_reach_the_call() {
     let t = voice_support::voice_server().await;

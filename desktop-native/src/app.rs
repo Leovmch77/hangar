@@ -5,12 +5,13 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::assets::IconName;
 use tokio::{runtime::Runtime, task::JoinHandle};
 use crate::{api::{self, Api, Failure, Source, dto::*, sse::Update}, cards, chat::{Chat, LiveTool}, composer,
-    conversation::{self, Item, Tool}, delivery::{DeliveryTracker, SendOutcome, SessionKey}, i18n::{tr, tr_shared}, theme,
+    conversation::{self, Item, Tool}, delivery::{DeliveryTracker, SendOutcome, SendTiming, SessionKey}, i18n::{tr, tr_shared}, theme,
     interaction::{self, Action, Ask, InFlight, Pick}, media::{self, MediaCache, MediaState}, appearance, motion, source_map};
 use gpui_kit::component::notification::Notification;
 use serde_json::{Value, json};
 
 mod activity;
+mod session_tabs;
 mod backdrop;
 mod baton;
 mod links;
@@ -226,7 +227,8 @@ enum Payload {
     // `None` marca o início do envio daquele anexo.
     UploadStep(SessionKey, u64, Option<Result<Uploaded, Failure>>),
     /// A legenda e as referências do Enter vão com os uploads até a mensagem sair.
-    UploadsDone(SessionKey, String, Vec<crate::context_refs::ContextRef>, bool, HashSet<String>, Option<Vec<String>>),
+    UploadsDone(SessionKey, String, Vec<crate::context_refs::ContextRef>, SendTiming, HashSet<String>, Option<Vec<String>>),
+    QueueJev(String, u64, Result<bool, String>),
     Commands(String, u64, Result<Vec<CommandInfo>, Failure>),
     Recent(SessionKey, Result<Vec<UploadFile>, Failure>),
     // Miniatura já decodificada fora da thread da janela; `None` = bytes que não são imagem legível.
@@ -636,6 +638,8 @@ pub struct Hangar {
     // que traz a aba ativa para a vista quando a seleção muda.
     tab_focus: HashMap<String, FocusHandle>,
     tabs_scroll: ScrollHandle,
+    pending_tab_reveal: Option<sidebar::Target>,
+    tab_reveal_scheduled: bool,
     appearance_note: Option<String>,
     // Por que o tema Desktop não está pintando com o papel de parede; `None` quando pinta ou não foi escolhido.
     desktop_note: Option<String>,
@@ -982,7 +986,7 @@ impl Hangar {
             mention: Default::default(),
             terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_caps: Vec::new(), plugin_local_tab: None, plugin_presentations: HashMap::new(), plugin_body_scrolls: HashMap::new(), plugin_question_focus: cx.focus_handle(), plugin_tabs_scroll: ScrollHandle::new(), plugin_tabs_seen: None, plugin_tabs_waits: 0, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), pages: page_card::Pages::new(window.window_handle()), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
-            settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
+            settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(), pending_tab_reveal: None, tab_reveal_scheduled: false,
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
             desktop_note: None,
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
@@ -1393,7 +1397,7 @@ impl Hangar {
         // Avisos, atalhos globais e contas passam a ser os da máquina desta conversa.
         if !same_server { self.load_notification_preferences(); }
         let target = sidebar::Target::new(&self.open_server(), &session.name);
-        if let Some(ix) = self.tab_targets().iter().position(|t| t == &target) { self.tabs_scroll.scroll_to_item(ix); }
+        self.scroll_target_tab(&target);
         self.selection += 1;
         self.revision += 1;
         if let Some(t) = self.session_task.take() { t.abort(); }
@@ -1558,6 +1562,7 @@ impl Hangar {
     fn receive(&mut self, envelope: Envelope, window: &mut Window, cx: &mut Context<Self>) {
         // Resultados amarrados à identidade da sessão valem mesmo depois de trocar a seleção.
         let payload = match envelope.payload {
+            Payload::QueueJev(server, seq, result) => { self.receive_queue_jev(server, seq, result); cx.notify(); return; }
             Payload::Sent(key, text, draft, result) => {
                 self.receive_sent(key, text, draft, result, window, cx);
                 cx.notify();
@@ -1900,7 +1905,7 @@ impl Hangar {
             Payload::Sent(..) | Payload::Interrupted(..) | Payload::Acted(..) | Payload::Files(..) | Payload::UploadStep(..)
                 | Payload::UploadsDone(..) | Payload::Saved(..) | Payload::ConnectionNotSaved(..) | Payload::Reply(..) | Payload::HeadlessPlan(..)
                 | Payload::AppearanceSaved(..) | Payload::Backdrop(..) | Payload::BackdropPicked(..) | Payload::BackdropRemoved(..)
-                | Payload::Remote(..) | Payload::Lan(..) | Payload::Presence(..) | Payload::Voice(..) | Payload::VoiceGate(..) | Payload::VoiceMemory(..) | Payload::VoiceModels(..)
+                | Payload::Remote(..) | Payload::Lan(..) | Payload::Presence(..) | Payload::Voice(..) | Payload::VoiceGate(..) | Payload::VoiceMemory(..) | Payload::VoiceModels(..) | Payload::QueueJev(..)
                 | Payload::Mermaid(..) => unreachable!(),
         }
         // Lista que trocou ou tirou a sessão aberta refaz a conversa.
@@ -1924,6 +1929,20 @@ impl Hangar {
         };
         let typed = self.delivery.typed(&key, &text);
         if !self.delivery.complete(&key, &text, outcome) { return; }
+        if let Some(note) = result.as_ref().ok().and_then(|d| d.timing_note.as_deref()) {
+            let (message, warning) = match note {
+                "direct" => ("queue_jev_direct", false),
+                "queue" => ("queue_jev_queued", false),
+                "delivered" => ("queue_jev_delivered", false),
+                "uncertain" => ("queue_jev_uncertain", true),
+                "no_context" => ("queue_jev_no_context", true),
+                "timeout" => ("queue_jev_timeout", true),
+                "work_changed" => ("queue_jev_work_changed", true),
+                "refused" => ("queue_jev_refused", true),
+                _ => ("queue_jev_unavailable", true),
+            };
+            self.action_feedback.insert(key.clone(), (tr(message), warning));
+        }
         if result.is_ok() { self.bridge_sending(key.clone(), cx); }
         self.sync_working_row(cx);
         let current = self.selected_key().as_ref() == Some(&key);
@@ -2000,7 +2019,7 @@ impl Hangar {
             match targets.len().checked_sub(1).map(|last| ix.min(last)) {
                 Some(next) => {
                     if let Some(focus) = self.row_focus(&targets[next]) { focus.focus(window, cx); }
-                    self.tabs_scroll.scroll_to_item(next);
+                    self.scroll_target_tab(&targets[next]);
                 }
                 None => self.root_focus.focus(window, cx),
             }
@@ -2539,6 +2558,9 @@ impl Hangar {
         self.action_feedback.remove(&key);
         // O grupo é o da hora do Enter: o texto pode sair depois, com outra conversa aberta ou o grupo mudado.
         let group = if steer { None } else { self.group_targets(&key, &text) };
+        let steer = steer || group.is_none() && !command && self.queue_sends_direct();
+        let steer = self.queue_timing(steer, group.is_none() && !command, &text);
+        let steer = if flying || attached { steer.after_wait() } else { steer };
         // Sem terminal, o `/btw` só sai traduzido e com o plugin anunciando que o atende; mesmo com a lista de
         // comandos ainda vazia (sem `blocked_command`), nunca vai cru ao Claude Code.
         let surface_btw = group.is_none() && self.plugin_source == Some(crate::plugin_ui::UiSource::Surface) && composer::side_question(&text);
@@ -2587,8 +2609,8 @@ impl Hangar {
     }
 
     /// `group`: com o "mandar pro grupo" ligado no Enter, os nomes que recebem (ela e os membros).
-    fn deliver(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) -> bool {
-        if !self.post(key.clone(), text, draft, steer, known, group, cx) { return false; }
+    fn deliver(&mut self, key: SessionKey, text: String, draft: String, steer: impl Into<SendTiming>, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) -> bool {
+        if !self.post(key.clone(), text, draft, steer.into(), known, group, cx) { return false; }
         self.sync_working_row(cx);
         self.error = None;
         self.stop_feedback.remove(&key);
@@ -2599,7 +2621,7 @@ impl Hangar {
     }
 
     /// O envio em si, sem mexer na conversa aberta: serve também ao texto que esperava a vez noutra sessão.
-    fn post(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) -> bool {
+    fn post(&mut self, key: SessionKey, text: String, draft: String, steer: SendTiming, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) -> bool {
         // Sessão fora da tela (envio nomeado pela voz, fila de outra sessão) usa a conexão guardada da máquina dela.
         let Some(api) = self.api_for(&key.server).or_else(|| self.machine_api(&servers::norm(&key.server))) else {
             self.action_feedback.insert(key, (tr("server_changed"), true));
@@ -2607,11 +2629,21 @@ impl Hangar {
             return false;
         };
         if !self.delivery.begin(key.clone(), text.clone(), known) { cx.notify(); return false; }
+        // O `/steer` do Claude com terminal ignora o texto; `/input` orienta somente a entrada deste envio.
+        let selected = self.selected_key().as_ref() == Some(&key);
+        let kind = self.sessions_of(&key.server).iter().find(|s| s.name == key.name).map(|s| (s.provider == "claude", s.headless))
+            .or_else(|| selected.then(|| { let (provider, headless) = self.provider(); (provider == "claude", headless) }));
+        let terminal_claude = steer == SendTiming::Direct && kind == Some((true, false));
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
             let result = match group {
                 Some(names) => api.broadcast(&names, &text).await.and_then(|results| group_sheet::group_delivery(&key.name, results)),
-                None if steer => api.steer_text(&key.name, &text).await,
+                None if terminal_claude => api.send_direct(&key.name, &text).await,
+                None if steer == SendTiming::Direct => api.steer_text(&key.name, &text).await,
+                None if matches!(steer, SendTiming::Jev { .. }) => {
+                    let SendTiming::Jev { task, message } = steer else { unreachable!() };
+                    api.send_decided(&key.name, &text, &task, &message).await
+                }
                 None => api.send(&key.name, &text).await,
             };
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Sent(key, text, draft, result) }).await;
@@ -2620,7 +2652,7 @@ impl Hangar {
     }
 
     // Sobe um por vez; o que já subiu não sobe de novo numa nova tentativa, e falha para a fila sem repetir.
-    fn start_uploads(&mut self, key: SessionKey, draft: String, refs: Vec<crate::context_refs::ContextRef>, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) {
+    fn start_uploads(&mut self, key: SessionKey, draft: String, refs: Vec<crate::context_refs::ContextRef>, steer: SendTiming, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) {
         let Some(api) = self.api_for(&key.server) else { return; };
         let Some(list) = self.attachments.get_mut(&key) else { return; };
         let mut jobs = Vec::new();
@@ -2656,7 +2688,7 @@ impl Hangar {
         };
     }
 
-    fn finish_uploads(&mut self, key: SessionKey, draft: String, refs: Vec<crate::context_refs::ContextRef>, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, window: &mut Window, cx: &mut Context<Self>) {
+    fn finish_uploads(&mut self, key: SessionKey, draft: String, refs: Vec<crate::context_refs::ContextRef>, steer: SendTiming, known: HashSet<String>, group: Option<Vec<String>>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(batch) = self.uploading.remove(&key) else { return; };
         let uploads: Option<Vec<_>> = self.attachments.get(&key).and_then(|list| list.iter().filter(|a| batch.contains(&a.id))
             .map(|attachment| match &attachment.state {
@@ -3071,7 +3103,14 @@ impl Hangar {
     fn answer_body(&self, cx: &Context<Self>) -> Option<Value> {
         let ask = self.chat.ask.as_ref()?;
         if self.ask_form.fingerprint != ask.fingerprint { return None; }
-        interaction::answer_body(ask, &self.ask_picks(cx))
+        let mut body = interaction::answer_body(ask, &self.ask_picks(cx))?;
+        let preferences = appearance::get();
+        // A identidade da pergunta já comprova a relação com o trabalho: o Jev não precisa inferi-la.
+        if ask.payload.is_async && ask.payload.provider.as_deref() == Some("codex")
+            && (preferences.steer_while_working || preferences.jev_delivery && self.queue_jev_ready()) {
+            body["steer"] = json!(true);
+        }
+        Some(body)
     }
 
     /// Escolhas do formulário com o texto digitado no lugar de quem está digitando.
@@ -5383,65 +5422,14 @@ impl Hangar {
     /// Abas no topo (como o web) ou embaixo: todas as sessões numa faixa, e o servidor e a conexão que moravam
     /// no rodapé da barra lateral. ←/→ andam o foco entre as abas; Enter ou Espaço abrem a sessão.
     fn render_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.schedule_tab_reveal(window, cx);
         let floating = theme::is_floating();
         let host = self.server_label(cx);
-        let weak = cx.entity().downgrade();
-        let active = self.active_key();
-        let targets = self.tab_targets();
-        let empty = targets.is_empty();
-        let selected = self.selected_target();
-        let tabs = targets.into_iter().filter_map(|target| {
-            let session = self.target_session(&target)?;
-            let focus = self.row_focus(&target)?.clone();
-            let on = selected.as_ref() == Some(&target);
-            let remote = target.server != active;
-            let machine = self.server_entry(&target.server).map(|s| s.label.as_str()).unwrap_or(&host);
-            let state = if session.limited == Some(true) { "limited" } else { session.state.as_str() };
-            // Nome, estado e perguntas por extenso: o ponto só diz o estado pela cor.
-            let mut label = format!("{} · {} · {}", session.name, machine, tr(&format!("chip_{state}")));
-            if session.pending_questions > 0 { label.push_str(&format!(" · ? {}", session.pending_questions)); }
-            // Trabalhando é a marca animada da lista (parada com movimento reduzido); os outros estados são um ponto na cor dele.
-            let mark = if session.state == "working" {
-                self.working_mark_slot(panes::Area::Nav, format!("tab-mark-{}", target.id()), 14., theme::accent())
-            } else {
-                div().size(px(8.)).mx(px(2.)).flex_shrink_0().rounded_full().bg(if state == "limited" { theme::limited() } else { theme::status(state) }).into_any_element()
-            };
-            let pick = target.clone();
-            let open = target.clone();
-            let menu_target = target.clone();
-            let label = self.session_number_label(&menu_target, label);
-            let number = self.session_number_badge(&menu_target);
-            Some(div().id(SharedString::from(format!("tab-{}", target.id()))).relative().track_focus(&focus).flex_shrink_0().max_w(px(240.)).h(px(32.)).px(px(8.))
-                .flex().items_center().gap(px(6.)).rounded(px(6.)).border_1().cursor_pointer()
-                .map(|el| if on { el.bg(theme::accent_dim()).border_color(theme::accent()).text_color(theme::text()).font_weight(FontWeight::SEMIBOLD) }
-                    else { el.border_color(transparent_black()).text_color(theme::muted()).hover(|el| el.bg(theme::hover())) })
-                .when(focus.is_focused(window), |el| el.focus_ring_style(window, cx))
-                .role(Role::Tab).aria_selected(on).aria_label(label.clone())
-                .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx))
-                .child(mark)
-                .children(number)
-                .child(chrome::provider_glyph(&session.provider, 14.))
-                .child(div().min_w_0().truncate().text_size(px(13.)).child(session.name.clone()))
-                .when(remote, |el| el.child(div().max_w(px(72.)).truncate().text_size(px(10.)).text_color(theme::faint()).child(machine.to_owned())))
-                .when(session.pending_questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning())
-                    .child(format!("? {}", session.pending_questions))))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_target(&pick, window, cx);
-                }))
-                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        this.select_target(&open, window, cx);
-                        cx.stop_propagation();
-                    }
-                }))
-                // Clique direito na aba abre o mesmo menu da linha da barra, como o SessionTabs do web.
-                .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_target.clone(), cx)))
-                .when(!self.invite_target(&target) && !session.read_only(), |el| self.group_row(el, session, remote.then_some(target.server.as_str()), 6., cx))
-                .context_menu(sidebar::session_menu(weak.clone(), target.server.clone(), session.clone())))
-        }).collect::<Vec<_>>();
+        let tabs = self.render_tab_groups(window, cx);
+        let empty = tabs.is_empty();
         // A folga lateral deixa o anel de foco da primeira e da última aba fora do recorte da rolagem. A faixa mede o que
         // as abas medem e só encolhe (rolando) quando falta espaço, para os botões de criar ficarem logo depois da última.
-        let strip = div().id("tabs-strip").flex_shrink_1().min_w_0().h_full().px(px(3.)).flex().items_center().gap(px(2.)).overflow_x_scroll().track_scroll(&self.tabs_scroll)
+        let strip = div().id("tabs-strip").tab_group().flex_shrink_1().min_w_0().h_full().px(px(3.)).flex().items_center().gap(px(2.)).overflow_x_scroll().track_scroll(&self.tabs_scroll)
             .role(Role::TabList).aria_label(tr("sessions"))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let step = match event.keystroke.key.as_str() { "left" => -1, "right" => 1, _ => return };
@@ -5449,14 +5437,14 @@ impl Hangar {
                 let Some(current) = targets.iter().position(|target| this.row_focus(target).is_some_and(|f| f.is_focused(window))) else { return };
                 let next = (current as isize + step).rem_euclid(targets.len() as isize) as usize;
                 if let Some(focus) = this.row_focus(&targets[next]) { focus.focus(window, cx); }
-                this.tabs_scroll.scroll_to_item(next);
+                this.scroll_target_tab(&targets[next]);
                 cx.stop_propagation();
                 cx.notify();
             }))
             .children(tabs)
             .when(empty && self.list_error.is_none(), |el| el.child(div().px_2().text_xs().text_color(theme::faint())
                 .child(tr(if self.list_online { "empty_sessions" } else { "connecting" }))));
-        chrome::glass_panel(div().h(px(44.)).w_full().flex_shrink_0().px(px(8.)).flex().items_center().gap(px(6.))
+        chrome::glass_panel(div().id("session-tabs-bar").h(px(session_tabs::BAR_HEIGHT)).w_full().flex_shrink_0().px(px(8.)).flex().items_center().gap(px(6.))
             .bg(theme::chrome()).border_color(theme::border())
             .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().shadow(theme::panel_shadow()) }
                 else if appearance::get().navigation == appearance::Navigation::BottomTabs { el.border_t_1() } else { el.border_b_1() })
@@ -5506,7 +5494,8 @@ impl Hangar {
         let worktree_gone = !compact && session.worktree_gone;
         let second_line = branch.is_some() || worktree.is_some() || worktree_gone;
         let worktree_target = session.worktree_path.clone().or_else(|| session.cwd.clone()).unwrap_or_default();
-        let merged = self.worktrees.status(&worktree_target).is_some_and(|s| s.merged);
+        let worktree_server = target.server.clone();
+        let merged = self.worktrees.status(&target.server, &worktree_target).is_some_and(|s| s.merged);
         let time = div().flex_shrink_0().text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
             .children(session.last_activity.map(side::since));
         // Id da marca com a máquina: a de mesmo nome em outra máquina não divide a animação.
@@ -5572,7 +5561,7 @@ impl Hangar {
                         .flex().items_center().gap(px(3.)).text_color(theme::accent())
                         .child(chrome::small_icon(IconName::GitBranch, 11., theme::accent()))
                         .child(if merged { format!("{label} ✓") } else { label })
-                        .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.open_worktree(worktree_target.clone(), window, cx); })))
+                        .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.open_worktree_on(worktree_server.clone(), worktree_target.clone(), window, cx); })))
                 })
                 .when(worktree_gone, |el| el.child(div().text_color(theme::muted()).child(tr_shared("worktree_apagada", &[]))))))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
@@ -6349,6 +6338,21 @@ impl Hangar {
         cx.notify();
     }
 
+    fn open_plugin(&mut self, site: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(site) = site {
+            let ids = crate::plugin_ui::pane_ids(&self.plugin_panes);
+            if !ids.iter().any(|id| id == site) { return; }
+            if crate::plugin_ui::active_pane(&ids, &self.plugin_shown, self.plugin_local_tab.as_deref()).as_deref() != Some(site) {
+                self.show_plugin(site.to_owned(), cx);
+            }
+        }
+        if let Some(key) = self.selected_key() { self.plugin_presentations.entry(key).or_default().restore(); }
+        if self.selected.as_ref().is_some_and(|session| session.takes_messages()) {
+            self.composer.update(cx, |input, cx| input.focus(window, cx));
+        } else { self.root_focus.focus(window, cx); }
+        cx.notify();
+    }
+
     /// Hover dos mods depois de um evento novo ou de uma troca de aba: fica só o trecho ainda desenhado na faixa ou no
     /// painel da frente.
     fn keep_plugin_hovered(&mut self) { self.keep_plugin_hovered_without(None); }
@@ -6456,6 +6460,10 @@ impl Hangar {
     fn plugin_view(&self, cx: &mut Context<Self>) -> crate::plugin_ui::View<'_> {
         let entity = cx.entity().downgrade();
         let shown = entity.clone();
+        let opened = entity.clone();
+        let open: crate::plugin_ui::Show = std::rc::Rc::new(move |site: &str, window: &mut Window, cx: &mut App| {
+            let _ = opened.update(cx, |this, cx| this.open_plugin(Some(site), window, cx));
+        });
         let show: crate::plugin_ui::Show = std::rc::Rc::new(move |site: &str, _: &mut Window, cx: &mut App| {
             let site = site.to_owned();
             let _ = shown.update(cx, |this, cx| this.show_plugin(site, cx));
@@ -6467,7 +6475,7 @@ impl Hangar {
                 let _ = entity.update(cx, |this, cx| this.submit_plugin_field(&site, &control, cx));
             })
         });
-        crate::plugin_ui::View { press: self.plugin_press(cx), minimize: (!self.plugin_panes.is_empty()).then(|| self.plugin_minimize(cx)).flatten(), show, tabs_scroll: &self.plugin_tabs_scroll, columns: self.plugin_columns,
+        crate::plugin_ui::View { press: self.plugin_press(cx), panes: &self.plugin_panes, minimize: (!self.plugin_panes.is_empty()).then(|| self.plugin_minimize(cx)).flatten(), show, open, tabs_scroll: &self.plugin_tabs_scroll, columns: self.plugin_columns,
             body_scrolls: self.selected_key().as_ref().and_then(|key| self.plugin_body_scrolls.get(key)),
             hover: Some(self.plugin_hover(cx)), hovered: &self.plugin_hovered, fields: &self.plugin_fields, submit }
     }
@@ -6657,11 +6665,7 @@ impl Hangar {
                 .child(div().flex_1().text_xs().text_color(theme::muted()).child(tr("plugin_minimized")))
                 .child(Button::new("plugin-restore").small().outline().label(tr("plugin_restore"))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        if let Some(key) = this.selected_key() { this.plugin_presentations.entry(key).or_default().restore(); }
-                        if this.selected.as_ref().is_some_and(|session| session.takes_messages()) {
-                            this.composer.update(cx, |input, cx| input.focus(window, cx));
-                        } else { this.root_focus.focus(window, cx); }
-                        cx.notify();
+                        this.open_plugin(None, window, cx);
                     })))).into_any_element()),
             Display::None => None,
         };
@@ -6768,7 +6772,7 @@ impl Render for Hangar {
         // Visor de arquivos expandido: sem a lista de sessões e sem o painel direito.
         let files_expanded = self.files_expanded();
         let nav = if page.is_some() || costs_page || worktrees_page || files_expanded { None }
-            else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(44.)).flex_shrink_0()
+            else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(session_tabs::BAR_HEIGHT)).flex_shrink_0()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }))) }
             else { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w(px(self.nav_width())).h_full().flex_shrink_0()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }))) };

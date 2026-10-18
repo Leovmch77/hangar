@@ -43,16 +43,104 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-async function render(serverId: string, orq = false) {
+async function render(serverId: string, orq = false, name = 'conversation', provider?: string | null) {
   const container = document.createElement('div');
   const root = createRoot(container);
   roots.push(root);
   const onClose = vi.fn();
-  await act(async () => { root.render(createElement(MoreSheet, { open: true, onClose, serverId, name: 'conversation', orq })); });
+  await act(async () => { root.render(createElement(MoreSheet, { open: true, onClose, serverId, name, orq, provider })); });
   return { container, onClose };
 }
 
 const shareButton = (container: HTMLElement) => container.querySelector<HTMLButtonElement>(`[aria-label="${m.compartilhar_menu()}"]`);
+const gitButton = (container: HTMLElement) => container.querySelector<HTMLButtonElement>(`[aria-label="${m.sessao_git()}"]`);
+
+test('troca de conta: Claude no servidor próprio fecha o menu e abre a mesma conversa mesmo com convidado ativo', async () => {
+  const { container, onClose } = await render(own.id, false, 'same-conversation', 'claude');
+  const account = container.querySelector<HTMLButtonElement>(`[aria-label="${m.bastao_menu()}"]`);
+  expect(account, 'ação de continuar em outra conta').not.toBeNull();
+  expect(account!.textContent).toContain(m.conta_mesma_conversa_sub());
+  await act(async () => { account!.click(); });
+  expect(onClose).toHaveBeenCalledExactlyOnceWith();
+  expect(boundary.push).toHaveBeenCalledExactlyOnceWith('/s/own/same-conversation/account');
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+test.each([
+  { kind: 'guest', serverId: guest.id, orq: false, provider: 'claude' },
+  { kind: 'removed', serverId: removed.id, orq: false, provider: 'claude' },
+  { kind: 'unknown-server', serverId: 'unknown', orq: false, provider: 'claude' },
+  { kind: 'orq', serverId: own.id, orq: true, provider: 'claude' },
+  { kind: 'codex', serverId: own.id, orq: false, provider: 'codex' },
+  { kind: 'pi', serverId: own.id, orq: false, provider: 'pi' },
+  { kind: 'omp', serverId: own.id, orq: false, provider: 'omp' },
+  { kind: 'kimi', serverId: own.id, orq: false, provider: 'kimi' },
+  { kind: 'unknown-provider', serverId: own.id, orq: false, provider: 'other' },
+  { kind: 'null-provider', serverId: own.id, orq: false, provider: null },
+  { kind: 'missing-provider', serverId: own.id, orq: false, provider: undefined },
+])('troca de conta: não oferece ação para $kind mesmo com servidor próprio ativo', async ({ serverId, orq, provider }) => {
+  useServers.setState({ activeId: own.id });
+  const { container, onClose } = await render(serverId, orq, 'conversation', provider);
+  expect(container.querySelector(`[aria-label="${m.bastao_menu()}"]`)).toBeNull();
+  expect(onClose).not.toHaveBeenCalled();
+  expect(boundary.push).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+test.each([false, true])('git abre a rota da conversa e fecha o menu no servidor próprio, orq=%s', async orq => {
+  const { container, onClose } = await render(own.id, orq);
+  const git = gitButton(container);
+  expect(git).not.toBeNull();
+  expect(git!.previousElementSibling?.getAttribute('aria-label')).toBe(m.arq_aba());
+  expect(git!.textContent).toContain(m.chat_acao_git_detalhe());
+  await act(async () => { git!.click(); });
+  expect(onClose).toHaveBeenCalledExactlyOnceWith();
+  expect(boundary.push).toHaveBeenCalledExactlyOnceWith('/s/own/conversation/git');
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+test.each([guest.id, removed.id, 'unknown'])('git não aparece no servidor %s mesmo com servidor próprio ativo', async serverId => {
+  useServers.setState({ activeId: own.id });
+  const { container } = await render(serverId);
+  expect(gitButton(container)).toBeNull();
+});
+
+test.each([
+  { kind: 'normal', orq: false, name: 'conversation' },
+  { kind: 'orq', orq: true, name: 'orq-run' },
+])('Time do trabalho: dono da conversa $kind abre o editor no servidor explícito', async ({ orq, name }) => {
+  const { container, onClose } = await render(own.id, orq, name);
+  const team = container.querySelector<HTMLButtonElement>(`[aria-label="${m.orqcfg_aba_papeis()}"]`);
+  expect(team).not.toBeNull();
+  await act(async () => { team!.click(); });
+  expect(onClose).toHaveBeenCalledExactlyOnceWith();
+  expect(boundary.push).toHaveBeenCalledExactlyOnceWith(`/s/own/${name}/orchestration-team`);
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+test.each([guest.id, removed.id, 'unknown'])('Time do trabalho: servidor %s não oferece editor em conversa normal nem orq', async serverId => {
+  useServers.setState({ activeId: own.id });
+  for (const orq of [false, true]) {
+    const { container } = await render(serverId, orq);
+    expect(container.querySelector(`[aria-label="${m.orqcfg_aba_papeis()}"]`)).toBeNull();
+  }
+  expect(boundary.push).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+test('busca global fecha Mais e abre rota independente da sessão sem mudar ações existentes', async () => {
+  const { container, onClose } = await render(own.id);
+  const search = container.querySelector<HTMLButtonElement>(`[aria-label="${m.switcher_buscar_conversas()}"]`);
+  expect(search, 'ação de busca global').not.toBeNull();
+  await act(async () => { search!.click(); });
+  expect(onClose).toHaveBeenCalledExactlyOnceWith();
+  expect(boundary.push).toHaveBeenCalledExactlyOnceWith('/search');
+  boundary.push.mockClear(); onClose.mockClear();
+  await act(async () => { container.querySelector<HTMLButtonElement>(`[aria-label="${m.arq_aba()}"]`)!.click(); });
+  expect(boundary.push).toHaveBeenCalledExactlyOnceWith('/s/own/conversation/files');
+  expect(onClose).toHaveBeenCalledExactlyOnceWith();
+  expect(fetch).not.toHaveBeenCalled();
+});
 
 test('servidor próprio da conversa oferece compartilhar entre grupo e arquivos mesmo com convidado ativo', async () => {
   const { container, onClose } = await render(own.id);
@@ -79,6 +167,25 @@ test('conversa de orquestração em servidor próprio não oferece compartilhar'
   const { container } = await render(own.id, true);
   expect(container.querySelector(`[aria-label="${m.arq_aba()}"]`)).not.toBeNull();
   expect(shareButton(container)).toBeNull();
+});
+
+test('orquestração abre seu painel no lugar de Atividade e sessão comum mantém Atividade', async () => {
+  const { container, onClose } = await render(own.id, true);
+  const panel = container.querySelector<HTMLButtonElement>(`[aria-label="${m.orq_tab_title()}"]`);
+  expect(panel).not.toBeNull();
+  expect(container.querySelector(`[aria-label="${m.ctx_atividade()}"]`)).toBeNull();
+  await act(async () => { panel!.click(); });
+  expect(onClose).toHaveBeenCalledExactlyOnceWith();
+  expect(boundary.push).toHaveBeenCalledExactlyOnceWith('/s/own/conversation/orchestration');
+
+  boundary.push.mockClear();
+  const normal = await render(own.id);
+  expect(normal.container.querySelector(`[aria-label="${m.orq_tab_title()}"]`)).toBeNull();
+  const activity = normal.container.querySelector<HTMLButtonElement>(`[aria-label="${m.ctx_atividade()}"]`);
+  expect(activity).not.toBeNull();
+  await act(async () => { activity!.click(); });
+  expect(normal.onClose).toHaveBeenCalledExactlyOnceWith();
+  expect(boundary.push).toHaveBeenCalledExactlyOnceWith('/s/own/conversation/activity');
 });
 
 test('servidor inexistente não oferece compartilhar', async () => {

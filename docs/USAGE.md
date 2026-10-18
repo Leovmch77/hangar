@@ -164,7 +164,7 @@ ou em `backend/.env`):
 | `CP_PORT` | `8765` | porta do backend |
 | `CP_FRONT_PORT` | — | porta onde o PWA é servido (entra no QR). Vazio = o próprio backend, que serve o `frontend/dist` na raiz. Só quem mantém um `vite preview` separado grava `5173` aqui. |
 | `CP_PUBLIC_URL` | — | sobrescreve a URL base do QR (ex: hostname Tailscale) |
-| `CP_TERM_ORIGINS` | — | origens EXTRAS aceitas pelo WebSocket do terminal (csv). Precisa quando o PWA é servido de um host que não é este backend, nem a `CP_PUBLIC_URL`, nem um peer — é o caso do app carregado da VPS falando com a máquina de casa. Sem isso o terminal abre e cai em "desconectado". |
+| `CP_TERM_ORIGINS` | — | origens EXTRAS de onde o convidado com login pode abrir o terminal (csv). O dono não precisa: o acesso dele (`?token=`) abre o terminal de qualquer endereço. Vale quando o convidado usa um app servido de um host que não é este backend, nem a `CP_PUBLIC_URL`, nem um peer. |
 | `CP_SCAN_ROOTS` | — | pastas que o seletor "Nova sessão" pode listar (csv) |
 | `CP_TERMINAL` | — | emulador do botão **terminal nativo** (`wezterm`, `kitty`, `alacritty`, `konsole`, `gnome-terminal`, `xterm`). Vazio = procura nessa ordem no PATH. |
 
@@ -246,6 +246,12 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   própria, e a sua pasta principal só muda quando você mesclar. A tela **Worktrees** lista cada
   uma (mesclada ou quantos commits à frente, o que não foi commitado) e apaga as mescladas e
   limpas; as conversas dela continuam e podem ser retomadas na pasta principal.
+- **Worktrees de todos os computadores no app nativo:** a tela reúne os servidores próprios
+  habilitados, separados por computador e repositório. Use **Todos os computadores** para filtrar
+  uma máquina. Detalhes, criação, exclusão e abertura de sessão acontecem no computador da
+  worktree. Se uma máquina não responder, as demais continuam visíveis e a falha permite tentar
+  de novo. Para uma **Pasta sumida**, **Limpar registro** remove apenas aquela entrada do Git,
+  conservando a branch, os commits e as conversas.
 - **Preferências de worktrees no app nativo:** em **Configurações → Worktrees**, escolha a pasta
   das novas worktrees de cada servidor. Deixe vazia para usar a pasta de worktrees do Hangar;
   as existentes continuam onde estão. A limpeza automática começa desligada. É possível ligá-la

@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { useHeaderHeight } from 'expo-router/react-navigation';
+import type { Edge } from 'react-native-safe-area-context';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import {
   basename,
@@ -28,6 +30,7 @@ import { readDraft, writeDraft, type ConversationDraft } from '../../../../src/s
 import { Screen } from '../../../../src/ui/Screen';
 import { Glass } from '../../../../src/ui/Glass';
 import { Icon } from '../../../../src/ui/Icon';
+import { HeaderBack, useGlassHeader } from '../../../../src/ui/glassHeader';
 import { MultilineInput } from '../../../../src/ui/MultilineInput';
 import { ProviderGlyph } from '../../../../src/ui/ProviderGlyph';
 import { toast } from '../../../../src/ui/Toast';
@@ -40,6 +43,8 @@ const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v) 
 const noop = () => {};
 // Id de menu da conta própria do Claude ('' não serve de id de ação no menu nativo).
 const OWN_ENGINE = '#own';
+// O cabeçalho é o da pilha (vidro, transparente): a conversa começa abaixo dele.
+const EDGES: Edge[] = ['bottom', 'left', 'right'];
 
 // Texto que não chegou à sessão vai para o rascunho dela, que o Composer restaura ao abrir.
 // `merge` junta ao que já estava lá (conversa já aberta noutra sessão) em vez de sobrescrever.
@@ -48,7 +53,7 @@ function handOffDraft(serverId: string, name: string, text: string, merge: boole
   try { prev = readDraft(serverId, name); } catch { /* ilegível: grava por cima */ }
   const value: ConversationDraft = merge && prev
     ? { ...prev, text: prev.text ? `${prev.text}\n\n${text}` : text, revision: prev.revision + 1 }
-    : { version: 1, text, revision: (prev?.revision ?? 0) + 1, transcript: null, attachment: null, submission: null };
+    : { version: 1, text, revision: (prev?.revision ?? 0) + 1, transcript: null, attachments: [], submission: null };
   try { writeDraft(serverId, name, value); } catch (e) {
     toast.erro(e instanceof Error ? e.message : m.draft_write_error());
   }
@@ -59,6 +64,8 @@ function handOffDraft(serverId: string, name: string, text: string, merge: boole
 export default function ArchivedConversation() {
   const { theme } = useUnistyles();
   const router = useRouter();
+  const header = useGlassHeader();
+  const headerHeight = useHeaderHeight();
   const params = useLocalSearchParams<{ server: string; project: string; sid: string }>();
   const serverId = one(params.server);
   const project = one(params.project);
@@ -236,6 +243,23 @@ export default function ArchivedConversation() {
   const pasta = entry?.cwd ? basename(entry.cwd) : '';
   const destino = [pasta, server?.label].filter(Boolean).join(' @ ');
   const muted = theme.tokens.text.muted;
+  const provider = entry?.provider;
+  const textColor = theme.tokens.text.primary;
+  const canGoBack = router.canGoBack();
+  // Memo: digitar no rascunho redesenha a tela, e opções novas reconfiguram o cabeçalho nativo.
+  const headerOptions = useMemo(() => ({
+    ...header,
+    headerLeft: canGoBack ? undefined : () => <HeaderBack onPress={() => router.replace('/')} />,
+    headerTitle: () => (
+      <View style={styles.titleRow}>
+        {provider ? <ProviderGlyph provider={provider} size={18} /> : <Icon name="MessageCircle" size={18} color={muted} />}
+        <View style={styles.titles}>
+          <Text style={[styles.title, { color: textColor }]} numberOfLines={1} accessibilityRole="header">{title}</Text>
+          {destino ? <Text style={[styles.destino, { color: muted }]} numberOfLines={1}>{destino}</Text> : null}
+        </View>
+      </View>
+    ),
+  }), [header, canGoBack, router, provider, muted, textColor, title, destino]);
 
   let body;
   if (loading) {
@@ -267,24 +291,9 @@ export default function ArchivedConversation() {
   const note = blockedNow ?? (resumeError || accountsError);
 
   return (
-    <Screen>
-      <View style={[styles.header, { borderBottomColor: theme.tokens.border.subtle }]}>
-        <Pressable
-          onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
-          hitSlop={8}
-          style={styles.back}
-          accessibilityRole="button"
-          accessibilityLabel={m.comum_voltar()}
-        >
-          <Icon name="ChevronLeft" size={22} color={theme.tokens.text.primary} />
-        </Pressable>
-        {entry ? <ProviderGlyph provider={entry.provider} size={18} /> : <Icon name="MessageCircle" size={18} color={muted} />}
-        <View style={styles.titles}>
-          <Text style={[styles.title, { color: theme.tokens.text.primary }]} numberOfLines={1} accessibilityRole="header">{title}</Text>
-          {destino ? <Text style={[styles.destino, { color: muted }]} numberOfLines={1}>{destino}</Text> : null}
-        </View>
-      </View>
-      <KeyboardAvoidingView behavior="padding" automaticOffset style={styles.flex}>
+    <Screen edges={EDGES}>
+      <Stack.Screen options={headerOptions} />
+      <KeyboardAvoidingView behavior="padding" automaticOffset style={[styles.flex, { paddingTop: headerHeight }]}>
         <View style={styles.flex}>{body}</View>
         {entry && !error ? (
           <View style={styles.dock}>
@@ -364,17 +373,8 @@ export default function ArchivedConversation() {
 
 const styles = StyleSheet.create((theme) => ({
   flex: { flex: 1 },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.base.space[2],
-    paddingHorizontal: theme.base.space[1],
-    paddingRight: theme.base.space[3],
-    minHeight: 48,
-    borderBottomWidth: 1,
-  },
-  back: { width: 40, height: 44, alignItems: 'center', justifyContent: 'center' },
-  titles: { flex: 1, minWidth: 0 },
+  titleRow: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], flexShrink: 1 },
+  titles: { flexShrink: 1, minWidth: 0 },
   title: { fontSize: theme.base.text.base, fontWeight: '600' },
   destino: { fontSize: theme.base.text.xxs },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: theme.base.space[2], padding: theme.base.space[6] },

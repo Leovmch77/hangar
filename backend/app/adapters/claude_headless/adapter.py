@@ -231,9 +231,6 @@ class _Sessao:
         # Input da tool em voo (partial_json acumulado): o rótulo mostra o alvo antes dela rodar.
         self.tool_nome: str | None = None
         self.tool_json = ""
-        # Lista do `/` vinda da própria CLI: nomes+descrição do initialize; os só-de-TUI do init.
-        self.comandos: list[dict] | None = None
-        self.comandos_terminal: frozenset[str] = frozenset()
 
     @property
     def previa(self) -> str:
@@ -1328,8 +1325,6 @@ class ClaudeHeadlessAdapter:
             if ev.get("permissionMode"):
                 self._definir_modo(sess, ev["permissionMode"])
                 self._reaplicar_base_do_plano(sess)
-            if isinstance(ev.get("terminal_slash_commands"), list):
-                sess.comandos_terminal = frozenset(str(c) for c in ev["terminal_slash_commands"])
             sess.initialized.set()
         elif sub == "status":
             if ev.get("permissionMode"):
@@ -1690,14 +1685,6 @@ class ClaudeHeadlessAdapter:
                           limited=sess.limited, limit_reset=sess.limit_reset,
                           codex_question=sess.question,
                           problema=sess.problema, problema_detalhe=sess.problema_detalhe)
-
-    def comandos(self, name: str) -> tuple[list[dict] | None, frozenset[str]]:
-        """Lista do `/` que a CLI desta sessão informou (None = ainda não subiu) e os nomes que só
-        rodam na TUI."""
-        sess = self._sessions.get(name)
-        if sess is None:
-            return None, frozenset()
-        return sess.comandos, sess.comandos_terminal
 
     def problema_de(self, name: str) -> tuple[str, str | None] | None:
         sess = self._sessions.get(name)

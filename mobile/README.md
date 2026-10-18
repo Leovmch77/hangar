@@ -42,7 +42,19 @@ o hook `eas-build-post-install` compila as duas antes do bundle; sem a do core o
 |---|---|---|
 | `preview` | uso diário: APK Android e iOS ad hoc, instalação interna, sem Metro | caminho de instalação deste README |
 | `development` | `developmentClient: true`, carrega o JS do Metro | iPhone sem conta paga: ver "iPhone com Apple ID gratuito" |
-| `production` | loja | fora do escopo; sem `eas submit`, loja ou OTA |
+| `production` | loja, canal OTA `production` | sem `eas submit` ou publicação em loja |
+
+## Atualizações OTA (EAS Update)
+
+O Release do GitHub e os builds EAS `preview` recebem o canal `preview`; EAS `production` usa `production`.
+Instale primeiro um binário novo com `expo-updates`; o app já instalado sem ele não recebe OTA.
+Publique em `mobile/`: `eas update --channel preview --message "Descrição da correção" --environment preview` (troque ambos para `production` no outro canal).
+Compile antes as traduções: `npm run i18n:compile:core && npm run i18n:compile`.
+Ao abrir, o app baixa em segundo plano, sem segurar a tela; a correção entra no próximo início completo (feche e abra de novo).
+O runtime segue `expo.version` (`appVersion`): mudança nativa (SDK, dependência, plugin ou configuração) exige subir essa versão e gerar/instalar binário novo antes de publicar JS para ela.
+Metro, Expo Go e development client mantêm OTA automática desligada; no GitHub, selecione `Release` para OTA.
+Veja publicações, canal e runtime em [Expo → Hangar → Updates](https://expo.dev/accounts/jeffer1312/projects/hangar/updates) ou `eas update:list`.
+OTA não renova o perfil Apple gratuito de 7 dias: a assinatura ainda precisa ser renovada.
 
 ## Versão
 
@@ -146,6 +158,7 @@ sem afirmar que toda regra compartilhável já foi extraída.
   Kimi não têm aceitação registrada no aparelho.
 - Voz/ditado dependem dos recursos de áudio configurados no servidor; sem eles, aparecem
   indisponíveis com o motivo.
-- Sem notificação push com o app fechado, sem OTA (EAS Update) e sem loja.
-- Board, Canvas, terminal completo e navegador embutido são do desktop/PWA, não do app.
+- Sem notificação push com o app fechado e sem loja.
+- Board, Canvas e navegador embutido são do desktop/PWA, não do app. O app tem terminal real
+  para sessões com terminal, com espelho disponível como alternativa explícita.
 - Situação de aceitação de cada entrega: `docs/analysis/2026-09-29-mobile-acceptance.md`.

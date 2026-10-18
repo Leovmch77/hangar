@@ -63,6 +63,15 @@ fn bodies_preserve_identity_and_native_zero_and_relay_only_normalization() {
 }
 
 #[test]
+fn async_answer_delivery_preserves_the_explicit_checkbox_and_rejects_coercions() {
+    let supplied = body(json!({"answers":[option()],"request_id":"async:t:q:0","interaction_id":"shown-a","steer":true}));
+    assert_eq!(headless_command(&supplied)["steer"],true);
+    for invalid in [json!("true"),json!(1),Value::Null] {
+        assert!(parse_body(&json!({"answers":[],"steer":invalid}).to_string().into()).is_none());
+    }
+}
+
+#[test]
 fn interaction_errors_keep_codes_and_unknown_never_becomes_success_or_not_sent() {
     for error in [InteractionError::Missing, InteractionError::Changed, InteractionError::Unavailable] {
         let failed = Err(RuntimeError::new(error.code(),error.message()));

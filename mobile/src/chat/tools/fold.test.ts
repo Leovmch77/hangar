@@ -24,6 +24,21 @@ describe('foldConversation', () => {
     expect(fold.id).toBe('f-p-t1');
   });
 
+  it('5000 itens copiam as partes uma vez, sem concatenação quadrática nem mutar entrada', () => {
+    const items = Array.from({ length: 5000 }, (_, i) => ({ type: 'tool' as const, id: `b${i}`, ev: bash(`b${i}`) }));
+    const iterator = Array.prototype[Symbol.iterator];
+    let copies = 0;
+    Array.prototype[Symbol.iterator] = function* () {
+      for (const value of iterator.call(this)) { copies++; yield value; }
+      return undefined;
+    };
+    let rows;
+    try { rows = foldConversation(items); } finally { Array.prototype[Symbol.iterator] = iterator; }
+    expect(rows[0].type === 'fold' && rows[0].parts).toHaveLength(5000);
+    expect(items).toHaveLength(5000);
+    expect(copies).toBeLessThan(5000 * 4);
+  });
+
   it('id do trecho não muda quando ele cresce na cauda', () => {
     const base = [ev('t1', 'thinking', { text: 'x' }), bash('b1')];
     const antes = foldConversation(agruparConversa(base, { entraNoPensamento: () => false }));

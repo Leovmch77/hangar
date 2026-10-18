@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 import { act, createElement, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { describe, expect, it, vi } from 'vitest';
+import { Platform } from 'react-native';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AggSession } from '@hangar/core';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -15,18 +16,26 @@ vi.mock('@react-native-menu/menu', () => ({
         onClick: () => onPressAction({ nativeEvent: { event: a.id } }) }, a.title))),
 }));
 // O mock comum passa `style` direto ao DOM, e o da linha é função de `pressed`.
-vi.mock('react-native', async (original) => ({
-  ...await original<typeof import('react-native')>(),
-  Pressable: (props: { accessibilityLabel?: string; onPress?: () => void; disabled?: boolean; children?: ReactNode }) =>
-    createElement('button', { 'aria-label': props.accessibilityLabel, onClick: props.onPress, disabled: props.disabled }, props.children),
-}));
+vi.mock('react-native', async (original) => {
+  const native = await original<typeof import('react-native')>();
+  return {
+    ...native,
+    // O DOM não compõe linhas nativas; preserva o contrato de truncamento recebido pelo Text.
+    Text: (props: import('react-native').TextProps) =>
+      createElement(native.Text, { ...props, ...{ 'data-number-of-lines': props.numberOfLines } }),
+    Pressable: (props: { accessibilityLabel?: string; onPress?: () => void; disabled?: boolean; children?: ReactNode }) =>
+      createElement('button', { 'aria-label': props.accessibilityLabel, onClick: props.onPress, disabled: props.disabled }, props.children),
+  };
+});
 vi.mock('expo-haptics', () => ({ impactAsync: () => Promise.resolve(), ImpactFeedbackStyle: { Medium: 'medium' } }));
-vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('../../ui/HangarMark', () => ({ HangarMark: () => null }));
 vi.mock('../../paraglide/messages', () => ({
   ask_perguntas: () => 'ask_perguntas',
+  conta_padrao: () => 'conta_padrao',
+  sessao_conta: (p: { n: string }) => `conta ${p.n}`,
   orq_row_badge: () => 'orq_row_badge',
   sessao_excluir_curto: () => 'sessao_excluir_curto',
+  sessao_git: () => 'sessao_git',
   convite_parar: () => 'convite_parar',
   sessao_renomear: () => 'sessao_renomear',
   sessao_retomar: () => 'sessao_retomar',
@@ -67,6 +76,138 @@ async function render(session: AggSession, extra: Record<string, unknown> = {}) 
 }
 
 describe('SessionRow', () => {
+  afterEach(() => { Platform.OS = 'android'; });
+
+  it('motor Claude substitui provedor no texto e na acessibilidade com marca real', async () => {
+    Platform.OS = 'ios';
+    const { container, root } = await render({ ...base, name: 'api', provider: 'claude', engine: 'gpt-6-1-sol', cwd: '/repo', branch: 'main' });
+    try {
+      expect(container.textContent).not.toContain('Claude');
+      const row = container.querySelector('button[aria-label^="api,"]');
+      expect(row?.getAttribute('aria-label')).toContain('gpt-6-1-sol');
+      expect(row?.getAttribute('aria-label')).not.toContain('Claude');
+      const mark = container.querySelector('[data-symbol="gearshape"]');
+      expect(mark).not.toBeNull();
+      const engine = Array.from(mark!.parentElement!.querySelectorAll('span')).find(el => el.textContent === 'gpt-6-1-sol');
+      expect(engine?.style.color).toBe('#00f');
+      expect(engine?.style.fontWeight).toBe('600');
+      expect(container.textContent).toContain('repo · main');
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it.each([false, true])('motor não encolhe e metadados longos cedem largura (compact=%s)', async (compact) => {
+    Platform.OS = 'ios';
+    const { container, root } = await render(
+      { ...base, name: 'api', provider: 'claude', engine: 'gpt-6-1-sol',
+        cwd: '/repos/projeto-com-pasta-muito-longa', branch: 'fix/branch-com-nome-muito-longo' },
+      { compact },
+    );
+    try {
+      const mark = container.querySelector('[data-symbol="gearshape"]');
+      const engine = mark?.parentElement;
+      const text = Array.from(engine?.querySelectorAll('span') ?? []).find(el => el.textContent === 'gpt-6-1-sol');
+      expect(engine?.style.flexShrink).toBe('0');
+      expect(text?.style.flexShrink).toBe('0');
+      const metadata = engine?.nextElementSibling as HTMLElement | null;
+      expect(metadata?.textContent).toBe(' · projeto-com-pasta-muito-longa · fix/branch-com-nome-muito-longo');
+      expect(metadata?.style.flexShrink).toBe('1');
+      expect(metadata?.getAttribute('data-number-of-lines')).toBe('1');
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it.each([
+    { engine: undefined, label: 'Claude' },
+    { engine: 'gpt-6-1-sol', label: 'gpt-6-1-sol' },
+  ])('separador do servidor fica fora do texto truncável (provedor=$label)', async ({ engine, label }) => {
+    Platform.OS = 'ios';
+    const serverLabel = 'servidor-com-nome-longo-para-disputar-a-largura';
+    const { container, root } = await render(
+      { ...base, name: 'api', provider: 'claude', engine, serverLabel, cwd: '/repo' },
+      { mostrarServidor: true },
+    );
+    try {
+      const server = Array.from(container.querySelectorAll('span')).find(el => el.textContent?.startsWith(serverLabel));
+      expect(server?.textContent).toBe(serverLabel);
+      expect(server?.getAttribute('data-number-of-lines')).toBe('1');
+      expect(server?.style.flexShrink).toBe('1');
+      const separator = server?.nextElementSibling as HTMLElement | null;
+      expect(separator?.textContent).toBe(' · ');
+      expect(separator?.style.flexShrink).toBe('0');
+      expect(separator?.nextElementSibling?.textContent).toContain(label);
+      if (engine) {
+        const mark = server?.parentElement?.querySelector('[data-symbol="gearshape"]');
+        expect(mark).not.toBeNull();
+        expect(mark?.parentElement?.textContent).toBe('gpt-6-1-sol');
+      }
+      expect(container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label')).toContain(label);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it.each([
+    { provider: 'claude', engine: undefined, label: 'Claude' },
+    { provider: 'codex', engine: 'gpt-6-1-sol', label: 'Codex' },
+    { provider: 'orq', engine: undefined, label: null },
+  ] as const)('marca de motor preserva provedor $provider sem motor Claude', async ({ provider, engine, label }) => {
+    Platform.OS = 'ios';
+    const { container, root } = await render({ ...base, name: 'api', provider, engine });
+    try {
+      expect(container.querySelector('[data-symbol="gearshape"]')).toBeNull();
+      expect(container.textContent).not.toContain('gpt-6-1-sol');
+      const accessible = container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label');
+      if (label) {
+        expect(container.textContent).toContain(label);
+        expect(accessible).toContain(label);
+      } else {
+        expect(accessible).not.toContain('Orq');
+      }
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it.each([
+    { conta: 'claude:/home/user/.claude-claude-200-3', label: '200-3', name: 'claude-200-3', color: '#97c69d' },
+    { conta: 'claude:C:\\Users\\user\\.claude-claude-200-3\\', label: '200-3', name: 'claude-200-3', color: '#97c69d' },
+    { conta: 'claude:/home/user/.claude/', label: 'conta_padrao', name: 'conta_padrao', color: '#9ba9d9' },
+    { conta: 'codex:C:\\Users\\user\\.codex\\', label: 'conta_padrao', name: 'conta_padrao', color: '#d3a781' },
+    { conta: 'codex:C:\\Users\\user\\.codex-claude-x\\', label: 'claude-x', name: 'claude-x', color: '#ccbf87' },
+    { conta: 'codex:/home/user/.codex-codex-x', label: 'x', name: 'codex-x', color: '#80bbc3' },
+  ])('chip de conta $conta mostra nome curto e ponto da cor PWA antes do tempo', async ({ conta, label, name, color }) => {
+    const { container, root } = await render({ ...base, name: 'api', provider: 'claude', conta });
+    try {
+      const chip = container.querySelector<HTMLElement>(`[aria-label="conta ${name}"]`);
+      expect(chip).not.toBeNull();
+      expect(chip!.textContent).toBe(label);
+      expect(chip!.querySelector<HTMLElement>('span')?.style.color).toBe('#666');
+      expect(chip!.querySelector<HTMLElement>('div')?.style.backgroundColor).toBe(color);
+      expect(chip!.style.maxWidth).toBe('96px');
+      expect(chip!.style.flexShrink).toBe('1');
+      const time = chip!.nextElementSibling as HTMLElement;
+      expect(time.textContent).not.toBe('');
+      expect(time.style.flexShrink).toBe('0');
+      expect(chip!.parentElement!.firstElementChild?.textContent).toBe('api');
+      expect(container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label')).toContain(`conta ${name}`);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it.each([undefined, null, 'chave:gpt-6-1-sol', 'kimi:api'])('chip de conta ignora identidade %s', async (conta) => {
+    const { container, root } = await render({ ...base, name: 'api', provider: 'claude', engine: 'gpt-6-1-sol', conta });
+    try {
+      expect(container.querySelector('[aria-label^="conta "]')).toBeNull();
+      expect(container.textContent).not.toContain('conta_padrao');
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
   it('orquestrador sem pasta: selo próprio e sem menu de toque longo', async () => {
     const { container, root } = await render({ ...base, name: 'g1-orq', provider: 'orq', pair_gid: 'g1', orq_arbiter: 'arb' });
     expect(container.textContent).toContain('orq_row_badge');

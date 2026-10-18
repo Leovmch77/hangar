@@ -7,6 +7,7 @@ import {
 } from '@hangar/core';
 import { useServers } from '../../stores/servers';
 import { toast } from '../../ui/Toast';
+import { withDeviceViewport } from './pageViewport';
 
 export type ThemeParams = { theme: 'dark' | 'light'; styles: { variables: Record<string, string> } };
 
@@ -121,7 +122,7 @@ export function usePageDocument(page: HtmlPageRef, sessionName: string, serverId
   }, [key, load]);
 
   // Tema próprio: a página fica como foi desenhada, sem as cores do app.
-  const doc = useMemo(() => (raw && !page.ownTheme ? themedPageDocument(raw, paramsRef.current.theme, paramsRef.current.styles.variables) : raw), [raw, page.ownTheme]);
+  const doc = useMemo(() => withDeviceViewport(raw && !page.ownTheme ? themedPageDocument(raw, paramsRef.current.theme, paramsRef.current.styles.variables) : raw), [raw, page.ownTheme]);
   // Fonte: a página como o agente escreveu (o servidor tira o tema e a ponte). Erro sobe para a tela mostrar.
   const loadSource = useCallback(async () => {
     if (!base) throw new Error('no-server');

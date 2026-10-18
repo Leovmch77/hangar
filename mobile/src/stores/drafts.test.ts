@@ -20,7 +20,7 @@ vi.mock('react-native-mmkv', () => ({
 function draft(overrides: Partial<ConversationDraft> = {}): ConversationDraft {
   return {
     version: 1, text: 'Mensagem atual', revision: 3, transcript: '/sessions/original.jsonl',
-    attachment: null, submission: null, ...overrides,
+    attachments: [], submission: null, ...overrides,
   };
 }
 
@@ -67,15 +67,24 @@ describe('drafts', () => {
   });
 
   it('persiste anexo e caminho de upload na identidade original', () => {
-    writeDraft('linux', 'sessao', draft({ attachment: {
+    writeDraft('linux', 'sessao', draft({ attachments: [{
       uri: 'file:///app/drafts/photo.jpg', name: 'photo.jpg', mime: 'image/jpeg',
       kind: 'image', uploadedPath: '/uploads/photo.jpg',
-    } }));
-    expect(readDraft('linux', 'sessao')?.attachment).toEqual({
+    }, { uri: 'file:///app/drafts/nota.txt', name: 'nota.txt', mime: 'text/plain', kind: 'file' }] }));
+    expect(readDraft('linux', 'sessao')?.attachments).toEqual([{
       uri: 'file:///app/drafts/photo.jpg', name: 'photo.jpg', mime: 'image/jpeg',
       kind: 'image', uploadedPath: '/uploads/photo.jpg',
-    });
+    }, { uri: 'file:///app/drafts/nota.txt', name: 'nota.txt', mime: 'text/plain', kind: 'file' }]);
     expect(readDraft('other', 'sessao')).toBeNull();
+  });
+
+  it('lê o rascunho gravado com um anexo só como lista', () => {
+    const photo = { uri: 'file:///app/drafts/photo.jpg', name: 'photo.jpg', mime: 'image/jpeg', kind: 'image' };
+    const { attachments: _none, ...legacy } = draft();
+    memory.set('draft.v1:linux::sessao', JSON.stringify({ ...legacy, attachment: photo }));
+    expect(readDraft('linux', 'sessao')?.attachments).toEqual([photo]);
+    memory.set('draft.v1:linux::sessao', JSON.stringify({ ...legacy, attachment: null }));
+    expect(readDraft('linux', 'sessao')?.attachments).toEqual([]);
   });
 
   it('resolver identidade sem rascunho não cria dados locais', () => {
@@ -95,7 +104,7 @@ describe('drafts', () => {
   it('primeiro jsonl associa o rascunho provisório sem perder anexo, revisão ou snapshot', () => {
     const value = draft({
       transcript: null, revision: 4,
-      attachment: { uri: 'file:///app/drafts/a', name: 'a', mime: 'text/plain', kind: 'file' },
+      attachments: [{ uri: 'file:///app/drafts/a', name: 'a', mime: 'text/plain', kind: 'file' }],
       submission: { text: 'Snapshot anterior', draftRevision: 3, status: 'rejected' },
     });
     writeDraft('linux', 'sessao', value);
@@ -153,7 +162,7 @@ describe('drafts', () => {
     JSON.stringify(draft({ revision: 1.5 })),
     JSON.stringify(draft({ transcript: 4 as unknown as string })),
     JSON.stringify(draft({ submission: { text: 'private text', draftRevision: 3, status: 'sent' as 'sending' } })),
-    JSON.stringify(draft({ attachment: { uri: '', name: 'a', mime: 'text/plain', kind: 'file' } })),
+    JSON.stringify(draft({ attachments: [{ uri: '', name: 'a', mime: 'text/plain', kind: 'file' }] })),
   ])('expõe erro recuperável sem apagar ou incluir dados inválidos no erro: %s', (raw) => {
     memory.set('draft.v1:linux::sessao', raw);
     let failure: unknown;
@@ -164,15 +173,15 @@ describe('drafts', () => {
   });
 
   it('grava somente os campos do contrato, inclusive dentro do anexo e snapshot', () => {
-    const value = { ...draft(), token: 'private-token', attachment: {
+    const value = { ...draft(), token: 'private-token', attachments: [{
       uri: 'file:///app/drafts/a', name: 'a', mime: 'text/plain', kind: 'file' as const,
       token: 'private-token',
-    }, submission: { text: 'Snapshot', draftRevision: 2, status: 'rejected' as const, token: 'private-token' } };
+    }], submission: { text: 'Snapshot', draftRevision: 2, status: 'rejected' as const, token: 'private-token' } };
     writeDraft('linux', 'sessao', value);
     expect(memory.get('draft.v1:linux::sessao')).not.toContain('private-token');
     memory.set('draft.v1:linux::sessao', JSON.stringify(value));
     expect(readDraft('linux', 'sessao')).toEqual({
-      ...draft(), attachment: { uri: 'file:///app/drafts/a', name: 'a', mime: 'text/plain', kind: 'file' },
+      ...draft(), attachments: [{ uri: 'file:///app/drafts/a', name: 'a', mime: 'text/plain', kind: 'file' }],
       submission: { text: 'Snapshot', draftRevision: 2, status: 'rejected' },
     });
   });
@@ -225,8 +234,8 @@ describe('upload do anexo', () => {
   beforeEach(() => { memory.clear(); });
 
   it('reabrir conserva arquivo, caminho enviado e destino', () => {
-    writeDraft('linux', 'sessao', draft({ attachment }));
-    const reopened = readDraft('linux', 'sessao')!.attachment!;
+    writeDraft('linux', 'sessao', draft({ attachments: [attachment] }));
+    const reopened = readDraft('linux', 'sessao')!.attachments[0];
     expect(reopened).toEqual(attachment);
     expect(reusableUploadPath(reopened, target)).toBe('/uploads/foto.png');
   });
@@ -312,10 +321,10 @@ describe('ditado conservado na origem', () => {
 
   it('resposta no contexto original insere texto preservando anexo e snapshot', () => {
     const attachment = { uri: 'file:///foto.png', name: 'foto.png', mime: 'image/png', kind: 'image' as const };
-    writeDraft('linux', 'sessao', draft({ attachment, submission: { text: 'Anterior', draftRevision: 2, status: 'unknown' } }));
+    writeDraft('linux', 'sessao', draft({ attachments: [attachment], submission: { text: 'Anterior', draftRevision: 2, status: 'unknown' } }));
     writeDictation('linux', 'sessao', voice());
     const result = finishDictation('linux', 'sessao', 'recording-1', { text: 'Ditado limpo', raw: 'Ditado cru', issue: '' }, true);
-    expect(result.draft).toMatchObject({ text: 'Mensagem atual Ditado limpo', revision: 4, attachment,
+    expect(result.draft).toMatchObject({ text: 'Mensagem atual Ditado limpo', revision: 4, attachments: [attachment],
       submission: { text: 'Anterior', draftRevision: 2, status: 'unknown' } });
     expect(readDictation('linux', 'sessao')).toBeNull();
   });

@@ -1,15 +1,21 @@
 // @vitest-environment happy-dom
-import { act, createElement, type ComponentProps, type ReactNode } from 'react';
+import { act, createElement, useImperativeHandle, type ComponentProps, type ReactNode, type Ref } from 'react';
+import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native';
+import type { LegendListRef } from '@legendapp/list/react-native';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { configureApi, type ChatEvent, type SessionInfo } from '@hangar/core';
+import { configureApi, configureLocale, type ChatEvent, type OrqEntry, type SessionInfo } from '@hangar/core';
+import { overwriteGetLocale } from '../paraglide/runtime';
 import { MessageList } from './MessageList';
 import { chatStore, _resetChatsForTests } from '../stores/chat';
 import * as m from '../paraglide/messages';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-vi.mock('../paraglide/messages', () => ({
+overwriteGetLocale(() => 'pt');
+configureLocale({ getLocale: () => 'pt' });
+vi.mock('../paraglide/messages', async (original) => ({
+  ...await original<typeof import('../paraglide/messages')>(),
   ...Object.fromEntries(
     ('native_delivery_failed native_delivery_unproved native_queue_held native_no_safe_delivery native_delivering native_queued '
       + 'native_queue_discard msg_nao_chegou_reenvie msg_aria_mensagens chat_servidor_removido')
@@ -27,22 +33,46 @@ vi.mock('../stores/aparencia', () => ({ useAparencia: (select: (s: unknown) => u
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
 // Só a casca visual é substituída; lista, notas, ação, store e API da fila são os reais.
 vi.mock('./UserBubble', () => ({ UserBubble: ({ text }: { text: string }) => createElement('span', { 'data-user': true }, text) }));
-vi.mock('./AssistantBubble', () => ({ AssistantBubble: () => null }));
+vi.mock('./AssistantBubble', () => ({ AssistantBubble: () => null, mkMarkdownStyle: () => ({}) }));
+vi.mock('react-native-enriched-markdown', () => ({ EnrichedMarkdownText: ({ markdown }: { markdown: string }) => createElement('article', null, markdown) }));
+vi.mock('../ui/Sheet', () => ({ Sheet: ({ children }: { children: ReactNode }) => createElement('section', null, children) }));
+vi.mock('../ui/Toast', () => ({ toast: { erro: vi.fn() } }));
 vi.mock('./PreviewBubble', () => ({ PreviewBubble: () => null }));
 vi.mock('./LiveWork', () => ({ AgentesRodando: () => null, PensamentoVivo: () => null, WorkingLine: () => null }));
 vi.mock('./TaskList', () => ({ TaskList: () => null }));
-vi.mock('./tools/ToolGroup', () => ({ ToolGroup: () => null }));
 vi.mock('./tools/ToolCard', () => ({ ToolCard: () => null }));
 vi.mock('./tools/ToolDetailSheet', () => ({ ToolDetailSheet: () => null }));
 vi.mock('./tools/HtmlPageCard', () => ({ HtmlPageCard: () => null }));
-const list = vi.hoisted(() => ({ render: vi.fn() }));
+type ListHandle = Pick<LegendListRef, 'scrollToEnd'> & {
+  getState: () => Partial<ReturnType<LegendListRef['getState']>>;
+};
+type ListProps = {
+  ref?: Ref<ListHandle>;
+  data: { id: string }[];
+  renderItem: (row: { item: unknown }) => ReactNode;
+  ListFooterComponent?: ReactNode;
+  alignItemsAtEnd?: boolean;
+  maintainScrollAtEnd?: boolean;
+  initialScrollAtEnd?: boolean;
+  maintainVisibleContentPosition?: boolean;
+  nestedScrollEnabled?: boolean;
+  recycleItems?: boolean;
+  onScroll: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
+  onContentSizeChange?: (width: number, height: number) => void;
+  onStartReached?: () => void;
+};
+const list = vi.hoisted(() => ({ render: vi.fn(), data: vi.fn(), alignment: vi.fn(), props: vi.fn<(props: ListProps) => void>(),
+  scrollToEnd: vi.fn<LegendListRef['scrollToEnd']>(), geometry: {} as Partial<ReturnType<LegendListRef['getState']>> }));
 vi.mock('@legendapp/list/react-native', () => ({
-  LegendList: ({ data, renderItem, ListFooterComponent }: {
-    data: { id: string }[]; renderItem: (row: { item: unknown }) => ReactNode; ListFooterComponent?: ReactNode;
-  }) => {
+  LegendList: (props: ListProps) => {
+    const { data, renderItem, ListFooterComponent, alignItemsAtEnd, ref } = props;
+    useImperativeHandle(ref, () => ({ scrollToEnd: list.scrollToEnd, getState: () => list.geometry }));
+    list.props(props);
     list.render(renderItem);
+    list.data(data);
+    list.alignment(alignItemsAtEnd);
     return createElement('div', null,
-      ...data.map((item) => createElement('div', { key: item.id }, renderItem({ item }))), ListFooterComponent);
+      ...data.map((item) => createElement('div', { key: item.id, 'data-row': item.id }, renderItem({ item }))), ListFooterComponent);
   },
 }));
 
@@ -65,6 +95,11 @@ const discardButtons = (container: HTMLElement) => [...container.querySelectorAl
 
 beforeEach(() => {
   list.render.mockClear();
+  list.data.mockClear();
+  list.alignment.mockClear();
+  list.props.mockClear();
+  list.scrollToEnd.mockClear();
+  list.geometry = {};
   vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', { status: 200 })));
   // B está ativo, mas o chat abaixo é de A.
   configureApi({ getBaseUrl: () => servers.servers[1].baseUrl, getToken: () => 'token-b', onUnauthorized: () => {}, origin: null,
@@ -75,6 +110,192 @@ afterEach(() => {
   _resetChatsForTests();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+const groupEvents = (count = 2): ChatEvent[] => Array.from({ length: count }, (_, i) => ({ id: `thought-${i}`, kind: 'thinking', text: `thought-${i}-text` }));
+const latestList = () => list.props.mock.lastCall![0];
+const expandGroup = (container: HTMLElement) => act(() => container.querySelector<HTMLButtonElement>('[data-row] button')!.click());
+
+it('expansão manual pausa todos os gatilhos e resiste a clone, append e callbacks agendados', () => {
+  vi.useFakeTimers();
+  const frames: FrameRequestCallback[] = [];
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
+  vi.stubGlobal('cancelAnimationFrame', vi.fn());
+  const initial = props(groupEvents(), { preserveToolGroupPosition: true });
+  const { container, root } = mount(createElement(MessageList, initial));
+  const renderItem = latestList().renderItem;
+  expect(latestList().maintainScrollAtEnd).toBe(true);
+  expect(frames).toHaveLength(1);
+  expandGroup(container);
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  expect(latestList().renderItem).toBe(renderItem);
+  expect(container.textContent).toContain('thought-0-text');
+  act(() => { frames.forEach(frame => frame(0)); vi.advanceTimersByTime(300); });
+  expect(list.scrollToEnd).not.toHaveBeenCalled();
+  const cloned: ChatEvent[] = JSON.parse(JSON.stringify(initial.events));
+  act(() => root.render(createElement(MessageList, { ...initial, events: cloned })));
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  act(() => root.render(createElement(MessageList, { ...initial, events: [...cloned, event({ id: 'new-row' })], bottomInset: 40 })));
+  act(() => { frames.forEach(frame => frame(0)); vi.advanceTimersByTime(300); });
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  expect(list.scrollToEnd).not.toHaveBeenCalled();
+});
+
+const scrollList = (y: number, height: number, viewport: number) => act(() => latestList().onScroll({
+  nativeEvent: { contentOffset: { y }, contentSize: { height }, layoutMeasurement: { height: viewport } },
+} as NativeSyntheticEvent<NativeScrollEvent>));
+
+it('scroll atrasado não desfaz pausa antes nem depois da nova medida', () => {
+  vi.useFakeTimers();
+  list.geometry = { contentLength: 400, scroll: 0, scrollLength: 400 };
+  const initial = props(groupEvents(), { preserveToolGroupPosition: true });
+  const { container, root } = mount(createElement(MessageList, initial));
+  expandGroup(container);
+  scrollList(0, 400, 400); // Evento anterior à expansão, ainda sem nova medida.
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  act(() => latestList().onContentSizeChange?.(390, 2000));
+  scrollList(0, 400, 400); // O estado da lista também ainda não acompanhou a medida.
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.geometry = {};
+  scrollList(0, 400, 400);
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.geometry = { contentLength: 2000, scroll: 0, scrollLength: 400 };
+  scrollList(0, 400, 400); // Agora só o evento está atrasado.
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  act(() => root.render(createElement(MessageList, { ...initial, events: [...initial.events, event({ id: 'new-row' })] })));
+  act(() => vi.advanceTimersByTime(300));
+  expect(list.scrollToEnd).not.toHaveBeenCalled();
+  list.geometry = { contentLength: 2000, scroll: 1600, scrollLength: 400 };
+  scrollList(1600, 2000, 400);
+  expect(latestList().maintainScrollAtEnd).toBe(true);
+  expandGroup(container);
+  list.geometry = { contentLength: 2000, scroll: 0, scrollLength: 400 };
+  expandGroup(container);
+  act(() => latestList().onContentSizeChange?.(390, 2000));
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.geometry = { contentLength: 2000, scroll: 1600, scrollLength: 400 };
+  scrollList(1600, 2000, 400); // Altura igual à anterior, mas confirmada pelo callback.
+  expect(latestList().maintainScrollAtEnd).toBe(true);
+});
+
+it('retoma só no fim medido pelo scroll ou pelo botão Ir pro fim', () => {
+  vi.useFakeTimers();
+  list.geometry = { contentLength: 400, scroll: 0, scrollLength: 400 };
+  const initial = props(groupEvents(), { preserveToolGroupPosition: true });
+  const { container, root } = mount(createElement(MessageList, initial));
+  expandGroup(container);
+  list.geometry = { contentLength: 2000, scroll: 0, scrollLength: 400 };
+  scrollList(0, 2000, 400);
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.geometry = { contentLength: 2000, scroll: 1600, scrollLength: 400 };
+  scrollList(1600, 2000, 400);
+  expect(latestList().maintainScrollAtEnd).toBe(true);
+  act(() => root.render(createElement(MessageList, { ...initial, events: [...initial.events, event({ id: 'new-row' })] })));
+  act(() => vi.advanceTimersByTime(300));
+  expect(list.scrollToEnd).toHaveBeenCalledWith({ animated: false });
+  expandGroup(container); // Recolhe sem pausar.
+  expect(latestList().maintainScrollAtEnd).toBe(true);
+  expandGroup(container);
+  list.geometry = { contentLength: 2400, scroll: 0, scrollLength: 400 };
+  scrollList(0, 2400, 400);
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.scrollToEnd.mockClear();
+  act(() => container.querySelector<HTMLButtonElement>(`[aria-label="${m.msg_ir_ultima()}"]`)!.click());
+  expect(latestList().maintainScrollAtEnd).toBe(true);
+  expect(list.scrollToEnd).toHaveBeenCalledWith({ animated: true });
+});
+
+it('medida real libera expansão que coube e Mostrar todas pausa novamente', () => {
+  vi.useFakeTimers();
+  const { container } = mount(createElement(MessageList, props(groupEvents(41), { preserveToolGroupPosition: true })));
+  expandGroup(container);
+  const measure = (height: number) => act(() => latestList().onContentSizeChange?.(390, height));
+  measure(430); // Sem medida da viewport, não presume zero.
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.geometry = { scroll: 0, scrollLength: 0, isWithinMaintainScrollAtEndThreshold: true };
+  measure(430);
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.geometry = { scroll: 0, scrollLength: 400, isWithinMaintainScrollAtEndThreshold: true };
+  measure(2000); // O sinal guardado de proximidade não decide a retomada.
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.geometry = { scrollLength: 400 };
+  measure(430);
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  list.geometry = { scroll: 0, scrollLength: 400, isWithinMaintainScrollAtEndThreshold: false };
+  measure(Number.NaN);
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  measure(430);
+  expect(latestList().maintainScrollAtEnd).toBe(true);
+  const showAll = [...container.querySelectorAll('button')].find(button => button.textContent === m.tool_mostrar_todas({ n: 41 }))!;
+  act(() => showAll.click());
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  expect(container.textContent).toContain('thought-40-text');
+  measure(2100);
+  act(() => vi.advanceTimersByTime(300));
+  expect(latestList().maintainScrollAtEnd).toBe(false);
+  expect(list.scrollToEnd).not.toHaveBeenCalled();
+});
+
+it('defaults preservam acompanhamento e virtualização; nested scroll é opt-in', () => {
+  const onLoadOlder = vi.fn();
+  const initial = props(groupEvents(), { onLoadOlder });
+  const { container, root } = mount(createElement(MessageList, initial));
+  expandGroup(container);
+  expect(latestList().maintainScrollAtEnd).toBe(true);
+  expect(latestList().nestedScrollEnabled).toBeUndefined();
+  expect(latestList().onContentSizeChange).toBeUndefined();
+  expect(latestList().initialScrollAtEnd).toBe(true);
+  expect(latestList().maintainVisibleContentPosition).toBe(true);
+  expect(latestList().recycleItems).toBe(false);
+  expect(latestList().onStartReached).toBe(onLoadOlder);
+  act(() => root.render(createElement(MessageList, { ...initial, nestedScrollEnabled: true })));
+  expect(latestList().nestedScrollEnabled).toBe(true);
+  act(() => root.render(createElement(MessageList, { ...initial, nestedScrollEnabled: false })));
+  expect(latestList().nestedScrollEnabled).toBe(false);
+});
+
+it('alinhamento da conversa mantém fim por padrão e permite topo explícito', () => {
+  const initial = props([event()]);
+  const { root } = mount(createElement(MessageList, initial));
+  expect(list.alignment.mock.lastCall?.[0]).toBe(true);
+  act(() => root.render(createElement(MessageList, { ...initial, alignItemsAtEnd: false })));
+  expect(list.alignment.mock.lastCall?.[0]).toBe(false);
+});
+
+it('timeline orq entra antes do aviso genérico e atualiza só a fronteira do dia ao carregar anteriores', () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(2026, 9, 16, 18));
+  const orq: OrqEntry = { kind: 'advance', task: 3, line: { code: 'integrated', merge: true }, origin: 'orchestrator',
+    sender: null, mark: null, alarm: false, rejected_round: null, body: '', question: null, parecer: null, error: null, decided_by: null };
+  const notice = (id: string, day: number, hour: number) => event({ id, kind: 'notice', text: 'raw-orq', orq,
+    ts: new Date(2026, 9, day, hour).getTime() / 1000 });
+  const first = notice('first', 15, 9), second = notice('second', 15, 10), nextDay = notice('next-day', 16, 11);
+  const initial = props([first, second, nextDay, event({ id: 'plain', kind: 'notice', text: 'interrupted' }),
+    event({ id: 'unknown', kind: 'notice', text: 'future-notice' }), event({ id: 'user', text: 'user-content' })], { sessionName: 'sess', serverId: 'a' });
+  const { container, root } = mount(createElement(MessageList, initial));
+  const row = (id: string) => container.querySelector(`[data-row="${id}"]`)!;
+  expect(row('first').textContent).toContain('fechada → merge → integração verde');
+  expect(row('first').textContent).toContain('ontem · 09:00');
+  expect(row('second').textContent).not.toContain('ontem');
+  expect(row('second').textContent).toContain('10:00');
+  expect(row('next-day').textContent).toContain('hoje · 11:00');
+  expect(row('plain').textContent).toBe(m.notice_interrupted());
+  expect(row('unknown').textContent).toBe('future-notice');
+  expect(row('user').textContent).toBe('user-content');
+  expect(container.textContent).not.toContain('raw-orq');
+  const renderItem = list.render.mock.lastCall![0];
+  const rows = list.data.mock.lastCall![0] as { id: string }[];
+  act(() => root.render(createElement(MessageList, { ...initial, preview: 'streaming-preview' })));
+  expect(list.render.mock.lastCall![0]).toBe(renderItem);
+  expect(list.data.mock.lastCall![0]).toBe(rows);
+  act(() => root.render(createElement(MessageList, { ...initial, events: [notice('earlier', 15, 8), ...initial.events] })));
+  expect(row('earlier').textContent).toContain('ontem · 08:00');
+  expect(row('first').textContent).not.toContain('ontem');
+  const updated = list.data.mock.lastCall![0] as { id: string }[];
+  expect(updated.find(item => item.id === 'first')).not.toBe(rows.find(item => item.id === 'first'));
+  expect(updated.find(item => item.id === 'second')).toBe(rows.find(item => item.id === 'second'));
+  expect(list.render.mock.lastCall![0]).toBe(renderItem);
+  expect(fetch).not.toHaveBeenCalled();
 });
 
 describe('notas da entrega na conversa', () => {

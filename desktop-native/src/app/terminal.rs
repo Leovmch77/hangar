@@ -538,8 +538,14 @@ impl Hangar {
                         slot.status = Status::Connected;
                     }
                     Ok(ws::Event::Data(bytes)) => { slot.view.feed(&bytes); Self::flush_terminal(slot); }
-                    Ok(ws::Event::Closed) => { slot.socket = None; slot.status = Status::Failed(tr("term_disconnected")); }
-                    Err(error) => { slot.socket = None; slot.status = Status::Failed(socket_error(error)); }
+                    Ok(ws::Event::Closed) => {
+                        crate::log_line(&format!("terminal {}: o servidor fechou o socket", slot.name));
+                        slot.socket = None; slot.status = Status::Failed(tr("term_disconnected"));
+                    }
+                    Err(error) => {
+                        crate::log_line(&format!("terminal {}: socket caiu: {error:?}", slot.name));
+                        slot.socket = None; slot.status = Status::Failed(socket_error(error));
+                    }
                 }
             }
             Reply::CodeList(key, request_key, attempt, result) => {
@@ -595,10 +601,29 @@ impl Hangar {
     }
 
     fn flush_terminal(slot: &mut Slot) {
-        if slot.socket.is_none() { return; }
+        let Some(socket) = &slot.socket else { return };
         for bytes in slot.view.take_output() {
-            if let Some(socket) = &slot.socket {
-                if let Err(error) = socket.send(&bytes) { slot.status = Status::Failed(socket_error(error)); }
+            if let Err(error) = socket.send(&bytes) {
+                crate::log_line(&format!("terminal {}: envio falhou ({} bytes): {error:?}", slot.name, bytes.len()));
+                slot.status = Status::Failed(socket_error(error));
+                // O resto não pode chegar ao programa com um buraco no meio.
+                break;
+            }
+        }
+    }
+
+    /// A roda num quadro só (a fila do socket tem 8 lugares) e, com a fila cheia, perdida em vez de dar o
+    /// terminal como desconectado. Só os bytes da roda: o pendente sai antes pelo `flush_terminal`.
+    fn flush_wheel(slot: &mut Slot) {
+        let Some(socket) = &slot.socket else { return };
+        let bytes = slot.view.take_output().concat();
+        if bytes.is_empty() { return; }
+        match socket.send(&bytes) {
+            Ok(_) => {}
+            Err(crate::ws::Error::QueueFull) => crate::log_line(&format!("terminal {}: fila cheia, rolagem descartada", slot.name)),
+            Err(error) => {
+                crate::log_line(&format!("terminal {}: envio da roda falhou: {error:?}", slot.name));
+                slot.status = Status::Failed(socket_error(error));
             }
         }
     }
@@ -633,7 +658,10 @@ impl Hangar {
         slot.bounds.set(bounds);
         if slot.view.resize_to_bounds(bounds, window) {
             let (cols, rows) = slot.view.dimensions();
-            if let Some(socket) = &slot.socket { if let Err(error) = socket.resize(cols, rows) { slot.status = Status::Failed(socket_error(error)); } }
+            if let Some(socket) = &slot.socket { if let Err(error) = socket.resize(cols, rows) {
+                crate::log_line(&format!("terminal {}: redimensionar falhou: {error:?}", slot.name));
+                slot.status = Status::Failed(socket_error(error));
+            } }
             cx.notify();
         }
     }
@@ -838,7 +866,11 @@ impl Hangar {
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 if let Some(slot) = this.terminal.as_mut().and_then(|panel| panel.tabs.get_mut(panel.active)) {
-                    if slot.view.scroll_wheel(event) { cx.notify(); }
+                    let at = event.position - slot.bounds.get().origin;
+                    Self::flush_terminal(slot);
+                    let can_send = slot.accepts_input();
+                    if slot.view.scroll_wheel(event, f32::from(at.x), f32::from(at.y), can_send) { cx.notify(); }
+                    Self::flush_wheel(slot);
                 }
             }))
             .on_action(cx.listener(|this, _: &CopyTerminal, _, cx| {

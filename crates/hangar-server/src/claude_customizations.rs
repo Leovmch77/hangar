@@ -52,7 +52,6 @@ enum Operation {
     Catalog(Context),
     Prepare(Prepare),
     Remember(Remember),
-    Hidden(Hidden),
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -92,8 +91,7 @@ struct Remember {
     session_id: String,
     settings: Value,
 }
-/// A lista do `/` da sessão: o Python monta, aqui se decide o que a conta, o projeto e a escolha da
-/// sessão desligaram (a sonda da CLI roda fora do projeto e só vê a conta).
+/// O que a conta, o projeto e a escolha da sessão desligaram na lista do `/`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Hidden {
@@ -190,12 +188,10 @@ pub async fn public_catalog(st: &Arc<AppState>, req: Request) -> Response {
 
 async fn run(st: &Arc<AppState>, op: Operation) -> Result<Value> {
     let slots = match &op {
-        // Só lê poucos JSON: sem vaga, para a lista do `/` nunca sair sem filtro por fila.
-        Operation::Hidden(_) => None,
-        Operation::Catalog(_) => Some(&st.workspace_read_slots),
-        _ => Some(&st.workspace_slots),
+        Operation::Catalog(_) => &st.workspace_read_slots,
+        _ => &st.workspace_slots,
     };
-    let permit = match slots.map(|slots| slots.clone().try_acquire_owned()).transpose() {
+    let permit = match slots.clone().try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => return Err(error(503, "claude_customizations_busy", "Consulta de plugins ocupada.")),
     };
@@ -211,7 +207,6 @@ async fn run(st: &Arc<AppState>, op: Operation) -> Result<Value> {
                 session_key(&args.session_id)?;
                 restricted_settings(&args.settings)?;
             },
-            Operation::Hidden(_) => {},
         }
         Ok::<_, CustomizationError>(op)
     }).await {
@@ -1015,6 +1010,13 @@ fn hidden(args: Hidden) -> Result<Value> {
         .collect();
     Ok(json!({"hidden": hidden}))
 }
+
+pub(crate) fn filter_commands(cwd: Option<PathBuf>, config_dir: PathBuf, settings: Value, commands: &[crate::commands::CommandInfo]) -> Result<HashSet<String>> {
+    let args = Hidden { cwd, config_dir, settings,
+        commands: commands.iter().filter(|c| !matches!(c.source.as_str(), "builtin" | "plugin")).map(|c| c.name.clone()).collect(),
+        plugins: commands.iter().filter(|c| c.source == "plugin").map(|c| c.name.clone()).collect() };
+    Ok(hidden(args)?["hidden"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect())
+}
 fn execute(op: Operation, installations: Vec<Installation>, root: &Path) -> Result<Value> {
     match op {
         Operation::Catalog(ctx) => Ok(json!(catalog(&ctx.cwd, &ctx.config_dir, installations)?)),
@@ -1037,7 +1039,6 @@ fn execute(op: Operation, installations: Vec<Installation>, root: &Path) -> Resu
             save_settings(root, &args.session_id, &args.settings)?;
             Ok(settings_result(args.settings))
         },
-        Operation::Hidden(args) => hidden(args),
     }
 }
 

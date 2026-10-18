@@ -42,7 +42,8 @@ fn input_answers_match_the_python_golden() {
         let params = Params { text: case["text"].as_str().unwrap(), steer: case["steer"].as_bool().unwrap(),
             terminal: case["terminal"].as_bool().unwrap(), codex: case["provider"] == "codex", operation_id: OP };
         let (sent, diary) = classify(&params, &reply(&case["reply"]));
-        let steered = wants_steer_queue(&params, &sent) && was_steered(OP, &reply(&case["queue"]));
+        // O golden antigo não fornece o resultado do controle terminal por entrada.
+        let steered = wants_steer_queue(&params, &sent) && !case["queue"].is_null() && was_steered(OP, &reply(&case["queue"]));
         let (status, body) = input_answer(&sent, steered);
         assert_eq!((status.as_u16(), body), (case["expect"]["status"].as_u64().unwrap() as u16, case["expect"]["body"].clone()), "{name}");
         let want: Vec<(&str, Option<&str>)> = case["diary"].as_array().unwrap().iter()

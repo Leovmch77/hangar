@@ -41,13 +41,14 @@
 // (quem monta o painel na tela) e `list` só lê os sidecares de sessão — os dois têm que funcionar
 // mesmo com o shell fora do ar.
 import { execFileSync } from 'node:child_process';
-import { accessSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, appendFileSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import fmt from '../shell/preview_fmt.cjs';
 import folha from '../shell/folha.cjs';
 import jev from '../shell/jev_objetivo.cjs';
 import roteiro from '../shell/jev_roteiro.cjs';
+import logs from '../shell/log.cjs';
 
 const CDP = 'http://127.0.0.1:9223';
 const DIR = join(homedir(), '.hangar', 'nav');
@@ -476,20 +477,33 @@ const DO_AUX = { JEV_TEXTO_BASE_URL: 'JEV_AUX_BASE_URL', JEV_TEXTO_API_KEY: 'JEV
 const envTexto = (env, k) => String((k in DO_AUX && !(k in env) ? env[DO_AUX[k]] : env[k]) ?? '').trim();
 
 /** Um pedido ao endpoint compatível com a OpenAI; falha vira exceção com a chave mascarada. */
-function chatCompletions({ base, chave, modelo, esforco, quem, maxTokens = 600 }) {
+function chatCompletions({ base, chave, modelo, esforco, quem, maxTokens = 600, esquema = null, avisar = () => {} }) {
+  // Provedor que recusa `response_format` perde o esquema nesta execução e segue pelo pedido em texto.
+  let comEsquema = Boolean(esquema);
   // Sem `temperature`: modelos novos (Haiku 5.5 na Anthropic) recusam o pedido inteiro com ele.
   return async (pedido) => {
     let r;
     let corpo;
-    try {
+    const enviar = async () => {
       r = await fetch(`${base}/chat/completions`, {
         method: 'POST',
         headers: { authorization: `Bearer ${chave}`, 'content-type': 'application/json' },
         body: JSON.stringify({ model: modelo, messages: [{ role: 'user', content: pedido }], max_tokens: maxTokens,
-          ...(esforco ? { reasoning_effort: esforco } : {}) }),
+          ...(esforco ? { reasoning_effort: esforco } : {}),
+          ...(comEsquema ? { response_format: { type: 'json_schema', json_schema: { name: 'resposta', strict: true, schema: esquema } } } : {}) }),
         signal: AbortSignal.timeout(60_000),
       });
       corpo = await r.text();
+    };
+    try {
+      await enviar();
+      if (comEsquema && r.status === 400 && /response_format|json_schema/i.test(corpo)) {
+        const texto = `${quem} recusou o esquema JSON; seguindo sem ele (${jev.semChave(corpo, chave).slice(0, 400)})`;
+        console.error(`hangar-preview: aviso: ${texto}`);
+        avisar(texto);
+        comEsquema = false;
+        await enviar();
+      }
     } catch (err) {
       throw new Error(err?.name === 'TimeoutError' ? `${quem} não respondeu em 60 s`
         : `${quem} falhou: ${jev.semChave(String(err?.message), chave).slice(0, 200)}`);
@@ -576,7 +590,7 @@ function problemaDoEscritor(env = process.env) {
  * Quem escolhe o passo quando o Jev fica sem alvo: só o modelo auxiliar configurado, nunca um
  * modelo fixo no código. Falta de endereço, chave ou modelo devolve o aviso no lugar do callback.
  */
-function auxiliarDoObjetivo(env = process.env) {
+function auxiliarDoObjetivo(env = process.env, avisar = () => {}) {
   const base = envTexto(env, 'JEV_TEXTO_BASE_URL').replace(/\/$/, '');
   const chave = envTexto(env, 'JEV_TEXTO_API_KEY');
   const modelo = envTexto(env, 'JEV_TEXTO_MODELO');
@@ -586,7 +600,47 @@ function auxiliarDoObjetivo(env = process.env) {
   // Endereço do Jev no lugar do auxiliar: o aviso do escritor já diz o que corrigir.
   if (problemaDoEscritor(env)) return {};
   // Com raciocínio ligado, 600 tokens acabavam antes da resposta e o JSON vinha vazio.
-  return { ajudar: chatCompletions({ base, chave, modelo, esforco: envTexto(env, 'JEV_AUX_ESFORCO'), quem: 'o modelo auxiliar', maxTokens: 4000 }) };
+  return { ajudar: chatCompletions({ base, chave, modelo, esforco: envTexto(env, 'JEV_AUX_ESFORCO'), quem: 'o modelo auxiliar', maxTokens: 4000, esquema: jev.ESQUEMA_DO_AUXILIAR, avisar }) };
+}
+
+const MAX_TRAJETOS = 50;
+
+/**
+ * Uma execução do `objetivo` em JSONL no log privado do Hangar: cada decisão com as probabilidades do
+ * Jev e a resposta crua do auxiliar, para ver depois por que o objetivo parou. Falha de disco vira
+ * aviso, nunca parada do laço. Valores de `--dados` (nome, CPF, credencial) saem trocados por
+ * "(oculto)", e só o dono do sistema lê o arquivo.
+ */
+function abrirTrajeto(dados) {
+  const dir = join(logs.dirLogs(), 'privado', 'objetivos');
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  } catch (err) {
+    console.error(`hangar-preview: aviso: trajeto nao gravado: ${String(err?.message).slice(0, 200)}`);
+    return null;
+  }
+  // ponytail: poda só na abertura; as mais novas ficam. Outra execução pode ter apagado o mesmo arquivo.
+  try {
+    for (const n of readdirSync(dir).filter((x) => x.endsWith('.jsonl')).sort().slice(0, -(MAX_TRAJETOS - 1))) {
+      try { unlinkSync(join(dir, n)); } catch { /* já apagado */ }
+    }
+  } catch { /* a poda nunca impede gravar */ }
+  // Como aparecem dentro do JSON (escapados); valor curto demais casaria com texto comum.
+  const valores = Object.values(dados ?? {}).filter((v) => typeof v === 'string' && v.length >= 3)
+    .map((v) => JSON.stringify(v).slice(1, -1)).sort((a, b) => b.length - a.length);
+  const arquivo = join(dir, `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}.jsonl`);
+  let ativo = true;
+  const gravar = (evento) => {
+    if (!ativo) return;
+    try {
+      const linha = valores.reduce((t, v) => t.split(v).join('(oculto)'), JSON.stringify({ t: new Date().toISOString(), ...evento }));
+      appendFileSync(arquivo, `${linha}\n`, { mode: 0o600 });
+    } catch (err) {
+      ativo = false;
+      console.error(`hangar-preview: aviso: trajeto interrompido: ${String(err?.message).slice(0, 200)}`);
+    }
+  };
+  return { arquivo, gravar };
 }
 
 if (cmd === 'confere') {
@@ -636,9 +690,23 @@ if (cmd === 'objetivo') {
   // campo que precisaria do escritor para com falta-dado.
   const problema = problemaDoEscritor();
   if (problema) console.error(`hangar-preview: aviso: modelo de texto inutilizavel: ${problema}`);
-  const { ajudar, aviso } = auxiliarDoObjetivo();
-  if (aviso) console.error(`hangar-preview: aviso: ${aviso}`);
   const inicio = Date.now();
+  const maxPassos = Number(flags.passos) > 0 ? Number(flags.passos) : 15;
+  const trajeto = abrirTrajeto(dados);
+  const gravar = trajeto?.gravar ?? (() => {});
+  // Logo no começo: quem chamou mata o processo no prazo dele e perderia a linha do fim.
+  if (trajeto) console.log(`trajeto: ${trajeto.arquivo}`);
+  // Saída por erro() (navegador fora, escritor falhou) ou exceção também fecha o arquivo; o motivo
+  // exato foi para o stderr.
+  let fechado = false;
+  process.on('exit', (codigo) => {
+    if (!fechado) gravar({ tipo: 'fim', sucesso: false, parou: `saiu com codigo ${codigo} antes do fim do laco (motivo no stderr)` });
+  });
+  const { ajudar, aviso } = auxiliarDoObjetivo(process.env, (texto) => gravar({ tipo: 'aviso', texto }));
+  if (aviso) console.error(`hangar-preview: aviso: ${aviso}`);
+  // Só os nomes das chaves de --dados: os valores podem ser credenciais.
+  gravar({ tipo: 'inicio', objetivo, dados: Object.keys(dados ?? {}), maxPassos, auxiliar: Boolean(ajudar),
+    escritor: !problema, avisos: [problema, aviso].filter(Boolean) });
   const resultado = await roteiro.rodarComRoteiro({
     objetivo,
     dados,
@@ -647,11 +715,16 @@ if (cmd === 'objetivo') {
     // --pasta relativa é relativa ao cwd da sessão, não ao do backend.
     pasta: flags.pasta ? resolve(flags.cwd || process.cwd(), flags.pasta) : roteiro.pastaDe(flags.cwd || process.cwd()),
     reserva: flags.pasta ? [] : roteiro.reservaDe(flags.cwd || process.cwd()),
-    maxPassos: Number(flags.passos) > 0 ? Number(flags.passos) : 15,
+    maxPassos,
     permitirRisco: flags.permitirRisco === true,
     escreverTexto: problema ? undefined : escritorDeTexto(),
     ajudar,
-    log: (linha) => console.log(semToken(linha)),
+    registrar: gravar,
+    log: (linha) => {
+      const l = semToken(linha);
+      console.log(l);
+      gravar({ tipo: 'log', linha: l });
+    },
     // Tudo que o navegador devolve vira estado enviado ao Jev: o token não sai da máquina.
     executar: async (verbo, args) => semToken((await chamar(chave, verbo, args)).texto),
     perguntar: async (estado, perguntas) => {
@@ -659,10 +732,15 @@ if (cmd === 'objetivo') {
       try {
         return await jev.askJev({ url, modelo, chave: chaveJev, estado, perguntas });
       } catch (err) {
+        gravar({ tipo: 'fim', sucesso: false, parou: err.message });
+        fechado = true;
         erro(err.message);
       }
     },
   });
+  gravar({ tipo: 'fim', sucesso: resultado.sucesso === true, parou: resultado.parou, falta: resultado.falta ?? null,
+    roteiro: resultado.roteiro ?? null, feito: resultado.feito, segundos: (Date.now() - inicio) / 1000 });
+  fechado = true;
   console.log(`\nparou: ${resultado.parou}`);
   if (resultado.roteiro) console.log(`roteiro: ${resultado.roteiro}`);
   console.log(`jev: acoes=${resultado.jev.acoes} verificacao=${resultado.jev.verificacao} tempo=${((Date.now() - inicio) / 1000).toFixed(1)}s`);

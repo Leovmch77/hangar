@@ -346,6 +346,12 @@ export interface SubagentRun {
   tools: { name: string; count: number }[];
   recent: { name: string; target: string }[];
   lastText: string;
+  state?: 'running' | 'finished' | 'failed' | null;
+  failed?: boolean;
+  endedAt?: string | null;
+  canMessage?: boolean;
+  messageBlocked?: string | null;
+  problema?: string | null;
   // So o Kimi manda: o wire dele registra o fim do turno do proprio subagente. Ausente (Claude) =
   // "nao da pra saber por aqui" — quem decide la e o tool_result no transcript do pai.
   finished?: boolean;

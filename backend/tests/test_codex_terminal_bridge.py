@@ -308,20 +308,20 @@ def test_claude_question_reaches_the_rust_whole_and_421_leaves_it_to_python(monk
         server.shutdown()
 
 
-@pytest.mark.parametrize("route", ["answer", "select", "select/submit", "model-effort"])
+@pytest.mark.parametrize("route", ["input", "answer", "select", "select/submit", "model-effort"])
 def test_claude_question_from_guest_or_connect_goes_to_the_rust(monkeypatch, route):
     calls = []
     _provider(monkeypatch, ct="claude")
     monkeypatch.setattr(runtime_coordinator, "rust_codex_terminal", lambda *args: None)
     monkeypatch.setattr(runtime_coordinator, "rust_claude", lambda *args: calls.append(args) or (200, b'{"ok": true}'))
-    body = b'{"option": 1, "interaction_id": "perm:t1"}'
+    body = b'{"text":"oi","jev_task":"t","jev_message":"m"}' if route == "input" else b'{"option": 1, "interaction_id": "perm:t1"}'
     for port in (GUEST_PORT, api_mod.CONNECT_PORT):
         with pytest.raises(api_mod._RustReply) as reply:
             asyncio.run(api_mod._codex_rust_port("ct", _request(port, f"/api/sessions/ct/{route}", body=body)))
         assert reply.value.args == (200, b'{"ok": true}')
     assert calls == [("ct", route, "POST", body)] * 2
     asyncio.run(api_mod._codex_rust_port("ct", _request(GUEST_PORT, "/api/sessions/ct/keys")))
-    assert len(calls) == 2, "fora da pergunta o Claude não vai a esta ponte"
+    assert len(calls) == 2, "fora das rotas migradas o Claude não vai a esta ponte"
 
 
 @pytest.mark.parametrize(("method", "route", "query", "body"), [

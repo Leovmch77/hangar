@@ -759,6 +759,67 @@ test('ref do auxiliar fora da pagina, ou falha dele, mantem a parada sem alvo co
   }
 });
 
+test('o segundo passo do auxiliar sai da fila sem chamá-lo de novo, e o trajeto registra a origem', async () => {
+  const executados = [];
+  const pedidos = [];
+  const eventos = [];
+  const r = await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 4,
+    executar: navegador(executados),
+    perguntar: async () => (executados.includes('click @e2') ? resposta({ op: 'DONE' }) : resposta({ click: NENHUM })),
+    ajudar: async (p) => { pedidos.push(p); return '{"acoes":[{"operacao":"CLICK","ref":"e1"},{"operacao":"CLICK","ref":"e2"}],"motivo":"ajuda e cadastro"}'; },
+    registrar: (e) => eventos.push(e),
+  });
+  assert.equal(r.sucesso, true, r.parou);
+  assert.deepEqual(r.feito, ['CLICK link "Ver ajuda"', 'CLICK button "Iniciar cadastro"']);
+  assert.equal(pedidos.length, 1);
+  const decisoes = eventos.filter((e) => e.tipo === 'decisao');
+  assert.deepEqual(decisoes.map((e) => e.via ?? e.parar), ['auxiliar', 'auxiliar (fila)', 'objetivo atingido, pagina confirma (0.90)']);
+  assert.ok(eventos.some((e) => e.tipo === 'auxiliar' && e.resposta.includes('"acoes"')));
+});
+
+test('depois que o Jev age sozinho, a fila do auxiliar cai e ele é chamado de novo', async () => {
+  const executados = [];
+  const pedidos = [];
+  let jevAgiu = false;
+  await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 3,
+    executar: navegador(executados),
+    perguntar: async () => {
+      // Passo 1 sem alvo (auxiliar), passo 2 o Jev clica sozinho, depois sem alvo de novo.
+      if (executados.includes('click @e1') && !jevAgiu) { jevAgiu = true; return resposta({ click: 'e2' }); }
+      return resposta({ click: NENHUM });
+    },
+    ajudar: async (p) => { pedidos.push(p); return '{"acoes":[{"operacao":"CLICK","ref":"e1"},{"operacao":"CLICK","ref":"e2"}],"motivo":"x"}'; },
+  });
+  assert.equal(pedidos.length, 2);
+});
+
+test('resposta do auxiliar fora de JSON ganha uma segunda chance com o texto que veio', async () => {
+  const executados = [];
+  const pedidos = [];
+  const r = await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 3,
+    executar: navegador(executados),
+    perguntar: async () => (executados.includes('click @e2') ? resposta({ op: 'DONE' }) : resposta({ click: NENHUM })),
+    ajudar: async (p) => { pedidos.push(p); return pedidos.length === 1 ? 'Clique em Iniciar cadastro.' : '{"acoes":[{"operacao":"CLICK","ref":"e2"}],"motivo":"x"}'; },
+  });
+  assert.equal(r.sucesso, true, r.parou);
+  assert.equal(pedidos.length, 2);
+  assert.match(pedidos[1], /nao era o objeto JSON pedido: Clique em Iniciar cadastro\./);
+});
+
+test('esquema do auxiliar cumpre o modo estrito: todo campo obrigatório e nada além', () => {
+  const { ESQUEMA_DO_AUXILIAR: e } = require('./jev_objetivo.cjs');
+  for (const o of [e, e.properties.acoes.items]) {
+    assert.equal(o.additionalProperties, false);
+    assert.deepEqual([...o.required].sort(), Object.keys(o.properties).sort());
+  }
+});
+
 test('clique do auxiliar num botao que envia respeita o risco do Jev', async () => {
   const executados = [];
   const r = await rodar({

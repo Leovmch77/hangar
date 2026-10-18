@@ -3,15 +3,17 @@ import { Image, Pressable, ScrollView, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { Sheet } from './Sheet';
 import { Icon, type IconName } from './Icon';
-import { pickCamera, pickFile, pickImage, type PickedAttachment } from './attachmentPicker';
+import { pickCamera, pickFiles, pickImages, type PickedAttachment } from './attachmentPicker';
 import { useSettingsColors } from '../features/config/colors';
 import * as m from '../paraglide/messages';
 
 type Props = {
   open: boolean;
   onClose: () => void;
-  /** Mesmo destino de antes: quem chama só adota o anexo escolhido. */
+  /** Chamado uma vez por anexo escolhido. */
   onPick: (picked: PickedAttachment) => void;
+  /** Fotos e arquivos com seleção múltipla; sem ele, um por vez. */
+  multiple?: boolean;
   onError: (message: string) => void;
   /** Cola texto ou imagem da área de transferência; ausente, o item não aparece. */
   onPaste?: () => void;
@@ -32,7 +34,7 @@ type Props = {
 
 const TILE = 112;
 
-export function AttachSheet({ open, onClose, onPick, onError, onPaste, onSessionAttachments, recentPhotos, onCommands, dictationStyle, sendToGroup }: Props) {
+export function AttachSheet({ open, onClose, onPick, multiple = false, onError, onPaste, onSessionAttachments, recentPhotos, onCommands, dictationStyle, sendToGroup }: Props) {
   const c = useSettingsColors();
   // A ação roda depois que a folha some: o iOS recusa abrir câmera/galeria por cima de uma folha
   // ainda em animação de saída.
@@ -42,22 +44,22 @@ export function AttachSheet({ open, onClose, onPick, onError, onPaste, onSession
     afterDismiss.current = action;
     onClose();
   };
-  const run = (picker: () => Promise<PickedAttachment | null>) => () =>
+  const run = (picker: () => Promise<PickedAttachment[]>) => () =>
     choose(() => {
       picker()
-        .then((picked) => { if (picked) onPick(picked); })
+        .then((picked) => { for (const p of picked) onPick(p); })
         .catch((e: unknown) => onError(e instanceof Error && e.message ? e.message : m.board_falha_upload()));
     });
 
-  const camera = run(pickCamera);
-  const photos = run(pickImage);
+  const camera = run(async () => { const shot = await pickCamera(); return shot ? [shot] : []; });
+  const photos = run(() => pickImages(multiple));
   const hasRecent = !!recentPhotos?.length;
 
   // Comandos e estilo do ditado também abrem outra folha: só depois que esta sumir.
   // `checked` presente = item liga/desliga: o leitor de tela anuncia o estado, e o ✓ é só visual.
   const rows: { icon: IconName; label: string; value?: string; checked?: boolean; onPress: () => void }[] = [
     ...(onPaste ? [{ icon: 'ClipboardPaste' as IconName, label: m.composer_colar(), onPress: () => choose(onPaste) }] : []),
-    { icon: 'File', label: m.composer_adicionar_arquivos(), onPress: run(pickFile) },
+    { icon: 'File', label: m.composer_adicionar_arquivos(), onPress: run(() => pickFiles(multiple)) },
     ...(onSessionAttachments
       ? [{ icon: 'Paperclip' as IconName, label: m.ctx_anexos_da_sessao(), onPress: () => choose(onSessionAttachments) }]
       : []),

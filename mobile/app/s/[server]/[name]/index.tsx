@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from 'react';
 import { AccessibilityInfo, ActivityIndicator, AppState, Platform, ScrollView, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useShallow } from 'zustand/react/shallow';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { chatStore } from '../../../../src/stores/chat';
 import { useServers } from '../../../../src/stores/servers';
@@ -29,13 +30,31 @@ import { SessionsDrawer } from '../../../../src/features/sessions/SessionsDrawer
 import { ServerSheet } from '../../../../src/features/sessions/ServerSheet';
 import { useLiveVoice } from '../../../../src/features/voice/liveVoiceStore';
 import { PlanActions } from '../../../../src/chat/PlanActions';
-import { pendingAskFromEvents, askPayloadFromToolUse, fetchSessionsForServer, isOrq, selectOptionForServer, submitSelectedForServer, interrupt, recarregarSessao, implementCodexPlan, pendingProposedPlan, pendingReplyPlan, setPermissionMode, currentQueuePanel } from '@hangar/core';
+import { askPayloadFromToolUse, fetchSessionsForServer, isOrq, selectOptionForServer, submitSelectedForServer, interrupt, recarregarSessao, implementCodexPlan, setPermissionMode } from '@hangar/core';
+import { createEventProjection } from '../../../../src/chat/eventProjection';
 import type { Provider, SessionInfo } from '@hangar/core';
 import * as m from '../../../../src/paraglide/messages';
 
 // Tela de chat de uma sessão: histórico janelado + SSE ao vivo (store chat.ts).
 // A conversa para antes da curva de baixo da caixa: senão o texto vaza pelos cantos arredondados.
 const BORDA_DOCK = 20;
+// Faixa da borda esquerda que fica com o voltar nativo do iOS (HIG: nunca disputar esse arrasto).
+const IOS_BACK_EDGE = 20;
+
+// A prévia e o trabalho ao vivo mudam a cada token: assinados aqui, re-renderizam só a lista,
+// não a tela com o Composer e o cabeçalho.
+type LiveListProps = Omit<ComponentProps<typeof MessageList>, 'preview' | 'previewMd' | 'previewFull' | 'pensamento' | 'ferramenta'>
+  & { chat: ReturnType<typeof chatStore> };
+function LiveMessageList({ chat, ...rest }: LiveListProps) {
+  const preview = chat.use((s) => s.preview);
+  const previewMd = chat.use((s) => s.previewMd);
+  const previewFull = chat.use((s) => s.previewFull);
+  const pensamento = chat.use((s) => s.pensamento);
+  const ferramenta = chat.use((s) => s.ferramenta);
+  return <MessageList {...rest} preview={preview} previewMd={previewMd} previewFull={previewFull} pensamento={pensamento} ferramenta={ferramenta} />;
+}
+const MemoChatHeader = memo(ChatHeader);
+const MemoComposer = memo(Composer);
 
 export default function ChatScreen() {
   const router = useRouter();
@@ -43,6 +62,17 @@ export default function ChatScreen() {
   const serverId = Array.isArray(params.server) ? params.server[0] : (params.server ?? '');
   const name = Array.isArray(params.name) ? params.name[0] : (params.name ?? '');
   const rota = `${serverId}::${name}`;
+  const settingsSequence = useRef(0);
+  const [settingsRequest, setSettingsRequest] = useState<{ route: string; which: 'mode' | 'account'; n: number } | null>(null);
+  const openSettings = useCallback((which: 'mode' | 'account') => {
+    setSettingsRequest({ route: rota, which, n: ++settingsSequence.current });
+  }, [rota]);
+  const consumeSettingsRequest = useCallback((n: number) => {
+    setSettingsRequest(current => current?.n === n ? null : current);
+  }, []);
+  useEffect(() => {
+    setSettingsRequest(current => current && current.route !== rota ? null : current);
+  }, [rota]);
 
   const chat = chatStore(serverId, name);
   const [servidorSumiu, setServidorSumiu] = useState(false);
@@ -85,7 +115,8 @@ export default function ChatScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, existe]);
 
-  const events = chat.use((s) => s.events);
+  const { events, eventsRevision } = chat.use(useShallow((s) => ({ events: s.events, eventsRevision: s.eventsRevision })));
+  const projectEvents = useMemo(() => createEventProjection(), [chat]);
   const stateEvent = chat.use((s) => s.stateEvent);
   const bufferingAnnounced = useRef(false);
   useEffect(() => {
@@ -95,15 +126,10 @@ export default function ChatScreen() {
     }
     bufferingAnnounced.current = buffering;
   }, [stateEvent?.codex_buffering]);
-  const preview = chat.use((s) => s.preview);
-  const previewMd = chat.use((s) => s.previewMd);
-  const previewFull = chat.use((s) => s.previewFull);
-  const pensamento = chat.use((s) => s.pensamento);
-  const ferramenta = chat.use((s) => s.ferramenta);
   const turnSeen = chat.use((s) => s.turnSeen);
   // Mesma fonte do painel Atividade: um Agent em background devolve resultado na hora e só o fold
   // sabe que ele segue rodando.
-  const activity = useActivity(events);
+  const activity = useActivity(events, eventsRevision);
   const agentesRodando = useMemo(() => activity.agents.filter((a) => a.running), [activity]);
   const loading = chat.use((s) => s.loading);
   const error = chat.use((s) => s.error);
@@ -112,7 +138,6 @@ export default function ChatScreen() {
   const pending = chat.use((s) => s.pending);
   // O mesmo painel que o Composer desenha: as mensagens dele saem da conversa enquanto esperam.
   const serverQueue = chat.use((s) => s.queuePanel) ?? null;
-  const queuePanel = useMemo(() => currentQueuePanel(serverQueue, events), [serverQueue, events]);
   const askOpen = chat.use((s) => s.askOpen);
   const askPayload = chat.use((s) => s.askPayload);
   const askPiId = chat.use((s) => s.askPiId);
@@ -162,7 +187,13 @@ export default function ChatScreen() {
   // Sem SSE adicional: acompanha a abertura e o Git do Codex pela lista.
   const rowsProvider = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name)?.provider ?? null) as Provider | null;
   const [fetchedSession, setFetchedSession] = useState<SessionInfo | null | undefined>(undefined);
-  const listSession = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name) ?? null);
+  // Só os campos que a tela lê: a linha inteira muda de identidade a cada publicação da lista.
+  const listSession = useSessions(useShallow((s) => {
+    const r = s.rows.find((x) => x.serverId === serverId && x.name === name);
+    return r ? { provider: r.provider, tracked: r.tracked, state: r.state, problema: r.problema, startup_steps: r.startup_steps,
+      label: r.label, question: r.question, guest_kind: r.guest_kind, headless: r.headless, ask_form: r.ask_form,
+      orq_arbiter: r.orq_arbiter } : null;
+  }));
   const currentSession = fetchedSession === undefined ? listSession : fetchedSession;
   const codexPreThread = currentSession?.provider === 'codex' && currentSession.tracked === false;
   useEffect(() => {
@@ -206,6 +237,10 @@ export default function ChatScreen() {
     };
   }, [ready, servidorSumiu, serverId, name]);
   const provider: Provider | null = codexPreThread ? 'codex' : rowsProvider ?? fetchedSession?.provider ?? null;
+  const { queuePanel, pendingAsk, proposedPlan, replyPlan } = useMemo(
+    () => projectEvents(events, eventsRevision, provider, serverQueue),
+    [projectEvents, events, eventsRevision, provider, serverQueue],
+  );
   const orq = isOrq({ provider });
   // Par em "ver e mandar recado": a conversa é de outra pessoa e só se acompanha.
   const soLeitura = currentSession?.guest_kind === 'pair';
@@ -214,6 +249,9 @@ export default function ChatScreen() {
     if (wasPreThread.current && currentSession?.tracked) chat.retry();
     wasPreThread.current = codexPreThread;
   }, [codexPreThread, currentSession?.tracked, chat]);
+
+  // A lista alimenta provedor, pergunta e pasta desta tela; a gaveta fechada não a segura mais.
+  useEffect(() => useSessions.getState().retain(), []);
 
   // O "Ouvir" das bolhas toca num player de módulo; sair da conversa cala a voz.
   useEffect(() => () => pararTts(), []);
@@ -225,7 +263,7 @@ export default function ChatScreen() {
 
   // Pi/Kimi: pergunta vem como tool_use, não como SSE ask_question
   useEffect(() => {
-    const q = provider ? pendingAskFromEvents(events, provider) : null;
+    const q = pendingAsk;
     if (!q) {
       if (askPiId) chat.markAskDismissed();
       return;
@@ -237,7 +275,7 @@ export default function ChatScreen() {
       return;
     }
     chat.openAsk(payload, q.id);
-  }, [events, provider, askOpen, askPiId, askPiDismissed, chat]);
+  }, [pendingAsk, provider, askOpen, askPiId, askPiDismissed, chat]);
 
   // A pergunta da lista (fora do quadro ou segurada pelo plugin) abre o passo a passo na hora, com o ID do
   // formulário: responde pelo `/answer` sem esperar o stream. Uma vez por formulário, para fechar não reabrir.
@@ -309,7 +347,7 @@ export default function ChatScreen() {
   const stopEmVoo = useRef<{ rota: string } | null>(null);
   const [stopVivo, setStopVivo] = useState<{ rota: string } | null>(null);
   const stopping = stopVivo?.rota === rota;
-  const handleStop = () => {
+  const handleStop = useCallback(() => {
     if (stopEmVoo.current?.rota === rota) return;
     const target = destino();
     if (!target) return mostrarAviso(m.chat_servidor_removido());
@@ -335,7 +373,8 @@ export default function ChatScreen() {
         stopEmVoo.current = null;
         setStopVivo(null);
       });
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rota, name, chat, serverId]);
   // Recarregar (Claude): recicla o processo na mesma conversa pra reler MCP/hooks/settings; com
   // terminal, o pane reabre com o comando de hoje. O motivo só existe sem terminal (vem do `state`);
   // sem motivo a ação fica só no "⋯".
@@ -376,12 +415,12 @@ export default function ChatScreen() {
   // Plano à espera de decisão: o do Codex vem marcado na resposta; no Claude sem terminal em modo
   // plano ninguém pergunta "implementar?", então a última resposta do turno é o plano.
   const decidablePlan = useMemo(() => {
-    if (provider === 'codex') return pendingProposedPlan(events);
+    if (provider === 'codex') return proposedPlan;
     if (provider === 'claude' && headless && stateEvent?.claude_permission_mode === 'plan' && stateEvent.state === 'idle') {
-      return pendingReplyPlan(events);
+      return replyPlan;
     }
     return null;
-  }, [provider, headless, events, stateEvent?.claude_permission_mode, stateEvent?.state]);
+  }, [provider, headless, proposedPlan, replyPlan, stateEvent?.claude_permission_mode, stateEvent?.state]);
   const implementPlan = async (plan: string) => {
     const live = chat.use.getState();
     if (live.stateEvent?.state !== 'idle' || plan !== decidablePlan?.plan) throw new Error(m.chat_plan_indisponivel());
@@ -428,30 +467,34 @@ export default function ChatScreen() {
   const problem = codexPreThread ? currentSession.problema : stateEvent?.problema;
   const problemDetail = codexPreThread ? null : stateEvent?.problema_detalhe;
 
-  // Na gaveta, toda navegação da lista sai deste chat (dismissTo) antes de ela empurrar o destino:
-  // a pilha fica sempre início → um chat, e "Nova conversa" (que só fecha a gaveta) leva ao início.
+  const onBack = useCallback(() => {
+    if (router.canGoBack()) router.back();
+    else router.replace('/');
+  }, [router]);
+  const onMore = useCallback(() => setMoreOpen(true), []);
+  const onTitlePress = useCallback(() => setPickerOpen(true), []);
+  const onAbrirAgentes = useCallback(() => router.push(`/s/${serverId}/${name}/activity` as never), [router, serverId, name]);
+  const loopStatus = stateEvent?.loop_status;
+  const loopIter = stateEvent?.loop_iter;
+  const loopMax = stateEvent?.loop_max;
+  const chipLoop = useMemo(() => loopStatus ? (
+    <LoopChip status={loopStatus} iter={loopIter} max={loopMax}
+              onPress={() => router.push(`/s/${serverId}/${name}/loop` as never)} />
+  ) : null, [loopStatus, loopIter, loopMax, router, serverId, name]);
+  const onReturnedAdopted = useCallback(() => setReturned((cur) => (cur?.route === rota ? null : cur)), [rota]);
+
+  // A lista sai deste chat antes de empurrar outro destino; Nova conversa pede o campo na inicial.
   return (
     <Screen edges={[]}>
-      <SessionsDrawer onClose={() => router.dismissTo('/')} onOpenServers={() => setServersOpen(true)}>
-        <ChatHeader
+      <SessionsDrawer edgeStart={Platform.OS === 'ios' ? IOS_BACK_EDGE : undefined} onClose={() => router.dismissTo('/')} onOpenServers={() => setServersOpen(true)}
+        onNewConversation={() => router.dismissTo({ pathname: '/', params: { compose: '1' } })}>
+        <MemoChatHeader
           name={name}
           state={codexPreThread ? currentSession.state : stateEvent?.state ?? null}
-          onBack={() => {
-            if (router.canGoBack()) router.back();
-            else router.replace('/');
-          }}
-          onMore={() => setMoreOpen(true)}
-          onTitlePress={() => setPickerOpen(true)}
-          chipLoop={
-            stateEvent?.loop_status ? (
-              <LoopChip
-                status={stateEvent.loop_status}
-                iter={stateEvent.loop_iter}
-                max={stateEvent.loop_max}
-                onPress={() => router.push(`/s/${serverId}/${name}/loop` as never)}
-              />
-            ) : null
-          }
+          onBack={onBack}
+          onMore={onMore}
+          onTitlePress={onTitlePress}
+          chipLoop={chipLoop}
         />
         <MoreSheet open={moreOpen} onClose={() => setMoreOpen(false)} serverId={serverId} name={name} orq={orq}
                    provider={provider} semTerminal={semTerminal} temPergunta={!!askPayload}
@@ -529,11 +572,10 @@ export default function ChatScreen() {
                 </Text>
               </View>
             ) : (
-              <MessageList
+              <LiveMessageList
+                chat={chat}
                 events={events}
-                preview={preview}
-                previewMd={previewMd}
-                previewFull={previewFull}
+                eventsRevision={eventsRevision}
                 session={currentSession}
                 olderFailed={olderFailed}
                 onLoadOlder={chat.loadOlder}
@@ -544,10 +586,8 @@ export default function ChatScreen() {
                 bottomInset={overlayH}
                 stateEvent={stateEvent}
                 turnSeen={turnSeen}
-                pensamento={pensamento}
-                ferramenta={ferramenta}
                 agentesRodando={agentesRodando}
-                onAbrirAgentes={() => router.push(`/s/${serverId}/${name}/activity` as never)}
+                onAbrirAgentes={onAbrirAgentes}
                 queuePanel={queuePanel}
                 canQuote={!servidorSumiu && fetchedSession !== null && !dead && !orq && !soLeitura}
               />
@@ -591,14 +631,16 @@ export default function ChatScreen() {
                 </View>
               )
               : orq
-              ? <OrqFooter serverId={serverId} arbiter={currentSession?.orq_arbiter} />
+              ? <OrqFooter serverId={serverId} name={name} arbiter={listSession ? listSession.orq_arbiter : currentSession?.orq_arbiter} />
               : soLeitura
               ? <Text style={styles.notice} accessibilityRole="text">{m.native_par_so_leitura()}</Text>
               : (
                 <>
-                  <Composer key={rota} serverId={serverId} name={name} draft={draft?.route === rota ? draft.text : undefined}
+                  <MemoComposer key={rota} serverId={serverId} name={name} draft={draft?.route === rota ? draft.text : undefined}
                             returned={returned?.route === rota ? returned.value : undefined}
-                            onReturnedAdopted={() => setReturned((cur) => (cur?.route === rota ? null : cur))}
+                            onReturnedAdopted={onReturnedAdopted}
+                            settingsRequest={settingsRequest?.route === rota ? settingsRequest : null}
+                            onSettingsRequestConsumed={consumeSettingsRequest}
                             firstInputId={firstInput?.id} firstInputSent={firstInput?.phase === 'sent'} sessionProvider={provider}
                             headless={headless} onStop={handleStop} stopping={stopping} queuePanel={queuePanel} />
                 </>
@@ -607,7 +649,7 @@ export default function ChatScreen() {
           </View>
           {/* Linha de status do app de PC, colada embaixo da caixa e fora da área que a conversa cobre. */}
           {!servidorSumiu && !codexPreThread && fetchedSession !== null && !orq && !soLeitura && !dead
-            ? <ComposerStatusLine key={`status:${rota}`} serverId={serverId} name={name} />
+            ? <ComposerStatusLine key={`status:${rota}`} serverId={serverId} name={name} onOpenSettings={openSettings} />
             : null}
           <KeyboardBar />
         </KeyboardAvoidingView>

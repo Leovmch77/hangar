@@ -20,7 +20,6 @@ from app.auth import _LOOPBACK, _blocked, _record_fail
 from app.config import settings
 from app.connect_port import CONNECT_PEER
 from app.guest_header import guest_of
-from app.termsock import _origem_aceita
 
 _log = logging.getLogger(__name__)
 UNAVAILABLE = "voice_unavailable"
@@ -49,11 +48,7 @@ async def _owner_only(ws: WebSocket) -> bool:
             _record_fail(host, now)
         await ws.close(code=1008)
         return False
-    origin = ws.headers.get("origin")
-    if origin and not _origem_aceita(origin, ws.headers.get("host")):
-        _log.warning("voicesock: origem %r recusada", origin)
-        await ws.close(code=1008)
-        return False
+    # Sem Origin: ela barra credencial ambiente, e página estranha não tem o `?token=`.
     return True
 
 

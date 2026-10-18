@@ -62,15 +62,15 @@ export function SettingsRow({ title, description, icon, onPress, onLongPress, ch
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   row: { borderTopWidth: 1, paddingVertical: 14, paddingHorizontal: 16, gap: 10 },
   headLine: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   head: { flex: 1, minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 14 },
   iconBox: { width: 36, height: 36, borderRadius: 10, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
   texts: { flex: 1, minWidth: 0, gap: 2 },
-  title: { fontSize: 15, fontWeight: '500' },
-  desc: { fontSize: 14 },
-  titleSmall: { fontSize: 15, fontWeight: '500' },
-  descSmall: { fontSize: 13.5 },
+  title: { fontSize: theme.base.text.sm, fontWeight: '500' },
+  desc: { fontSize: theme.base.text.xs },
+  titleSmall: { fontSize: theme.base.text.sm, fontWeight: '500' },
+  descSmall: { fontSize: theme.base.text.xs },
   controlIndented: { paddingLeft: 50 },
-});
+}));

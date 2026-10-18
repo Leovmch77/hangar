@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as Haptics from 'expo-haptics';
-import { AccessibilityInfo, ActivityIndicator, Alert, AppState, Keyboard, Platform, Pressable, Text, View, type NativeSyntheticEvent, type TextInput, type TextInputKeyPressEventData } from 'react-native';
+import { AccessibilityInfo, ActivityIndicator, Alert, AppState, Keyboard, Platform, Pressable, ScrollView, Text, View, type NativeSyntheticEvent, type TextInput, type TextInputKeyPressEventData } from 'react-native';
 import type { NativeStackNavigationProp } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { broadcast, formataErro, uploadFileForServer, steerSession, podeEnviarSozinho, providerName, sendInputForServer, sideQuestionOf, slashMatches, slashTokenAt, replaceSlashToken, relimparDitado, estilosDitado, canUpdateQueueEdit, queueEditLeft } from '@hangar/core';
@@ -43,6 +43,8 @@ interface Props {
   // Texto devolvido pelo Parar/cancelar: entra antes do que já está no campo, nunca no lugar.
   returned?: { text: string };
   onReturnedAdopted?: () => void;
+  settingsRequest?: { which: 'mode' | 'account'; n: number } | null;
+  onSettingsRequestConsumed?: (n: number) => void;
   firstInputId?: string;
   firstInputSent?: boolean;
   sessionProvider?: string | null;
@@ -56,12 +58,21 @@ interface Props {
 
 type PendingAttach = PickedAttachment;
 
-// Texto que o envio atual produziria (citações, digitado e anexo já enviado), para comparar com o
+// Como o PWA: os caminhos de todos os anexos numa linha só (o envio por terminal recusa quebra de linha).
+const attachLine = (list: readonly PendingAttach[]) => list.map((a) => attachInsert(a, a.uploadedPath!)).join(' ');
+const allUploaded = (list: readonly PendingAttach[]) => list.length > 0 && list.every((a) => a.uploadedPath);
+
+// Texto que o envio atual produziria (citações, digitado e anexos já enviados), para comparar com o
 // envio gravado no rascunho.
-function composeForSend(typed: string, refs: readonly DraftContextRef[], attach: PendingAttach | null): string {
+function composeForSend(typed: string, refs: readonly DraftContextRef[], attachments: readonly PendingAttach[]): string {
   const withRefs = composeWithContextRefs(refsForMessage(refs, typed), typed.trim());
-  return attach?.uploadedPath ? withAttach(withRefs, attachInsert(attach, attach.uploadedPath)) : withRefs;
+  return allUploaded(attachments) ? withAttach(withRefs, attachLine(attachments)) : withRefs;
 }
+
+// O tamanho é só da prévia: fora do disco, para a comparação com o guardado não ver diferença.
+const toDraftAttachments = (list: readonly PendingAttach[]): DraftAttachment[] => list.map(({ size: _size, ...a }) => a);
+const mergeAttachments = (a: readonly DraftAttachment[], b: readonly DraftAttachment[]) =>
+  [...a, ...b.filter((x) => !a.some((y) => y.uri === x.uri))];
 
 // O campo é só um `/nome` sendo digitado (nem argumento nem outro texto): é ele que o comando
 // escolhido substitui por inteiro. Espaço no fim não conta: a lista abre com o cursor antes dele.
@@ -105,7 +116,7 @@ const joinDrafts = (before: string, after: string) => (before.trim() && after.tr
 function keepRecoverable(serverId: string, name: string, old: ConversationDraft): ConversationDraft {
   const pending = readRecoverableDraft(serverId, name);
   if (pending && pending.transcript === old.transcript && pending.revision === old.revision) return pending;
-  const value = pending ? { ...old, text: joinDrafts(pending.text, old.text), attachment: old.attachment ?? pending.attachment } : old;
+  const value = pending ? { ...old, text: joinDrafts(pending.text, old.text), attachments: mergeAttachments(pending.attachments, old.attachments) } : old;
   writeRecoverableDraft(serverId, name, value);
   return value;
 }
@@ -128,7 +139,7 @@ const dictatedInField = (bar: DictationBar, value: string) => {
   return value.slice(start, start + bar.shown.length) === bar.shown;
 };
 
-export function Composer({ serverId, name, draft, returned, onReturnedAdopted, firstInputId, firstInputSent = false, sessionProvider, headless = false, onStop, stopping = false, queuePanel: queueList }: Props) {
+export function Composer({ serverId, name, draft, returned, onReturnedAdopted, settingsRequest, onSettingsRequestConsumed, firstInputId, firstInputSent = false, sessionProvider, headless = false, onStop, stopping = false, queuePanel: queueList }: Props) {
   const { theme } = useUnistyles();
   const navigation = useNavigation<NativeStackNavigationProp<Record<string, object | undefined>>>();
   const inputRef = useRef<TextInput>(null);
@@ -217,7 +228,13 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const [recoverable, setRecoverable] = useState(boot.recoverable);
   const [dictation, setDictation] = useState(boot.dictation);
   const [submission, setSubmission] = useState(boot.draft?.submission ?? null);
-  const [pendingAttach, setPendingAttach] = useState<PendingAttach | null>(boot.draft?.attachment ?? null);
+  const [pendingAttachments, setPendingAttachmentsState] = useState<PendingAttach[]>(boot.draft?.attachments ?? []);
+  // Colar ou escolher vários chega em paralelo: cada um acrescenta à lista mais nova, nunca à do render.
+  const attachmentsRef = useRef(pendingAttachments);
+  const setPendingAttachments = useCallback((next: PendingAttach[]) => {
+    attachmentsRef.current = next;
+    setPendingAttachmentsState(next);
+  }, []);
   // Rascunho guardado é mais novo que o texto de handoff/cancelamento que a rota ainda carrega.
   const adoptedDraftRef = useRef(draft);
   const [text, setText] = useState(() => boot.draft?.text ?? (firstInputSent ? '' : draft ?? ''));
@@ -227,10 +244,10 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   }, [text]);
 
   // Só texto novo avança a revisão: é ela que decide se o ACK pode limpar o campo.
-  const persistDraft = useCallback((patch: { text?: string; attachment?: DraftAttachment | null }): boolean => {
+  const persistDraft = useCallback((patch: { text?: string; attachments?: readonly PendingAttach[] }): boolean => {
     if (blockedRef.current) return false;
     // Em edição o campo tem o texto da fila, não o rascunho: o guardado continua o de antes da edição.
-    if (patch.text !== undefined && patch.attachment === undefined && chat.use.getState().queueEdit) return true;
+    if (patch.text !== undefined && patch.attachments === undefined && chat.use.getState().queueEdit) return true;
     let current: ConversationDraft | null;
     try { current = readDraft(origin.serverId, origin.name) ?? draftRef.current; } catch (e) {
       // Formato inválido não tem o que salvar: a edição nova grava por cima, como no boot.
@@ -242,22 +259,22 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     }
     if (current?.transcript && transcriptRef.current && current.transcript !== transcriptRef.current) current = draftRef.current;
     const base: ConversationDraft = current
-      ?? { version: 1, text: '', revision: 0, transcript: transcriptRef.current, attachment: null, submission: null };
+      ?? { version: 1, text: '', revision: 0, transcript: transcriptRef.current, attachments: [], submission: null };
     const value: ConversationDraft = {
       ...base,
       transcript: base.transcript ?? transcriptRef.current,
       ...(patch.text !== undefined ? { text: patch.text, revision: base.revision + 1 } : {}),
-      ...(patch.attachment !== undefined ? { attachment: patch.attachment } : {}),
+      ...(patch.attachments !== undefined ? { attachments: toDraftAttachments(patch.attachments) } : {}),
     };
     try {
-      if (!value.text && !value.attachment && !value.submission) clearDraft(origin.serverId, origin.name);
+      if (!value.text && !value.attachments.length && !value.submission) clearDraft(origin.serverId, origin.name);
       else writeDraft(origin.serverId, origin.name, value);
     } catch (e) {
       setDraftIssue(e instanceof Error ? e.message : m.draft_write_error());
       return false;
     }
-    if (patch.attachment !== undefined && voiceSendRef.current
-      && JSON.stringify(value.attachment) !== JSON.stringify(voiceSendRef.current.draft.attachment)) cancelVoiceSend();
+    if (patch.attachments !== undefined && voiceSendRef.current
+      && JSON.stringify(value.attachments) !== JSON.stringify(voiceSendRef.current.draft.attachments)) cancelVoiceSend();
     draftRef.current = value;
     setSubmission(value.submission);
     setDraftIssue('');
@@ -283,16 +300,14 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       setDictation(readDictation(origin.serverId, origin.name));
       const latest = readDraft(origin.serverId, origin.name);
       if (!latest) {
-        setPendingAttach(null);
+        setPendingAttachments([]);
         return;
       }
       if (latest.transcript && transcriptRef.current && latest.transcript !== transcriptRef.current) return;
       const unchanged = textRef.current === (draftRef.current?.text ?? '');
       draftRef.current = latest;
       setSubmission(latest.submission);
-      setPendingAttach((cur) => latest.attachment
-        ? (cur?.uri === latest.attachment.uri ? { ...latest.attachment, size: cur.size } : latest.attachment)
-        : null);
+      setPendingAttachments(latest.attachments.map((a) => ({ ...a, size: attachmentsRef.current.find((c) => c.uri === a.uri)?.size })));
       if (unchanged) {
         textRef.current = latest.text;
         setText(latest.text);
@@ -300,13 +315,15 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     } catch (e) {
       setDraftIssue(e instanceof Error ? e.message : m.draft_read_error());
     }
-  }, [draftUpdate, origin]);
+  }, [draftUpdate, origin, setPendingAttachments]);
 
   const handleRecoverSubmission = useCallback(() => {
     if (isSubmitting(origin.serverId, origin.name) || !submission
       || (submission.status !== 'rejected' && submission.status !== 'unknown')) return;
-    // O anexo continua no rascunho com o caminho enviado: devolver só o texto evita citar o arquivo duas vezes.
-    const insert = pendingAttach?.uploadedPath ? attachInsert(pendingAttach, pendingAttach.uploadedPath) : null;
+    // Os anexos continuam no rascunho com o caminho enviado: devolver só o texto evita citá-los duas vezes.
+    // Um anexo novo, ainda sem upload, não estava no envio recusado.
+    const uploaded = pendingAttachments.filter((a) => a.uploadedPath);
+    const insert = uploaded.length ? attachLine(uploaded) : null;
     const withoutAttachment = insert && submission.text.endsWith(insert)
       ? submission.text.slice(0, -insert.length).replace(/ — $/, '') : submission.text;
     // As citações não voltam ao campo: continuam na bandeja, que só esvazia quando o envio dá certo.
@@ -326,7 +343,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     } catch (e) {
       setDraftIssue(e instanceof Error ? e.message : m.draft_write_error());
     }
-  }, [submission, origin, pendingAttach]);
+  }, [submission, origin, pendingAttachments]);
 
   // null → caminho é a primeira confirmação (Codex iniciando); caminho → outro é sessão recriada.
   useEffect(() => {
@@ -348,7 +365,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
         draftRef.current = null;
         setSubmission(null);
         setRecoverable(kept);
-        setPendingAttach(null);
+        setPendingAttachments([]);
         setText('');
       } else {
         draftRef.current = kept ?? (draftRef.current && { ...draftRef.current, transcript });
@@ -359,28 +376,25 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       setReadBlocked(true);
       setDraftIssue(e instanceof Error ? e.message : m.draft_read_error());
     }
-  }, [transcript, origin]);
+  }, [transcript, origin, setPendingAttachments]);
 
   const handleRecoverDraft = useCallback(() => {
     if (!recoverable) return;
-    if (pendingAttach && recoverable.attachment) {
-      setError(m.composer_draft_recover_attach_busy());
-      return;
-    }
     const next = joinDrafts(textRef.current, recoverable.text);
     // O upload antigo foi para a sessão que morreu: a recriada recebe o arquivo, nunca o caminho.
-    const adopted = !pendingAttach && recoverable.attachment ? withoutUpload(recoverable.attachment) : undefined;
-    if (!persistDraft({ text: next, ...(adopted ? { attachment: adopted } : {}) })) return;
+    const adopted = recoverable.attachments.length
+      ? mergeAttachments(attachmentsRef.current, recoverable.attachments.map(withoutUpload)) : undefined;
+    if (!persistDraft({ text: next, ...(adopted ? { attachments: adopted } : {}) })) return;
     try {
       clearRecoverableDraft(origin.serverId, origin.name);
     } catch (e) {
       setDraftIssue(e instanceof Error ? e.message : m.draft_clear_error());
     }
-    if (adopted) setPendingAttach(adopted);
+    if (adopted) setPendingAttachments(adopted);
     setRecoverable(null);
     setText(next);
     setSelection({ start: next.length, end: next.length });
-  }, [recoverable, persistDraft, origin, pendingAttach]);
+  }, [recoverable, persistDraft, origin, setPendingAttachments]);
 
   const handleDiscardDraft = useCallback(() => {
     try {
@@ -391,9 +405,11 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       setDraftIssue(e instanceof Error ? e.message : m.draft_clear_error());
       return;
     }
-    if (recoverable?.attachment && recoverable.attachment.uri !== pendingAttach?.uri) dropCopy(recoverable.attachment.uri);
+    for (const a of recoverable?.attachments ?? []) {
+      if (!attachmentsRef.current.some((c) => c.uri === a.uri)) dropCopy(a.uri);
+    }
     setRecoverable(null);
-  }, [origin, recoverable, pendingAttach]);
+  }, [origin, recoverable]);
 
   const handleRereadDraft = useCallback(() => {
     const load = loadDraft(origin.serverId, origin.name, transcriptRef.current);
@@ -405,14 +421,14 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     setReadBlocked(false);
     draftRef.current = load.draft;
     setSubmission(load.draft?.submission ?? null);
-    setPendingAttach(load.draft?.attachment ?? null);
+    setPendingAttachments(load.draft?.attachments ?? []);
     setRecoverable(load.recoverable);
     setDictation(load.dictation);
     // O que a pessoa digitou enquanto a leitura falhava fica depois do guardado.
     const next = joinDrafts(load.draft?.text ?? '', typed);
     persistText(next);
     setText(next);
-  }, [origin, persistText]);
+  }, [origin, persistText, setPendingAttachments]);
   const [sending, setSending] = useState(false);
   const sendingRef = useRef(false);
   const [uploading, setUploading] = useState(false);
@@ -442,8 +458,9 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   // Organização desligada na máquina da sessão: todo estilo volta cru, então a barra não oferece versões.
   const organizationOff = useDictationOrganization(styleServer) === 'off';
   const [commandSheetOpen, setCommandSheetOpen] = useState(false);
-  // `/model` e `/effort` abrem a folha do chip da sessão; o número sobe a cada pedido.
-  const [selectorRequest, setSelectorRequest] = useState<{ which: 'model' | 'effort'; n: number } | null>(null);
+  // Comandos e rodapé abrem a mesma folha; o número sobe a cada pedido.
+  const [selectorRequest, setSelectorRequest] = useState<{ which: 'model' | 'effort' | 'mode' | 'account'; n: number } | null>(null);
+  const lastSettingsRequest = useRef<number | null>(null);
   // null = pergunta lateral fechada; string = a pergunta que veio com o `/btw` (pode ser vazia).
   const [sideQuestion, setSideQuestion] = useState<string | null>(null);
   // Só é definido quando o app MOVE o cursor (ditado, undo, draft); o onSelectionChange devolve o
@@ -531,8 +548,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   }, [returned]);
   // Repetir um envio recusado com anexo já enviado gera o mesmo texto: o snapshot não bloqueia.
   const submissionBlocksSend = !!submission
-    && (isSubmitting(serverId, name) || submission.text.trim() !== composeForSend(text, refs, pendingAttach));
-  const hasContent = text.trim().length > 0 || pendingAttach !== null || refs.length > 0;
+    && (isSubmitting(serverId, name) || submission.text.trim() !== composeForSend(text, refs, pendingAttachments));
+  const hasContent = text.trim().length > 0 || pendingAttachments.length > 0 || refs.length > 0;
 
   // A primeira mensagem já pode ter chegado antes de esta tela montar: nunca criar outro eco.
   const sendText = useCallback(async (value: string, revision?: number, explicit = false): Promise<void> => {
@@ -574,7 +591,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
 
   const handleSend = useCallback(async (voiceReady = false) => {
     if (voiceReady && (chat.use.getState().queueEdit || submissionBlocksSend || sendingRef.current || sending || uploading
-      || blockedRef.current || (!textRef.current.trim() && !pendingAttach)
+      || blockedRef.current || (!textRef.current.trim() && !pendingAttachments.length)
       || !activeRef.current || !navigation.isFocused())) {
       setError((current) => current || m.composer_voice_send_cancelled());
       return;
@@ -586,7 +603,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     }
     if (!voiceReady && deferVoiceSendRef.current('send')) return;
     const trimmed = textRef.current.trim();
-    const hasAttach = pendingAttach !== null;
+    const hasAttach = pendingAttachments.length > 0;
     const sentRefs = refsForMessage(refs, trimmed);
     if (!trimmed && !hasAttach && !sentRefs.length) return;
     if (submissionBlocksSend) return;
@@ -613,37 +630,46 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     };
     const body = composeWithContextRefs(sentRefs, trimmed);
     let finalText = body;
-    const attach = pendingAttach;
-    if (attach) {
+    // Remover anexo fica desligado durante o envio; colar no meio dele acrescenta um que espera a próxima vez.
+    const sentAttachments = attachmentsRef.current;
+    if (sentAttachments.length) {
       const target = { serverId: origin.serverId, name: origin.name, transcript: transcriptRef.current };
-      let path = reusableUploadPath(attach, target);
-      if (!path) {
-        const server = useServers.getState().servers.find((s) => s.id === origin.serverId);
-        if (!server) {
-          setError(m.chat_servidor_removido());
-          stop();
-          return;
+      const inserts: string[] = [];
+      setUploading(true);
+      try {
+        for (const attach of sentAttachments) {
+          let path = reusableUploadPath(attach, target);
+          if (!path) {
+            const server = useServers.getState().servers.find((s) => s.id === origin.serverId);
+            if (!server) {
+              setError(m.chat_servidor_removido());
+              stop();
+              return;
+            }
+            try {
+              const blob = await (await fetch(attach.uri)).blob();
+              path = (await uploadFileForServer(server, origin.name, new File([blob], attach.name, { type: attach.mime }))).path;
+            } catch (e) {
+              // O backend diz o motivo (tamanho, formato); o texto e os anexos continuam no rascunho, e
+              // os que já subiram guardam o caminho para não subir de novo.
+              setError(e instanceof Error && e.message ? `${m.board_falha_upload()}: ${e.message}` : m.board_falha_upload());
+              stop();
+              return;
+            }
+            const uploaded = { ...attach, uploadedPath: path, uploadedFor: target };
+            const current = attachmentsRef.current.map((a) => (a.uri === attach.uri ? uploaded : a));
+            if (!persistDraft({ attachments: current })) {
+              stop();
+              return;
+            }
+            setPendingAttachments(current);
+          }
+          inserts.push(attachInsert(attach, path));
         }
-        setUploading(true);
-        try {
-          const blob = await (await fetch(attach.uri)).blob();
-          path = (await uploadFileForServer(server, origin.name, new File([blob], attach.name, { type: attach.mime }))).path;
-        } catch (e) {
-          // O backend diz o motivo (tamanho, formato); o texto e o anexo continuam no rascunho.
-          setError(e instanceof Error && e.message ? `${m.board_falha_upload()}: ${e.message}` : m.board_falha_upload());
-          stop();
-          return;
-        } finally {
-          setUploading(false);
-        }
-        const uploaded = { ...attach, uploadedPath: path, uploadedFor: target };
-        if (!persistDraft({ attachment: uploaded })) {
-          stop();
-          return;
-        }
-        setPendingAttach(uploaded);
+      } finally {
+        setUploading(false);
       }
-      finalText = withAttach(body, attachInsert(attach, path));
+      finalText = withAttach(body, inserts.join(' '));
     }
     if (!finalText.trim()) {
       stop();
@@ -676,9 +702,11 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       }
       removeSentContextRefs(refsKey, sentRefs);
       setBar(null);
-      if (attach && persistDraft({ attachment: null })) {
-        dropCopy(attach.uri);
-        setPendingAttach(null);
+      // Só saem os enviados: colar durante o envio acrescenta um que ainda espera a vez.
+      const rest = attachmentsRef.current.filter((a) => !sentAttachments.some((x) => x.uri === a.uri));
+      if (sentAttachments.length && persistDraft({ attachments: rest })) {
+        for (const a of sentAttachments) dropCopy(a.uri);
+        setPendingAttachments(rest);
         // Outra tela desta conversa aberta durante o envio ainda mostra o anexo: o aviso vem depois da limpeza.
         chat.use.setState((s) => ({ draftUpdate: s.draftUpdate + 1 }));
       }
@@ -692,7 +720,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       setSending(false);
       sendingRef.current = false;
     }
-  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttach, serverId, name, firstInputId, pairPeers, sendToPair, persistText, persistDraft, origin, submissionBlocksSend, isClaude, setBar, queueEdit, navigation, refs, refsKey]);
+  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttachments, setPendingAttachments, serverId, name, firstInputId, pairPeers, sendToPair, persistText, persistDraft, origin, submissionBlocksSend, isClaude, setBar, queueEdit, navigation, refs, refsKey]);
 
   // auto-envio: contagem de 3s
   const iniciarAuto = useCallback(
@@ -801,7 +829,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           if (aviso) setError(aviso);
           if (allowAuto && !voiceSendRef.current && podeEnviarSozinho({
             motivo: voice.motivo, texto: trimmed, aviso: aviso || null,
-            rascunhoAntes: !!voice.before.trim() || !!completed.draft.attachment || !!completed.draft.submission,
+            rascunhoAntes: !!voice.before.trim() || completed.draft.attachments.length > 0 || !!completed.draft.submission,
           })) iniciarAuto(completed.draft.text);
         }
       }
@@ -1148,10 +1176,10 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const canSend = (hasContent || voiceActive) && !micStarting && !waitingVoiceSend && !sending && !uploading && !readBlocked && !submissionBlocksSend;
   const showTextSteer = state === 'working' && (isCodex || (isClaude && headless))
     && (!!text.trim() || voiceActive) && !text.trimStart().startsWith('/') && !editing && !(sendToPair && pairPeers?.length);
-  const canSteerText = showTextSteer && canSend && !pendingAttach;
+  const canSteerText = showTextSteer && canSend && !pendingAttachments.length;
   const handleSteerText = useCallback(async (voiceReady = false) => {
     if ((!voiceReady && !canSteerText) || sendingRef.current || isSubmitting(origin.serverId, origin.name)
-      || micStartingRef.current || pendingAttach || chat.use.getState().queueEdit
+      || micStartingRef.current || attachmentsRef.current.length || chat.use.getState().queueEdit
       || chat.use.getState().stateEvent?.state !== 'working' || !(isCodex || (isClaude && headless))
       || (sendToPair && pairPeers?.length) || !activeRef.current || !navigation.isFocused()) {
       if (voiceReady) setError((current) => current || m.composer_voice_send_cancelled());
@@ -1183,7 +1211,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       sendingRef.current = false;
       setSending(false);
     }
-  }, [canSteerText, origin, chat, persistText, limparUndo, cancelarAuto, setBar, pendingAttach, isCodex, isClaude, headless, sendToPair, pairPeers, voiceActive, navigation]);
+  }, [canSteerText, origin, chat, persistText, limparUndo, cancelarAuto, setBar, isCodex, isClaude, headless, sendToPair, pairPeers, voiceActive, navigation]);
 
   useEffect(() => {
     const intent = voiceSendRef.current;
@@ -1198,7 +1226,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
         || !server || server.baseUrl !== intent.server.baseUrl || server.token !== intent.server.token
         || !latest || latest.transcript !== intent.draft.transcript || transcript !== intent.draft.transcript
         || latest.revision !== intent.draft.revision + (applied ? 1 : 0)
-        || JSON.stringify(latest.attachment) !== JSON.stringify(intent.draft.attachment)
+        || JSON.stringify(latest.attachments) !== JSON.stringify(intent.draft.attachments)
         || (!applied && latest.text !== intent.draft.text)
         || (voice?.id === intent.dictationId && (voice.status === 'failed' || !!voice.issue))) {
         cancelVoiceSend();
@@ -1317,9 +1345,16 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     }
   }, [replaceText, isClaude, origin]);
 
-  const openSelector = useCallback((which: 'model' | 'effort') => {
+  const openSelector = useCallback((which: 'model' | 'effort' | 'mode' | 'account') => {
     setSelectorRequest((cur) => ({ which, n: (cur?.n ?? 0) + 1 }));
   }, []);
+  useEffect(() => {
+    if (!settingsRequest || lastSettingsRequest.current === settingsRequest.n) return;
+    lastSettingsRequest.current = settingsRequest.n;
+    openSelector(settingsRequest.which);
+    // A tela larga o pedido para ele não voltar ao remontar o Composer.
+    onSettingsRequestConsumed?.(settingsRequest.n);
+  }, [settingsRequest, onSettingsRequestConsumed, openSelector]);
 
   // Sugestão tocada: model/effort abrem o seletor; com argumento, destrutivo ou no Codex preenche
   // para revisar; o resto envia direto.
@@ -1364,27 +1399,26 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       setError(e instanceof Error && e.message ? e.message : m.draft_write_error());
       return;
     }
-    if (!persistDraft({ attachment: kept })) {
+    const next = [...attachmentsRef.current, { ...kept, size: picked.size }];
+    if (!persistDraft({ attachments: next })) {
       dropCopy(kept.uri);
       return;
     }
-    if (pendingAttach && pendingAttach.uri !== kept.uri) dropCopy(pendingAttach.uri);
-    setPendingAttach({ ...kept, size: picked.size });
-  }, [persistDraft, pendingAttach]);
+    setPendingAttachments(next);
+  }, [persistDraft, setPendingAttachments]);
 
   const handlePicked = useCallback((picked: PickedAttachment) => {
     setError('');
     void adoptPicked(picked);
   }, [adoptPicked]);
 
-  // Colar imagem ou arquivo no campo vira o anexo, como o paste do PWA. O composer leva um anexo só.
+  // Colar imagens ou arquivos no campo os acrescenta aos anexos, como o paste do PWA.
   const handlePaste = useCallback((files: PastedFile[], erro: string | null) => {
     if (erro) { setError(formataErro(erro) ?? erro); return; }
-    const f = files[0];
-    if (!f) return;
-    const mime = f.type || 'application/octet-stream';
-    handlePicked({ uri: f.uri, name: f.fileName, mime, kind: mime.startsWith('image/') ? 'image' : 'file', size: f.fileSize });
-    if (files.length > 1) setError(m.composer_colou_so_um());
+    for (const f of files) {
+      const mime = f.type || 'application/octet-stream';
+      handlePicked({ uri: f.uri, name: f.fileName, mime, kind: mime.startsWith('image/') ? 'image' : 'file', size: f.fileSize });
+    }
   }, [handlePicked]);
 
   // O menu de segurar do campo no iOS não oferece Colar: o "+" cola pela área de transferência.
@@ -1407,11 +1441,12 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
 
   const router = useRouter();
 
-  const handleRemoveAttach = useCallback(() => {
-    if (!pendingAttach || !persistDraft({ attachment: null })) return;
-    dropCopy(pendingAttach.uri);
-    setPendingAttach(null);
-  }, [pendingAttach, persistDraft]);
+  const handleRemoveAttach = useCallback((uri: string) => {
+    const next = attachmentsRef.current.filter((a) => a.uri !== uri);
+    if (next.length === attachmentsRef.current.length || !persistDraft({ attachments: next })) return;
+    dropCopy(uri);
+    setPendingAttachments(next);
+  }, [persistDraft, setPendingAttachments]);
 
   useEffect(() => {
     return () => {
@@ -1497,9 +1532,15 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           setTimeout(() => { if (!Keyboard.isVisible()) inputRef.current?.focus(); }, 900);
         }} />
 
-        {/* A edição troca só o texto: o anexo do rascunho espera a volta dele. */}
-        {pendingAttach && !editing ? (
-          <AttachmentPreview attachment={pendingAttach} onRemove={handleRemoveAttach} disabled={sending} />
+        {/* A edição troca só o texto: os anexos do rascunho esperam a volta dele. */}
+        {pendingAttachments.length === 1 && !editing ? (
+          <AttachmentPreview attachment={pendingAttachments[0]} onRemove={() => handleRemoveAttach(pendingAttachments[0].uri)} disabled={sending} />
+        ) : pendingAttachments.length > 1 && !editing ? (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.attachStrip}>
+            {pendingAttachments.map((a) => (
+              <AttachmentPreview key={a.uri} attachment={a} onRemove={() => handleRemoveAttach(a.uri)} disabled={sending} style={styles.attachTile} />
+            ))}
+          </ScrollView>
         ) : null}
 
 
@@ -1690,7 +1731,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           </View>
         ) : null}
 
-        {recoverable && !editing ? (
+        {/* Recuperável sem texto nem anexo não tem o que devolver. */}
+        {recoverable && (recoverable.text.trim() || recoverable.attachments.length) && !editing ? (
           <View style={styles.undoRow}>
             <Text style={[styles.hint, styles.recoverText, { color: theme.tokens.text.muted }]} numberOfLines={2}>
               {m.composer_draft_previous({ text: recoverable.text.trim().slice(0, 80) })}
@@ -1727,6 +1769,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           open={attachMenuOpen}
           onClose={() => setAttachMenuOpen(false)}
           onPick={handlePicked}
+          multiple
           onError={setError}
           onPaste={() => { void handleClipboardPaste(); }}
           onSessionAttachments={() => router.push(`/s/${origin.serverId}/${origin.name}/attachments` as never)}
@@ -1853,6 +1896,12 @@ const styles = StyleSheet.create((theme) => ({
   retryText: {
     fontSize: theme.base.text.xs,
     fontWeight: '600',
+  },
+  attachStrip: {
+    gap: theme.base.space[2],
+  },
+  attachTile: {
+    width: 220,
   },
   versionRow: {
     flexDirection: 'row',

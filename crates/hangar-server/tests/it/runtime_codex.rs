@@ -1703,6 +1703,87 @@ fn conversation_terminal_failed_reservation_leaves_the_question_open() {
 }
 
 #[test]
+fn terminal_async_answer_with_direct_delivery_steers_only_the_original_turn() {
+    for switched in [false, true] {
+        let mut engine = subscribed_terminal();
+        let store = identified(&mut engine);
+        line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"active"}}}),13.0);
+        let question = ask_async(&mut engine,"q1","Qual pasta?",13.1);
+        let token = async_token(&engine,&store,&question);
+        let effects = engine.command(command(OperationKind::AnswerQuestions,json!({"request_id":question,
+            "interaction_id":token,"answers":[{"question_id":"answer","kind":"text","value":"A"}],"steer":true})),clock(13.2)).unwrap();
+        let reservation = reservation_of(&effects).unwrap();
+        assert!(frames(&effects).is_empty(),"a resposta precisa ser persistida antes da escrita");
+        engine.settle_async_answer(&reservation.entry_id,true);
+        if switched {
+            line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"active","status":"completed"}}}),13.3);
+            line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"other"}}}),13.4);
+            assert_eq!(engine.ready_async_answer_entry(),None,"outro turno não recebe a orientação antiga");
+            line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"other","status":"completed"}}}),13.5);
+        }
+        assert_eq!(engine.ready_async_answer_entry(),Some(reservation.entry_id.clone()));
+        let frame = frames(&dispatch(&mut engine,&reservation,14.0))[0].clone();
+        assert_eq!(frame["method"],if switched { "turn/start" } else { "turn/steer" });
+        if !switched { assert_eq!(frame["params"]["expectedTurnId"],"active"); }
+        assert_eq!(frame["params"]["input"][0]["text"],"> Qual pasta?\n\nA");
+        assert_eq!(engine.ready_async_answer_entry(),None,"a reserva não pode ser enviada duas vezes");
+        ack(&mut engine,&reservation.operation_id,WriteOutcome::Written,14.1);
+        let result = if switched { json!({"turn":{"id":"next"}}) } else { json!({"turnId":"active"}) };
+        line(&mut engine,json!({"id":frame["id"],"result":result}),14.2);
+        assert!(!engine.async_question_pending(&question),"a aceitação fecha somente a pergunta respondida");
+    }
+}
+
+#[test]
+fn terminal_async_answer_without_direct_delivery_waits_for_the_turn() {
+    let mut engine = subscribed_terminal();
+    let store = identified(&mut engine);
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"active"}}}),13.0);
+    let question = ask_async(&mut engine,"q1","Qual pasta?",13.1);
+    let reservation = reserved(&mut engine,&store,&question,"answer",13.2);
+    assert_eq!(engine.ready_async_answer_entry(),None);
+    assert!(frames(&dispatch(&mut engine,&reservation,13.3)).is_empty());
+}
+
+#[test]
+fn explicitly_refused_async_steering_waits_in_the_same_queue_entry() {
+    let mut engine = subscribed_terminal();
+    let store = identified(&mut engine);
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"active"}}}),13.0);
+    let question = ask_async(&mut engine,"q1","Qual pasta?",13.1);
+    let token = async_token(&engine,&store,&question);
+    let reservation = reservation_of(&engine.command(command(OperationKind::AnswerQuestions,json!({"request_id":question,
+        "interaction_id":token,"answers":[{"question_id":"answer","kind":"text","value":"A"}],"steer":true})),clock(13.2)).unwrap()).unwrap();
+    engine.settle_async_answer(&reservation.entry_id,true);
+    let frame = frames(&dispatch(&mut engine,&reservation,13.3))[0].clone();
+    ack(&mut engine,&reservation.operation_id,WriteOutcome::Written,13.4);
+    let effects = line(&mut engine,json!({"id":frame["id"],"error":{"code":-32600,"message":"no active turn to steer"}}),13.5);
+    assert_eq!(reply_of(&effects,&reservation.operation_id).unwrap().0,Disposition::Deferred);
+    assert_eq!(engine.ready_async_answer_entry(),None);
+    line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"active","status":"completed"}}}),13.6);
+    assert_eq!(engine.ready_async_answer_entry(),Some(reservation.entry_id.clone()));
+    assert_eq!(frames(&dispatch(&mut engine,&reservation,13.7))[0]["method"],"turn/start");
+}
+
+#[test]
+fn late_refusal_never_requeues_an_async_answer_with_unknown_delivery() {
+    let mut engine = subscribed_terminal();
+    let store = identified(&mut engine);
+    line(&mut engine,json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"active"}}}),13.0);
+    let question = ask_async(&mut engine,"q1","Qual pasta?",13.1);
+    let token = async_token(&engine,&store,&question);
+    let reservation = reservation_of(&engine.command(command(OperationKind::AnswerQuestions,json!({"request_id":question,
+        "interaction_id":token,"answers":[{"question_id":"answer","kind":"text","value":"A"}],"steer":true})),clock(13.2)).unwrap()).unwrap();
+    engine.settle_async_answer(&reservation.entry_id,true);
+    let frame = frames(&dispatch(&mut engine,&reservation,13.3))[0].clone();
+    ack(&mut engine,&reservation.operation_id,WriteOutcome::Unknown,13.4);
+    let effects = line(&mut engine,json!({"id":frame["id"],"error":{"code":-32600,"message":"no active turn to steer"}}),13.5);
+    assert_eq!(reply_of(&effects,&reservation.operation_id).unwrap().0,Disposition::Unknown);
+    line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"active","status":"completed"}}}),13.6);
+    assert_eq!(engine.ready_async_answer_entry(),None);
+}
+
+#[test]
 fn conversation_terminal_reservation_with_unknown_persistence_never_goes_out_in_this_life() {
     let mut engine = subscribed_terminal();
     let store = identified(&mut engine);
@@ -1855,7 +1936,7 @@ fn conversation_terminal_reservation_resumes_from_the_persisted_operation() {
     let restored = || Engine::new(json!({"name":"session","thread_id":"thread-1","headless":false,"initialized":true,"connected":true,
         "async_questions":[["async:thread-1:q1:0",question.clone()]],"async_seen":["q1"]}),1,clock(10.0));
     let reservation = ReservedAsyncAnswer { request_id:"async:thread-1:q1:0".into(),interaction_id:"old-life".into(),
-        entry_id:"async-answer:1:3".into(),operation_id:"async-answer:1:3".into(),text:"> Qual pasta?\n\nA".into() };
+        entry_id:"async-answer:1:3".into(),operation_id:"async-answer:1:3".into(),text:"> Qual pasta?\n\nA".into(),steer_turn:None };
     // Fechada antes do envio: a mesma entrada sai na vida nova.
     for (status,written) in [(Status::Prepared,false),(Status::Deferred,true)] {
         let mut engine = restored();
@@ -1895,7 +1976,7 @@ fn conversation_terminal_late_turn_start_of_a_restored_reservation_closes_only_i
     let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":false,"initialized":true,"connected":true,
         "async_questions":[["async:thread-1:q1:0",question]],"async_seen":["q1"]}),1,clock(10.0));
     let reservation = ReservedAsyncAnswer { request_id:"async:thread-1:q1:0".into(),interaction_id:"old".into(),
-        entry_id:"async-answer:1:3".into(),operation_id:"async-answer:1:3".into(),text:"> Qual pasta?\n\nA".into() };
+        entry_id:"async-answer:1:3".into(),operation_id:"async-answer:1:3".into(),text:"> Qual pasta?\n\nA".into(),steer_turn:None };
     engine.restore_async_answer(reservation.clone(),"thread-1",Status::Unknown,true);
     engine.restore_rpc("async-answer:1:3".into(),&json!({"jsonrpc":"2.0","id":"hangar:1:9","method":"turn/start",
         "params":{"threadId":"thread-1","input":[{"type":"text","text":"> Qual pasta?\n\nA"}]}}),0,0);
@@ -2123,7 +2204,7 @@ fn conversation_terminal_relaunch_controls_are_refused_with_a_code() {
         let refused = engine.command(op("op-1",kind,json!({"mode":"Full Access"})),clock(13.0)).err().unwrap();
         assert_eq!(refused.code,TERMINAL_RELAUNCH,"{kind:?}");
     }
-    for kind in [OperationKind::Commands,OperationKind::Cwd,OperationKind::Detach,OperationKind::SteerQueue] {
+    for kind in [OperationKind::Cwd,OperationKind::Detach,OperationKind::SteerQueue] {
         let refused = engine.command(op("op-1",kind,json!({})),clock(13.0)).err().unwrap();
         assert_eq!(refused.code,TERMINAL_UNSUPPORTED,"{kind:?}");
     }

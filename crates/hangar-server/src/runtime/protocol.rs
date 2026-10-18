@@ -5,6 +5,22 @@ use std::path::PathBuf;
 pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 pub const MAX_ENVELOPE: usize = 2 * MAX_FRAME + 1024;
 
+/// Identidade estável do trabalho em andamento; prévias e alterações da fila não a modificam.
+pub fn turn_marker(view: &Value) -> Option<Value> {
+    if view["terminal"] == true {
+        return view["working_revision"].as_u64().filter(|revision| *revision > 0)
+            .map(|revision| serde_json::json!({"working_revision": revision}));
+    }
+    if view["in_progress"] != true { return None; }
+    for key in ["turn_id", "turn_started"] {
+        let value = &view[key];
+        if value.is_number() || value.as_str().is_some_and(|s| !s.is_empty()) {
+            return Some(serde_json::json!({(key): value}));
+        }
+    }
+    None
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClockSample {
@@ -52,13 +68,13 @@ pub enum WriteOutcome { Written, NotWritten, Unknown }
 pub enum OperationKind {
     Input, Steer, SteerQueue, Interrupt, AnswerQuestions, Select, SetModel, SetEffort, SetServiceTier,
     SetPermissionMode, Compact, Clear, ListModels, ListSkills, ReadRateLimits, ReadSettings,
-    SetMode, SkipQuestion, Restart, OpenTerminal, Reload, Commands, Cwd, Detach,
+    SetMode, SkipQuestion, Restart, OpenTerminal, Reload, Cwd, Detach,
     /// Interna: só o ator a cria, a partir da entrada reservada que a fila devolveu.
     DispatchAsyncAnswer,
 }
 
 /// Resposta a uma pergunta assíncrona do Codex com terminal, já formada e guardada na fila como
-/// entrada própria até sair como `turn/start`. `operation_id` é o da operação persistida (igual à entrada).
+/// entrada própria até a entrega. `operation_id` é o da operação persistida (igual à entrada).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReservedAsyncAnswer {
     pub request_id: String,
@@ -66,6 +82,9 @@ pub struct ReservedAsyncAnswer {
     pub entry_id: String,
     pub operation_id: String,
     pub text: String,
+    /// Orientação só vale no turno em que a pessoa respondeu; depois dele, espera um turno novo.
+    #[serde(default)]
+    pub steer_turn: Option<String>,
 }
 
 impl ReservedAsyncAnswer {

@@ -43,6 +43,8 @@ enum ReservationState {
     /// A gravação na fila ainda não voltou.
     Reserving,
     Reserved,
+    /// Orientação recusada explicitamente: a resposta espera um turno novo.
+    Waiting,
     Dispatching,
     /// Pode ter sido escrita: nunca sai de novo.
     Uncertain,
@@ -629,17 +631,28 @@ impl Engine {
     /// Tudo o que segura um turno novo, menos as perguntas assíncronas: a resposta reservada de uma
     /// delas não pode esperar a si mesma.
     fn async_dispatch_ready(&self) -> bool {
-        self.alive && self.sendable() && !self.in_progress && self.server_requests.is_empty() && self.lost_requests.is_empty() && self.skill_preparations.is_empty()
+        !self.in_progress && self.async_transport_ready()
+    }
+
+    fn async_transport_ready(&self) -> bool {
+        self.alive && self.sendable() && self.server_requests.is_empty() && self.lost_requests.is_empty() && self.skill_preparations.is_empty()
             && !self.rpc.values().any(|rpc|matches!(rpc.method.as_str(),"turn/start" | "turn/steer" | "thread/compact/start")
                 || rpc.continuation.as_ref().is_some_and(|next|next["kind"] == "skill_lookup"))
+    }
+
+    fn async_answer_ready(&self, reservation: &ReservedAsyncAnswer) -> bool {
+        self.async_transport_ready() && (!self.in_progress || reservation.steer_turn.as_ref()
+            .is_some_and(|turn| self.turn_id.as_ref() == Some(turn)))
     }
 
     fn async_pending(&self,request_id:&str) -> bool { self.async_questions.pending.iter().any(|(id,_)|id == request_id) }
 
     /// Só a primeira reserva apta, pela ordem da fila; o ator a manda antes da mensagem comum.
     pub fn ready_async_answer_entry(&self) -> Option<String> {
-        if self.headless || !self.async_dispatch_ready() { return None; }
-        self.reservations.iter().find(|r|r.state == ReservationState::Reserved && self.async_pending(&r.reservation.request_id))
+        if self.headless { return None; }
+        self.reservations.iter().find(|r|matches!(r.state, ReservationState::Reserved | ReservationState::Waiting)
+            && (r.state != ReservationState::Waiting || !self.in_progress) && self.async_pending(&r.reservation.request_id)
+            && self.async_answer_ready(&r.reservation))
             .map(|r|r.reservation.entry_id.clone())
     }
 
@@ -877,7 +890,7 @@ impl Engine {
         let reserved = self.reservations.iter().find(|r|r.reservation.operation_id == operation_id).map(|r|r.reservation.clone());
         let continuation = if !self.headless && method == "thread/resume" && subscribe_operation(&operation_id) {
             Some(json!({"kind":"subscribe"}))
-        } else if let Some(reserved) = reserved.filter(|_|!self.headless && method == "turn/start") {
+        } else if let Some(reserved) = reserved.filter(|_|!self.headless && matches!(method,"turn/start" | "turn/steer")) {
             // A resposta tardia ainda fecha a reserva certa, nunca outra pergunta.
             Some(json!({"kind":"async_answer","reserved":true,"request_id":reserved.request_id,"text":reserved.text,"entry_id":reserved.entry_id}))
         } else if method == "thread/settings/update" && frame["params"].get("serviceTier").is_some() {
@@ -1418,7 +1431,7 @@ impl Engine {
                         let answer = response["answers"]["answer"]["answers"][0].as_str().unwrap_or("");
                         let text = format!("> {}\n\n{answer}",question["questions"][0]["question"].as_str().unwrap_or(""));
                         if !self.headless {
-                            // Com terminal a resposta vira entrada reservada na fila: sai quando nada segura um turno novo.
+                            // A fila persiste antes da escrita, inclusive quando a resposta orienta o turno atual.
                             if let Some(existing) = self.reservations.iter().find(|r|r.reservation.request_id == *request) {
                                 if existing.state == ReservationState::Reserving { return Err(error("a resposta anterior ainda está sendo registrada")); }
                                 return Ok(vec![Effect::Reply { operation_id:id,disposition:Disposition::Unknown,payload:existing.reservation.reply_payload() }]);
@@ -1426,7 +1439,8 @@ impl Engine {
                             self.counter += 1;
                             let entry_id = format!("async-answer:{}:{}",self.generation,self.counter);
                             let reservation = ReservedAsyncAnswer { request_id:request.clone(),interaction_id:expected.interaction_id.clone(),
-                                entry_id:entry_id.clone(),operation_id:entry_id,text };
+                                entry_id:entry_id.clone(),operation_id:entry_id,text,
+                                steer_turn: (payload["steer"] == true && self.in_progress).then(||self.turn_id.clone()).flatten() };
                             let command = Self::async_answer_command(&reservation,&self.thread_id,self.generation);
                             self.reservations.push(Reservation { reservation:reservation.clone(),state:ReservationState::Reserving });
                             effects.push(Effect::ReserveAsyncAnswer { operation_id:id,reservation,command });
@@ -1434,8 +1448,12 @@ impl Engine {
                             return Ok(effects);
                         }
                         let next = json!({"kind":"async_answer","request_id":request,"text":text});
-                        let request = ClientRequest::TurnStart(wire::TurnStartParams { thread_id:self.thread_id.clone(),
-                            approval_policy:None,summary:None,input:vec![json!({"type":"text","text":text})] });
+                        let input = vec![json!({"type":"text","text":text})];
+                        let request = if payload["steer"] == true && self.in_progress {
+                            let turn = self.turn_id.clone().ok_or_else(||error("não foi possível confirmar o turno da resposta"))?;
+                            ClientRequest::TurnSteer(wire::TurnSteerParams { thread_id:self.thread_id.clone(),expected_turn_id:turn,input })
+                        } else { ClientRequest::TurnStart(wire::TurnStartParams { thread_id:self.thread_id.clone(),
+                            approval_policy:None,summary:None,input }) };
                         self.send(id.clone(),request,Some(next),&mut effects);
                         self.wires.get_mut(&id).unwrap().interaction = Some(expected);
                         self.changed(&mut effects,true);
@@ -1477,20 +1495,26 @@ impl Engine {
                 if self.headless { return Err(error("operação interna do Codex com terminal")); }
                 let supplied:ReservedAsyncAnswer = serde_json::from_value(payload.clone()).map_err(|_|error("reserva de resposta inválida"))?;
                 let found = self.reservations.iter().position(|r|r.reservation == supplied);
-                let usable = found.filter(|&index|self.reservations[index].state == ReservationState::Reserved && id == supplied.operation_id
+                let usable = found.filter(|&index|matches!(self.reservations[index].state,ReservationState::Reserved | ReservationState::Waiting) && id == supplied.operation_id
                     && payload["thread_id"] == self.thread_id.as_str() && payload["generation"].as_u64() == Some(self.generation)
                     && self.async_pending(&supplied.request_id));
                 let Some(_) = usable else {
                     // Pergunta encerrada, outra conversa ou reserva desconhecida: a entrada sai da fila sem turno.
-                    if let Some(index) = found.filter(|&index|self.reservations[index].state == ReservationState::Reserved) { self.reservations.remove(index); }
+                    if let Some(index) = found.filter(|&index|matches!(self.reservations[index].state,ReservationState::Reserved | ReservationState::Waiting)) { self.reservations.remove(index); }
                     return Ok(vec![Effect::Reply { operation_id:id,disposition:Disposition::Rejected,
                         payload:json!({"error":"a pergunta já foi respondida ou pertence a outra conversa","reservation":"invalid"}) }]);
                 };
-                if !self.async_dispatch_ready() { return Ok(vec![Effect::Reply { operation_id:id,disposition:Disposition::Deferred,payload:json!({}) }]); }
+                if !self.async_answer_ready(&supplied) || self.in_progress && found.is_some_and(|index|self.reservations[index].state == ReservationState::Waiting) {
+                    return Ok(vec![Effect::Reply { operation_id:id,disposition:Disposition::Deferred,payload:json!({}) }]);
+                }
                 self.set_reservation(&supplied.entry_id,ReservationState::Dispatching);
                 let next = json!({"kind":"async_answer","reserved":true,"request_id":supplied.request_id,"text":supplied.text,"entry_id":supplied.entry_id});
-                let request = ClientRequest::TurnStart(wire::TurnStartParams { thread_id:self.thread_id.clone(),
-                    approval_policy:None,summary:None,input:vec![json!({"type":"text","text":supplied.text})] });
+                let input = vec![json!({"type":"text","text":supplied.text})];
+                let request = if self.in_progress {
+                    ClientRequest::TurnSteer(wire::TurnSteerParams { thread_id:self.thread_id.clone(),
+                        expected_turn_id:supplied.steer_turn.clone().unwrap(),input })
+                } else { ClientRequest::TurnStart(wire::TurnStartParams { thread_id:self.thread_id.clone(),
+                    approval_policy:None,summary:None,input }) };
                 self.send(id,request,Some(next),&mut effects);
             }
             OperationKind::SetPermissionMode => {
@@ -1740,7 +1764,22 @@ impl Engine {
                     rpc.params["processId"].as_str().unwrap_or("?"),line["error"]["message"].as_str().unwrap_or("erro do Codex"));
                 self.policy("local_output",json!({"text":text}),effects);
             }
-            // Turno recusado pelo Codex: a reserva acaba e a pergunta continua aberta para outra resposta.
+            // Recusa explícita comprova que a orientação não entrou. A mesma entrada espera o fim do turno.
+            let inactive_steer = line["error"]["message"].as_str().is_some_and(|message|
+                message == "no active turn to steer" || message.starts_with("expected active turn id `"));
+            if rpc.method == "turn/steer" && inactive_steer && let Some(entry) = reserved_entry(&rpc) {
+                if rpc.timed_out || !self.reservations.iter().any(|r|r.reservation.entry_id == entry && r.state == ReservationState::Dispatching) {
+                    effects.push(Effect::Reply { operation_id:rpc.operation_id,disposition:Disposition::Unknown,payload:json!({"error":line["error"]}) });
+                    self.changed(effects,false);
+                    return Ok(());
+                }
+                self.set_reservation(&entry,ReservationState::Waiting);
+                effects.push(Effect::Reply { operation_id:rpc.operation_id,disposition:Disposition::Deferred,payload:json!({"error":line["error"]}) });
+                if !self.in_progress { effects.push(Effect::WakeQueue); }
+                self.changed(effects,false);
+                return Ok(());
+            }
+            // Outra recusa do Codex: a reserva acaba e a pergunta continua aberta para outra resposta.
             if let Some(entry) = reserved_entry(&rpc) { self.reservations.retain(|r|r.reservation.entry_id != entry); }
             let message = line["error"]["message"].as_str().unwrap_or("");
             if self.bootstrap_fallback(&rpc,message,effects) { return Ok(()); }
@@ -1847,6 +1886,10 @@ impl Engine {
                     self.turn_id = Some(response.turn.id).filter(|id|!id.is_empty()); self.in_progress = true; self.state_revision += 1;
                     if !self.headless { self.in_progress_since = Some(self.clock.monotonic_s); }
                 }
+            }
+            "turn/steer" => {
+                if let Some(entry) = reserved_entry(&rpc) { self.finish_reservation(&entry); }
+                if self.ready_async_answer_entry().is_some() { effects.push(Effect::WakeQueue); }
             }
             "thread/compact/start" => {
                 if rpc.state_revision == self.state_revision { self.in_progress = true; self.compacting = true; self.state_revision += 1; }

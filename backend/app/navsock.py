@@ -325,7 +325,6 @@ async def _print_avulso(cdp: _Cdp, ws: WebSocket, estado: dict) -> None:
 # ── handler ────────────────────────────────────────────────────────────────────
 
 async def _autorizado(ws: WebSocket) -> bool:
-    from app import termsock                      # mesma porta de entrada do painel de terminal
     host = ws.client.host if ws.client else ""
     agora = time.time()
     if _blocked(host, agora):
@@ -341,14 +340,7 @@ async def _autorizado(ws: WebSocket) -> bool:
             _record_fail(host, agora)
         await ws.close(code=1008)
         return False
-    origem = ws.headers.get("origin")
-    if origem and not termsock._origem_aceita(origem, ws.headers.get("host")):
-        _log.warning("navsock: origem %r recusada", origem)
-        # Com motivo, ao contrário do token: origem recusada é CONFIGURAÇÃO (o app servido de outro
-        # endereço, que se declara em CP_TERM_ORIGINS), não credencial errada — e sem essa frase ela
-        # chega na tela como "conexão caiu", igual a cabo solto.
-        await ws.close(code=1008, reason="origem nao autorizada (CP_TERM_ORIGINS)")
-        return False
+    # Sem Origin: ela barra credencial ambiente, e página estranha não tem o `?token=`.
     return True
 
 

@@ -140,6 +140,19 @@ def _already_there(target: Path, sha: str) -> bool:
         return False                 # ilegível: baixa de novo em vez de dar o binário por bom
 
 
+def stale(release: tuple | None) -> bool:
+    """O binário instalado aqui não é o publicado para este sistema na release lida."""
+    plat = platform_key()
+    manifest = release[2] if release else None
+    if plat is None or not isinstance(manifest, dict) or not has_build(manifest, plat):
+        return False
+    ext = ".exe" if plat.startswith("windows") else ""
+    files = manifest["files"]
+    # Manifesto sem sha não prova nada: oferecer a troca que o download não consegue fazer prenderia a tela.
+    return any(isinstance(sha := files[f"{plat}/{name}"].get("sha256"), str)
+               and not _already_there(bin_dir() / f"{name}{ext}", sha.lower()) for name in NAMES)
+
+
 def _free(path: Path) -> bool:
     try:
         os.lstat(path)

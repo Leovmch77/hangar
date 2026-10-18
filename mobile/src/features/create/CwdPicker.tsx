@@ -4,6 +4,8 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { getRootsForServer, relativeTime, scanDirForServer } from '@hangar/core';
 import type { FsRoot, FsEntry, FsScanError, Server } from '@hangar/core';
 import { readProject } from '../../stores/createPreferences';
+import { loadErrorText } from './loadError';
+import { useCanceledLoadRetry } from './useCanceledLoadRetry';
 import { Icon } from '../../ui/Icon';
 import { useSettingsColors } from '../config/colors';
 import { TextTabs } from '../usage/HomeUsageCard';
@@ -65,11 +67,14 @@ export function CwdPicker({
   const [searchFocused, setSearchFocused] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualPath, setManualPath] = useState('');
-  const scanController = useRef<AbortController | null>(null);
   const selectedAtOpen = useRef(selected);
+  const initialScanIndex = useRef(0);
+  const startRootsRetry = useCanceledLoadRetry(useCallback(() => setRootsTry((n) => n + 1), []));
+  const startScanRetry = useCanceledLoadRetry(useCallback(() => setScanTry((n) => n + 1), []));
 
   useEffect(() => {
     const controller = new AbortController();
+    const retry = startRootsRetry();
     setRootsLoading(true);
     setRootsError('');
     setScanError(null);
@@ -86,15 +91,37 @@ export function CwdPicker({
         setPath(current && current !== root.path && current.startsWith(root.path) ? parentOf(current) : root.path);
         return;
       }
-      if (saved && !r.some((root) => root.path === saved.root)) {
+    })().catch((cause: unknown) => {
+      if (controller.signal.aborted) return;
+      setRootsError(loadErrorText(cause, m.arquivo_carregar_raizes_erro()));
+      retry.failed(cause);
+    }).finally(() => {
+      if (!controller.signal.aborted) setRootsLoading(false);
+    });
+    return () => { retry.cancel(); controller.abort(); };
+  }, [server, autoSelect, rootsTry, startRootsRetry]);
+
+  useEffect(() => { initialScanIndex.current = 0; }, [server, roots, autoSelect]);
+
+  useEffect(() => {
+    if (rootsLoading || rootsError || !roots.length || !autoSelect) return;
+    const controller = new AbortController();
+    const retry = startScanRetry();
+    setScanError(null);
+    setScanFailed(false);
+    void (async () => {
+      const saved = readProject(server.id);
+      if (saved && !roots.some((root) => root.path === saved.root)) {
         setScanError(m.criar_projeto_indisponivel());
         return;
       }
-      for (const root of saved ? r.filter((root) => root.path === saved.root) : r) {
+      const candidates = saved ? roots.filter((root) => root.path === saved.root) : roots;
+      for (const root of candidates.slice(initialScanIndex.current)) {
         const cwd = saved?.cwd ?? root.path;
         const result = await scanDirForServer(server, root.path, cwd, controller.signal);
         if (controller.signal.aborted) return;
         if (result.error) {
+          initialScanIndex.current++;
           setScanError(saved ? `${m.criar_projeto_indisponivel()} ${scanMessage(result.error)}` : scanMessage(result.error));
           continue;
         }
@@ -102,39 +129,37 @@ export function CwdPicker({
         return;
       }
     })().catch((cause: unknown) => {
-      if (!controller.signal.aborted) setRootsError(cause instanceof Error ? cause.message : m.arquivo_carregar_raizes_erro());
-    }).finally(() => {
-      if (!controller.signal.aborted) setRootsLoading(false);
+      if (controller.signal.aborted) return;
+      setScanError(loadErrorText(cause, m.arquivo_ler_falhou()));
+      setScanFailed(true);
+      retry.failed(cause);
     });
-    return () => { controller.abort(); scanController.current?.abort(); };
-  }, [server, onPick, autoSelect, rootsTry]);
+    return () => { retry.cancel(); controller.abort(); };
+  }, [server, onPick, autoSelect, roots, rootsLoading, rootsError, scanTry, startScanRetry]);
 
-  const doScan = useCallback(async (rootPath: string, target: string) => {
-    scanController.current?.abort();
+  useEffect(() => {
+    if (rootsLoading || !activeRoot) return;
     const controller = new AbortController();
-    scanController.current = controller;
+    const retry = startScanRetry();
     setScanning(true);
     setScanError(null);
     setScanFailed(false);
-    try {
-      const res = await scanDirForServer(server, rootPath, target, controller.signal);
-      if (controller.signal.aborted) return;
-      setEntries(res.error ? [] : res.entries);
-      if (res.error) setScanError(scanMessage(res.error));
-    } catch (e) {
-      if (controller.signal.aborted) return;
-      setScanError(e instanceof Error ? e.message : m.arquivo_ler_falhou());
-      setScanFailed(true);
-      setEntries([]);
-    } finally {
-      if (!controller.signal.aborted) setScanning(false);
-    }
-  }, [server]);
-
-  useEffect(() => {
-    if (!rootsLoading && activeRoot) void doScan(activeRoot.path, path || activeRoot.path);
-    return () => scanController.current?.abort();
-  }, [activeRoot, path, doScan, rootsLoading, scanTry]);
+    void scanDirForServer(server, activeRoot.path, path || activeRoot.path, controller.signal)
+      .then((res) => {
+        if (controller.signal.aborted) return;
+        setEntries(res.error ? [] : res.entries);
+        if (res.error) setScanError(scanMessage(res.error));
+      })
+      .catch((e: unknown) => {
+        if (controller.signal.aborted) return;
+        setScanError(loadErrorText(e, m.arquivo_ler_falhou()));
+        setScanFailed(true);
+        setEntries([]);
+        retry.failed(e);
+      })
+      .finally(() => { if (!controller.signal.aborted) setScanning(false); });
+    return () => { retry.cancel(); controller.abort(); };
+  }, [activeRoot, path, server, rootsLoading, scanTry, startScanRetry]);
 
   // Raiz escolhida já é a pasta, como no menu do PC; o painel continua aberto para descer nela.
   const selectRoot = (r: FsRoot) => {
@@ -185,7 +210,10 @@ export function CwdPicker({
     const manualValid = !!manualPath.trim();
 
     const cRows = !activeRoot ? (
-      scanError ? note(scanError, true) : null
+      scanError ? <View style={styles.cState}>
+        {note(scanError, true)}
+        {scanFailed ? textRetry(() => setScanTry((n) => n + 1)) : null}
+      </View> : null
     ) : scanning ? (
       <View style={styles.cSkeletons}>
         {[120, 168, 96].map((w) => <View key={w} style={[styles.cSkeleton, { width: w, backgroundColor: c.border }]} />)}
@@ -357,7 +385,10 @@ export function CwdPicker({
   );
 
   const rows = !activeRoot ? (
-    scanError ? <Text style={styles.muted} accessibilityRole="alert">{scanError}</Text> : null
+    scanError ? <View style={styles.state}>
+      <Text style={styles.muted} accessibilityRole="alert">{scanError}</Text>
+      {scanFailed ? retry(() => setScanTry((n) => n + 1)) : null}
+    </View> : null
   ) : scanning ? (
     // Cinco linhas de esqueleto: nome e detalhe, como o render_rows do PC.
     <View style={styles.skeletonList}>
@@ -493,8 +524,8 @@ export function CwdPicker({
 const styles = StyleSheet.create((theme) => ({
   container: { flex: 1, gap: 12 },
   state: { gap: 8, alignItems: 'flex-start', paddingVertical: 8 },
-  muted: { fontSize: 14, color: theme.tokens.text.muted, paddingVertical: 8 },
-  error: { fontSize: 13.5, color: theme.tokens.status.error },
+  muted: { fontSize: theme.base.text.xs, color: theme.tokens.text.muted, paddingVertical: 8 },
+  error: { fontSize: theme.base.text.xs, color: theme.tokens.status.error },
   chipsScroll: { flexGrow: 0, flexShrink: 0 },
   chips: { flexDirection: 'row', gap: 8 },
   chip: {
@@ -506,7 +537,7 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: 'center',
   },
   chipOn: { backgroundColor: theme.tokens.accent.dim, borderColor: theme.tokens.accent.base },
-  chipTxt: { fontSize: 14, color: theme.tokens.text.primary },
+  chipTxt: { fontSize: theme.base.text.xs, color: theme.tokens.text.primary },
   chipTxtOn: { fontWeight: '500' },
   skeleton: { borderRadius: 6, backgroundColor: theme.tokens.border.default },
   skeletonSoft: { opacity: 0.6 },
@@ -525,10 +556,10 @@ const styles = StyleSheet.create((theme) => ({
   },
   searchOn: { borderColor: theme.tokens.accent.base },
   // 16 no campo: abaixo disso o iOS dá zoom ao focar.
-  searchInput: { flex: 1, height: '100%', color: theme.tokens.text.primary, fontSize: 16, paddingVertical: 0 },
+  searchInput: { flex: 1, height: '100%', color: theme.tokens.text.primary, fontSize: theme.base.text.sm, paddingVertical: 0 },
   crumbs: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   crumb: { minHeight: 32, paddingHorizontal: 8, borderRadius: 6, justifyContent: 'center' },
-  crumbTxt: { fontSize: 14, color: theme.tokens.text.primary },
+  crumbTxt: { fontSize: theme.base.text.xs, color: theme.tokens.text.primary },
   rows: { flex: 1, minHeight: 96 },
   list: { flex: 1 },
   rowWrap: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingBottom: 2 },
@@ -546,12 +577,12 @@ const styles = StyleSheet.create((theme) => ({
   },
   rowOn: { backgroundColor: theme.tokens.accent.dim, borderColor: theme.tokens.accent.base },
   rowPressed: { backgroundColor: theme.tokens.border.subtle },
-  rowName: { fontSize: 15, fontWeight: '600', color: theme.tokens.text.primary },
+  rowName: { fontSize: theme.base.text.sm, fontWeight: '600', color: theme.tokens.text.primary },
   meta: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  rowPath: { flex: 1, minWidth: 0, fontFamily: theme.base.fontMono, fontSize: 12, color: theme.tokens.text.muted },
+  rowPath: { flex: 1, minWidth: 0, fontFamily: theme.base.fontMono, fontSize: theme.base.text.xxs, color: theme.tokens.text.muted },
   badge: {
     fontFamily: theme.base.fontMono,
-    fontSize: 11.5,
+    fontSize: theme.base.text.xxxs,
     color: theme.tokens.text.muted,
     paddingHorizontal: 6,
     borderRadius: 4,
@@ -559,7 +590,7 @@ const styles = StyleSheet.create((theme) => ({
     borderColor: theme.tokens.border.default,
     overflow: 'hidden',
   },
-  when: { flexShrink: 0, fontSize: 12, color: theme.tokens.text.muted, opacity: 0.8 },
+  when: { flexShrink: 0, fontSize: theme.base.text.xxs, color: theme.tokens.text.muted, opacity: 0.8 },
   drill: { width: 40, height: 44, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
   footer: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   outline: {
@@ -570,9 +601,9 @@ const styles = StyleSheet.create((theme) => ({
     borderColor: theme.tokens.border.default,
     justifyContent: 'center',
   },
-  outlineTxt: { fontSize: 14, fontWeight: '500', color: theme.tokens.text.primary },
+  outlineTxt: { fontSize: theme.base.text.xs, fontWeight: '500', color: theme.tokens.text.primary },
   ghost: { minHeight: 36, paddingHorizontal: 10, borderRadius: 8, flexDirection: 'row', alignItems: 'center', gap: 6 },
-  ghostTxt: { fontSize: 14, color: theme.tokens.text.secondary },
+  ghostTxt: { fontSize: theme.base.text.xs, color: theme.tokens.text.secondary },
   manual: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   manualInput: {
     flex: 1,
@@ -583,34 +614,34 @@ const styles = StyleSheet.create((theme) => ({
     borderColor: theme.tokens.border.default,
     color: theme.tokens.text.primary,
     fontFamily: theme.base.fontMono,
-    fontSize: 16,
+    fontSize: theme.base.text.sm,
   },
   disabled: { opacity: 0.5 },
   // Modo compacto: menu do iPhone com as cores do Hangar; sem flex:1 para o painel encolher ao conteúdo.
   cContainer: { flexShrink: 1, gap: 8 },
   cState: { gap: 4, alignItems: 'flex-start', paddingVertical: 4 },
-  cNote: { fontSize: 14, paddingVertical: 6 },
+  cNote: { fontSize: theme.base.text.xs, paddingVertical: 6 },
   cTextBtn: { height: 32, justifyContent: 'center', paddingHorizontal: 4 },
-  cTextBtnTxt: { fontSize: 14.5, fontWeight: '500' },
+  cTextBtnTxt: { fontSize: theme.base.text.sm, fontWeight: '500' },
   cTabsRow: { flexDirection: 'row', gap: 6 },
   cTabSkeleton: { height: 28, borderRadius: 6 },
   cSearch: { height: 36, borderRadius: 10, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10 },
   cPathRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: -2 },
   cBack: { width: 24, height: 24, borderRadius: 6, alignItems: 'center', justifyContent: 'center' },
-  cPath: { flex: 1, minWidth: 0, fontSize: 13 },
+  cPath: { flex: 1, minWidth: 0, fontSize: theme.base.text.xs },
   cRows: { flexShrink: 1 },
   cList: { flexGrow: 0, flexShrink: 1 },
   cSkeletons: { gap: 18, paddingVertical: 12, paddingLeft: 8 },
   cSkeleton: { height: 8, borderRadius: 4 },
   cRowWrap: { flexDirection: 'row', alignItems: 'center', borderRadius: 8 },
   cRow: { flex: 1, minWidth: 0, height: 44, flexDirection: 'row', alignItems: 'center', gap: 10, paddingLeft: 8, borderRadius: 8 },
-  cName: { flexShrink: 1, fontSize: 15, fontWeight: '500' },
-  cWhen: { marginLeft: 'auto', paddingLeft: 8, fontSize: 13, fontVariant: ['tabular-nums'] },
+  cName: { flexShrink: 1, fontSize: theme.base.text.sm, fontWeight: '500' },
+  cWhen: { marginLeft: 'auto', paddingLeft: 8, fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
   cDrill: { width: 40, height: 44, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
   // Recuo até o texto: 8 de margem + ícone 16 + gap 10.
   cSep: { height: StyleSheet.hairlineWidth, marginLeft: 34 },
   cFooter: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingTop: 2 },
   cPill: { height: 32, paddingHorizontal: 14, borderRadius: 9999, borderWidth: 1, justifyContent: 'center' },
-  cPillTxt: { fontSize: 14.5, fontWeight: '500' },
-  cManualInput: { flex: 1, fontFamily: theme.base.fontMono, fontSize: 16 },
+  cPillTxt: { fontSize: theme.base.text.sm, fontWeight: '500' },
+  cManualInput: { flex: 1, fontFamily: theme.base.fontMono, fontSize: theme.base.text.sm },
 }));

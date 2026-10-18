@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
-  import { basename, createSession, defaultBase, pickFolderRoot, providerName, type Provider, type SessionOpeningExtras, type WorktreeChoice } from '@hangar/core';
+  import { flushSync, onMount, untrack } from 'svelte';
+  import { basename, createSession, defaultBase, pickFolderRoot, providerName, type AggSession, type Provider, type SessionOpeningExtras, type WorktreeChoice } from '@hangar/core';
   import HomeUsage from '../components/HomeUsage.svelte';
   import FolderGitPill from '../components/FolderGitPill.svelte';
   import BottomSheet from '../components/BottomSheet.svelte';
@@ -15,6 +15,10 @@
   import NewChatComposer from '../components/newchat/NewChatComposer.svelte';
   import NewChatAttach from '../components/newchat/NewChatAttach.svelte';
   import NewChatMic from '../components/newchat/NewChatMic.svelte';
+  import HomeSessions from '../components/HomeSessions.svelte';
+  import { sessionsStore } from '../lib/sessionsStore.svelte';
+  import { homeSessionsView } from '../lib/homeSessions';
+  import { homeScreen, type HomeScreen } from '../lib/homeScreen.svelte';
   import { quotaFeed } from '../lib/quotaFeed.svelte';
   import { faixaDeCota } from '../lib/cota';
   import { createNewChatDraft } from '../lib/newChatDraft.svelte';
@@ -23,9 +27,108 @@
   import { keyboardInset } from '../lib/keyboardInset';
   import * as m from '../paraglide/messages';
 
-  // Tela inicial do celular: nova conversa no desenho do nativo (`render_new_chat`). Máquina e pasta
-  // acima do compositor, modelo dentro, conta e branch abaixo, e o aviso embaixo de tudo.
-  let { onOpenList }: { onOpenList: () => void } = $props();
+  // Tela inicial do celular: lista das sessões abertas com a faixa "Nova conversa…" embaixo; a faixa
+  // cresce até a nova conversa no desenho do nativo (`render_new_chat`), na mesma tela.
+  let { onOpenList, onOpenChat }: { onOpenList: () => void; onOpenChat: (name: string) => void } = $props();
+
+  let freezeList = () => {};
+  function openHomeChat(name: string) {
+    freezeList();
+    onOpenChat(name);
+  }
+  function rememberList(el: HTMLDivElement, _rows: AggSession[]) {
+    let restoreTarget = homeSessionsView.scrollTop;
+    let leaving = false;
+    let frame = 0;
+    let thaw: ReturnType<typeof setTimeout> | undefined;
+    const restore = () => {
+      cancelAnimationFrame(frame);
+      if (restoreTarget <= 0 || leaving) return;
+      el.style.overflowAnchor = 'none';
+      // Cada onda tenta de novo depois do layout, sem perder o alvo quando ainda não cabe.
+      frame = requestAnimationFrame(() => {
+        if (restoreTarget <= 0 || leaving || !el.isConnected) return;
+        el.scrollTop = restoreTarget;
+        if (restoreTarget - el.scrollTop <= 1) { restoreTarget = 0; el.style.overflowAnchor = ''; }
+      });
+    };
+    const save = () => {
+      if (leaving || restoreTarget > 0) return;
+      homeSessionsView.scrollTop = el.scrollTop;
+    };
+    const stopRestoring = (event: Event) => {
+      if (event instanceof KeyboardEvent && !['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) return;
+      restoreTarget = 0;
+      el.style.overflowAnchor = '';
+      save();
+    };
+    freezeList = () => {
+      save();
+      // O teardown pode emitir scroll(0) antes de desmontar a tela.
+      leaving = true;
+      clearTimeout(thaw);
+      thaw = setTimeout(() => { leaving = false; restore(); }, 1000);
+    };
+    const gestures = ['wheel', 'touchmove', 'keydown'];
+    el.addEventListener('scroll', save);
+    for (const event of gestures) el.addEventListener(event, stopRestoring, { passive: true });
+    restore();
+    return {
+      update: restore,
+      destroy() {
+        cancelAnimationFrame(frame); clearTimeout(thaw);
+        el.removeEventListener('scroll', save);
+        for (const event of gestures) el.removeEventListener(event, stopRestoring);
+      },
+    };
+  }
+
+  // A entrada do histórico marca a nova conversa aberta: Voltar do navegador fecha antes de sair.
+  const COMPOSE = 'cpHomeCompose';
+  let mode = $state<HomeScreen>(history.state?.[COMPOSE] ? 'newConversation' : homeScreen.pref);
+  const collapsed = $derived(mode === 'sessions');
+  let dockEl = $state<HTMLElement>();
+  let dockHeight = $state(0);
+  let launcherHeight = $state(0);
+  // Altura só anima na troca de modo; crescer o campo ao digitar acompanha na hora.
+  let animating = $state(false);
+  let lastMode = untrack(() => mode);
+  // `pre`: antes de o dock ficar `inert`, quando o clique no microfone ainda vale.
+  $effect.pre(() => {
+    if (mode === lastMode) return;
+    lastMode = mode;
+    if (mode === 'sessions') {
+      // Gravando, a lista não esconde o microfone ligado: parar transcreve para o campo.
+      untrack(() => dockEl)?.querySelector<HTMLButtonElement>('.mic[aria-pressed="true"]')?.click();
+      if (untrack(() => dockEl)?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
+    }
+    animating = true;
+    const t = setTimeout(() => (animating = false), 340);
+    return () => clearTimeout(t);
+  });
+  const openCount = $derived(sessionsStore.rows.filter((r) => r.state !== 'dead' && !r.outside).length);
+
+  function markCompose() {
+    if (!history.state?.[COMPOSE]) history.pushState({ ...history.state, [COMPOSE]: 1 }, '', location.href);
+  }
+  onMount(() => {
+    if (mode === 'newConversation') markCompose();
+    const onPop = () => { mode = history.state?.[COMPOSE] ? 'newConversation' : 'sessions'; };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  });
+
+  // Síncrono dentro do toque: o iOS só abre o teclado (e o microfone) no mesmo gesto.
+  function openCompose(target: 'field' | 'mic') {
+    flushSync(() => { mode = 'newConversation'; });
+    markCompose();
+    if (target === 'field') dockEl?.querySelector('textarea')?.focus();
+    else dockEl?.querySelector<HTMLButtonElement>('.mic:not([aria-pressed="true"])')?.click();
+  }
+  function showSessions() {
+    if (history.state?.[COMPOSE]) history.back();
+    else mode = 'sessions';
+  }
 
   const draft = createNewChatDraft();
   draft.init();
@@ -86,11 +189,19 @@
   }
 </script>
 
-<div class="home" use:keyboardInset>
+<div class="home" class:collapsed use:keyboardInset>
   <header class="top">
-    <button type="button" class="icon-btn" aria-label={m.newchat_abrir_lista()} onclick={onOpenList}>
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-        stroke-linecap="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7" /><line x1="4" y1="12" x2="20" y2="12" /><line x1="4" y1="17" x2="14" y2="17" /></svg>
+    <button type="button" class="sessions-btn" aria-label={collapsed ? m.newchat_abrir_lista() : m.native_sessions()}
+      onclick={collapsed ? onOpenList : showSessions}>
+      {#if collapsed}
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7" /><line x1="4" y1="12" x2="20" y2="12" /><line x1="4" y1="17" x2="14" y2="17" /></svg>
+      {:else}
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6" /></svg>
+      {/if}
+      <span class="sessions-label">{m.native_sessions()}</span>
+      <span class="badge">{openCount}</span>
     </button>
     <button type="button" class="icon-btn" aria-label={m.native_settings()} onclick={() => abrirConfig('root', null)}>
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -107,12 +218,32 @@
       <button type="button" class="link" onclick={() => abrirConfig('root', null)}>{m.native_settings()}</button>
     </div>
   {:else}
-    <div class="greeting">
-      {#if draft.serverObj}<HomeUsage server={draft.serverObj} />{/if}
-      <h1>{m.native_new_chat_title()}</h1>
+    <div class="middle">
+      <div class="layer list-layer" inert={!collapsed} use:rememberList={sessionsStore.rows}>
+        <HomeSessions onOpenChat={openHomeChat} />
+      </div>
+      <div class="layer greeting" inert={collapsed}>
+        {#if draft.serverObj}<HomeUsage server={draft.serverObj} />{/if}
+        <h1>{m.native_new_chat_title()}</h1>
+      </div>
     </div>
 
-    <div class="dock">
+    <div class="bottom" class:animating style:height={dockHeight ? `${collapsed ? launcherHeight : dockHeight}px` : undefined}>
+    <div class="launcher" inert={!collapsed} bind:clientHeight={launcherHeight}>
+      <button type="button" class="launcher-text" onclick={() => openCompose('field')}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" /></svg>
+        <span>{m.home_new_conversation()}</span>
+      </button>
+      <button type="button" class="launcher-mic" aria-label={m.newchat_mic()} disabled={!draft.serverObj || draft.sending}
+        onclick={() => openCompose('mic')}>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10v1a7 7 0 0 0 14 0v-1" /><line x1="12" y1="18" x2="12" y2="22" />
+        </svg>
+      </button>
+    </div>
+
+    <div class="dock" bind:this={dockEl} bind:clientHeight={dockHeight} inert={collapsed}>
       <div class="top-pills">
         {#if draft.servers.length > 1}
           <QuietPill label={machineLabel} ariaLabel={m.native_new_chat_machine()} disabled={draft.sending}
@@ -169,6 +300,7 @@
           </div>
         {/snippet}
       </NewChatComposer>
+    </div>
     </div>
   {/if}
 </div>
@@ -281,7 +413,43 @@
     border: 0; border-radius: var(--radius-full); background: transparent; color: var(--text-secondary); cursor: pointer;
   }
   .icon-btn:active { background: var(--fill-subtle); }
-  .greeting { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .middle { flex: 1; min-height: 0; position: relative; }
+  .layer {
+    position: absolute; inset: 0; transition: opacity 320ms var(--ease-out), transform 320ms var(--ease-out);
+  }
+  .list-layer { overflow-y: auto; margin: 0 calc(-1 * var(--space-3)); opacity: 0; transform: translateY(-60px); }
+  .collapsed .list-layer { opacity: 1; transform: none; }
+  .greeting { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .collapsed .greeting { opacity: 0; transform: translateY(40px); }
+  .bottom { position: relative; overflow: hidden; flex-shrink: 0; }
+  .bottom.animating { transition: height 320ms var(--ease-out); }
+  .launcher, .dock { position: absolute; left: 0; right: 0; bottom: 0; transition: opacity 320ms var(--ease-out), transform 320ms var(--ease-out); }
+  .launcher {
+    display: flex; align-items: center; min-height: 54px; padding: 0 4px 0 14px; border-radius: 26px;
+    background: var(--surface-raised); border: 1px solid var(--border-default); opacity: 0;
+  }
+  .collapsed .launcher { opacity: 1; }
+  .collapsed .dock { opacity: 0; transform: translateY(16px); }
+  .launcher-text {
+    flex: 1; min-width: 0; min-height: 44px; display: flex; align-items: center; justify-content: flex-start; gap: 10px; border: 0; background: transparent;
+    color: var(--text-muted); font-size: var(--text-base); text-align: left; cursor: pointer;
+  }
+  .launcher-mic {
+    width: 44px; height: 44px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+    border: 0; border-radius: var(--radius-full); background: transparent; color: var(--text-secondary); cursor: pointer;
+  }
+  .launcher-mic:disabled { opacity: 0.5; cursor: default; }
+  .sessions-btn {
+    min-height: 44px; display: inline-flex; align-items: center; gap: 8px; padding: 0 12px 0 8px; border: 0;
+    border-radius: var(--radius-full); background: transparent; color: var(--text-primary); cursor: pointer;
+  }
+  .sessions-btn:active { background: var(--fill-subtle); }
+  .sessions-label { font-size: var(--text-base); font-weight: var(--fw-semibold); }
+  .badge {
+    min-width: 22px; height: 22px; padding: 0 6px; display: inline-flex; align-items: center; justify-content: center;
+    border-radius: 11px; background: var(--fill-subtle); font-size: var(--text-xs); font-weight: 600; font-variant-numeric: tabular-nums;
+  }
+  @media (prefers-reduced-motion: reduce) { .layer, .bottom, .launcher, .dock { transition: none; } }
   .greeting h1 { margin: 0; font-size: var(--text-xl); font-weight: var(--fw-semibold); color: var(--text-primary); }
   .dock { display: flex; flex-direction: column; gap: 2px; }
   .top-pills { display: flex; justify-content: flex-end; align-items: center; gap: 2px; padding-bottom: 4px; }

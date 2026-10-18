@@ -147,3 +147,34 @@ test("na janela do foco armado, o envio do composer só cai com o alvo confirmad
   expect(bodies(posts, "focus-target")).toHaveLength(perguntas);
   void clock;
 });
+
+test("botão do próprio plugin num painel vai ao app com o dono, e o de outro mod mantém o dele", PLUGINS, async ($, on) => {
+  on("command.register", () => ({ value: undefined }) as never);
+  on("fs.list", () => ({ value: [] }) as never);
+  on("fs.exists", () => ({ value: false }) as never);
+  on("tool.call", { tool: "Bash" }, () => ({ result: { stdout: "", stderr: "", interrupted: false, backgroundTaskId: "b1" } }) as never);
+  const { clock, posts } = await start($, on);
+  await $.tool.call({ tool: "Bash", command: "sleep 600", run_in_background: true } as never);
+  await clock.advance(3000);
+  const ui = await $.ui.mount({ plugin: "hangar", surface: "terminal", component: "Pane", requestId: "hangar-andamento", props: PANE });
+  await ui.drawn();
+  await clock.advance(1000);
+  const outro = await $.ui.mount({ plugin: "paineis", surface: "terminal", component: "Pane", requestId: "controle", props: PANE });
+  await outro.drawn();
+  await clock.advance(1000);
+  const owners = new Map<string, string>();
+  const walk = (n: unknown): void => {
+    if (Array.isArray(n)) return n.forEach(walk);
+    if (!n || typeof n !== "object") return;
+    const node = n as { props?: { key?: string }; press?: { plugin?: string }; children?: unknown };
+    if (node.press && node.props?.key) owners.set(node.props.key, node.press.plugin ?? "");
+    walk(node.children);
+  };
+  walk(lastUi(posts).trees);
+  expect(lastUi(posts).ids).toEqual(expect.arrayContaining(["hangar-andamento", "controle"]));
+  expect([...owners.values()].every(Boolean)).toBe(true);
+  expect(owners.get("parar-b1")).toBe("hangar");
+  expect(owners.get("abrir")).toBe("paineis");
+  await outro.unmount();
+  await ui.unmount();
+});

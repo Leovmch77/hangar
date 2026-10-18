@@ -307,12 +307,12 @@ impl Api {
     }
 
     pub async fn send(&self, name: &str, text: &str) -> Result<Delivery, Failure> {
-        let r = self.client.post(self.endpoint(Some(name), Some("input")))
-            .json(&json!({"text": text, "steer": false})).timeout(Duration::from_secs(60))
-            .send().await.map_err(|_| Failure::transport(true))?;
-        let delivery: Delivery = Self::checked(r, true).await?.json().await.map_err(|_| Failure::transport(true))?;
-        if !delivery.ok { return Err(Failure::transport(true)); }
-        Ok(delivery)
+        self.send_input(name, json!({"text": text, "steer": false})).await
+    }
+
+    /// A orientação pertence à entrada deste pedido, sem promover mensagens que já esperavam.
+    pub async fn send_direct(&self, name: &str, text: &str) -> Result<Delivery, Failure> {
+        self.send_input(name, json!({"text": text, "steer": true})).await
     }
 
     // Texto vai direto ao turno em voo (Codex, sem terminal); a resposta não traz `delivered`.
@@ -322,7 +322,20 @@ impl Api {
             .send().await.map_err(|_| Failure::transport(true))?;
         let value: Value = Self::checked(r, true).await?.json().await.map_err(|_| Failure::transport(true))?;
         if value.get("ok").and_then(Value::as_bool) != Some(true) { return Err(Failure::transport(true)); }
-        Ok(Delivery { ok: true, delivered: true })
+        Ok(Delivery { ok: true, delivered: true, ..Default::default() })
+    }
+
+    pub async fn send_decided(&self, name: &str, text: &str, task: &str, message: &str) -> Result<Delivery, Failure> {
+        self.send_input(name, json!({"text": text, "jev_task": task, "jev_message": message})).await
+    }
+
+    async fn send_input(&self, name: &str, body: Value) -> Result<Delivery, Failure> {
+        let r = self.client.post(self.endpoint(Some(name), Some("input")))
+            .json(&body).timeout(Duration::from_secs(60))
+            .send().await.map_err(|_| Failure::transport(true))?;
+        let delivery: Delivery = Self::checked(r, true).await?.json().await.map_err(|_| Failure::transport(true))?;
+        if !delivery.ok { return Err(Failure::transport(true)); }
+        Ok(delivery)
     }
 
     pub async fn commands(&self, name: &str) -> Result<Vec<CommandInfo>, Failure> {
@@ -618,7 +631,7 @@ impl Api {
                 Value::String(text) => text.clone(),
                 _ => e.get("msg").or_else(|| e.get("code")).and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| e.to_string()),
             });
-            (name.clone(), Delivery { ok: flag("ok"), delivered: flag("delivered") }, error)
+            (name.clone(), Delivery { ok: flag("ok"), delivered: flag("delivered"), ..Default::default() }, error)
         }).collect())
     }
 

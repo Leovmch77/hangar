@@ -229,7 +229,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   closeTxt: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: theme.base.text.base,
   },
   imgWrap: {
     width: '100%',

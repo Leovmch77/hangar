@@ -20,15 +20,16 @@ const isDenied = (e: unknown) => {
   return code === 'ERR_USER_REJECTED_PERMISSIONS' || (e instanceof Error && /permission/i.test(e.message));
 };
 
-// Galeria do aparelho. Permissão negada vira o aviso de fotos; cancelar devolve null.
-export async function pickImage(): Promise<PickedAttachment | null> {
+// Galeria do aparelho. Permissão negada vira o aviso de fotos; cancelar devolve a lista vazia.
+export async function pickImages(multiple = false): Promise<PickedAttachment[]> {
   try {
     const res = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       quality: 0.8,
+      allowsMultipleSelection: multiple,
     });
-    if (res.canceled || !res.assets?.[0]) return null;
-    return fromImageAsset(res.assets[0]);
+    if (res.canceled) return [];
+    return (res.assets ?? []).map(fromImageAsset);
   } catch (e) {
     if (isDenied(e)) throw new Error(m.composer_sem_acesso_fotos());
     throw e;
@@ -53,20 +54,21 @@ export async function pickCamera(): Promise<PickedAttachment | null> {
 }
 
 // Qualquer arquivo; versões antigas do picker devolvem o asset solto, sem `assets`.
-export async function pickFile(): Promise<PickedAttachment | null> {
-  const res = await DocumentPicker.getDocumentAsync({ type: '*/*', copyToCacheDirectory: true });
-  if (res.canceled) return null;
+export async function pickFiles(multiple = false): Promise<PickedAttachment[]> {
+  const res = await DocumentPicker.getDocumentAsync({ type: '*/*', copyToCacheDirectory: true, multiple });
+  if (res.canceled) return [];
   type Asset = { uri: string; name: string; mimeType?: string; size?: number };
-  const asset = (res as unknown as { assets?: Asset[] }).assets?.[0] ?? (res as unknown as Asset);
-  if (!asset?.uri) return null;
-  return {
+  const assets = (res as unknown as { assets?: Asset[] }).assets ?? [res as unknown as Asset];
+  return assets.filter((asset) => asset?.uri).map((asset) => ({
     uri: asset.uri,
     name: asset.name ?? 'arquivo',
     mime: asset.mimeType ?? 'application/octet-stream',
     kind: IMAGE_NAME.test(asset.name ?? '') ? 'image' : 'file',
     size: asset.size,
-  };
+  }));
 }
+
+export const pickFile = async (): Promise<PickedAttachment | null> => (await pickFiles())[0] ?? null;
 
 /** Imagem copiada vira anexo; senão devolve o texto. Vazia = null. */
 export async function readClipboard(): Promise<PickedAttachment | string | null> {

@@ -371,16 +371,6 @@ class PreviewEvent(BaseModel):
     vivo: bool = False
 
 
-class CommandInfo(BaseModel):
-    # Contrato JSON consumido pelo frontend: argumentHint em camelCase de proposito.
-    name: str
-    display: str                                   # forma exibida, ex: "/clear"
-    description: Optional[str] = None
-    argumentHint: Optional[str] = None             # dica de argumento, ex: "<ambiente>"
-    source: Literal["builtin", "skill", "plugin"] = "builtin"
-    destructive: bool = False                      # exige confirmacao na UI
-
-
 class FsRoot(BaseModel):
     # Raiz liberada do scanner, virando um chip no app. name = basename do caminho.
     name: str

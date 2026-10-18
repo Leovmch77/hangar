@@ -685,6 +685,47 @@ def _behind_top() -> bool:
             and _git_quiet("merge-base", "--is-ancestor", head, topo).returncode == 0)
 
 
+_SERVER_WORKFLOW = ".github/workflows/server.yml"
+
+
+def _caminhos_do_build(rev: str) -> list[str] | None:
+    """Os `paths` do push no workflow que publica o hangar-server: mudar um deles pede binário novo."""
+    p = _git_quiet("show", f"{rev}:{_SERVER_WORKFLOW}")
+    if p.returncode != 0:
+        return None
+    caminhos, dentro = [], False
+    for linha in p.stdout.splitlines():
+        texto = linha.strip()
+        if texto == "paths:":
+            dentro = True
+        elif dentro and texto.startswith("- "):
+            caminhos.append(texto[2:].strip().strip("\"'"))
+        elif dentro and texto and not texto.startswith("#"):
+            break
+    return caminhos or None
+
+
+def _ultimo_com_o_binario(publicado: str, topo: str) -> str:
+    """O commit mais novo que ainda roda com o binário publicado: o pai do primeiro, depois dele, que muda o
+    que o build do Rust lê. Sem ler a lista, para no próprio commit do binário."""
+    caminhos = _caminhos_do_build(topo)
+    if caminhos is None:
+        _log.warning("paths do %s ilegiveis em %s: o codigo para no commit do binario %s", _SERVER_WORKFLOW, topo, publicado[:8])
+        return publicado
+    p = _git_quiet("log", "--first-parent", "--reverse", "--format=%H", f"{publicado}..{topo}", "--",
+                   *(f":(glob){c}" for c in caminhos))
+    if p.returncode != 0:
+        _log.warning("git log dos commits depois do binario falhou (%s): %s", p.returncode, p.stderr.strip()[-300:])
+        return publicado
+    primeiro = p.stdout.split()[:1]
+    if not primeiro:
+        return topo
+    anterior = _git_quiet("rev-parse", "--verify", "--quiet", f"{primeiro[0]}^1").stdout.strip()
+    if not anterior:
+        _log.warning("pai de %s ilegivel: o codigo para no commit do binario %s", primeiro[0][:8], publicado[:8])
+    return anterior or publicado
+
+
 def pinned_target(destino: str) -> tuple[str | None, tuple | None]:
     """Até onde o checkout pode ir, e a release lida para escolher.
 
@@ -723,6 +764,13 @@ def pinned_target(destino: str) -> tuple[str | None, tuple | None]:
         _log.warning("binario %s sem contrato conferido (entrada %r, commit do topo %r)",
                      plat, entry, manifest.get("commit"))
         return None, release
+    # O código vai até o commit do binário publicado, nem um depois: o código seguinte rodaria com o binário de antes.
+    publicado = binary[0]
+    if publicado == _git_quiet("rev-parse", "--verify", "--quiet", topo).stdout.strip():
+        return topo, release
+    if _git_quiet("merge-base", "--is-ancestor", publicado, topo).returncode == 0:
+        return _ultimo_com_o_binario(publicado, topo), release
+    # Binário de commit fora desta branch: o último commit dela que fala o mesmo contrato.
     return _newest_with_protocol(topo, want), release
 
 

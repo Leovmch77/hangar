@@ -1420,16 +1420,41 @@ def rust(repo, tmp_path, monkeypatch):
             "binario_35": binario_35, "ultimo_35": ultimo_35, "topo": _rev(obra, "HEAD")}
 
 
-def test_topo_sem_binario_para_no_ultimo_commit_do_contrato_publicado(repo, rust):
+def test_topo_sem_binario_para_no_commit_do_binario_publicado(repo, rust):
+    # Nem o commit seguinte de mesmo contrato: o código dele rodaria com o binário de antes.
     final = atualizar.executar()
     assert final["ok"] is True
-    assert _rev(repo, "HEAD") == rust["ultimo_35"] != rust["topo"]
+    assert _rev(repo, "HEAD") == rust["binario_35"] != rust["ultimo_35"]
     assert final["avisos"] == ["aguardando o build do servidor Rust para este sistema (compilando, ou o build "
-                               f"falhou): a versão mais nova muda o contrato com ele; atualizado até {rust['ultimo_35'][:8]}"]
+                               f"falhou): a versão mais nova muda o contrato com ele; atualizado até {rust['binario_35'][:8]}"]
     assert rust["pedidos"] == [f"{atualizar.rust_release.RELEASES_URL}/server-latest"]
     # O download usa o manifesto da escolha, e a tela (também no Reiniciar) é compilada aqui.
     assert rust["preparo"]["release"][2] is rust["manifesto"]
     assert atualizar._behind_top() is True
+
+
+def _workflow_do_server(obra):
+    """O `server.yml` só compila o binário quando o push muda um destes caminhos."""
+    (obra / ".github" / "workflows").mkdir(parents=True, exist_ok=True)
+    _commit(obra, ".github/workflows/server.yml",
+            'on:\n  push:\n    branches: ["**"]\n    paths:\n      - "crates/**"\n'
+            '      # o contrato interno\n      - "backend/app/rust_server.py"\n  workflow_dispatch:\n')
+
+
+def test_commit_que_muda_o_rust_espera_o_binario_dele(repo, rust):
+    _workflow_do_server(rust["obra"])
+    _git(rust["obra"], "push", "-q", "origin", "main")
+    final = atualizar.executar()
+    assert final["ok"] is True and _rev(repo, "HEAD") == rust["ultimo_35"]
+
+
+def test_commit_so_de_python_depois_do_binario_chega(repo, rust):
+    rust["manifesto"]["commit"] = rust["topo"]
+    _workflow_do_server(rust["obra"])
+    _commit(rust["obra"], "py.txt", "só Python\n")
+    _git(rust["obra"], "push", "-q", "origin", "main")
+    final = atualizar.executar()
+    assert final["ok"] is True and _rev(repo, "HEAD") == _rev(rust["obra"], "HEAD") != rust["topo"]
 
 
 def test_build_deste_sistema_atrasado_no_manifesto_por_sistema(repo, rust):
@@ -1439,7 +1464,7 @@ def test_build_deste_sistema_atrasado_no_manifesto_por_sistema(repo, rust):
         "linux-x86_64": {"commit": rust["binario_35"], "protocol": 35},
         "windows-x86_64": {"commit": rust["topo"], "protocol": 36}}
     final = atualizar.executar()
-    assert final["ok"] is True and _rev(repo, "HEAD") == rust["ultimo_35"]
+    assert final["ok"] is True and _rev(repo, "HEAD") == rust["binario_35"]
 
 
 @pytest.mark.parametrize("platforms", [{"windows-x86_64": {"protocol": 36}}, None, []])
@@ -1546,6 +1571,7 @@ def test_commit_local_adiante_do_topo_nao_e_atras_do_topo(repo, rust):
 def test_branch_de_teste_nova_nasce_no_commit_escolhido_com_upstream(repo, rust, monkeypatch):
     obra = rust["obra"]
     _git(obra, "checkout", "-q", "-b", "teste")
+    _workflow_do_server(obra)
     _commit(obra, "t.txt", "teste\n")
     teste_36 = _rev(obra, "HEAD")
     _protocolo(obra, 37)

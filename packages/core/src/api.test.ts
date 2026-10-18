@@ -20,7 +20,7 @@ import { answerQuestions, closePluginPane, inputPluginField, interrupt, openEven
 import type { AskQuestionPayload, StateEvent } from './types';
 import { discardFile, fileAuthHeader, fileUrlNative, getPairContract, getPlans, listFiles, pathDiff, readFile, searchFiles, setPlanPin, unpairSession, writeFile } from './api';
 import type { Server } from './servers';
-import { createShare, exportShortcuts } from './api';
+import { createShare, exportShortcuts, sendSubagentMessage } from './api';
 import { cancelQueuedMessage, editQueuedMessage, reorderQueuedMessage, steerQueuedMessage } from './api';
 import { fileUrl, uploadUrl, uploadUrlNative } from './api';
 import { editTranscriptionProviderKey, editTranscriptionProviderTarget, moveTranscriptionProvider, parseTranscriptionProviders, transcriptionProviderKeepsKey, transcriptionProviderLabel, transcriptionProvidersMissingKey, testTranscriptionProvider } from './api';
@@ -665,6 +665,46 @@ describe('contratos de conversa com servidor explícito', () => {
     expect(create.mock.calls[0][1]).toEqual({ withCredentials: credentials });
     openEventStreamForServer(target, 'sessao', 'req-legado');
     expect(new URL(create.mock.calls[1][0]).searchParams.has('last_event_id')).toBe(false);
+  });
+});
+
+describe('sendSubagentMessage', () => {
+  const target = { id: 'b', label: 'Servidor B', baseUrl: 'https://b.test', token: 'token-b' };
+
+  it('envia ao servidor explícito com caminhos escapados e texto aparado', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"delivered":true}'));
+
+    await expect(sendSubagentMessage('mesma/sessão', 'agente/ação +', ' \n continue daqui \t ', target)).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
+      'https://b.test/api/sessions/mesma%2Fsess%C3%A3o/subagents/agente%2Fa%C3%A7%C3%A3o%20%2B/message',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ Authorization: 'Bearer token-b', 'Content-Type': 'application/json' }),
+        body: '{"text":"continue daqui"}',
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(timeout).toHaveBeenCalledExactlyOnceWith(40_000);
+    expect(fetchMock.mock.calls[0][1]?.signal).toBe(timeout.mock.results[0].value);
+  });
+
+  it.each([
+    { kind: 'código 409', status: 409, detail: { code: 'erro_subagente_inexistente', params: {}, msg: 'subagent not found' },
+      expected: { status: 409, code: 'erro_subagente_inexistente', message: 'subagente não encontrado' } },
+    { kind: 'texto 409', status: 409, detail: 'o agente já encerrou',
+      expected: { status: 409, message: 'o agente já encerrou' } },
+    { kind: 'credencial 401', status: 401, detail: 'token de B recusado',
+      expected: { status: 401, message: 'token de B recusado' } },
+  ])('recusa $kind sem sucesso falso, repetição ou perda da credencial ativa', async ({ status, detail, expected }) => {
+    overwriteGetLocale(() => 'pt');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ detail }), { status }));
+
+    await expect(sendSubagentMessage('sessao', 'agente', 'continue', target)).rejects.toMatchObject(expected);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(onUnauthorizedSpy).not.toHaveBeenCalled();
   });
 });
 

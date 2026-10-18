@@ -99,7 +99,7 @@ completa em [plataforma.md](../decisoes/plataforma.md#perguntas-permissões-e-ci
 - **Portas 8766 e 8768:** autorização do convidado e do Connect, com repasse num sentido das
   respostas de pergunta do Claude e de tudo do Codex do Rust às pontes privadas; estado, prévia,
   pergunta e sugestão pelo canal privado do hub; transcript e fila lidos pelo Python; terminal
-  ligado a `/__hangar_server/term`; a Origin do terminal (`/internal/term/origin`) e o 409 de
+  ligado a `/__hangar_server/term`; a Origin do login de convidado no terminal e o 409 de
   painel aberto (pergunta `term.active` ao Rust).
 - **Limpeza externa do `DELETE` de Codex com terminal:** `share_store`/`sync_tunnel`, `ThenLink`,
   atalhos e caches, depois que o Rust encerrou a sessão.

@@ -1,4 +1,8 @@
-import { toast as sonner, Toaster } from 'sonner-native';
+import type { PropsWithChildren } from 'react';
+import { View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { toast as sonner, Toaster as SonnerToaster, type ToasterProps } from 'sonner-native';
+import { haptic } from './haptics';
 
 const MOD_TEXT_MAX = 300;
 const MOD_VISIBLE_MAX = 4;
@@ -11,9 +15,10 @@ function modGone(id: string | number): void {
 }
 
 export const toast = {
-  ok: (msg: string) => sonner.success(msg),
-  erro: (msg: string) => sonner.error(msg),
+  ok: (msg: string) => { haptic.success(); return sonner.success(msg); },
+  erro: (msg: string) => { haptic.error(); return sonner.error(msg); },
   aviso: (msg: string) => sonner(msg, { duration: 12_000 }),
+  passive: (msg: string) => sonner(msg, { duration: 3_000, toasterId: 'passive' }),
   /** Aviso de um mod do Claude Code: o nome do mod é o título, como na caixa do terminal. */
   mod: (msg: string, plugin: string, ms: number) => {
     while (modVisible.length >= MOD_VISIBLE_MAX) sonner.dismiss(modVisible.shift());
@@ -24,4 +29,15 @@ export const toast = {
     return id;
   },
 };
-export { Toaster };
+function PassiveToastWrapper({ children }: PropsWithChildren) {
+  return <View pointerEvents="none" collapsable={false} style={{ width: '100%' }}>{children}</View>;
+}
+
+export function Toaster(props: ToasterProps) {
+  const insets = useSafeAreaInsets();
+  return <>
+    <SonnerToaster {...props} />
+    <SonnerToaster id="passive" position="top-center" offset={insets.top + 64}
+      visibleToasts={1} enableStacking={false} ToastWrapper={PassiveToastWrapper} />
+  </>;
+}

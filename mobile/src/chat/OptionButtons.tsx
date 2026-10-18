@@ -4,6 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { kindOf, isPermission, questionParts, planChoiceKey, type PlanChoiceKey } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { superficie } from '../theme/superficie';
+import { haptic } from '../ui/haptics';
 import { Icon } from '../ui/Icon';
 import { semEmoji } from '../ui/semEmoji';
 import { useAparencia } from '../stores/aparencia';
@@ -58,13 +59,15 @@ function OptionButtonsContent({ question, options, interactionId, onSelect, onCa
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
-  async function run(action: () => void | Promise<void>) {
+  // `answer`: a resposta vai embora (notificação no resultado); marcar uma caixa é só seleção.
+  async function run(action: () => void | Promise<void>, answer = false) {
     if (locked.current) return;
     locked.current = true;
     setBusy(true);
     setError('');
-    try { await action(); }
+    try { await action(); if (answer) haptic.success(); }
     catch (e) {
+      if (answer) haptic.error();
       if (mounted.current) setError(e instanceof Error ? e.message : m.comum_falha_envio_opcao());
     } finally {
       locked.current = false;
@@ -108,11 +111,15 @@ function OptionButtonsContent({ question, options, interactionId, onSelect, onCa
           const isDeny = permission && kind === 'deny';
           const planKey = planKeys[i];
           const changes = planKey === 'changes';
-          const sendFeedback = () => void run(() => onSelect(i + 1, interactionId, feedback.trim()));
+          const sendFeedback = () => void run(() => onSelect(i + 1, interactionId, feedback.trim()), true);
           return (
             <View key={i} style={styles.list}>
             <Pressable
-              onPress={() => (changes ? setFeedbackOpen((v) => !v) : void run(() => onSelect(i + 1, interactionId)))}
+              onPress={() => {
+                if (changes) return setFeedbackOpen((v) => !v);
+                if (multipla) haptic.selection();
+                void run(() => onSelect(i + 1, interactionId), !multipla);
+              }}
               disabled={busy}
               accessibilityLabel={planKey ? `${i + 1}. ${opt}` : undefined}
               accessibilityState={{ disabled: busy, busy, checked: multipla ? marcada(opt) : undefined, expanded: changes ? feedbackOpen : undefined }}
@@ -186,7 +193,7 @@ function OptionButtonsContent({ question, options, interactionId, onSelect, onCa
         })}
         {multipla && onSubmit ? (
           <Pressable
-            onPress={() => void run(() => onSubmit(interactionId))}
+            onPress={() => void run(() => onSubmit(interactionId), true)}
             disabled={busy || marcadas === 0}
             accessibilityState={{ disabled: busy || marcadas === 0, busy }}
             style={[styles.btn, { backgroundColor: theme.tokens.accent.base, borderColor: theme.tokens.accent.base }, marcadas === 0 && styles.off]}
@@ -242,7 +249,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   qCode: {
     fontFamily: theme.base.fontMono,
-    fontSize: 14,
+    fontSize: theme.base.text.xs,
     paddingHorizontal: 4,
     borderRadius: 4,
   },

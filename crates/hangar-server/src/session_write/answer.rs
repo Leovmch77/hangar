@@ -59,6 +59,7 @@ pub struct Body {
     /// `null`, texto ou inteiro: o `int | str | None` do `AnswerBody`.
     request_id: Value,
     interaction_id: Option<String>,
+    steer: bool,
 }
 
 impl Body {
@@ -90,7 +91,7 @@ fn parse_item(value: &Value) -> Option<Item> {
 pub fn parse_body(bytes: &Bytes) -> Option<Body> {
     let value: Value = serde_json::from_slice(bytes).ok()?;
     let object = value.as_object()?;
-    if object.keys().any(|k| k != "answers" && k != "request_id" && k != "interaction_id") { return None; }
+    if object.keys().any(|k| !matches!(k.as_str(), "answers" | "request_id" | "interaction_id" | "steer")) { return None; }
     let answers = object.get("answers")?.as_array()?.iter().map(parse_item).collect::<Option<Vec<_>>>()?;
     let request_id = match object.get("request_id") {
         None | Some(Value::Null) => Value::Null,
@@ -99,7 +100,8 @@ pub fn parse_body(bytes: &Bytes) -> Option<Body> {
         Some(_) => return None,
     };
     let interaction_id = optional(object.get("interaction_id"), |v| v.as_str().map(str::to_owned))?;
-    Some(Body { answers, request_id, interaction_id })
+    let steer = match object.get("steer") { None => false, Some(value) => value.as_bool()? };
+    Some(Body { answers, request_id, interaction_id, steer })
 }
 
 fn refused(msg: &str) -> Answer { (StatusCode::CONFLICT, detail_body("erro_sem_resposta", msg, json!({}))) }
@@ -286,7 +288,11 @@ pub fn chat_answer(sent: &Result<RuntimeReply, RuntimeError>) -> Answer {
 }
 
 /// O corpo do `answer_questions` sem terminal: o ator confere a pergunta pendente e monta a resposta.
-pub fn headless_command(body: &Body) -> Value { json!({"request_id": body.request_id, "answers": body.answers_json(), "interaction_id": body.interaction_id}) }
+pub fn headless_command(body: &Body) -> Value {
+    let mut command = json!({"request_id": body.request_id, "answers": body.answers_json(), "interaction_id": body.interaction_id});
+    if body.steer { command["steer"] = json!(true); }
+    command
+}
 
 /// No Codex a recusa do ator (`codex_command`) é falha de envio, como no Python, com a frase do Codex.
 pub fn headless_answer(codex: bool, sent: &Result<RuntimeReply, RuntimeError>) -> Answer {

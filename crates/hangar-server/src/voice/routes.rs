@@ -2,7 +2,7 @@
 use crate::routes::AppState;
 use crate::session_write::json_response;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::{extract::{ConnectInfo, FromRequestParts, Request, State}, http::{Method, StatusCode, header}, response::{IntoResponse, Response}};
+use axum::{extract::{ConnectInfo, FromRequestParts, Request, State}, http::{Method, StatusCode}, response::{IntoResponse, Response}};
 use serde_json::json;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use super::hub::{Attached, Hello};
@@ -11,7 +11,7 @@ use super::settings::{self, SettingsDto, VoiceSettings};
 
 const HELLO_WITHIN: Duration = Duration::from_secs(10);
 
-/// Só o dono pelo `?token=` (como o terminal), com a Origin conferida pelo Python.
+/// Só o dono pelo `?token=` (como o terminal); sem Origin: página estranha não tem o token.
 pub async fn ws(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (client_ip, https) = st.cfg.trusted.resolve(peer.ip(), req.headers());
     let fwd = crate::proxy::Forward { client_ip, https, guest: None };
@@ -23,23 +23,10 @@ pub async fn ws(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<
         Ok(ws) => ws,
         Err(_) => return crate::routes::pass(&st, Request::from_parts(parts, body), &fwd).await,
     };
-    if let Some(origin) = parts.headers.get(header::ORIGIN).filter(|o| !o.is_empty()) {
-        // Origin que nem é texto não passa como "sem Origin".
-        let Ok(origin) = origin.to_str() else { return (StatusCode::FORBIDDEN, "origem recusada").into_response() };
-        let host = parts.headers.get(header::HOST).and_then(|v| v.to_str().ok());
-        match crate::term::origin::ask(&st.http, st.cfg.upstream, &st.cfg.internal_secret, origin, host).await {
-            Ok(true) => {}
-            Ok(false) => { super::log("voice origin refused"); return (StatusCode::FORBIDDEN, "origem recusada").into_response(); }
-            Err(code) => {
-                st.diag.report("rust.voice_failed", "voice", code, "a origem da voz não foi conferida");
-                return json_response(StatusCode::SERVICE_UNAVAILABLE, json!({"ok": false, "error_code": code, "message": "a origem da voz não foi conferida"}));
-            }
-        }
-    }
     ws.on_upgrade(move |socket| serve_socket(st, socket))
 }
 
-/// Ponte do Connect: o Python já conferiu o dono e a Origin; aqui só o segredo interno.
+/// Ponte do Connect: o Python já conferiu o dono; aqui só o segredo interno.
 pub async fn private_ws(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
     let (mut parts, _) = req.into_parts();

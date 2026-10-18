@@ -44,8 +44,10 @@ Only terminal sessions use the tmux pane for live **state** and input. Backend p
   ticket (`~/.claude/.hangar-kimi/<pane>.json`) — the CLI has no caller-chosen session-id.
 - `sse.py` — merges the above into the SSE stream. `api.py` — FastAPI routes. `auth.py` — bearer token / `cp_token` cookie.
 - Also: `pqueue.py` (durable input queue), `preview.py` (live in-flight block), `askquestion.py`
-  (native AskUserQuestion stepper), `uploads.py`, `git_ops.py`, `commands.py`, `workflows.py`,
+  (native AskUserQuestion stepper), `uploads.py`, `git_ops.py`, `workflows.py`,
   `model_picker.py`, `config.py`, `fs.py`, `hook_installer.py`.
+- `crates/hangar-server/src/commands/` — catálogo de comandos do Claude, sonda compartilhada e
+  filtro em processo; o Python só autentica e repassa nas portas que atende.
 - `site/` — landing page de `hangar.dev.br` (HTML estático em PT/EN gerado por `site/build.py`,
   publicado no Cloudflare Pages); vídeos do app gravados por `site/tools/record/`. Ver `site/README.md`.
 
@@ -259,8 +261,8 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Promovem camada que renderiza preto durante o scroll.
 - **A lista de mensagens é janelada** (`WINDOW=120`). Não renderize o transcript inteiro.
 - **O app renderiza `AskUserQuestion` nativamente**; use à vontade. Texto numerado é só fallback.
-- **Mods no nativo têm altura estável entre abas; Minimizar é local.** Perguntas ocupam o mesmo
-  espaço do mod e só devolvem o painel quando a interação termina. Minimização manual, aba e
+- **Mods no nativo começam minimizados e têm altura estável entre abas; Minimizar é local.**
+  Perguntas ocupam o mesmo espaço do mod e só devolvem o painel quando a interação termina. Minimização manual, aba e
   rolagem pertencem à sessão. Evidência em [frontend.md](docs/decisoes/frontend.md#mods-altura-estável-e-pergunta-no-mesmo-espaço-16102026).
 - **Mensagem esperando na fila do Hangar aparece no painel "Na fila", não como bolha.** A lista e a
   ordem vêm do evento `queue`; o modelo é `packages/core/src/queuePanel.ts` (o nativo repete em
@@ -279,6 +281,9 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Com o Rust de pé, o PTY é só dele (Windows incluído): o `termsock` faz a porta de entrada de quem
   chega ao Python (convidado, Connect) e liga os bytes a `/__hangar_server/term`; o 409 pergunta
   `term.active` e erro da ponte é 503 (fechamento 1013 no socket), nunca PTY no Python.
+- **WebSocket do dono com `?token=` não confere Origin** (terminal, voz e navegador, Rust e
+  Python). A Origin (`_origem_aceita`, `CP_TERM_ORIGINS`) só barra credencial que o navegador manda
+  sozinho: hoje, o login de convidado no `termsock`. [Motivo](docs/decisoes/plataforma.md#websocket-do-dono-com-token-não-confere-origin-17102026).
 - **Aba ativa do navegador embutido é UMA só, compartilhada entre painel e CLI**; `--aba` age em
   outra sem trocar o que está na tela. O sidecar do navegador é ADITIVO: `url`/`targetId` no topo
   são os da aba ativa, e é só isso que o backend lê.
@@ -315,6 +320,22 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   janela). Sem ícone de pé ou sem hospedeiro de bandeja, fechar encerra: o app nunca fica vivo e
   invisível. No Wayland esconder troca os objetos xdg na mesma superfície; só desmapear com
   buffer nulo não volta no Hyprland.
+- **App iOS (`mobile/`)** — interface e desempenho. Medição e exemplos em
+  [frontend.md](docs/decisoes/frontend.md#app-ios-mobile-interface-e-desempenho-16102026).
+  - A borda esquerda (0–20 pt) é o voltar do iOS: gaveta e arrasto próprio começam mais para dentro (`SessionsDrawer` `edgeStart`).
+  - Alvo de toque mínimo 44×44 pt; visual menor ganha `hitSlop`.
+  - Voltar e setas são `Icon` (`ChevronLeft`…), nunca caractere (‹ ▸).
+  - Formulário em folha usa o `KeyboardAvoidingView` do `react-native-keyboard-controller` com `automaticOffset`.
+  - Vibração só por `src/ui/haptics.ts` (iOS): seleção ao marcar, sucesso/erro no resultado; `toast.ok`/`toast.erro` já vibram.
+  - Tela simples usa o cabeçalho nativo da pilha (`useGlassHeader`); só o chat tem cabeçalho próprio.
+  - Conteúdo sob cabeçalho transparente: ScrollView com `contentInsetAdjustmentBehavior="automatic"` no iOS; o resto recua por `useHeaderHeight`.
+  - Tamanho de texto vem de `theme.base.text.*`, mínimo 11 pt; `fontScaleGuard.test.ts` barra número solto.
+  - Ícone Lucide novo ganha SF Symbol em `src/ui/sfSymbols.ts` quando houver um de mesmo sentido.
+  - Texto ao vivo (prévia) publica no máximo a cada ~50 ms; nunca um render por token.
+  - Composer e ChatHeader ficam em `memo` com callbacks estáveis; quem lê a prévia é só quem a desenha.
+  - Animação contínua para fora da tela e com a gaveta fechada, e roda a no máximo ~20 fps.
+  - Lista, folha e vidro escondidos não montam: nascem na primeira abertura.
+  - Linha que não mudou mantém o mesmo objeto (store e lista): evento novo não redesenha as outras.
 
 ### Harnesses — Claude, Codex, Pi, omp, Kimi → [`docs/decisoes/harnesses.md`](docs/decisoes/harnesses.md)
 
@@ -502,7 +523,7 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   etapas, códigos e origem da falha. Texto de conversa, credenciais e saídas brutas ficam fora
   dele. O shell Electron também escreve lá (`privado/shell.log`): lançado pelo `.desktop`, o
   console dele vai pro `/dev/null`. Detalhes e compatibilidade em [plataforma.md](docs/decisoes/plataforma.md#diário-de-uso-causa-e-contexto-no-arquivo-exportado).
-- **Uma configuração do Jev para navegador, orquestração, voz e Computer Use.** `jev_api_key`,
+- **Uma configuração do Jev para navegador, orquestração, voz, Computer Use e escolha de envio.** `jev_api_key`,
   `jev_endpoint` e `jev_model` no `runtime_config`; no ambiente `TYPESAFE_API_KEY`, `JEV_ENDPOINT`
   e `JEV_MODEL`, já resolvidos. Não existe chave do Jev só para o Computer Use. A regra do destino
   (chave `sk-or-` ou endereço do OpenRouter) tem cinco cópias que mudam juntas: `destino_jev`,
@@ -536,7 +557,7 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
 - **A porta 8765 é do `hangar-server` (Rust); o Python escuta atrás, numa porta de loopback.**
   Ele atende `/history` e `/events` de Claude/Codex, `/api/costs`, `/api/uso`, `/api/cotacao` e o
   custo de sessão Codex com o token do dono, e o terminal real do dono (só pelo
-  `?token=`; a Origin ainda é decidida pelo Python em `/internal/term/origin`). Custos e uso têm índice próprio
+  `?token=`, sem conferir Origin). Custos e uso têm índice próprio
   (`custos-rust.sqlite3`) no cache local; stats continuam no Python. Contas Claude/Codex e
   cotas são só do Rust: no modo `python` respondem `accounts_need_rust_server`, sem reserva
   Python. Anexos de sessão pertencem ao Rust enquanto o supervisor estiver em `rust` ou
@@ -569,7 +590,7 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   (renomear, trocar de conta) e a reabre depois; fechada pela troca de conversa, recusa na hora
   (409), fechada por congelamento curto, a escrita espera. A saúde diz o que o Rust atende em
   `owns` (`table::owned_modes`). No convidado e no Connect (8766/8768) o Python autentica e repassa
-  num sentido, corpo, método e query intactos: `answer`/`select`/`select/submit` e as rotas
+  num sentido, corpo, método e query intactos: `input`/`answer`/`select`/`select/submit` e as rotas
   `queue/*` do Claude a `/__hangar_server/claude/<nome>/<rota>`, tudo do Codex do Rust (`queue/*`
   incluídas) a
   `/__hangar_server/codex/<nome>/<rota>` (a mesma ponte recebe o texto de broadcast, grupo, par e

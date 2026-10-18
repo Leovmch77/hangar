@@ -214,6 +214,41 @@ def test_token_errado_fecha_sem_abrir_pty(sessao):
     assert termsock.clientes_ativos() == set()
 
 
+def test_token_do_dono_abre_de_qualquer_origem():
+    # Token na query não é credencial ambiente: passa da Origin e só para na sessão inexistente.
+    from starlette.websockets import WebSocketDisconnect
+    with pytest.raises(WebSocketDisconnect) as e:
+        with _client().websocket_connect("/api/sessions/nao-existe/term?token=secret&cols=80&rows=24",
+                                         headers={"origin": "https://evil.com"}):
+            pass
+    assert (e.value.code, e.value.reason) == (1008, "sessao nao existe")
+
+
+def test_convidado_com_login_continua_preso_a_origem(monkeypatch):
+    # Login de convidado é sessão própria (credencial ambiente): a Origin continua conferida.
+    import contextvars
+    from starlette.websockets import WebSocketDisconnect
+    from app import guest_users
+    monkeypatch.setattr(guest_users, "current", contextvars.ContextVar("guest", default=object()))
+    with pytest.raises(WebSocketDisconnect) as e:
+        with _client().websocket_connect("/api/sessions/nao-existe/term?cols=80&rows=24",
+                                         headers={"origin": "https://evil.com"}):
+            pass
+    assert (e.value.code, e.value.reason) == (1008, "")
+
+
+def test_config_nao_avisa_recusa_ao_dono_de_origem_estranha(monkeypatch):
+    # O dono abre o terminal com `?token=` de qualquer Origin: a tela não pode dizer que recusa.
+    # Convidado com login segue preso à Origin, e a config tem que avisar.
+    import contextvars
+    from app import guest_users
+    r = _client().get("/api/config", headers={"Authorization": "Bearer secret", "origin": "https://evil.com"})
+    assert r.status_code == 200 and r.json()["somente_leitura"]["terminal_origem_ok"] is True
+    monkeypatch.setattr(guest_users, "current", contextvars.ContextVar("guest", default=object()))
+    from app import api
+    assert api._origem_do_terminal_ok(type("R", (), {"headers": {"origin": "https://evil.com", "host": "x"}})()) is False
+
+
 def test_sessao_desconhecida_recusa(sessao):
     c = _client()
     with pytest.raises(Exception):

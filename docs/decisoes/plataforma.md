@@ -739,6 +739,32 @@ por decisão explícita — o app Expo fica para depois.
 
 ## Uma configuração do Jev para os quatro usos
 
+16/10/2026: o envio pelo nativo também usa essa configuração no servidor da sessão. No painel
+"Na fila", "Jev Decide" e "Mandar direto" são escolhas exclusivas. Ambas desligadas conservam a
+fila comum. O Jev recebe até 2.000 caracteres do texto digitado e 1.000 de contexto, com o pedido
+atual e a fala recente do agente (ou a pergunta pendente), sem o
+conteúdo de arquivos, imagens ou saídas de ferramentas. Só uma decisão de mandar direto com
+probabilidade de pelo menos 0,9 orienta a entrada específica. Consulta com prazo de 2 s, erro,
+contexto insuficiente, mensagem maior que 2.000 caracteres, resposta duvidosa ou sessão alterada
+durante a consulta mantêm a entrega comum e mostram um aviso. O ator confere novamente o turno
+antes de orientar; no Claude terminal a prova vem dos eventos do plugin, nunca da revisão da fila.
+Sem essa prova, a entrega segue pela fila comum. Envios que esperam outro envio ou upload também
+conservam a fila comum: o contexto do Enter pode pertencer a um turno que já terminou. A fila
+continua com edição, ordem e exclusão; editar não pede outra classificação. Não há interrupção
+automática. A decisão é do Rust; não instala hooks nem um roteador adicional nos agentes.
+`GET /api/jev/delivery` confirma suporte nesta conexão e configuração, sem devolver a chave.
+No Connect, o Python só autentica e repassa a disponibilidade e o corpo original do envio ao
+Rust, antes de validar o formato antigo da entrada. Não há classificação nem outra fila no Python.
+
+17/10/2026: as respostas às perguntas assíncronas do Codex com terminal seguem esses controles. Com
+"Mandar direto" ou "Jev Decide", a identidade da pergunta comprova que a resposta pertence ao
+trabalho atual: ela pode orientar esse turno sem uma classificação adicional. Com ambos
+desligados, espera na fila. No terminal, a resposta é persistida antes da escrita; a orientação
+só vale no turno em que foi respondida. Turno encerrado permite envio normal; outro turno em
+andamento espera, sem reaproveitar a orientação antiga. Incerteza de entrega nunca gera reenvio.
+Mensagens comuns mantêm o limite de 0,9. Falta de contexto, timeout e mudança de turno têm avisos
+próprios; o log registra decisão, probabilidade, duração e código de falha, sem o texto da conversa.
+
 09/10/2026, decisão do Jefferson. Navegador (`objetivo`/`confere`), orquestração, voz e Computer Use
 (Windows e Linux) leem a MESMA chave, URL e modelo: `jev_api_key`, `jev_endpoint` e `jev_model` no
 `runtime_config`, no ambiente `TYPESAFE_API_KEY`, `JEV_ENDPOINT` e `JEV_MODEL`. A chave separada do
@@ -1548,8 +1574,9 @@ Anotar valor e unidade, a sessão de cada `/history`, e o que não deu para medi
 
 **Terminal real do dono (parte 4, Task 8, 06/10/2026).** Fora do Windows, o `WS .../term` do
 dono (`?token=` só; Bearer e cookie seguem ao Python, como no `termsock`) abre o PTY no Rust
-(`term/`, `portable-pty`). A Origin continua decidida pelo `_origem_aceita` do Python, perguntada
-uma vez por conexão em `/internal/term/origin` (prazo 1 s; falha = 503 com código no diário).
+(`term/`, `portable-pty`). A Origin era perguntada ao Python em `/internal/term/origin`; desde
+17/10/2026 o dono com token não a confere mais (entrada "WebSocket do dono com token não confere
+Origin").
 Recusa antes do aceite é 403, como o fechamento antes do `accept` do Starlette; multiplexador
 fora e teto de 64 painéis aceitam e fecham com 1013 e o motivo. O tamanho da janela fica na
 opção `@hangar_term_size` da sessão enquanto o painel vive, e o `main.rs` repõe ao subir o das
@@ -2767,3 +2794,20 @@ defeitos achados nele (todos consertados no Rust, decisão do usuário) estão n
   no modo `python`, abrir e reabrir respondem 503 com código. Ficam no Python, registrados: texto que
   nasce nele (grupo, par, broadcast) acorda Claude/Codex sem terminal pedindo ao Rust, e a
   transferência Claude→Codex (inativa no serviço).
+
+## WebSocket do dono com token não confere Origin (17/10/2026)
+
+- Regra: a conexão WebSocket autenticada pelo token do dono na query (`?token=`) não consulta a
+  Origin. Vale para o terminal (`term/mod.rs` no Rust, `termsock._porta_de_entrada` no Python), a
+  voz (`voice/routes.rs`, `voicesock._owner_only`) e o navegador remoto (`navsock._autorizado`).
+- Motivo: WebSocket não passa por CORS, e a Origin existe para impedir que uma página qualquer
+  aberta no navegador use uma credencial AMBIENTE (cookie, login guardado) que o navegador manda
+  sozinho. O token na query não é ambiente: uma página estranha não o tem. Conferir a Origin nesse
+  caso não acrescenta proteção e só barra quem entrou de verdade.
+- Caso real: o app iOS pelo Hangar Connect (`https://app.hangar.dev.br/casa`) levava
+  `voice origin refused` e precisou de `CP_TERM_ORIGINS` declarado em cada máquina.
+- O que continua: o login de convidado do `termsock` (`guest_users.current`, sessão por cookie)
+  segue com a Origin conferida por `_origem_aceita`, e `CP_TERM_ORIGINS`/`term_origins` seguem
+  valendo para ele. Convidado da 8766 continua decidido pelo porteiro, sem Origin, como antes.
+- Removidos por ficarem sem chamador: `crates/hangar-server/src/term/origin.rs` e a rota interna
+  `POST /internal/term/origin`; contrato interno 74 → 75.

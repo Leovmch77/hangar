@@ -115,6 +115,13 @@ def test_owner_text_frames_cross_both_ways(rust):
     assert headers["x-hangar-internal"] == "sek"
 
 
+def test_owner_token_opens_from_any_origin(rust):
+    # Token na query não é credencial ambiente: a Origin do app do Connect não é conferida.
+    with _client().websocket_connect(VOICE_URL, headers={"origin": "https://evil.com"}) as ws:
+        ws.send_text(json.dumps({"type": "ping"}))
+        assert json.loads(ws.receive_text()) == {"type": "pong"}
+
+
 def test_guest_is_refused(rust, monkeypatch):
     monkeypatch.setattr(voicesock, "guest_of", lambda conn: object())
     with pytest.raises(WebSocketDisconnect) as e:

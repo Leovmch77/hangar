@@ -4,7 +4,6 @@
 //! dono nem Origin) e cai com 4410 quando o acesso acaba. Quem não é dono nem convidado de convite
 //! segue ao Python (login de convidado, token errado, bloqueio, Connect), que volta por
 //! `/__hangar_server/term`.
-pub(crate) mod origin;
 mod pty;
 mod resolve;
 #[cfg(all(test, unix))]
@@ -23,7 +22,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, FromRequestParts, Path, Request, State};
-use axum::http::{Method, StatusCode, header};
+use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{Notify, mpsc, watch};
@@ -221,7 +220,8 @@ async fn serve(st: Arc<AppState>, peer: SocketAddr, req: Request, want: Want) ->
         Want::Session { .. } => session.is_some_and(|s| g.sessions.get(s) == Some(&Kind::Share)),
         Want::Hangar(_) => false,
     });
-    // Só `?token=`, como o termsock: Bearer e cookie não abrem shell.
+    // Só `?token=`, como o termsock: Bearer e cookie não abrem shell. Por isso não há Origin a
+    // conferir: ela barra credencial ambiente, e página estranha não tem o token.
     let owner = guest.is_none() && auth::query_param(req.uri().query(), "token").filter(|t| !t.is_empty())
         .is_some_and(|t| st.auth.is_owner(&fwd.client_ip, Some(t.as_bytes())));
     if !(owner || guest == Some(true)) || req.method() != Method::GET || (guest.is_some() && matches!(want, Want::Hangar(_))) {
@@ -234,25 +234,6 @@ async fn serve(st: Arc<AppState>, peer: SocketAddr, req: Request, want: Want) ->
         Err(_) => return pass(&st, Request::from_parts(parts, body), &fwd).await,
     };
     let label = match &want { Want::Session { name, .. } => name.clone(), Want::Hangar(_) => "hangar".into() };
-    // A Origin do convidado é a do app dele, como no termsock.
-    if let Some(origin) = parts.headers.get(header::ORIGIN).filter(|o| guest.is_none() && !o.is_empty()) {
-        // Origin que nem é texto não passa como "sem Origin".
-        let Ok(origin) = origin.to_str() else { return refuse("origem recusada") };
-        let host = parts.headers.get(header::HOST).and_then(|v| v.to_str().ok());
-        match origin::ask(&st.http, st.cfg.upstream, &st.cfg.internal_secret, origin, host).await {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::warn!(session = %label, "terminal: origem recusada");
-                return refuse("origem recusada");
-            }
-            Err(code) => {
-                st.diag.report("rust.term_failed", &label, code, "a origem do terminal não foi conferida");
-                let body = serde_json::json!({"ok": false, "error_code": code,
-                    "message": "a origem do terminal não foi conferida"}).to_string();
-                return (StatusCode::SERVICE_UNAVAILABLE, [(header::CONTENT_TYPE, "application/json")], body).into_response();
-            }
-        }
-    }
     let cfg = &st.term.cfg;
     let resolved = match &want {
         Want::Session { name, shortcut: None } => Ok(Some(name.clone())),

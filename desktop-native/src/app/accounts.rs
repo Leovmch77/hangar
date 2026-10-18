@@ -113,7 +113,7 @@ enum Group { Subscriptions, Models, Others }
 #[derive(Clone, Copy, PartialEq)]
 enum Tone { Muted, Warn, Danger }
 
-struct Bar { label: String, reset: String, pct: f64, reset_at: Option<f64>, per_model: bool }
+struct Bar { label: String, reset: String, reset_days: String, pct: f64, reset_at: Option<f64>, per_model: bool }
 
 /// `stale` é a idade da leitura quando ela já envelheceu; `cause`, por que a leitura seguinte não trocou os números.
 enum QuotaView { Bars { bars: Vec<Bar>, stale: Option<String>, cause: Option<String> }, Note(String), Nothing }
@@ -240,6 +240,16 @@ pub(super) fn reset_text(at: Option<f64>, now: f64) -> String {
         (0, m) => format!("{m}m"),
         (h, 0) => format!("{h}h"),
         (h, m) => format!("{h}h{m:02}"),
+    }
+}
+
+fn reset_days_text(at: Option<f64>, now: f64) -> String {
+    let Some(at) = at.filter(|at| at.is_finite() && *at > now) else { return "—".into() };
+    let days = ((at - now) / 86_400.).floor() as u64;
+    match days {
+        0 => tr("accounts_reset_less_day"),
+        1 => tr("accounts_reset_one_day"),
+        n => tr("accounts_summary_days").replace("{n}", &n.to_string()),
     }
 }
 
@@ -437,7 +447,8 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
     let quota = match (c.read_windows(), c.quota.as_ref()) {
         (Some(windows), Some(q)) => {
             let mut bars: Vec<Bar> = windows.iter().map(|w| Bar {
-                label: w.label.clone(), reset: reset_text(w.reset_at, now), pct: w.pct, reset_at: w.reset_at, per_model: w.por_modelo,
+                label: w.label.clone(), reset: reset_text(w.reset_at, now), reset_days: reset_days_text(w.reset_at, now),
+                pct: w.pct, reset_at: w.reset_at, per_model: w.por_modelo,
             }).collect();
             bars.sort_by_key(|b| window_order(&b.label));
             let stale = q.age.filter(|a| *a > STALE_AFTER).map(|a| tr("accounts_last_read").replace("{n}", &age(a)));
@@ -1019,15 +1030,18 @@ impl Hangar {
                 .children(row.login_note.clone().map(|text| div().min_w_0().text_size(px(12.5)).text_color(theme::warning())
                     .whitespace_normal().child(text)))
                 .when(!row.chips.is_empty(), |el| el.child(chips)));
-        let quota = div().w(px(if wide { columns_width(labels.len()) } else { 206. })).flex_shrink_0().flex().flex_col()
+        let quota = div().w(px(if wide { columns_width(labels) } else { 206. })).flex_shrink_0().flex().flex_col()
             .gap(px(if compact || wide { 4. } else { 8. }))
             .map(|el| match &row.quota {
                 QuotaView::Bars { bars, stale, cause } => el.when(stale.is_some(), |el| el.opacity(0.6))
                     .map(|el| if wide {
-                        el.child(div().flex().gap(px(COLUMN_GAP)).children(labels.iter().enumerate().map(|(n, label)| {
+                        el.child(div().flex().gap(px(COLUMN_GAP)).children(labels.iter().enumerate().flat_map(|(n, label)| {
                             let key = SharedString::from(format!("accounts-bar-{}-{label}", row.id));
                             let grow = motion::enter(key, motion::FADE_IN.after(120 + 35 * (order.min(12) + n) as u64), window, cx);
-                            quota_column(bars.iter().find(|b| &b.label == label), compact, grow)
+                            let bar = bars.iter().find(|b| &b.label == label);
+                            let mut cells = vec![quota_column(bar, compact, grow)];
+                            if label == "7d" { cells.push(weekly_reset_column(bar)); }
+                            cells
                         })))
                     } else if compact { el.child(mini_quota(bars, labels)) } else { el.children(bars.iter().map(quota_bar)) })
                     .children(stale.clone().map(|text| div().flex().items_center().gap(px(5.)).text_size(px(11.5)).text_color(theme::muted())
@@ -1135,13 +1149,13 @@ impl Hangar {
 }
 
 /// Página larga: largura de cada coluna de cota, o vão entre elas e a coluna das ações.
-const COLUMN: f32 = 140.;
+const COLUMN: f32 = 112.;
 const COLUMN_GAP: f32 = 16.;
 const ACTIONS: f32 = 160.;
 
 /// Seção sem janela nenhuma ainda guarda o espaço de duas: a nota da cota não espreme o nome.
-fn columns_width(count: usize) -> f32 {
-    let count = count.max(2) as f32;
+fn columns_width(labels: &[String]) -> f32 {
+    let count = (labels.len() + usize::from(labels.iter().any(|label| label == "7d"))).max(2) as f32;
     count * COLUMN + (count - 1.) * COLUMN_GAP
 }
 
@@ -1181,10 +1195,22 @@ fn column_head(title: Option<&str>, rows: &[&Row], labels: &[String]) -> Div {
         .child(div().flex_1().min_w_0().flex().items_center().gap(px(8.))
             .children(title.map(|t| div().child(t.to_owned())))
             .when(title.is_some(), |el| el.child(div().font_weight(FontWeight::NORMAL).child(rows.len().to_string()))))
-        .child(div().w(px(columns_width(labels.len()))).flex_shrink_0().flex().gap(px(COLUMN_GAP))
-            .children(labels.iter().map(|label| div().w(px(COLUMN)).flex_shrink_0().truncate()
-                .child(if used(label) { window_label(label) } else { String::new() }))))
+        .child(div().w(px(columns_width(labels))).flex_shrink_0().flex().gap(px(COLUMN_GAP))
+            .children(labels.iter().flat_map(|label| {
+                let mut cells = vec![div().w(px(COLUMN)).flex_shrink_0().truncate()
+                    .child(if used(label) { window_label(label) } else { String::new() })];
+                if label == "7d" {
+                    cells.push(div().w(px(COLUMN)).flex_shrink_0().truncate()
+                        .child(if used(label) { tr("accounts_weekly_reset") } else { String::new() }));
+                }
+                cells
+            })))
         .child(div().w(px(ACTIONS)).flex_shrink_0())
+}
+
+fn weekly_reset_column(bar: Option<&Bar>) -> Div {
+    div().w(px(COLUMN)).flex_shrink_0().text_size(px(13.)).text_color(theme::muted())
+        .child(bar.map_or_else(|| "—".into(), |b| b.reset_days.clone()))
 }
 
 /// Uma janela na coluna dela: o %, a barra que cresce ao abrir (`grow` de 0 a 1) e quando reinicia. Na Compacta, só o %.

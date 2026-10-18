@@ -517,7 +517,7 @@ def test_quiesce_settles_entry_claimed_by_cancelled_drain(tmp_path, monkeypatch,
         return None
     buffers = SimpleNamespace(discard=discard)
     sess = SimpleNamespace(name="session", initialized=asyncio.Event(), model=None, effort=None, permission_mode=None,
-        modo_nao_plan=None, comandos=[], comandos_terminal=[], usage=None, context_window=None, cost=None,
+        modo_nao_plan=None, usage=None, context_window=None, cost=None,
         desligando=False, live_active=None, drenador=None, proc=None, leitor=None,
         preview_buffer=buffers, thinking_buffer=buffers, tool_buffer=buffers)
     adapter._sessions["session"] = sess

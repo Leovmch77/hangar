@@ -1,5 +1,8 @@
 import { defineConfig } from 'vitest/config';
 import path from 'node:path';
+import { createRequire } from 'node:module';
+
+createRequire(import.meta.url)('./scripts/build-terminal-document.cjs').generateTerminalDocument();
 
 export default defineConfig({
   resolve: {
@@ -15,7 +18,10 @@ export default defineConfig({
       'react-native-worklets': path.resolve(__dirname, 'src/__mocks__/react-native-worklets.ts'),
       'react-native-svg': path.resolve(__dirname, 'src/__mocks__/react-native-svg.ts'),
       'expo-haptics': path.resolve(__dirname, 'src/__mocks__/expo-haptics.ts'),
+      'expo-symbols': path.resolve(__dirname, 'src/__mocks__/expo-symbols.ts'),
       'react-native-safe-area-context': path.resolve(__dirname, 'src/__mocks__/react-native-safe-area-context.ts'),
+      // Antes do pacote inteiro: o alias casa por prefixo.
+      'react-native-gesture-handler/ReanimatedDrawerLayout': path.resolve(__dirname, 'src/__mocks__/react-native-gesture-handler-drawer.ts'),
       'react-native-gesture-handler': path.resolve(__dirname, 'src/__mocks__/react-native-gesture-handler.ts'),
     },
   },

@@ -58,8 +58,9 @@ const nativeNavigation = {
 };
 const routerPush = vi.hoisted(() => vi.fn());
 const chatRow = vi.hoisted(() => ({ extra: {} as Record<string, unknown> }));
-const navigation = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), canGoBack: true }));
+const navigation = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), dismissTo: vi.fn(), canGoBack: true }));
 const route = vi.hoisted(() => ({ params: { server: 's1', name: 'sess' }, segments: ['s'] }));
+const realSettings = vi.hoisted(() => ({ enabled: false, models: vi.fn(), permissions: vi.fn(), commands: vi.fn() }));
 const realFirstInput = vi.hoisted(() => ({ enabled: false, send: vi.fn(), steer: vi.fn(), history: vi.fn(), transcribe: vi.fn(), relimpar: vi.fn(),
   upload: vi.fn(async () => ({ path: '/up/sess/ditado-1.m4a' })) }));
 const voiceInput = vi.hoisted(() => ({ recording: false, simulateRecorder: false, delayStop: false, stop: vi.fn(),
@@ -69,7 +70,7 @@ const voiceInput = vi.hoisted(() => ({ recording: false, simulateRecorder: false
   finishRecording: null as null | ((reason: MotivoFim) => void), onStopError: null as null | ((e: Error) => void) }));
 vi.mock('expo-router', () => ({
   useNavigation: () => nativeNavigation,
-  useRouter: () => ({ push: routerPush, back: navigation.back, replace: navigation.replace, canGoBack: () => navigation.canGoBack }),
+  useRouter: () => ({ push: routerPush, back: navigation.back, replace: navigation.replace, dismissTo: navigation.dismissTo, canGoBack: () => navigation.canGoBack }),
   useLocalSearchParams: () => route.params, useSegments: () => route.segments,
 }));
 vi.mock('@hangar/core', async (original) => ({
@@ -85,6 +86,7 @@ vi.mock('@hangar/core', async (original) => ({
   recarregarSessao: vi.fn(async () => ({ ok: true })),
   implementCodexPlan: vi.fn(async () => {}),
   setPermissionMode: vi.fn(async () => ({ mode: 'acceptEdits', current: 'acceptEdits', previous_non_plan: 'acceptEdits' })),
+  getModelOptions: realSettings.models, getPermissionModes: realSettings.permissions, getCommands: realSettings.commands,
   sendInputForServer: realFirstInput.send,
   steerSession: realFirstInput.steer,
   getHistory: realFirstInput.history,
@@ -99,7 +101,9 @@ vi.mock('../stores/servers', () => {
 });
 vi.mock('../ui/Screen', () => ({ Screen: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 // A gaveta puxa o gesture-handler nativo, que o vitest não carrega; aqui só o conteúdo importa.
-vi.mock('../features/sessions/SessionsDrawer', () => ({ SessionsDrawer: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
+vi.mock('../features/sessions/SessionsDrawer', () => ({ SessionsDrawer: ({ children, onClose, onNewConversation }: { children: ReactNode; onClose: () => void; onNewConversation?: () => void }) => createElement('div', null, children,
+  createElement('button', { 'aria-label': 'drawer-new-conversation', onClick: onNewConversation ?? onClose }),
+  createElement('button', { 'aria-label': 'drawer-navigation-close', onClick: onClose })) }));
 vi.mock('../features/sessions/ServerSheet', () => ({ ServerSheet: () => null }));
 vi.mock('react-native-keyboard-controller', () => ({
   KeyboardAvoidingView: ({ children }: { children: ReactNode }) => createElement('div', null, children),
@@ -107,7 +111,6 @@ vi.mock('react-native-keyboard-controller', () => ({
   useKeyboardState: <T,>(select: (s: { isVisible: boolean; height: number }) => T) => select({ isVisible: false, height: 0 }),
 }));
 vi.mock('./LoopChip', () => ({ LoopChip: () => null }));
-vi.mock('./OrqFooter', () => ({ OrqFooter: () => null }));
 vi.mock('./TuiPill', () => ({ TuiPill: () => null }));
 vi.mock('./RecarregarPill', () => ({ RecarregarPill: () => null }));
 vi.mock('./PendingPlan', () => ({ PendingPlan: () => null }));
@@ -123,9 +126,12 @@ vi.mock('../ui/Sheet', () => ({ Sheet: ({ children, onDidPresent, onDismiss }: {
   return createElement('div', null, children);
 } }));
 const panelEvents = vi.hoisted(() => ({ dismissed: undefined as (() => void) | undefined }));
-vi.mock('../ui/AnchoredPanel', () => ({ AnchoredPanel: ({ open, onDismissed, children }: { open: boolean; onDismissed?: () => void; children: ReactNode }) => {
+vi.mock('../ui/AnchoredPanel', () => ({ AnchoredPanel: ({ open, onDismissed, onClose, label, children }: {
+  open: boolean; onDismissed?: () => void; onClose?: () => void; label?: string; children: ReactNode;
+}) => {
   panelEvents.dismissed = onDismissed;
-  return open ? createElement('div', null, children) : null;
+  return open ? createElement('div', { role: 'dialog', 'aria-label': label }, children,
+    onClose ? createElement('button', { 'aria-label': 'dismiss-settings', onClick: onClose }) : null) : null;
 } }));
 // A folha de anexo também é um Sheet; fora daqui para o `sheetEvents` seguir preso à folha de opções.
 vi.mock('../ui/AttachSheet', () => ({ AttachSheet: ({ open, sendToGroup }: {
@@ -134,11 +140,15 @@ vi.mock('../ui/AttachSheet', () => ({ AttachSheet: ({ open, sendToGroup }: {
 vi.mock('../features/usage/HomeUsageCard', () => ({ HomeUsageCard: () => null, TextTabs: () => null }));
 vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 // Cada chave devolve o próprio nome, como nos outros testes de componente do app.
-vi.mock('../paraglide/messages', () => ({ ...Object.fromEntries(
-  ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo compartilhar_menu ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes mods_celular_mostrar mods_celular_mostrar_um mods_celular_mostrar_paineis mods_celular_ocultar mods_celular_sub plugin_band_label navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de term_titulo '
+vi.mock('../paraglide/messages', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../paraglide/messages')>(),
+  ...Object.fromEntries(
+  ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo compartilhar_menu ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes mods_celular_mostrar mods_celular_mostrar_um mods_celular_mostrar_paineis mods_celular_ocultar mods_celular_sub plugin_band_label navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de switcher_buscar_conversas term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
+    .concat(' sessao_git chat_acao_git_detalhe cota_conta_ativa accounts_switch_title native_ctl_model_title native_new_chat_reasoning native_mode_bypassPermissions chat_mode_label')
     .concat(' live_voice_open composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint composer_steer_current_text ditado_estilo_titulo uso_aria codex_orientar_ajuda composer_fila_titulo composer_submission_recover_first queue_steer_uncertain')
     .concat(' composer_interromper_claude composer_interromper_msg composer_interromper comum_cancelar')
+    .concat(' orq_tab_title orq_row_badge orq_talk_to_arbiter')
     .concat(' cite_action cite_too_long_aria selection_copy selection_copy_markdown selection_copy_image_url selection_copy_image_urls')
     .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro nova_conversa_salvar_erro')
     .concat(' askq_enviando board_falha_envio board_falha_upload chat_chegou_mas chat_envio_incerto chat_nao_chegou_em chat_servidor_removido codex_orientar_recebido codex_orientar_sem_envio composer_ditado_anterior composer_ditado_aplicado composer_ditado_indisponivel composer_ditado_interrompido composer_ditado_recuperavel composer_draft_read_again composer_draft_recover_attach_busy composer_falha_gravacao composer_falha_transcricao composer_fila_erro composer_sem_acesso_fotos composer_sem_acesso_mic composer_submission_check composer_submission_rejected composer_submission_sending composer_transcrever_de_novo composer_transcricao_vazia composer_aguarde_transcricao')
@@ -186,7 +196,8 @@ beforeEach(() => {
 });
 afterEach(() => { _limparEsfriamentoParaTestes(); _resetRotasForTests(); });
 
-const sessionsState = vi.hoisted(() => ({ rows: [] as { serverId: string; name: string; jsonl?: string | null; pair_peers?: string[] }[], byServerRecord: {} }));
+const sessionsState = vi.hoisted(() => ({ rows: [] as (Pick<SessionInfo, 'name' | 'jsonl' | 'pair_peers' | 'provider' | 'orq_arbiter' | 'conta' | 'engine'> & { serverId: string })[], byServerRecord: {},
+  holders: 0, retain: () => { sessionsState.holders++; return () => { sessionsState.holders--; }; } }));
 
 // Composer isolado: sem picker, pills, ditado nem store real — só o que decide o botão Parar.
 const composerChat = vi.hoisted(() => ({ state: 'idle' as string, send: vi.fn(async (_text: string) => {}) }));
@@ -198,13 +209,24 @@ vi.mock('./draftAttachments', () => ({
   removeDraftAttachment: vi.fn(),
 }));
 vi.mock('../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
-vi.mock('../ui/MultilineInput', () => ({ MultilineInput: ({ value, onChangeText, accessibilityLabel, ref }: {
+const pasteInput = vi.hoisted(() => ({ onPaste: null as null | ((files: import('@mattermost/react-native-paste-input').PastedFile[], error: string | null) => void) }));
+vi.mock('../ui/MultilineInput', () => ({ MultilineInput: ({ value, onChangeText, accessibilityLabel, ref, onPaste, onSelectionChange }: {
   value: string; onChangeText: (text: string) => void; accessibilityLabel?: string; ref?: import('react').Ref<HTMLTextAreaElement>;
-}) => createElement('textarea', { ref, 'aria-label': accessibilityLabel, value, readOnly: true, onInput: (e: { currentTarget: { value: string } }) => onChangeText(e.currentTarget.value) }),
+  onPaste?: NonNullable<typeof pasteInput.onPaste>;
+  onSelectionChange?: (event: { nativeEvent: { selection: { start: number; end: number } } }) => void;
+}) => (pasteInput.onPaste = onPaste ?? null, createElement('textarea', { ref, 'aria-label': accessibilityLabel, value, readOnly: true,
+  onInput: (e: { currentTarget: HTMLTextAreaElement }) => {
+    onChangeText(e.currentTarget.value);
+    onSelectionChange?.({ nativeEvent: { selection: { start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd } } });
+  } })),
 }));
 vi.mock('../features/pills/PillMenu', () => ({ PillMenu: () => null }));
 vi.mock('../features/ditado/EstiloPill', () => ({ DictationStyleMenu: () => null, useDictationStyleLabel: () => 'estilo' }));
-vi.mock('./SessionSettings', () => ({ SessionSettingsButton: () => createElement('button', { 'aria-label': 'composer_session_settings' }) }));
+vi.mock('./SessionSettings', async () => {
+  const actual = await vi.importActual<typeof import('./SessionSettings')>('./SessionSettings');
+  return { ...actual, SessionSettingsButton: (props: Parameters<typeof actual.SessionSettingsButton>[0]) => realSettings.enabled
+    ? createElement(actual.SessionSettingsButton, props) : createElement('button', { 'aria-label': 'composer_session_settings' }) };
+});
 vi.mock('../features/ditado/useDitado', () => ({ useDitado: (callbacks: {
   onFim: NonNullable<typeof voiceInput.onFim>; onErroParada?: (e: Error) => void;
 }) => {
@@ -243,11 +265,16 @@ vi.mock('../features/ditado/useDitado', () => ({ useDitado: (callbacks: {
   };
 } }));
 vi.mock('../features/ditado/ditadoEstiloStore', () => ({ dictationStyleStore: () => ({ getState: () => ({ pronto: false }) }) }));
-vi.mock('./CommandSheet', () => ({
-  CommandSheet: () => null,
-  useSessionCommands: () => ({ commands: [], error: '', retry: () => {} }),
-}));
-vi.mock('./SlashSuggest', () => ({ SlashSuggest: () => null }));
+vi.mock('./CommandSheet', async () => {
+  const actual = await vi.importActual<typeof import('./CommandSheet')>('./CommandSheet');
+  return { ...actual, CommandSheet: () => null,
+    useSessionCommands: (...args: Parameters<typeof actual.useSessionCommands>) => realSettings.enabled
+      ? actual.useSessionCommands(...args) : { commands: [], error: '', retry: () => {} } };
+});
+vi.mock('./SlashSuggest', async () => {
+  const actual = await vi.importActual<typeof import('./SlashSuggest')>('./SlashSuggest');
+  return { SlashSuggest: (props: Parameters<typeof actual.SlashSuggest>[0]) => realSettings.enabled ? createElement(actual.SlashSuggest, props) : null };
+});
 vi.mock('./SideQuestionSheet', () => ({ SideQuestionSheet: () => null }));
 vi.mock('../stores/sessions', () => ({
   useSessions: Object.assign((sel: (s: unknown) => unknown) => sel(sessionsState), { getState: () => sessionsState }),
@@ -299,7 +326,11 @@ vi.mock('../features/attachments/DocumentViewer', () => ({ DocumentViewer: () =>
 vi.mock('../features/attachments/mediaCache', () => ({ canShareFile: false, shareFile: async () => {} }));
 vi.mock('../ui/Toast', () => ({ toast: { ok: () => {}, erro: () => {} } }));
 vi.mock('expo-clipboard', () => ({ setStringAsync: vi.fn(async () => {}) }));
-vi.mock('./PreviewBubble', () => ({ PreviewBubble: () => null }));
+const previewTexts = vi.hoisted(() => [] as string[]);
+vi.mock('./PreviewBubble', () => ({ PreviewBubble: ({ text }: { text: string }) => { previewTexts.push(text); return null; } }));
+// Conta os renders da tela: o KeyboardBar é filho direto dela, sem memo.
+const screenRenders = vi.hoisted(() => ({ n: 0 }));
+vi.mock('./KeyboardBar', () => ({ KeyboardBar: () => { screenRenders.n++; return null; } }));
 vi.mock('./ThinkingBlock', () => ({ ThinkingBlock: () => null }));
 vi.mock('./tools/ToolCard', () => ({ ToolCard: () => null }));
 vi.mock('./tools/ToolGroup', () => ({ ToolGroup: () => null }));
@@ -394,6 +425,214 @@ describe('ações e atualização da conversa na rota', () => {
         onerror: null, onopen: null, readyState: 1 }) });
   });
   afterEach(() => { _resetChatsForTests(); chatRow.extra = {}; vi.useRealTimers(); });
+
+  describe('ajustes pelo rodapé na tela real', () => {
+    beforeEach(() => {
+      realSettings.enabled = true;
+      realSettings.models.mockReset().mockResolvedValue({ kind: 'claude', models: [{ id: 'opus', name: 'Opus 5.5' }] });
+      realSettings.permissions.mockReset().mockResolvedValue({ current: 'bypassPermissions', modes: ['bypassPermissions', 'plan'], sondavel: false });
+      realSettings.commands.mockReset().mockResolvedValue(['model', 'effort'].map(name => ({ name, display: `/${name}`, source: 'builtin' })));
+      sessionsState.rows = [
+        { serverId: 's2', name: 'sess', provider: 'claude', conta: 'claude:/home/test/.claude-active-server' },
+        { serverId: 's1', name: 'another', provider: 'claude', conta: 'claude:/home/test/.claude-other-session' },
+        { serverId: 's1', name: 'sess', provider: 'claude', conta: 'claude:/home/test/.claude-route-account' },
+      ];
+      chatStore('s1', 'sess').use.setState({ statusLine: '🤖 Opus5.5 (high)',
+        stateEvent: { session: 'sess', state: 'idle', claude_permission_mode: 'bypassPermissions' } });
+      routerPush.mockClear(); layouts.clear();
+    });
+    afterEach(() => { realSettings.enabled = false; layouts.clear(); });
+    const panel = (container: HTMLElement) => container.querySelector('[role="dialog"][aria-label="composer_session_settings"]');
+    const measureFooter = async () => {
+      await act(async () => {
+        for (const [id, onLayout] of layouts) {
+          if (id === 'composer-status-items' || id.startsWith('composer-status-measure-')) {
+            onLayout({ nativeEvent: { layout: { x: 0, y: 0, width: id === 'composer-status-items' ? 343 : 100, height: 44 } } } as import('react-native').LayoutChangeEvent);
+          }
+        }
+      });
+    };
+    const openFooter = async (container: HTMLElement, label: string) => {
+      await measureFooter();
+      const action = button(container, label);
+      expect(action?.tagName).toBe('BUTTON');
+      await act(async () => action!.click());
+      expect(panel(container)).not.toBeNull();
+    };
+    const closePanel = async (container: HTMLElement) => {
+      await act(async () => button(container, 'dismiss-settings')!.click());
+      expect(panel(container)).toBeNull();
+    };
+
+    it('modo e conta abrem e reabrem a mesma folha, que mostra a conta e navega para trocar na rota certa', async () => {
+      const { container, root } = await render(createElement(ChatScreen));
+      try {
+        expect(panel(container)).toBeNull();
+        for (const label of ['native_mode_bypassPermissions', 'native_mode_bypassPermissions', 'route-account', 'route-account']) {
+          await openFooter(container, label);
+          expect(container.querySelectorAll('[role="dialog"][aria-label="composer_session_settings"]')).toHaveLength(1);
+          expect(panel(container)!.textContent).toContain('cota_conta_ativa');
+          expect(panel(container)!.textContent).toContain('route-account');
+          expect(panel(container)!.textContent).not.toContain('active-server');
+          expect(panel(container)!.textContent).not.toContain('other-session');
+          expect(panel(container)!.textContent).toContain('native_ctl_model_title');
+          expect(button(panel(container)! as HTMLElement, 'accounts_switch_title')).toBeDefined();
+          await closePanel(container);
+        }
+        expect(setPermissionMode).not.toHaveBeenCalled();
+        expect(realFirstInput.send).not.toHaveBeenCalled();
+        expect(realSettings.models).toHaveBeenCalledWith('sess', useServers.getState().servers[0]);
+        await openFooter(container, 'route-account');
+        await act(async () => button(container, 'accounts_switch_title')!.click());
+        expect(panel(container)).toBeNull();
+        expect(routerPush).toHaveBeenLastCalledWith('/s/s1/sess/account');
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('pedido consumido não reabre depois de remontar o Composer nem ao trocar servidor ou sessão', async () => {
+      const { container, root } = await render(createElement(ChatScreen));
+      try {
+        await openFooter(container, 'route-account');
+        await closePanel(container);
+        // O rodapé de orquestração desmonta o Composer mantendo a mesma tela e rota.
+        sessionsState.rows[2] = { ...sessionsState.rows[2], provider: 'orq' };
+        await act(async () => root.render(createElement(ChatScreen)));
+        expect(container.querySelector('textarea')).toBeNull();
+        sessionsState.rows[2] = { ...sessionsState.rows[2], provider: 'claude' };
+        await act(async () => root.render(createElement(ChatScreen)));
+        expect(container.querySelector('textarea')).not.toBeNull();
+        expect(panel(container)).toBeNull();
+        await openFooter(container, 'native_mode_bypassPermissions');
+        route.params = { server: 's2', name: 'sess' };
+        await act(async () => root.render(createElement(ChatScreen)));
+        expect(panel(container)).toBeNull();
+        await openFooter(container, 'active-server');
+        route.params = { server: 's1', name: 'another' };
+        chatRow.extra = { name: 'another' };
+        await act(async () => root.render(createElement(ChatScreen)));
+        expect(panel(container)).toBeNull();
+        await openFooter(container, 'other-session');
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('/model e /effort continuam reabrindo a folha depois do pedido externo, sem enviar comandos', async () => {
+      const { container, root } = await render(createElement(ChatScreen));
+      try {
+        await openFooter(container, 'route-account');
+        await closePanel(container);
+        for (const command of ['/model', '/model', '/effort', '/effort']) {
+          const field = container.querySelector('textarea')!;
+          await act(async () => { field.value = command; field.setSelectionRange(command.length, command.length); field.dispatchEvent(new Event('input', { bubbles: true })); });
+          const suggestion = button(container, command);
+          expect(suggestion).toBeDefined();
+          await act(async () => suggestion!.click());
+          expect(panel(container)).not.toBeNull();
+          expect(panel(container)!.textContent).toContain('native_ctl_model_title');
+          expect(panel(container)!.textContent).toContain('native_new_chat_reasoning');
+          expect(field.value).toBe('');
+          await closePanel(container);
+        }
+        expect(realFirstInput.send).not.toHaveBeenCalled();
+      } finally { act(() => root.unmount()); }
+    });
+  });
+
+  it('Nova conversa da gaveta do chat pede compose na inicial, sem mudar o fechamento das demais navegações', async () => {
+    navigation.dismissTo.mockClear();
+    const { container, root } = await render(createElement(ChatScreen));
+    try {
+      await act(async () => button(container, 'drawer-new-conversation')!.click());
+      expect(navigation.dismissTo).toHaveBeenLastCalledWith({ pathname: '/', params: { compose: '1' } });
+      await act(async () => button(container, 'drawer-navigation-close')!.click());
+      expect(navigation.dismissTo).toHaveBeenLastCalledWith('/');
+    } finally { act(() => root.unmount()); }
+  });
+
+  it('rodapé acompanha sucessão e ausência de árbitro na lista sem reutilizar o árbitro antigo', async () => {
+    chatRow.extra = { provider: 'orq', orq_arbiter: 'arb-old' };
+    const row: (typeof sessionsState.rows)[number] = { serverId: 's1', name: 'sess', provider: 'orq', orq_arbiter: 'arb-old' };
+    sessionsState.rows = [row];
+    routerPush.mockClear();
+    const { container, root } = await render(createElement(ChatScreen));
+    const talk = () => container.querySelector<HTMLButtonElement>('[aria-label="orq_talk_to_arbiter"]');
+    try {
+      expect(talk()).not.toBeNull();
+      await act(async () => talk()!.click());
+      expect(routerPush).toHaveBeenLastCalledWith('/s/s1/arb-old');
+      await act(async () => button(container, 'orq_tab_title')!.click());
+      expect(routerPush).toHaveBeenLastCalledWith('/s/s1/sess/orchestration');
+
+      sessionsState.rows = [{ ...row, orq_arbiter: 'arb-new' }];
+      await act(async () => root.render(createElement(ChatScreen)));
+      await act(async () => talk()!.click());
+      expect(routerPush).toHaveBeenLastCalledWith('/s/s1/arb-new');
+
+      sessionsState.rows = [{ ...row, orq_arbiter: null }];
+      await act(async () => root.render(createElement(ChatScreen)));
+      expect(talk()!.disabled).toBe(true);
+      routerPush.mockClear();
+      await act(async () => talk()!.click());
+      expect(routerPush).not.toHaveBeenCalled();
+
+      sessionsState.rows = [];
+      await act(async () => root.render(createElement(ChatScreen)));
+      expect(talk()!.disabled).toBe(false);
+      await act(async () => talk()!.click());
+      expect(routerPush).toHaveBeenLastCalledWith('/s/s1/arb-old');
+      expect(fetchSessionsForServer).toHaveBeenCalledTimes(1);
+    } finally { act(() => root.unmount()); }
+  });
+
+  it('a conversa mantém a lista de sessões viva enquanto está aberta, com a gaveta fechada', async () => {
+    const { root } = await render(createElement(ChatScreen));
+    expect(sessionsState.holders).toBe(1);
+    act(() => root.unmount());
+    expect(sessionsState.holders).toBe(0);
+  });
+
+  it('prévia chegando redesenha só a lista, não a tela inteira', async () => {
+    const { root } = await render(createElement(ChatScreen));
+    try {
+      const antes = screenRenders.n;
+      previewTexts.length = 0;
+      await act(async () => chatStore('s1', 'sess').use.setState({ preview: 'parcial' }));
+      expect(previewTexts).toContain('parcial');
+      expect(screenRenders.n).toBe(antes);
+    } finally { act(() => root.unmount()); }
+  });
+
+  it('confirmações antigas da fila não redesenham a tela com histórico carregado', async () => {
+    vi.useFakeTimers();
+    const listeners: Record<string, ((event: { data: string }) => void)[]> = {};
+    configureApi({ getBaseUrl: () => 'http://unused', getToken: () => '', onUnauthorized: () => {}, origin: null,
+      createEventSource: () => ({
+        addEventListener: (type, callback) => { (listeners[type] ??= []).push(callback); },
+        removeEventListener: () => {}, close: () => {}, onerror: null, onopen: null, readyState: 1,
+      }) });
+    realFirstInput.history.mockResolvedValue(Array.from({ length: 400 }, (_, i) => ({
+      id: `history:${i}`, kind: i % 2 ? 'assistant_msg' : 'user_msg', text: `histórico ${i}`, ts: 1_700_000_000,
+    })));
+    const { root } = await render(createElement(ChatScreen));
+    try {
+      expect(chatStore('s1', 'sess').use.getState().events).toHaveLength(400);
+      expect(listeners.queue_confirmed).toHaveLength(1);
+      const before = screenRenders.n;
+      for (let i = 0; i < 160; i++) {
+        await act(async () => listeners.queue_confirmed.forEach(listener => listener({ data: JSON.stringify({
+          id: `queued-old-${i}`, kind: 'user_msg', text: 'já entregue',
+          queued_delivered: true, queued_confirmed: true, queued_ts: 1_700_000_000,
+        }) })));
+      }
+      expect(screenRenders.n - before).toBe(0);
+      await act(async () => listeners.message.forEach(listener => listener({ data: JSON.stringify({
+        id: 'live:1', kind: 'assistant_msg', text: 'mensagem nova', ts: 1_700_000_001,
+      }) })));
+      expect(bubbleTexts).toContain('mensagem nova');
+      const after = screenRenders.n;
+      await act(async () => vi.advanceTimersByTimeAsync(1000));
+      expect(screenRenders.n).toBe(after);
+    } finally { act(() => root.unmount()); }
+  });
 
   it('lista reserva o espaço real dos mods e volta ao vidro do composer quando eles saem', async () => {
     layouts.clear();
@@ -1024,11 +1263,88 @@ describe('rascunho guardado no Composer', () => {
     expect(reopened.container.textContent).toContain('nota.txt');
     act(() => button(reopened.container, 'composer_draft_recover')!.click());
     expect(reopened.container.querySelector('textarea')!.value).toBe('nota');
-    expect(JSON.parse(storage.memory.get('draft.v1:s1::sess')!)).toMatchObject({ attachment, submission: null });
+    expect(JSON.parse(storage.memory.get('draft.v1:s1::sess')!)).toMatchObject({ attachments: [attachment], submission: null });
     act(() => reopened.root.unmount());
   });
 
-  it('recuperação não troca anexo atual; depois de removê-lo adota o anterior sem reutilizar upload da sessão morta', async () => {
+  it('colar vários anexa todos; remover tira só aquele; Enviar sobe os que faltam e junta os caminhos numa linha', async () => {
+    composerChat.send.mockClear();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ blob: async () => new Blob(['x']) } as Response);
+    realFirstInput.upload.mockReset().mockResolvedValueOnce({ path: '/up/a.png' }).mockResolvedValueOnce({ path: '/up/c.txt' });
+    const { container, root } = await render(createElement(Composer, props));
+    await act(async () => pasteInput.onPaste!([
+      { uri: 'file:///a.png', fileName: 'a.png', type: 'image/png', fileSize: 2048 },
+      { uri: 'file:///b.txt', fileName: 'b.txt', type: 'text/plain', fileSize: 10 },
+      { uri: 'file:///c.txt', fileName: 'c.txt', type: 'text/plain', fileSize: 10 },
+    ], null));
+    const removers = () => container.querySelectorAll<HTMLElement>('[aria-label="board_remover_anexo"]');
+    expect(removers()).toHaveLength(3);
+    expect(container.textContent).not.toContain('composer_colou_so_um');
+    act(() => removers()[1].click());
+    const uris = () => (JSON.parse(storage.memory.get('draft.v1:s1::sess')!) as { attachments: { uri: string }[] }).attachments.map((a) => a.uri);
+    expect(uris()).toEqual(['file:///a.png', 'file:///c.txt']);
+    type(container, 'legenda');
+    await act(async () => button(container, 'composer_enviar_mensagem')!.click());
+    expect(realFirstInput.upload).toHaveBeenCalledTimes(2);
+    expect(composerChat.send).toHaveBeenCalledExactlyOnceWith(
+      'legenda — 📎 board_imagem: /up/a.png 📎 board_arquivo: /up/c.txt', expect.any(Number));
+    expect(removers()).toHaveLength(0);
+    expect(uris()).toEqual([]);
+    fetchSpy.mockRestore();
+    act(() => root.unmount());
+  });
+
+  it('anexo colado durante o upload fica no rascunho e espera o próximo envio', async () => {
+    composerChat.send.mockClear();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ blob: async () => new Blob(['x']) } as Response);
+    let uploaded!: (v: { path: string }) => void;
+    realFirstInput.upload.mockReset().mockImplementationOnce(() => new Promise((resolve) => { uploaded = resolve; }));
+    storage.memory.set('draft.v1:s1::sess', JSON.stringify({ version: 1, text: '', revision: 1, transcript: null, submission: null,
+      attachments: [{ uri: 'file:///a.png', name: 'a.png', mime: 'image/png', kind: 'image' }] }));
+    const { container, root } = await render(createElement(Composer, props));
+    await act(async () => { void button(container, 'composer_enviar_mensagem')!.click(); });
+    await act(async () => pasteInput.onPaste!([{ uri: 'file:///novo.txt', fileName: 'novo.txt', type: 'text/plain', fileSize: 1 }], null));
+    await act(async () => uploaded({ path: '/up/a.png' }));
+    expect(composerChat.send).toHaveBeenCalledExactlyOnceWith('📎 board_imagem: /up/a.png', expect.any(Number));
+    const uris = (JSON.parse(storage.memory.get('draft.v1:s1::sess')!) as { attachments: { uri: string }[] }).attachments.map((a) => a.uri);
+    expect(uris).toEqual(['file:///novo.txt']);
+    expect(container.querySelectorAll('[aria-label="board_remover_anexo"]')).toHaveLength(1);
+    fetchSpy.mockRestore();
+    act(() => root.unmount());
+  });
+
+  it('falha no segundo upload guarda o caminho do primeiro e o reenvio não o sobe de novo', async () => {
+    composerChat.send.mockClear();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ blob: async () => new Blob(['x']) } as Response);
+    realFirstInput.upload.mockReset().mockResolvedValueOnce({ path: '/up/a.png' }).mockRejectedValueOnce(new Error('grande demais'))
+      .mockResolvedValueOnce({ path: '/up/b.txt' });
+    storage.memory.set('draft.v1:s1::sess', JSON.stringify({ version: 1, text: '', revision: 1, transcript: null, submission: null, attachments: [
+      { uri: 'file:///a.png', name: 'a.png', mime: 'image/png', kind: 'image' },
+      { uri: 'file:///b.txt', name: 'b.txt', mime: 'text/plain', kind: 'file' },
+    ] }));
+    const { container, root } = await render(createElement(Composer, props));
+    await act(async () => button(container, 'composer_enviar_mensagem')!.click());
+    expect(composerChat.send).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('grande demais');
+    await act(async () => button(container, 'composer_enviar_mensagem')!.click());
+    expect(realFirstInput.upload).toHaveBeenCalledTimes(3);
+    expect(composerChat.send).toHaveBeenCalledExactlyOnceWith('📎 board_imagem: /up/a.png 📎 board_arquivo: /up/b.txt', expect.any(Number));
+    fetchSpy.mockRestore();
+    act(() => root.unmount());
+  });
+
+  it.each([
+    ['vazio', { text: '', attachment: null }, false],
+    ['só espaços', { text: '  \n ', attachments: [] }, false],
+    ['só anexo', { text: '', attachments: [{ uri: 'file:///draft-attachments/1-1.txt', name: 'n.txt', mime: 'text/plain', kind: 'file' }] }, true],
+  ])('rascunho anterior %s só aparece com o que devolver', async (_case, content, shown) => {
+    storage.memory.set('draft.v1.recoverable:s1::sess', JSON.stringify({ version: 1, revision: 1, transcript: '/old', submission: null, ...content }));
+    const { container, root } = await render(createElement(Composer, props));
+    expect(container.textContent?.includes('composer_draft_previous')).toBe(shown);
+    act(() => root.unmount());
+  });
+
+  it('recuperação soma o anexo anterior ao atual sem reutilizar upload da sessão morta', async () => {
     const attachment = { uri: 'file:///draft-attachments/2-1.txt', name: 'atual.txt', mime: 'text/plain', kind: 'file' };
     const previous = { ...attachment, uri: 'file:///draft-attachments/1-1.txt', name: 'anterior.txt',
       uploadedPath: '/uploads/anterior.txt', uploadedFor: { serverId: 's1', name: 'sess', transcript: '/old' } };
@@ -1040,16 +1356,11 @@ describe('rascunho guardado no Composer', () => {
     }));
     const { container, root } = await render(createElement(Composer, props));
     act(() => button(container, 'composer_draft_recover')!.click());
-    expect(container.textContent).toContain('composer_draft_recover_attach_busy');
-    expect(container.querySelector('textarea')!.value).toBe('atual');
-    expect(JSON.parse(storage.memory.get('draft.v1:s1::sess')!).attachment).toEqual(attachment);
-    expect(storage.memory.has('draft.v1.recoverable:s1::sess')).toBe(true);
-    act(() => container.querySelector<HTMLButtonElement>('[aria-label="board_remover_anexo"]')!.click());
-    act(() => button(container, 'composer_draft_recover')!.click());
     expect(container.querySelector('textarea')!.value).toBe('atual\nanterior');
-    expect(JSON.parse(storage.memory.get('draft.v1:s1::sess')!).attachment).toEqual({
+    expect(JSON.parse(storage.memory.get('draft.v1:s1::sess')!).attachments).toEqual([attachment, {
       uri: previous.uri, name: previous.name, mime: previous.mime, kind: previous.kind,
-    });
+    }]);
+    expect(container.querySelectorAll('[aria-label="board_remover_anexo"]')).toHaveLength(2);
     expect(storage.memory.has('draft.v1.recoverable:s1::sess')).toBe(false);
     act(() => root.unmount());
   });
@@ -1314,7 +1625,7 @@ describe('Orientar texto do composer com os stores reais', () => {
     const panel = blocked === 'edição da fila'
       ? { entries: [{ id: 'q1', text: 'mensagem da fila', ts: null }], actions: true } : noQueue;
     writeDraft('s1', 'sess', { version: 1, text: 'rascunho', revision: 1, transcript: null, submission: null,
-      attachment: blocked === 'anexo' ? { uri: 'file:///foto.png', name: 'foto.png', mime: 'image/png', kind: 'image' } : null });
+      attachments: blocked === 'anexo' ? [{ uri: 'file:///foto.png', name: 'foto.png', mime: 'image/png', kind: 'image' }] : [] });
     if (blocked === 'edição da fila') {
       const chat = chatStore('s1', 'sess');
       chat.use.setState({ queuePanel: panel });
@@ -1625,7 +1936,7 @@ describe('Enviar encerra o ditado e aguarda o texto completo', () => {
 
   it.each(['anexo', 'grupo', 'pares'])('mudar %s durante a espera cancela a intenção', async (change) => {
     if (change === 'anexo') writeDraft('s1', 'sess', { version: 1, text: 'antes', revision: 1, transcript: '/t/voice.jsonl', submission: null,
-      attachment: { uri: 'file:///foto.png', name: 'foto.png', mime: 'image/png', kind: 'image' } });
+      attachments: [{ uri: 'file:///foto.png', name: 'foto.png', mime: 'image/png', kind: 'image' }] });
     sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/voice.jsonl', pair_peers: ['par'] }];
     const request = pendingTranscription();
     const { container, root } = await start(change === 'anexo' ? '' : 'antes');
@@ -1666,7 +1977,7 @@ describe('Enviar encerra o ditado e aguarda o texto completo', () => {
       if (change === 'edição da fila') queuedText = chat.startQueueEdit('q1', 'antes');
       if (change === 'anexo') {
         writeDraft('s1', 'sess', { ...readDraft('s1', 'sess')!,
-          attachment: { uri: 'file:///foto.png', name: 'foto.png', mime: 'image/png', kind: 'image' } });
+          attachments: [{ uri: 'file:///foto.png', name: 'foto.png', mime: 'image/png', kind: 'image' }] });
         chat.use.setState((s) => ({ draftUpdate: s.draftUpdate + 1 }));
       }
     });
@@ -1678,7 +1989,7 @@ describe('Enviar encerra o ditado e aguarda o texto completo', () => {
     const kept = change === 'edição da fila' ? 'antes' : `antes ${answer.text}`;
     expect(container.querySelector('textarea')!.value).toBe(change === 'edição da fila' ? 'na fila' : kept);
     expect(readDraft('s1', 'sess')?.text).toBe(kept);
-    if (change === 'anexo') expect(readDraft('s1', 'sess')?.attachment?.uri).toBe('file:///foto.png');
+    if (change === 'anexo') expect(readDraft('s1', 'sess')?.attachments[0]?.uri).toBe('file:///foto.png');
     if (change === 'edição da fila') expect(readDictation('s1', 'sess')).toMatchObject({ status: 'ready', text: answer.text });
   });
 
@@ -1733,7 +2044,7 @@ describe('Enviar encerra o ditado e aguarda o texto completo', () => {
   });
 
   it('pending externo órfão solta o botão no teto sem apagar texto nem áudio', async () => {
-    writeDraft('s1', 'sess', { version: 1, text: 'antes', revision: 1, transcript: '/t/voice.jsonl', attachment: null, submission: null });
+    writeDraft('s1', 'sess', { version: 1, text: 'antes', revision: 1, transcript: '/t/voice.jsonl', attachments: [], submission: null });
     setDictationInFlight('s1', 'sess', 'orphan', true);
     try {
       writeDictation('s1', 'sess', { version: 1, id: 'orphan', transcript: '/t/voice.jsonl', draftRevision: 1, before: 'antes',
@@ -2042,7 +2353,7 @@ describe('ditado entregue à conversa de origem', () => {
     status: 'ready', text: 'ditado', raw: 'ditado cru', issue: '', ...patch,
   });
   const storeDraft = (patch: Record<string, unknown> = {}) => storage.memory.set('draft.v1:s1::sess', JSON.stringify({
-    version: 1, text: 'antes', revision: 2, transcript: '/t/a.jsonl', attachment: null, submission: null, ...patch,
+    version: 1, text: 'antes', revision: 2, transcript: '/t/a.jsonl', attachments: [], submission: null, ...patch,
   }));
   beforeEach(() => { sessionsState.rows = [{ serverId: 's1', name: 'sess', jsonl: '/t/a.jsonl' }]; });
 

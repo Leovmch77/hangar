@@ -1,144 +1,201 @@
 import { useMemo, useState, type ReactNode } from 'react';
-import { Pressable, Text, View } from 'react-native';
+import { Pressable, Text, View, useWindowDimensions } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { parseStatusLine } from '@hangar/core';
 import { chatStore } from '../stores/chat';
 import { useSessions } from '../stores/sessions';
+import { permissionLabel } from '../features/pills/permissionLabel';
 import { Icon } from '../ui/Icon';
 import { ContextRing } from './ContextRing';
 import { UsageSheet } from './UsageSheet';
-import { composerStatus } from './usage';
+import { composerStatus, fitComposerItems } from './usage';
+import { sessionAccountLabel } from './sessionAccountLabel';
 import * as m from '../paraglide/messages';
 
 interface Props {
   serverId: string;
   name: string;
+  onOpenSettings?: (which: 'mode' | 'account') => void;
 }
 
-// Linha de status do app de PC embaixo do composer: pasta, branch e diff, tempo, contexto, cota e
-// custo. Ela é a porta da folha de Uso — o anel saiu da linha de botões do composer para cá.
-// Mono, pequena e apagada; cor só no que avisa (diff, contexto e cota altos).
-export function ComposerStatusLine({ serverId, name }: Props) {
+// Só os itens de uso abrem a folha; modo e conta reaproveitam os ajustes da sessão.
+export function ComposerStatusLine({ serverId, name, onOpenSettings }: Props) {
   const { theme } = useUnistyles();
+  const { fontScale } = useWindowDimensions();
   const chat = chatStore(serverId, name);
   const statusLine = chat.use((s) => s.statusLine);
+  const stateEvent = chat.use((s) => s.stateEvent);
   const session = useSessions((s) => s.byServerRecord?.[serverId]?.find((x) => x.name === name)
     ?? s.rows.find((x) => x.serverId === serverId && x.name === name) ?? null);
   const status = useMemo(() => composerStatus(parseStatusLine(statusLine, session), session), [statusLine, session]);
+  const accountLabel = session ? sessionAccountLabel(session) : null;
   const [usageOpen, setUsageOpen] = useState(false);
+  const [availableWidth, setAvailableWidth] = useState(0);
+  const [measured, setMeasured] = useState<Record<string, number>>({});
 
-  // Mesmos limiares do anel (70 / 90).
   const tone = (pct: number) => (pct >= 90 ? theme.tokens.status.error : pct >= 70 ? theme.tokens.status.warning : theme.tokens.text.muted);
   const muted = theme.tokens.text.muted;
-  const items: { key: string; node: ReactNode; spoken: string; shrink?: boolean }[] = [];
+  const openUsage = () => setUsageOpen(true);
+  const items: { key: string; node: ReactNode; spoken: string; shrink?: boolean; onPress?: () => void }[] = [];
   if (status.folder) {
-    items.push({ key: 'folder', spoken: status.folder, shrink: true, node: (
+    items.push({ key: 'folder', spoken: status.folder, shrink: true, onPress: openUsage, node: (
       <>
         <Icon name="Folder" size={12} color={muted} />
-        <Text style={[styles.text, styles.shrinkText, { color: muted }]} numberOfLines={1}>{status.folder}</Text>
+        <Text style={[styles.text, styles.shrinkText, { color: muted }]} numberOfLines={1} ellipsizeMode="tail">{status.folder}</Text>
       </>
     ) });
   }
   if (status.branch) {
-    const diff = [status.added ? `+${status.added}` : '', status.removed ? `−${status.removed}` : ''].filter(Boolean).join(' ');
-    items.push({ key: 'branch', spoken: diff ? `${status.branch} ${diff}` : status.branch, shrink: true, node: (
+    items.push({ key: 'branch', spoken: status.branch, shrink: true, onPress: openUsage, node: (
       <>
         <Icon name="GitBranch" size={12} color={muted} />
-        <Text style={[styles.text, styles.shrinkText, { color: muted }]} numberOfLines={1}>{status.branch}</Text>
-        {status.added ? <Text style={[styles.text, { color: theme.tokens.status.success }]}>+{status.added}</Text> : null}
-        {status.removed ? <Text style={[styles.text, { color: theme.tokens.status.error }]}>−{status.removed}</Text> : null}
+        <Text style={[styles.text, styles.shrinkText, { color: muted }]} numberOfLines={1} ellipsizeMode="tail">{status.branch}</Text>
       </>
+    ) });
+  }
+  if (status.added || status.removed) {
+    const diff = [status.added ? `+${status.added}` : '', status.removed ? `−${status.removed}` : ''].filter(Boolean).join(' ');
+    items.push({ key: 'diff', spoken: diff, onPress: openUsage, node: (
+      <Text style={styles.text} numberOfLines={1} ellipsizeMode="tail">
+        {status.added ? <Text style={{ color: theme.tokens.status.success }} numberOfLines={1} ellipsizeMode="tail">+{status.added}</Text> : null}
+        {status.added && status.removed ? ' ' : ''}
+        {status.removed ? <Text style={{ color: theme.tokens.status.error }} numberOfLines={1} ellipsizeMode="tail">−{status.removed}</Text> : null}
+      </Text>
     ) });
   }
   if (status.time) {
-    items.push({ key: 'time', spoken: status.time, node: (
+    items.push({ key: 'time', spoken: status.time, onPress: openUsage, node: (
       <>
         <View style={[styles.dot, { backgroundColor: theme.tokens.status.success }]} />
-        <Text style={[styles.text, { color: muted }]}>{status.time}</Text>
+        <Text style={[styles.text, { color: muted }]} numberOfLines={1} ellipsizeMode="tail">{status.time}</Text>
       </>
     ) });
+  }
+  const claudeMode = stateEvent?.claude_permission_mode;
+  const codexMode = stateEvent?.codex_mode;
+  const mode = session?.provider === 'claude' ? (claudeMode ? permissionLabel(claudeMode) : m.chat_mode_label())
+    : session?.provider === 'codex' ? (codexMode === 'plan' ? m.chat_mode_plan() : codexMode === 'default' ? m.chat_mode_normal() : m.chat_mode_label()) : null;
+  if (mode) {
+    items.push({ key: 'mode', spoken: mode, shrink: true, onPress: onOpenSettings ? () => onOpenSettings('mode') : undefined,
+      node: <Text style={[styles.text, styles.shrinkText, { color: muted }]} numberOfLines={1} ellipsizeMode="tail">{mode}</Text> });
+  }
+  if (accountLabel) {
+    items.push({ key: 'account', spoken: accountLabel, shrink: true, onPress: onOpenSettings ? () => onOpenSettings('account') : undefined,
+      node: <Text style={[styles.text, styles.shrinkText, { color: muted }]} numberOfLines={1} ellipsizeMode="tail">{accountLabel}</Text> });
   }
   if (status.ctxPct != null) {
     const pct = Math.round(status.ctxPct);
-    items.push({ key: 'ctx', spoken: `${m.ctx_contexto()} ${pct}%`, node: (
+    items.push({ key: 'ctx', spoken: `${m.ctx_contexto()} ${pct}%`, onPress: openUsage, node: (
       <>
         <ContextRing pct={status.ctxPct} size={12} showValue={false} />
-        <Text style={[styles.text, { color: tone(status.ctxPct) }]}>{pct}%</Text>
+        <Text style={[styles.text, { color: tone(status.ctxPct) }]} numberOfLines={1} ellipsizeMode="tail">{pct}%</Text>
       </>
     ) });
   }
-  if (status.quota) {
-    const q = status.quota;
-    items.push({ key: 'quota', spoken: `${q.label} ${Math.round(q.pct)}%`, node: (
-      <Text style={[styles.text, { color: tone(q.pct) }]}>{q.key} {Math.round(q.pct)}%</Text>
+  for (const q of status.quotas ?? []) {
+    items.push({ key: q.key, spoken: `${q.label} ${Math.round(q.pct)}%`, onPress: openUsage, node: (
+      <Text style={[styles.text, { color: tone(q.pct) }]} numberOfLines={1} ellipsizeMode="tail">{q.key} {Math.round(q.pct)}%</Text>
     ) });
   }
   if (status.cost) {
-    items.push({ key: 'cost', spoken: status.cost, node: <Text style={[styles.text, { color: muted }]}>{status.cost}</Text> });
+    items.push({ key: 'cost', spoken: status.cost, onPress: openUsage,
+      node: <Text style={[styles.text, { color: muted }]} numberOfLines={1} ellipsizeMode="tail">{status.cost}</Text> });
   }
+  if (!items.length) {
+    items.push({ key: 'usage', spoken: m.uso_aria(), onPress: openUsage, node: (
+      <>
+        <Icon name="Gauge" size={12} color={muted} />
+        <Text style={[styles.text, { color: muted }]} numberOfLines={1} ellipsizeMode="tail">{m.uso_titulo()}</Text>
+      </>
+    ) });
+  }
+  const measurementId = (item: typeof items[number]) => `${fontScale}:${item.spoken}`;
+  const widths = fitComposerItems(items.filter(item => measured[item.key] != null)
+    .map(item => ({ ...item, width: measured[item.key] })), availableWidth);
 
   return (
-    <>
-      {/* Cabe na largura como no PWA: pasta e branch encolhem com reticências, o resto fica inteiro. */}
-      <Pressable
-        onPress={() => setUsageOpen(true)}
-        style={({ pressed }) => [styles.line, pressed && styles.pressed]}
-        accessibilityRole="button"
-        accessibilityLabel={m.uso_aria()}
-        accessibilityValue={items.length ? { text: items.map((i) => i.spoken).join(', ') } : undefined}
-      >
-        {/* Os itens já vão no valor do botão; lidos de novo por dentro seriam repetição. */}
-        <View style={styles.items} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-          {items.length ? items.map((it) => (
-            <View key={it.key} style={[styles.item, it.shrink ? styles.shrinkItem : styles.fixedItem]}>{it.node}</View>
-          )) : (
-            <View style={styles.item}>
-              <Icon name="Gauge" size={12} color={muted} />
-              <Text style={[styles.text, { color: muted }]}>{m.uso_titulo()}</Text>
-            </View>
-          )}
-        </View>
-      </Pressable>
-      <UsageSheet open={usageOpen} onClose={() => setUsageOpen(false)} serverId={serverId} name={name} />
-    </>
+    <View style={styles.line}>
+      <View testID="composer-status-items" style={styles.items} onLayout={event => {
+        const width = event.nativeEvent.layout.width;
+        setAvailableWidth(previous => previous === width ? previous : width);
+      }}>
+        {items.filter(item => widths[item.key] != null).map(item => {
+          const props = { testID: `composer-status-${item.key}`, accessibilityLabel: item.spoken,
+            style: [styles.item, { width: widths[item.key] }] };
+          const content = <View style={styles.content} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">{item.node}</View>;
+          return item.onPress ? (
+            <Pressable key={item.key} {...props} accessibilityRole="button" onPress={item.onPress}
+              style={({ pressed }) => [...props.style, pressed && styles.pressed]}>{content}</Pressable>
+          ) : <View key={item.key} {...props} accessible>{content}</View>;
+        })}
+      </View>
+      {/* Mesma tipografia, sem largura imposta: onLayout lê o tamanho preferido, fora do fluxo. */}
+      <View testID="composer-status-measuring" style={styles.measuring} pointerEvents="none"
+        accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+        {items.map(item => {
+          const id = measurementId(item);
+          return <View key={`${item.key}:${id}`} testID={`composer-status-measure-${item.key}`} style={styles.measureItem} onLayout={event => {
+            const width = Math.ceil(event.nativeEvent.layout.width);
+            setMeasured(previous => previous[item.key] === width
+              ? previous : { ...previous, [item.key]: width });
+          }}>{item.node}</View>;
+        })}
+      </View>
+      {usageOpen ? <UsageSheet open onClose={() => setUsageOpen(false)} serverId={serverId} name={name} /> : null}
+    </View>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
   line: {
-    minHeight: 32,
-    justifyContent: 'center',
+    position: 'relative',
     paddingHorizontal: theme.base.space[4],
-    paddingTop: theme.base.space[1],
-    paddingBottom: theme.base.space[1],
   },
   pressed: {
     opacity: 0.6,
   },
   items: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.base.space[3],
-    minWidth: 0,
-  },
-  item: {
-    flexDirection: 'row',
+    flexWrap: 'nowrap',
     alignItems: 'center',
     gap: 4,
-  },
-  shrinkItem: {
-    flexShrink: 1,
     minWidth: 0,
+    minHeight: 44,
   },
-  fixedItem: {
+  item: {
+    minWidth: 44,
+    minHeight: 44,
     flexShrink: 0,
+    justifyContent: 'center',
+  },
+  content: {
+    flexDirection: 'row',
+    flexWrap: 'nowrap',
+    alignItems: 'center',
+    minWidth: 0,
+    gap: 4,
+  },
+  measuring: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    flexDirection: 'row',
+    opacity: 0,
+  },
+  measureItem: {
+    flexDirection: 'row',
+    flexShrink: 0,
+    alignItems: 'center',
+    minWidth: 44,
+    gap: 4,
   },
   shrinkText: {
+    minWidth: 0,
     flexShrink: 1,
   },
   text: {
     fontFamily: theme.base.fontMono,
-    fontSize: 12,
+    fontSize: theme.base.text.xxs,
   },
   dot: {
     width: 6,

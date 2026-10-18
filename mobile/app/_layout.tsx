@@ -64,7 +64,8 @@ export default function Layout() {
   // de um chat. O layout é o único lugar montado o tempo todo.
   useEffect(() => {
     if (!aviso) return;
-    toast.erro(
+    if (aviso.tipo === 'identification') toast.aviso(aviso.message);
+    else toast.erro(
       aviso.tipo === 'token'
         ? m.servidores_aviso_token({ label: aviso.label })
         : aviso.tipo === 'vault_unread'
@@ -88,16 +89,22 @@ export default function Layout() {
           />
           {/* Página inteira, como no desktop: são várias páginas com ida e volta, e na folha arrastar fechava tudo. */}
           <Stack.Screen name="config" options={{ headerShown: false }} />
-          {/* A borda esquerda do chat abre a gaveta de sessões; voltar fica no botão do cabeçalho
-              (e no voltar do Android, que este gesto não desliga). */}
-          <Stack.Screen name="s/[server]/[name]/index" options={{ gestureEnabled: false }} />
+          <Stack.Screen name="costs" options={{ presentation: 'card', headerShown: false }} />
+          <Stack.Screen name="stats" options={{ presentation: 'card', headerShown: false }} />
+          {/* A borda esquerda do chat é o voltar do iOS; a gaveta abre mais para dentro (SessionsDrawer `edgeStart`). */}
+          <Stack.Screen name="s/[server]/[name]/index" />
           {/* Página inteira, como a do T3: voltar pelo cabeçalho e pelo gesto. */}
           <Stack.Screen name="s/[server]/[name]/page" options={{ headerShown: false }} />
           <Stack.Screen name="s/[server]/[name]/ask" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
           <Stack.Screen name="s/[server]/[name]/activity" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
+          <Stack.Screen name="s/[server]/[name]/orchestration" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
           <Stack.Screen name="s/[server]/[name]/loop" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
           <Stack.Screen name="s/[server]/[name]/pair" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
           <Stack.Screen name="s/[server]/[name]/files" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
+          <Stack.Screen name="s/[server]/[name]/git" options={Platform.OS === 'android'
+            ? { presentation: 'card', headerShown: true }
+            : { presentation: 'formSheet', headerShown: true, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
+          <Stack.Screen name="s/[server]/[name]/account" options={{ presentation: 'formSheet', headerShown: true, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
           <Stack.Screen name="s/[server]/[name]/terminal" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
           <Stack.Screen name="s/[server]/[name]/attachments" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
           <Stack.Screen name="s/[server]/[name]/codex-limits" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />

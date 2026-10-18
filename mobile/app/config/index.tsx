@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Platform, Pressable, Text, TextInput, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
@@ -34,6 +34,7 @@ const SERVER: Page[] = [
   { route: '/config/contas', icon: 'User', title: m.native_settings_page_accounts,
     rows: [m.contas_atualizar, m.contas_secao_claude, m.contas_secao_modelos, m.contas_secao_outros] },
   { route: '/config/orchestration', icon: 'Users', title: m.native_settings_page_orchestration, rows: [] },
+  { route: '/config/orchestration-history', icon: 'History', title: m.orq_history_title, rows: [] },
   { route: '/config/harnesses', icon: 'Activity', title: m.native_settings_page_harnesses, rows: [] },
   { route: '/config/voice', icon: 'Mic', title: m.native_settings_page_voice, rows: [] },
   { route: '/config/jev', icon: 'Zap', title: m.jev_title, rows: [] },
@@ -62,6 +63,7 @@ function search(query: string) {
 }
 
 export default function ConfigIndex() {
+  useEffect(() => useSessions.getState().retain(), []);
   const router = useRouter();
   const c = useSettingsColors();
   const [query, setQuery] = useState('');
@@ -150,7 +152,7 @@ function ServerPicker() {
   );
 }
 
-const styles = StyleSheet.create({
+const styles = StyleSheet.create((theme) => ({
   search: {
     height: 40,
     flexDirection: 'row',
@@ -160,10 +162,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 6,
   },
-  searchInput: { flex: 1, height: 40, fontSize: 15, padding: 0 },
+  searchInput: { flex: 1, height: 40, fontSize: theme.base.text.sm, padding: 0 },
   list: { gap: 2 },
-  none: { paddingHorizontal: 10, paddingVertical: 8, fontSize: 14 },
+  none: { paddingHorizontal: 10, paddingVertical: 8, fontSize: theme.base.text.xs },
   picker: { maxWidth: 180, flexDirection: 'row', alignItems: 'center', gap: 6 },
   dot: { width: 7, height: 7, borderRadius: 4 },
-  pickerText: { flexShrink: 1, fontSize: 13.5 },
-});
+  pickerText: { flexShrink: 1, fontSize: theme.base.text.xs },
+}));

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useServers } from '../../../../src/stores/servers';
 import { filesStore, entriesOf, listaCortadaOf } from '../../../../src/features/files/filesStore';
@@ -14,6 +15,7 @@ type Aba = 'arvore' | 'busca' | 'arquivo';
 
 export default function FilesSheet() {
   const { theme } = useUnistyles();
+  const insets = useSafeAreaInsets();
   const { server, name, path } = useLocalSearchParams<{ server: string; name: string; path?: string }>();
   const serverId = String(server ?? '');
   const sessionName = String(name ?? '');
@@ -106,14 +108,14 @@ export default function FilesSheet() {
           {m.chat_servidor_removido()}
         </Text>
         <Pressable onPress={() => router.back()} accessibilityRole="button">
-          <Text style={{ color: theme.tokens.accent.base, fontSize: 13 }}>{m.comum_voltar()}</Text>
+          <Text style={{ color: theme.tokens.accent.base, fontSize: theme.base.text.xs }}>{m.comum_voltar()}</Text>
         </Pressable>
       </View>
     );
   }
 
   return (
-    <View style={[styles.root, { backgroundColor: theme.tokens.bg.base }]}>
+    <View style={[styles.root, { backgroundColor: theme.tokens.bg.base, paddingBottom: insets.bottom }]}>
       {/* tabs */}
       <View style={[styles.tabs, { borderBottomColor: theme.tokens.border.subtle }]}>
         <Pressable onPress={() => setAba('arvore')} style={[styles.tab, aba === 'arvore' ? { borderBottomColor: theme.tokens.accent.base } : null]}>
@@ -201,7 +203,7 @@ const styles = StyleSheet.create((theme) => ({
     borderBottomColor: 'transparent',
   },
   tabTxt: {
-    fontSize: 13,
+    fontSize: theme.base.text.xs,
     fontWeight: '600',
   },
   center: {

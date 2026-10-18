@@ -7,7 +7,9 @@ import { SessionSettingsButton, SessionSettingsControl } from '../../chat/Sessio
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const api = vi.hoisted(() => ({ codex: vi.fn(), models: vi.fn(), tier: vi.fn(), permissions: vi.fn() }));
+const routing = vi.hoisted(() => ({ push: vi.fn() }));
+vi.mock('expo-router', () => ({ useRouter: () => routing }));
+const api = vi.hoisted(() => ({ codex: vi.fn(), models: vi.fn(), tier: vi.fn(), permissions: vi.fn(), modelWrite: vi.fn(), modeWrite: vi.fn() }));
 const state = vi.hoisted(() => ({
   servers: [] as Server[], activeId: 'b',
   rows: [] as (SessionInfo & { serverId: string })[],
@@ -16,6 +18,8 @@ const state = vi.hoisted(() => ({
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
   getCodexModels: api.codex, getModelOptions: api.models, setServiceTier: api.tier, getPermissionModes: api.permissions,
+  setModelEffort: api.modelWrite, setEngineModel: api.modelWrite, setCodexModel: api.modelWrite,
+  setPermissionMode: api.modeWrite, setCodexMode: api.modeWrite,
 }));
 vi.mock('../../stores/servers', () => ({ useServers: (select: (s: typeof state) => unknown) => select(state) }));
 vi.mock('../../stores/sessions', () => ({ useSessions: (select: (s: typeof state) => unknown) => select(state) }));
@@ -42,7 +46,7 @@ vi.mock('../../paraglide/messages', () => ({
     + 'chat_mode_plan chat_mode_normal native_codex_permission_probe_hint composer_codex_approval '
     + 'native_mode_plan native_mode_auto native_mode_manual native_mode_acceptEdits native_mode_bypassPermissions native_mode_dontAsk '
     + 'native_ctl_fast native_ctl_fast_on native_ctl_fast_off native_ctl_fast_hint native_ctl_fast_unavailable '
-    + 'native_invalid_response servidor_nao_existe chat_servidor_removido'
+    + 'native_invalid_response servidor_nao_existe chat_servidor_removido cota_conta_ativa accounts_switch_title conta_padrao'
   ).split(' ').map((key) => [key, () => key])),
   native_ctl_failed: ({ reason }: { reason: string }) => `native_ctl_failed ${reason}`,
 }));
@@ -75,16 +79,18 @@ function deferred<T>() {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
-async function mount(provider = 'codex', serverId = 'a') {
+async function mount(provider = 'codex', serverId = 'a', openRequest?: { which: 'model' | 'effort' | 'mode' | 'account'; n: number }) {
   const container = document.createElement('div');
   const root = createRoot(container);
   roots.push(root);
-  const element = () => createElement(SessionSettingsButton, { serverId, name: 'sess', provider, headless: false });
+  const element = () => createElement(SessionSettingsButton, { serverId, name: 'sess', provider, headless: false, openRequest });
   const open = async () => { await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="composer_session_settings"]')!.click()); };
   const close = async () => { await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="dismiss-settings"]')!.click()); };
   await act(async () => root.render(element()));
-  expect(container.querySelector('[role="switch"]')).toBeNull();
-  await open();
+  if (!openRequest) {
+    expect(container.querySelector('[role="switch"]')).toBeNull();
+    await open();
+  }
   return { container, open, close, refresh: async () => { await act(async () => root.render(element())); } };
 }
 const toggle = (container: HTMLElement) => container.querySelector<HTMLButtonElement>('[role="switch"]')!;
@@ -106,6 +112,71 @@ beforeEach(() => {
   api.tier.mockResolvedValue({ ok: true, service_tier: 'priority' });
 });
 afterEach(() => { act(() => { for (const root of roots.splice(0)) root.unmount(); }); });
+
+describe('Conta atual na folha de ajustes real', () => {
+  it.each([
+    { provider: 'claude', account: { conta: 'claude:/home/test/.claude-route-account' }, label: 'route-account' },
+    { provider: 'claude', account: { engine: 'local-gpt', conta: 'chave:local-gpt' }, label: 'local-gpt' },
+    { provider: 'codex', account: { codex_account: 'codex-route-account' }, label: 'route-account' },
+    { provider: 'codex', account: { codex_home: '/home/test/.codex-route-home' }, label: 'route-home' },
+  ])('$provider mostra $label da sessão da rota com outro servidor ativo', async ({ provider, account, label }) => {
+    state.rows = [
+      { name: 'sess', serverId: 'b', state: 'idle', provider: 'claude', conta: 'claude:/home/test/.claude-active-account' },
+      { name: 'another', serverId: 'a', state: 'idle', provider: 'claude', conta: 'claude:/home/test/.claude-other-session' },
+      { name: 'sess', serverId: 'a', state: 'idle', provider: provider as SessionInfo['provider'], ...account },
+    ];
+    const { container } = await mount(provider);
+    expect(container.querySelector('[role="heading"], [role="header"]')?.textContent).toBe('cota_conta_ativa');
+    expect(container.textContent).toContain(label);
+    expect(container.textContent).not.toContain('active-account');
+    expect(container.textContent).not.toContain('other-session');
+  });
+
+  it('sem conta reconhecida não inventa conta do servidor ativo', async () => {
+    state.rows = [{ name: 'sess', serverId: 'b', state: 'idle', conta: 'claude:/home/test/.claude-active-account' }];
+    const { container } = await mount('claude');
+    expect(container.textContent).not.toContain('active-account');
+  });
+});
+
+describe('Troca de conta na folha de ajustes real', () => {
+  it.each(['mode', 'account'] as const)('%s abre a mesma folha sem selecionar e troca fecha antes de navegar para a rota', async (which) => {
+    state.rows[0].provider = 'claude';
+    state.rows[0].conta = 'claude:/home/test/.claude-route-account';
+    const { container, refresh } = await mount('claude', 'a', { which, n: 1 });
+    expect(container.querySelector('[aria-label="dismiss-settings"]')).not.toBeNull();
+    expect(container.textContent).toContain('native_ctl_model_title');
+    const action = container.querySelector<HTMLButtonElement>('[aria-label="accounts_switch_title"]');
+    expect(action).not.toBeNull();
+    expect(parseFloat(action!.style.minHeight)).toBeGreaterThanOrEqual(44);
+    expect(api.modelWrite).not.toHaveBeenCalled();
+    expect(api.modeWrite).not.toHaveBeenCalled();
+    expect(api.tier).not.toHaveBeenCalled();
+    await act(async () => action!.click());
+    expect(container.querySelector('[aria-label="dismiss-settings"]')).toBeNull();
+    expect(routing.push).toHaveBeenCalledExactlyOnceWith('/s/a/sess/account');
+    await refresh();
+    expect(container.querySelector('[aria-label="dismiss-settings"]')).toBeNull();
+  });
+
+  it.each(['invite', 'removed', 'inviteEnded', 'missing'] as const)('não oferece troca em servidor %s, mesmo com outro próprio ativo', async (kind) => {
+    if (kind === 'missing') state.servers = state.servers.slice(1);
+    else state.servers[0] = { ...state.servers[0], [kind]: true };
+    const { container } = await mount('claude', 'a', { which: 'account', n: 1 });
+    expect(container.querySelector('[aria-label="dismiss-settings"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="accounts_switch_title"]')).toBeNull();
+    expect(routing.push).not.toHaveBeenCalled();
+  });
+
+  it('Codex mostra conta atual sem oferecer troca', async () => {
+    state.rows[0].provider = 'codex';
+    state.rows[0].codex_account = 'route-codex-account';
+    const { container } = await mount('codex', 'a', { which: 'account', n: 1 });
+    expect(container.textContent).toContain('route-codex-account');
+    expect(container.querySelector('[aria-label="accounts_switch_title"]')).toBeNull();
+    expect(routing.push).not.toHaveBeenCalled();
+  });
+});
 
 describe('Modelos na folha de ajustes real', () => {
   it.each([

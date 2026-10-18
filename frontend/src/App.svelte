@@ -655,7 +655,7 @@
     <Worktrees onBack={navigateToSessions} />
   {:else if route.name === 'home'}
     <!-- Celular abre na nova conversa; no desktop `home` caiu no DesktopShell acima, como a lista. -->
-    <NewChatHome onOpenList={navigateToSessions} />
+    <NewChatHome onOpenList={navigateToSessions} onOpenChat={navigateToChat} />
   {:else if route.name === 'sessions' || route.name === 'board' || route.name === 'canvas'}
     <!-- Quadro/canvas são só desktop: no mobile caem na lista normal (em vez de tela em branco). -->
     <SessionList

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { LiveVoiceRequestError } from '@hangar/core';
 import type { LiveVoiceHandlers, LiveVoiceSettingsReply, LiveVoiceState, Server, VoiceMemory } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
@@ -254,6 +255,114 @@ describe('uma chamada capturada, sem depender do servidor ativo', () => {
   });
 });
 
+describe('seleção explícita do servidor da voz', () => {
+  test('após erro em A seleciona B, limpa estado e memória e liga B sem mudar a seleção global', async () => {
+    servers.setState({ activeId: a.id });
+    const instance = await startA();
+    instance.handlers.state(state(5));
+    await useLiveVoice.getState().refreshMemory();
+    instance.handlers.failed('connection_lost', 'old-machine');
+    useLiveVoice.getState().selectServer(b.id);
+    expect(useLiveVoice.getState().server).toEqual(b);
+    expect(useLiveVoice.getState().view).toMatchObject({ phase: 'idle', serverLabel: 'machine-b', state: null, error: null,
+      memory: { loading: false, entries: [], error: null, forgetError: null } });
+    expect(api.settings).toHaveBeenLastCalledWith(b);
+    await useLiveVoice.getState().start();
+    expect(calls[1].start).toHaveBeenCalledWith(b, null, expect.any(Number));
+    expect(servers.getState().activeId).toBe(a.id);
+  });
+
+  test.each(['connecting', 'live'] as const)('seleção não muda destino enquanto %s', async phase => {
+    openA();
+    useLiveVoice.getState().selectServer(b.id);
+    expect(useLiveVoice.getState().server?.id).toBe(b.id);
+    await useLiveVoice.getState().start();
+    calls[0].handlers.phase(phase);
+    const requests = api.settings.mock.calls.length;
+    useLiveVoice.getState().selectServer(a.id);
+    expect(useLiveVoice.getState().server?.id).toBe(b.id);
+    expect(api.settings).toHaveBeenCalledTimes(requests);
+    expect(calls[0].stop).not.toHaveBeenCalled();
+    await useLiveVoice.getState().stop();
+  });
+
+  test.each(['connecting', 'live'] as const)('servidor invalidado em %s conserva erro até escolha explícita de B', async phase => {
+    const instance = await startA();
+    instance.handlers.phase(phase);
+    servers.setState({ servers: [{ ...a, removed: true }, b] });
+    useLiveVoice.getState().reconcileServers();
+    await settle();
+    expect(instance.stop).toHaveBeenCalledOnce();
+    expect(useLiveVoice.getState().view).toMatchObject({ phase: 'closed', error: { code: 'server_removed' } });
+    useLiveVoice.getState().reconcileServers();
+    expect(useLiveVoice.getState().view.error?.code).toBe('server_removed');
+    expect(useLiveVoice.getState().server?.id).toBe(a.id);
+    useLiveVoice.getState().selectServer(b.id);
+    expect(useLiveVoice.getState().server?.id).toBe(b.id);
+    expect(useLiveVoice.getState().view).toMatchObject({ phase: 'idle', error: null, state: null, memory: { entries: [] } });
+    expect(api.settings).toHaveBeenLastCalledWith(b);
+    await useLiveVoice.getState().start();
+    expect(calls[1].start).toHaveBeenCalledWith(b, null, expect.any(Number));
+    await useLiveVoice.getState().stop();
+  });
+
+  test('respostas atrasadas de A não preenchem ajustes nem memória de B', async () => {
+    const oldSettings = deferred<LiveVoiceSettingsReply>();
+    const oldMemory = deferred<VoiceMemory[]>();
+    api.settings.mockReturnValueOnce(oldSettings.promise).mockResolvedValueOnce(reply('b-account'));
+    api.memory.mockReturnValueOnce(oldMemory.promise);
+    openA();
+    const reading = useLiveVoice.getState().refreshMemory();
+    useLiveVoice.getState().selectServer(b.id);
+    expect(useLiveVoice.getState().server?.id).toBe(b.id);
+    oldSettings.resolve(reply('old-a-account')); oldMemory.resolve([memory]);
+    await reading; await settle();
+    expect(useLiveVoice.getState().view.settings.reply?.settings.codex_account).toBe('b-account');
+    expect(useLiveVoice.getState().view.memory.entries).toEqual([]);
+  });
+});
+
+describe('escolha da voz preservada e somente máquinas habilitadas', () => {
+  test('fechar e reabrir por A conserva a escolha explícita B sem persistência nem troca global', () => {
+    openA();
+    useLiveVoice.getState().selectServer(b.id);
+    useLiveVoice.getState().dismiss();
+    useLiveVoice.getState().openFor(a.id, 'session-a');
+    expect(useLiveVoice.getState().server?.id).toBe(b.id);
+    expect(servers.getState().activeId).toBe(b.id);
+  });
+
+  test.each([
+    { disabled: true }, { removed: true }, { invite: true }, { inviteEnded: true }, { token: '' },
+  ])('seleção recusa máquina inelegível %j', patch => {
+    openA();
+    useLiveVoice.getState().selectServer(b.id);
+    servers.setState({ servers: [{ ...a, ...patch }, b] });
+    const requests = api.settings.mock.calls.length;
+    useLiveVoice.getState().selectServer(a.id);
+    expect(useLiveVoice.getState().server?.id).toBe(b.id);
+    expect(api.settings).toHaveBeenCalledTimes(requests);
+  });
+
+  test.each([{ disabled: true }, { removed: true }])('escolha inválida %j recua para ativo elegível e depois primeira própria', patch => {
+    openA();
+    useLiveVoice.getState().selectServer(b.id);
+    useLiveVoice.getState().dismiss();
+    servers.setState({ servers: [a, { ...b, ...patch }], activeId: a.id });
+    useLiveVoice.getState().reconcileServers();
+    expect(useLiveVoice.getState().server?.id).toBe(a.id);
+    expect(useLiveVoice.getState().open).toBe(false);
+    expect(api.settings).toHaveBeenLastCalledWith(a);
+    servers.setState({ servers: [{ ...a, disabled: true }, b], activeId: a.id });
+    useLiveVoice.getState().reconcileServers();
+    expect(useLiveVoice.getState().server?.id).toBe(b.id);
+    servers.setState({ servers: [{ ...b, disabled: true }] });
+    useLiveVoice.getState().reconcileServers();
+    expect(useLiveVoice.getState().server).toBeNull();
+    expect(useLiveVoice.getState().view.serverLabel).toBe('');
+  });
+});
+
 describe('restauração com o transporte real e prazo desde o store', () => {
   beforeEach(async () => {
     realTransport = await vi.importActual<typeof import('./liveVoice')>('./liveVoice');
@@ -484,9 +593,25 @@ describe('coexistência com ditado', () => {
 });
 
 describe('configuração e memória do servidor capturado', () => {
+  test('falha de rede ao carregar ajustes mostra mensagem traduzida sem detalhe do transporte', async () => {
+    const transportError = 'fetch failed: Fetch request has been canceled';
+    api.settings.mockRejectedValueOnce(new Error(transportError));
+    openA();
+    await useLiveVoice.getState().loadSettings(a);
+    expect(useLiveVoice.getState().view.settings.error).toBe(m.native_network_error());
+    expect(useLiveVoice.getState().view.settings.error).not.toContain(transportError);
+  });
+
+  test('falha HTTP com código preserva mensagem e detalhe ao carregar ajustes', async () => {
+    api.settings.mockRejectedValueOnce(new LiveVoiceRequestError('account_missing', 'chosen-account', 409));
+    openA();
+    await useLiveVoice.getState().loadSettings(a);
+    expect(useLiveVoice.getState().view.settings).toMatchObject({ error: 'account_missing: chosen-account', loading: false, reply: null });
+  });
+
   test('resposta antiga de settings não vence retry; erro aparece e retry recupera', async () => {
     const old = deferred<LiveVoiceSettingsReply>();
-    api.settings.mockReturnValueOnce(old.promise).mockRejectedValueOnce(new Error('settings_failed')).mockResolvedValueOnce(reply('new-account'));
+    api.settings.mockReturnValueOnce(old.promise).mockRejectedValueOnce(new LiveVoiceRequestError('settings_failed')).mockResolvedValueOnce(reply('new-account'));
     openA();
     await useLiveVoice.getState().retry();
     expect(useLiveVoice.getState().view.settings).toMatchObject({ error: 'settings_failed', loading: false, reply: null });
@@ -507,10 +632,18 @@ describe('configuração e memória do servidor capturado', () => {
     expect(api.models).toHaveBeenLastCalledWith(a, 'codex', null, null, 'changed-on-another-device');
   });
 
+  test('falha HTTP sem código preserva causa ao carregar modelos', async () => {
+    api.models.mockRejectedValueOnce(Object.assign(new Error('502: erro_codex_model_list: catálogo indisponível'), { status: 502 }));
+    openA();
+    await useLiveVoice.getState().loadSettings(a);
+    useLiveVoice.getState().openSettings(); await settle();
+    expect(useLiveVoice.getState().view.settings.modelsError).toBe('502: erro_codex_model_list: catálogo indisponível');
+  });
+
   test('salva PUT inteiro, sem otimismo destrutivo ou dois saves em voo; erro preserva configuração', async () => {
     openA(); await settle();
     const pending = deferred<LiveVoiceSettingsReply['settings']>();
-    api.save.mockReturnValueOnce(pending.promise).mockRejectedValueOnce(new Error('save_failed'));
+    api.save.mockReturnValueOnce(pending.promise).mockRejectedValueOnce(new LiveVoiceRequestError('save_failed'));
     const next = { ...reply().settings, voice: null, codex_account: 'next-account' };
     const saving = useLiveVoice.getState().saveSettings(next);
     await useLiveVoice.getState().saveSettings(next);
@@ -539,11 +672,11 @@ describe('configuração e memória do servidor capturado', () => {
 
   test('falhas de credenciais/modelos/memória não viram listas vazias sem causa', async () => {
     openA(); await settle();
-    api.accounts.mockRejectedValueOnce(new Error('accounts_failed'));
-    api.models.mockRejectedValueOnce(new Error('models_failed'));
-    api.memory.mockRejectedValueOnce(new Error('memory_failed'));
+    api.accounts.mockRejectedValueOnce(Object.assign(new Error('503: accounts_failed'), { status: 503 }));
+    api.models.mockRejectedValueOnce(Object.assign(new Error('502: models_failed'), { status: 502 }));
+    api.memory.mockRejectedValueOnce(new LiveVoiceRequestError('memory_failed'));
     useLiveVoice.getState().openSettings(); await settle();
-    expect(useLiveVoice.getState().view.settings).toMatchObject({ error: 'accounts_failed', modelsError: 'models_failed' });
+    expect(useLiveVoice.getState().view.settings).toMatchObject({ error: '503: accounts_failed', modelsError: '502: models_failed' });
     expect(useLiveVoice.getState().view.memory.error).toBe('memory_failed');
     useLiveVoice.getState().openSettings(); await settle();
     expect(useLiveVoice.getState().view.settings.error).toBeNull();

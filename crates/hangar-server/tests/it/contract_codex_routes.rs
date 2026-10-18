@@ -93,9 +93,19 @@ async fn open(registry: &RuntimeRegistry, dir: &std::path::Path, case: &Value) {
         transcript: dir.join("k.jsonl"), created: 0.0 }, dir.into()).await.unwrap();
 }
 
-async fn serve(registry: Arc<RuntimeRegistry>) -> (Arc<Fake>, std::net::SocketAddr) {
+async fn serve(registry: Arc<RuntimeRegistry>, home: &std::path::Path) -> (Arc<Fake>, std::net::SocketAddr) {
     let (python, upstream) = spawn_fake().await;
-    let state = AppState::new(config(upstream, "127.0.0.1"));
+    let mut state = AppState::new(config(upstream, "127.0.0.1"));
+    state.accounts = hangar_server::accounts::AccountService::new(
+        hangar_server::accounts::environment::AccountEnvironment::from_map([
+            ("HOME".to_owned(), home.to_string_lossy().into_owned()),
+            ("USERPROFILE".to_owned(), home.to_string_lossy().into_owned()),
+            ("PATH".to_owned(), String::new()),
+        ].into()));
+    let mut list_env = hangar_server::list::bridge::ListEnv::from_env();
+    list_env.dirs = None;
+    state.list = Arc::new(hangar_server::list::bridge::ListBridge::new(list_env,
+        hangar_server::list::facts::FactsClient::new(upstream, SECRET.into())));
     assert!(state.state.runtime.set(registry).is_ok());
     (python, spawn_state(state).await)
 }
@@ -110,6 +120,21 @@ async fn call(server: std::net::SocketAddr, case: &Value, token: &str) -> (u16, 
     let status = response.status().as_u16();
     let text = response.text().await.unwrap();
     (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
+}
+
+async fn check_unowned_route(server: std::net::SocketAddr, python: &Fake, case: &Value) {
+    let (status, body) = call(server, case, OWNER).await;
+    let path = format!("/api/sessions/s/{}", case["route"].as_str().unwrap());
+    assert_eq!(status, 200, "{}", case["name"]);
+    if case["route"] == "commands" {
+        let commands = body.as_array().expect("catálogo Claude no Rust");
+        assert!(commands.iter().any(|command| command["name"] == "reload-plugins"));
+        assert_eq!(python.hits_to(&path), 0, "o catálogo Claude não volta ao Python");
+    } else {
+        assert_eq!(body, Value::String("from-python".into()), "{}", case["name"]);
+        assert_eq!(python.last_hit().0, path);
+        if case["method"] == "POST" { assert_eq!(python.last_body(), case["body"].to_string().as_bytes()); }
+    }
 }
 
 /// ID que a pergunta assíncrona da sessão recebe ao ser exibida (o `<shown>` do golden).
@@ -128,7 +153,7 @@ async fn headless_codex_routes_match_the_python_golden() {
         let registry = registry(dir.path());
         let registry = Arc::new(if case["route"] == "question/skip" { registry.with_interactions(store.clone()) } else { registry });
         open(&registry, dir.path(), case).await;
-        let (python, server) = serve(registry.clone()).await;
+        let (python, server) = serve(registry.clone(), dir.path()).await;
         let mut sent = case.clone();
         if sent["body"]["interaction_id"] == "<shown>" { sent["body"]["interaction_id"] = show(&store, case); }
         let (status, body) = call(server, &sent, OWNER).await;
@@ -154,7 +179,7 @@ async fn skip_route_accepts_and_forwards_the_displayed_interaction_id() {
     let store = Arc::new(InteractionStore::default());
     let registry = Arc::new(registry(dir.path()).with_interactions(store.clone()));
     open(&registry, dir.path(), &case).await;
-    let (python, server) = serve(registry).await;
+    let (python, server) = serve(registry, dir.path()).await;
     let mut bare = case.clone();
     bare["body"] = json!({"request_id": request});
     let missing = call(server, &bare, OWNER).await;
@@ -169,14 +194,12 @@ async fn skip_route_accepts_and_forwards_the_displayed_interaction_id() {
 }
 
 #[tokio::test]
-async fn sessions_the_rust_does_not_own_reach_python_intact() {
+async fn unowned_controls_relay_but_claude_commands_stay_in_rust() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Arc::new(registry(dir.path()));
-    let (python, server) = serve(registry).await;
+    let (python, server) = serve(registry, dir.path()).await;
     for case in golden().iter().filter(|c| !c["relay"].is_null()) {
-        assert_eq!(call(server, case, OWNER).await, (200, Value::String("from-python".into())), "{}", case["name"]);
-        assert_eq!(python.last_hit().0, format!("/api/sessions/s/{}", case["route"].as_str().unwrap()));
-        if case["method"] == "POST" { assert_eq!(python.last_body(), case["body"].to_string().as_bytes()); }
+        check_unowned_route(server, &python, case).await;
     }
 }
 
@@ -186,7 +209,7 @@ async fn guest_reaches_python_and_bodies_the_route_refuses_are_a_rust_422() {
     let registry = Arc::new(registry(dir.path()));
     let case = golden().into_iter().find(|c| c["name"] == "model_ok").unwrap();
     open(&registry, dir.path(), &case).await;
-    let (python, server) = serve(registry).await;
+    let (python, server) = serve(registry, dir.path()).await;
     assert_eq!(call(server, &case, "token-errado").await.1, Value::String("from-python".into()), "convidado segue ao Python");
     let tier = json!({"service_tier": "turbo"});
     for (route, body) in [("model", json!({"model": "gpt-5", "x": 1})), ("model", json!({"model": 5})), ("model", json!({"effort": "low"})), ("service-tier", tier)] {
@@ -219,7 +242,7 @@ async fn limits_never_errors_nor_waits_with_the_gate_closed() {
     let case = golden().into_iter().find(|c| c["name"] == "limits_ok").unwrap();
     open(&registry, dir.path(), &case).await;
     registry.ingress().close("s", Duration::from_secs(1)).await.unwrap();
-    let (python, server) = serve(registry).await;
+    let (python, server) = serve(registry, dir.path()).await;
     let started = std::time::Instant::now();
     assert_eq!(call(server, &case, OWNER).await, (200, json!({"primary": null, "secondary": null, "planType": null})));
     assert!(started.elapsed() < Duration::from_secs(1), "esperou a porta: {:?}", started.elapsed());
@@ -227,9 +250,8 @@ async fn limits_never_errors_nor_waits_with_the_gate_closed() {
 }
 
 #[tokio::test]
-async fn terminal_entry_goes_to_python() {
-    // O registro do Rust só abre entrada de terminal como `claude` (Codex com terminal é do Python até a
-    // 5C): é ela que exercita o desvio antes da porta.
+async fn terminal_controls_relay_but_claude_commands_bypass_the_write_gate() {
+    // A entrada Claude exercita o desvio dos controles Codex; seu catálogo é uma leitura do Rust.
     let dir = tempfile::tempdir().unwrap();
     let registry = Arc::new(registry(dir.path()));
     let binding = TerminalBinding { name: "s".into(), pane: "%1".into(), conversation: "sid".into(), generation: 1, created: 1,
@@ -243,10 +265,9 @@ async fn terminal_entry_goes_to_python() {
     assert!(registry.writable("s").await.unwrap().terminal);
     // A porta fechada prova que o desvio vem antes dela: o Python responde sem esperar.
     registry.ingress().close("s", Duration::from_secs(1)).await.unwrap();
-    let (python, server) = serve(registry).await;
+    let (python, server) = serve(registry, dir.path()).await;
     for case in golden().iter().filter(|c| c["relay"] == "terminal") {
-        assert_eq!(call(server, case, OWNER).await, (200, Value::String("from-python".into())), "{}", case["name"]);
-        assert_eq!(python.last_hit().0, format!("/api/sessions/s/{}", case["route"].as_str().unwrap()));
+        check_unowned_route(server, &python, case).await;
     }
 }
 
@@ -296,7 +317,7 @@ async fn permissions_of_a_dead_headless_codex_answer_from_the_session_file_not_5
     let handle = registry.handle("k", 1).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async { while handle.view().await.unwrap()["alive"] != false { tokio::time::sleep(Duration::from_millis(20)).await; } })
         .await.expect("o cano caiu");
-    let (python, server) = serve(registry.clone()).await;
+    let (python, server) = serve(registry.clone(), dir.path()).await;
     let get = |server| async move { client().get(format!("http://{server}/api/sessions/s/codex-permissions"))
         .header("authorization", format!("Bearer {OWNER}")).send().await.unwrap() };
     let post = |server, mode: &'static str| async move { client().post(format!("http://{server}/api/sessions/s/codex-permissions"))

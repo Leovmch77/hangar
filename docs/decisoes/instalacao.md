@@ -39,9 +39,12 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   checkout da branch de teste: a volta é pelo botão.
 - **O Atualizar só avança até o commit cujo binário do Rust foi publicado para este sistema.**
   O binário é o de `platforms.<sistema>` no `server-latest.json` da release da branch (sem a
-  chave, o `commit` do topo); o contrato é o `protocol` dele ou o `RUST_SERVER_PROTOCOL` do commit. O checkout vai ao commit mais novo de
-  `origin/<branch>` (primeiro pai) com o mesmo número, nunca recua, e o download usa o manifesto
-  lido na escolha. Atrás do topo, a tela avisa que aguarda o build do servidor Rust e é
+  chave, o `commit` do topo); o contrato é o `protocol` dele ou o `RUST_SERVER_PROTOCOL` do commit. O checkout vai
+  do commit desse binário até o último antes do primeiro (primeiro pai) que muda um dos `paths` do
+  push no `.github/workflows/server.yml` de lá, nunca recua, e o download usa o manifesto lido na
+  escolha; sem ler a lista, para no commit do binário. Só binário de commit fora de `origin/<branch>`
+  cai no commit mais novo com o mesmo número. A tela conta as mudanças até esse commit e também oferece atualizar quando o binário
+  instalado não é o publicado (código em dia, binário que saiu depois). Atrás do topo, a tela avisa que aguarda o build do servidor Rust e é
   compilada aqui (também no Reiniciar); checkout já à frente com binário de outro contrato também
   avisa. Sem Rust (`CP_RUST_SERVER=0`) ou sem release própria de branch fora da main (404): topo,
   como antes, calado. Sem como conferir (rede, git, 404 na release da main, sem build deste
@@ -615,6 +618,15 @@ manifesto, sem rede ou com o commit do binário ausente, o checkout terminava no
 35. O 404 na main não é "sem release": o `gh release upload --clobber` do `server.yml` apaga o
 manifesto antes de subir o novo, e cada sistema que publica regrava. Agora o contrato que vale
 nesses casos é o do checkout: trocar dele sem binário conferido é o que deixa o Python sozinho.
+
+**Commit exato, não o mesmo contrato (16/10/2026).** No notebook do Jefferson o Atualizar das 17:41
+levou o checkout a `2970723f` enquanto o build do `server.yml` de `cb6daadbb`, que trazia a correção
+da fila, ainda rodava (~30 min). Com o contrato igual, o código foi ao topo e o `hangar-server`
+ficou o das 16:36: a correção do Rust não chegou, e depois, com o binário publicado às 17:49, a
+tela respondia "Não há versão nova" porque contava só commits. Agora o checkout para antes do
+primeiro commit que muda o que o `server.yml` compila (commit só de Python chega, porque nele o
+workflow nem roda), e a tela compara o sha256 dos binários instalados com o manifesto (resposta
+guardada 5 min; "Procurar" relê), oferecendo a troca do binário mesmo com o código em dia.
 
 ## Verificação local antes do push (06/10/2026)
 

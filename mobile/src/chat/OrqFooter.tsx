@@ -1,16 +1,27 @@
 import { Pressable, Text, View } from 'react-native';
-import { StyleSheet } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
+import { Icon } from '../ui/Icon';
 import * as m from '../paraglide/messages';
 
 // O orquestrador não recebe mensagem: no lugar do compositor fica o caminho até quem recebe.
 // Sem árbitro registrado o botão fica desligado, como no web e no nativo, para a tela não
 // parecer um compositor que sumiu.
-export function OrqFooter({ serverId, arbiter }: { serverId: string; arbiter: string | null | undefined }) {
+export function OrqFooter({ serverId, name, arbiter }: { serverId: string; name: string; arbiter: string | null | undefined }) {
   const router = useRouter();
+  const { theme } = useUnistyles();
   return (
     <View style={styles.rodape}>
       <Text style={styles.selo}>{m.orq_row_badge()}</Text>
+      <Pressable
+        onPress={() => router.push(`/s/${serverId}/${name}/orchestration` as never)}
+        style={styles.botao}
+        accessibilityRole="button"
+        accessibilityLabel={m.orq_tab_title()}
+      >
+        <Icon name="PanelsTopLeft" size={20} color={theme.tokens.accent.base} />
+        <Text style={styles.texto}>{m.orq_tab_title()}</Text>
+      </Pressable>
       <Pressable
         onPress={() => { if (arbiter) router.push(`/s/${serverId}/${arbiter}` as never); }}
         disabled={!arbiter}
@@ -36,6 +47,8 @@ const styles = StyleSheet.create((theme) => ({
   },
   botao: {
     minHeight: 56,
+    flexDirection: 'row',
+    gap: theme.base.space[2],
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: theme.base.space[4],

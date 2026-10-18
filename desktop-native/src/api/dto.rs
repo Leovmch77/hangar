@@ -581,10 +581,11 @@ pub struct AskPayload {
     #[serde(default)] pub questions: Vec<AskItem>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct Delivery {
     pub ok: bool,
     #[serde(default)] pub delivered: bool,
+    #[serde(default)] pub timing_note: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]

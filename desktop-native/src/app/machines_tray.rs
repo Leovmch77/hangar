@@ -10,7 +10,7 @@ impl Tray {
 }
 
 impl Hangar {
-    pub(super) fn tab_targets(&self) -> Vec<Target> {
+    pub(super) fn ungrouped_tab_targets(&self) -> Vec<Target> {
         let active = self.active_key();
         let mut targets = self.sessions.iter().filter(|s| !self.sidebar.is_hidden(&active, &s.name))
             .map(|s| Target::new(&active, &s.name)).collect::<Vec<_>>();

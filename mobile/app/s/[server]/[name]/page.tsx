@@ -2,12 +2,15 @@ import { useCallback, useRef, useState } from 'react';
 import { Pressable, ScrollView, Share, Text, View } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
+import { useHeaderHeight } from 'expo-router/react-navigation';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
+import type { Edge } from 'react-native-safe-area-context';
 import { pageFileName, parseHostMessage, type HtmlPageRef } from '@hangar/core';
 import { canShareFile, shareTextFile } from '../../../../src/features/attachments/mediaCache';
 import { toast } from '../../../../src/ui/Toast';
 import { Screen } from '../../../../src/ui/Screen';
+import { HeaderBack, useGlassHeader } from '../../../../src/ui/glassHeader';
 import { Icon } from '../../../../src/ui/Icon';
 import { onlyInitial, usePageDocument, usePageWebView } from '../../../../src/chat/tools/pageDocument';
 import { one, pageFromParams } from '../../../../src/chat/tools/pageRoute';
@@ -18,6 +21,9 @@ const ALLOW_PINCH = "(()=>{const f=()=>{let v=document.querySelector('meta[name=
   + "if(!v){v=document.createElement('meta');v.name='viewport';document.head.appendChild(v)}"
   + "v.content='width=device-width,initial-scale=1,minimum-scale=0.5,maximum-scale=5,user-scalable=yes'};"
   + "document.readyState==='loading'?document.addEventListener('DOMContentLoaded',f):f()})();true";
+
+// A página começa abaixo do cabeçalho: a WebView não sabe recuar por baixo do vidro.
+const EDGES: Edge[] = ['bottom', 'left', 'right'];
 
 // Página publicada pelo agente em tela própria, como o T3 no celular: voltar no cabeçalho e no gesto, zoom por pinça.
 export default function PageScreen() {
@@ -32,19 +38,19 @@ export default function PageScreen() {
 
 function Shell({ title, serverId, sessionName, actions, children }:
   { title: string; serverId: string; sessionName: string; actions?: React.ReactNode; children: React.ReactNode }) {
-  const { theme } = useUnistyles();
   const router = useRouter();
-  const back = () => (router.canGoBack() ? router.back() : router.replace(`/s/${encodeURIComponent(serverId)}/${encodeURIComponent(sessionName)}` as never));
+  const header = useGlassHeader();
+  const headerHeight = useHeaderHeight();
+  const back = () => router.replace(`/s/${encodeURIComponent(serverId)}/${encodeURIComponent(sessionName)}` as never);
   return (
-    <Screen>
-      <View style={[styles.header, { borderBottomColor: theme.tokens.border.subtle }]}>
-        <Pressable onPress={back} hitSlop={8} style={styles.back} accessibilityRole="button" accessibilityLabel={m.comum_voltar()}>
-          <Icon name="ChevronLeft" size={22} color={theme.tokens.text.primary} />
-        </Pressable>
-        <Text style={[styles.title, { color: theme.tokens.text.primary }]} numberOfLines={1} accessibilityRole="header">{title}</Text>
-        {actions}
-      </View>
-      <View style={styles.flex}>{children}</View>
+    <Screen edges={EDGES}>
+      <Stack.Screen options={{
+        ...header,
+        title,
+        headerLeft: router.canGoBack() ? undefined : () => <HeaderBack onPress={back} />,
+        headerRight: actions ? () => actions : undefined,
+      }} />
+      <View style={[styles.flex, { paddingTop: headerHeight }]}>{children}</View>
     </Screen>
   );
 }
@@ -174,12 +180,6 @@ function PageView({ page, serverId, sessionName }: { page: HtmlPageRef; serverId
 
 const styles = StyleSheet.create((theme) => ({
   flex: { flex: 1 },
-  header: {
-    flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[1],
-    paddingRight: theme.base.space[3], minHeight: 48, borderBottomWidth: 1,
-  },
-  back: { width: 40, height: 44, alignItems: 'center', justifyContent: 'center' },
-  title: { flex: 1, minWidth: 0, fontSize: theme.base.text.base, fontWeight: '600' },
   web: { flex: 1, backgroundColor: 'transparent' },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', gap: theme.base.space[2], padding: theme.base.space[6] },
   note: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted, textAlign: 'center' },

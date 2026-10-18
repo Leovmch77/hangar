@@ -5,7 +5,8 @@ use std::{borrow::Cow, collections::{HashMap, HashSet}, rc::Rc};
 use std::sync::Arc;
 use std::time::Duration;
 use gpui_kit::*;
-use gpui_kit::component::{button::Button, input::{Input, InputEvent, InputState}, Sizable};
+use gpui_kit::assets::IconName;
+use gpui_kit::component::{button::Button, input::{Input, InputEvent, InputState}, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use serde_json::{json, Value};
 use crate::theme;
@@ -203,8 +204,10 @@ pub fn older_server_retry(action: &'static str, body: &Value, status: Option<u16
 /// rótulo. `columns` é a largura, em colunas, para a qual a faixa foi desenhada.
 pub struct View<'a> {
     pub press: Option<Press>,
+    pub panes: &'a [Value],
     pub minimize: Option<Minimize>,
     pub show: Show,
+    pub open: Show,
     /// Rolagem da fileira de abas: o app manda rolar até a aba ativa quando ela muda.
     pub tabs_scroll: &'a ScrollHandle,
     /// O app conserva o deslocamento mesmo quando outra aba ou a pergunta ocupa o lugar.
@@ -595,6 +598,27 @@ fn plain(v: &Value) -> String {
     children(v).iter().map(|c| match c { Value::String(s) => s.clone(), Value::Number(n) => n.to_string(), _ => String::new() }).collect()
 }
 
+fn is_settings_button(v: &Value) -> bool {
+    if v["type"] != "Button" { return false; }
+    let label = v["props"]["label"].as_str().map(str::to_owned).unwrap_or_else(|| plain(v));
+    label.to_lowercase().split(|c: char| !c.is_alphabetic())
+        .any(|word| matches!(word, "config" | "configuração" | "configurações" | "configuracao" | "configuracoes" | "cofinguração"))
+}
+
+fn contains_settings_button(v: &Value) -> bool {
+    is_settings_button(v) || children(v).iter().any(contains_settings_button)
+}
+
+/// O lançador de um painel capturado restaura o app sem repetir a ação do mod no terminal.
+fn captured_pane<'a>(v: &Value, label: &str, panes: &'a [Value]) -> Option<&'a Value> {
+    if v["props"]["plain"] != true { return None; }
+    let title = label.strip_prefix('▸').or_else(|| label.strip_prefix('▾'))?.trim();
+    let mut matching = panes.iter().filter(|pane| pane["title"].as_str() == Some(title));
+    let pane = matching.next()?;
+    if matching.next().is_some() || pane["id"].as_str().is_none_or(str::is_empty) { return None; }
+    Some(pane)
+}
+
 fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
     // Box com `key` é escopo: o hover dele e o dos filhos valem com o ponteiro nele; os outros seguem o de cima.
     let lit = if is_scope(v) { scope_active(c.view.hovered, &c.spot(at)) } else { at.lit };
@@ -632,8 +656,23 @@ fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
         }
         "Button" => {
             let label = Some(text_of(&p["label"])).filter(|s| !s.is_empty()).unwrap_or_else(|| plain(v));
+            if c.site == BAND_SITE && let Some(pane) = captured_pane(v, &label, c.view.panes) {
+                let site = pane["id"].as_str().unwrap().to_owned();
+                let open = c.view.open.clone();
+                return div().id(SharedString::from(format!("plg-open-{site}"))).flex_shrink_0().cursor_pointer()
+                    .focusable().tab_stop(true).role(Role::Button)
+                    .hover(|el| el.text_color(theme::accent_text()).underline())
+                    .focus_visible(|el| el.text_color(theme::accent_text()).underline())
+                    .on_click(move |_, window, cx| open(&site, window, cx))
+                    .child(label).into_any_element();
+            }
+            let settings = is_settings_button(v);
+            let plain = p["plain"] == true && !settings;
+            let content = if settings { Icon::new(IconName::Settings).size(px(15.)).into_any_element() }
+                else { div().child(label.clone()).into_any_element() };
             let base = div().flex_shrink_0().font_family(theme::SANS).text_size(px(12.)).line_height(px(18.))
-                .px_2().py_1().rounded(px(6.)).border_1().border_color(theme::border()).bg(theme::raised())
+                .when(!plain, |el| el.flex().items_center().justify_center().px_2().py_1().rounded(px(6.))
+                    .border_1().border_color(theme::border()).bg(theme::raised()))
                 .when(p["dimColor"] == true, |el| el.opacity(0.6))
                 .when(p["variant"] == "primary", |el| el.bg(theme::accent()).text_color(theme::on_accent()).border_color(theme::accent()))
                 // Estilo do rótulo como no web, das props ou do `hover` do escopo; o fundo vence o da pílula.
@@ -647,11 +686,12 @@ fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
                 (Some(button), Some(press)) => {
                     let site = c.site.to_owned();
                     base.id(SharedString::from(format!("plg-{site}-{}-{}", button.plugin, button.key))).cursor_pointer()
-                        .hover(|el| el.border_color(theme::accent()))
+                        .hover(move |el| if plain { el.text_color(theme::accent_text()).underline() } else { el.border_color(theme::accent()) })
+                        .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx))
                         .on_click(move |_, window, cx| press(&site, &button, window, cx))
-                        .child(label).into_any_element()
+                        .child(content).into_any_element()
                 }
-                _ => base.child(label).into_any_element(),
+                _ => base.child(content).into_any_element(),
             }
         }
         "Input" => field(v, p, c),
@@ -798,10 +838,14 @@ fn boxed(v: &Value, p: &Value, c: &Ctx, at: &Spot, lit: bool) -> AnyElement {
     // Linha com hover fica no desenho comum, o único que aplica o hover.
     let el = el.children(kids.iter().enumerate().map(|(i, k)| {
         let at = at.child(i, lit);
-        match i.checked_sub(1).filter(|_| text_row(k) && !wants_hover(k)).and_then(|j| raster_row(&kids[j])) {
+        let child = match i.checked_sub(1).filter(|_| text_row(k) && !wants_hover(k)).and_then(|j| raster_row(&kids[j])) {
             Some(frame) => aligned_row(k, frame, c, &at),
             None => node(k, c, &at),
-        }
+        };
+        let row = matches!(p["flexDirection"].as_str(), None | Some("row"));
+        if c.site == BAND_SITE && row && i > 0 && contains_settings_button(k) {
+            div().ml_auto().flex().flex_shrink_0().child(child).into_any_element()
+        } else { child }
     }));
     // Escopo e cartão absoluto avisam o app do ponteiro: o cartão conta como parte do escopo que o contém.
     let id = c.spot(at);
@@ -1013,6 +1057,22 @@ fn unmark(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn captured_launcher_matches_only_one_named_pane() {
+        let launcher = serde_json::json!({"props": {"plain": true}});
+        let pane = serde_json::json!({"id": "pm", "title": "DEMO-10001"});
+        let panes = vec![pane.clone()];
+        for label in ["▸ DEMO-10001", "▾ DEMO-10001"] {
+            assert_eq!(super::captured_pane(&launcher, label, &panes), Some(&panes[0]));
+        }
+        assert!(super::captured_pane(&launcher, "▸ DEMO-10001 · Plano", &panes).is_none());
+        assert!(super::captured_pane(&launcher, "DEMO-10001", &panes).is_none());
+        assert!(super::captured_pane(&serde_json::json!({}), "▸ DEMO-10001", &panes).is_none());
+        assert!(super::captured_pane(&launcher, "▸ DEMO-10001", &[]).is_none());
+        assert!(super::captured_pane(&launcher, "▸ DEMO-10001", &[pane.clone(), pane]).is_none());
+        assert!(super::captured_pane(&launcher, "▸ DEMO-10001", &[serde_json::json!({"title": "DEMO-10001"})]).is_none());
+    }
+
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
     use super::{accepts_typing, active_pane, apply_delta, box_background, button_control, cell_color, color, field_id, fields, FieldSync, fills_place, follow_local, follows_server,
         hover_props, input_kind, input_request, is_empty, older_server_retry, keep_hovered, keyless_text, Outbox, pane_ids, tab_scroll_target, TabScroll, plain_deep, raster_row, raster_runs, safe_href,

@@ -59,7 +59,7 @@ export default function Login() {
 
     // add é síncrono em memória, mas persist é async (emenda 2) — o probe só roda depois
     const existing = useServers.getState().servers.some((s) => s.baseUrl === p.base && !s.invite);
-    const added = useServers.getState().add({ baseUrl: p.base, token: p.token, label: new URL(p.base).hostname });
+    const added = useServers.getState().add({ baseUrl: p.base, token: p.token, label: m.native_settings_group_server() });
 
     try {
       await verifyLoginMachine(added, !existing);
@@ -218,7 +218,7 @@ const styles = StyleSheet.create((theme, rt) => ({
     borderColor: theme.tokens.border.default,
     borderRadius: theme.base.radius.md,
     color: theme.tokens.text.primary,
-    fontSize: 16,
+    fontSize: theme.base.text.sm,
     paddingHorizontal: theme.base.space[4],
   },
   errorBox: {
