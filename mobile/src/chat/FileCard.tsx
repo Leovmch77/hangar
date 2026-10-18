@@ -1,7 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Platform, Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { deliverFile } from '../features/attachments/mediaCache';
 import { haptic } from '../ui/haptics';
 import { SvgXml } from 'react-native-svg';
 import { svgIcone } from '@hangar/core';
@@ -37,6 +36,8 @@ export const FileCard = memo(function FileCard({ uri, headers, name }: {
     haptic.selection();
     setStatus('loading');
     try {
+      // Sob demanda: a bolha do usuário também desenha o card, e o módulo nativo de arquivos só carrega no toque.
+      const { deliverFile } = await import('../features/attachments/mediaCache');
       const r = await deliverFile(uri, headers, name);
       if (!alive.current) return;
       setStatus(r === 'cancelled' || r === 'shared' ? 'idle' : r);
