@@ -16,7 +16,6 @@ import { MessageList } from '../../../../src/chat/MessageList';
 import { pararTts } from '../../../../src/chat/BubbleActions';
 import { Composer } from '../../../../src/chat/Composer';
 import { ComposerStatusLine } from '../../../../src/chat/ComposerStatusLine';
-import { KeyboardBar } from '../../../../src/chat/KeyboardBar';
 import { OrqFooter } from '../../../../src/chat/OrqFooter';
 import { TuiPill } from '../../../../src/chat/TuiPill';
 import { RecarregarPill } from '../../../../src/chat/RecarregarPill';
@@ -651,7 +650,6 @@ export default function ChatScreen() {
           {!servidorSumiu && !codexPreThread && fetchedSession !== null && !orq && !soLeitura && !dead
             ? <ComposerStatusLine key={`status:${rota}`} serverId={serverId} name={name} onOpenSettings={openSettings} />
             : null}
-          <KeyboardBar />
         </KeyboardAvoidingView>
       </SessionsDrawer>
       <ServerSheet open={serversOpen} onFechar={() => setServersOpen(false)} />

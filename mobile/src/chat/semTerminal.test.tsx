@@ -100,14 +100,18 @@ vi.mock('../stores/servers', () => {
   return { useServers: Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state }) };
 });
 vi.mock('../ui/Screen', () => ({ Screen: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
+// Conta os renders da tela: a gaveta é filha direta dela, sem memo.
+const screenRenders = vi.hoisted(() => ({ n: 0 }));
 // A gaveta puxa o gesture-handler nativo, que o vitest não carrega; aqui só o conteúdo importa.
-vi.mock('../features/sessions/SessionsDrawer', () => ({ SessionsDrawer: ({ children, onClose, onNewConversation }: { children: ReactNode; onClose: () => void; onNewConversation?: () => void }) => createElement('div', null, children,
-  createElement('button', { 'aria-label': 'drawer-new-conversation', onClick: onNewConversation ?? onClose }),
-  createElement('button', { 'aria-label': 'drawer-navigation-close', onClick: onClose })) }));
+vi.mock('../features/sessions/SessionsDrawer', () => ({ SessionsDrawer: ({ children, onClose, onNewConversation }: { children: ReactNode; onClose: () => void; onNewConversation?: () => void }) => {
+  screenRenders.n++;
+  return createElement('div', null, children,
+    createElement('button', { 'aria-label': 'drawer-new-conversation', onClick: onNewConversation ?? onClose }),
+    createElement('button', { 'aria-label': 'drawer-navigation-close', onClick: onClose }));
+} }));
 vi.mock('../features/sessions/ServerSheet', () => ({ ServerSheet: () => null }));
 vi.mock('react-native-keyboard-controller', () => ({
   KeyboardAvoidingView: ({ children }: { children: ReactNode }) => createElement('div', null, children),
-  // O KeyboardBar do chat lê o estado do teclado; nestes testes ele está sempre fechado.
   useKeyboardState: <T,>(select: (s: { isVisible: boolean; height: number }) => T) => select({ isVisible: false, height: 0 }),
 }));
 vi.mock('./LoopChip', () => ({ LoopChip: () => null }));
@@ -328,9 +332,6 @@ vi.mock('../ui/Toast', () => ({ toast: { ok: () => {}, erro: () => {} } }));
 vi.mock('expo-clipboard', () => ({ setStringAsync: vi.fn(async () => {}) }));
 const previewTexts = vi.hoisted(() => [] as string[]);
 vi.mock('./PreviewBubble', () => ({ PreviewBubble: ({ text }: { text: string }) => { previewTexts.push(text); return null; } }));
-// Conta os renders da tela: o KeyboardBar é filho direto dela, sem memo.
-const screenRenders = vi.hoisted(() => ({ n: 0 }));
-vi.mock('./KeyboardBar', () => ({ KeyboardBar: () => { screenRenders.n++; return null; } }));
 vi.mock('./ThinkingBlock', () => ({ ThinkingBlock: () => null }));
 vi.mock('./tools/ToolCard', () => ({ ToolCard: () => null }));
 vi.mock('./tools/ToolGroup', () => ({ ToolGroup: () => null }));
