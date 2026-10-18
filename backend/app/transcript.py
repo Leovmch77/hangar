@@ -329,6 +329,22 @@ def _is_command_meta(text: str) -> bool:
     return text.lstrip().startswith(_COMMAND_META_PREFIXES)
 
 
+_COMMAND_NAME = re.compile(r"<command-name>([^<]*)</command-name>")
+_COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
+
+
+def comando_digitado(text: str) -> str | None:
+    """`/comando args` digitado vira `<command-name>/comando</command-name>` + `<command-args>` no
+    transcript. Só a mensagem que É o comando conta (citar a tag não conta), e ela volta inteira."""
+    t = text.strip()
+    nome = _COMMAND_NAME.search(t) if t.startswith(("<command-name>", "<command-message>")) else None
+    if not nome:
+        return None
+    args = _COMMAND_ARGS.search(t)
+    comando = f"{nome.group(1).strip()} {args.group(1).strip() if args else ''}".strip()
+    return comando if comando.startswith("/") else None
+
+
 def _strip_meta_blocks(text: str) -> str:
     return _PASTED_RE.sub(r"\2", _META_BLOCK_RE.sub("", text)).strip()
 
@@ -631,7 +647,11 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
                                       result="task-notification")]
                 return []
             if _is_command_meta(content):
-                return []
+                # O `/clear` abre a conversa nova; mostrá-lo seria a primeira bolha dela.
+                comando = comando_digitado(content)
+                if not comando or comando.split()[0] == "/clear":
+                    return []
+                return [ChatEvent(kind="user_msg", id=uid, text=comando)]
             if _INTERRUPCAO_RE.match(content.strip()):
                 return [ChatEvent(kind="notice", id=uid, text="interrupted")]
             cleaned = _strip_meta_blocks(content)

@@ -103,3 +103,15 @@ def test_sem_ancestral_claude_nao_grava_o_marcador_de_ativo(tmp_path):
     assert marcador.exists(), "o hook nem chegou a rodar"
     time.sleep(0.2)
     assert _active_jsonls(tmp_path) == []
+
+def test_user_prompt_submit_marks_the_prompt_that_started(tmp_path):
+    # O aceite antecipado casa o texto enviado por este hash; "abc" tem o SHA-1 conhecido.
+    antes = time.time()
+    _run({"hook_event_name": "UserPromptSubmit", "session_id": "abc", "prompt": "  abc\n"}, tmp_path)
+    marca = json.loads((tmp_path / ".hangar-prompt" / "abc.json").read_text())
+    assert marca["sha1"] == "a9993e364706816aba3e25717850c26c9cd0d89d"
+    assert marca["ts"] >= antes
+
+def test_other_events_do_not_mark_a_prompt(tmp_path):
+    _run({"hook_event_name": "PreToolUse", "session_id": "abc", "prompt": "abc"}, tmp_path)
+    assert not (tmp_path / ".hangar-prompt" / "abc.json").exists()

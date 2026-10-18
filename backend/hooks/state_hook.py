@@ -125,6 +125,14 @@ try:
     state = _STATE.get(event)
     if state and sid:
         _write_marker(base, ".hangar-state", sid, {"state": state, "ts": time.time()})
+    # O prompt passou da recusa do motor e os hooks começaram: o backend dá a mensagem por aceita
+    # antes do transcript, que só é gravado quando todos terminam. Pasta própria porque o backend
+    # reescreve o .hangar-state sem estes campos.
+    prompt = o.get("prompt")
+    if event == "UserPromptSubmit" and sid and isinstance(prompt, str):
+        import hashlib
+        _write_marker(base, ".hangar-prompt", sid,
+                      {"sha1": hashlib.sha1(prompt.strip().encode("utf-8")).hexdigest(), "ts": time.time()})
 
     # Transcript ATIVO: gravado em QUALQUER evento (todo hook carrega transcript_path). Crucial: o
     # /resume feito DENTRO de uma sessao ja aberta pode NAO disparar SessionStart -> mas o 1o prompt/

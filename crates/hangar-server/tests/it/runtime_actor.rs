@@ -946,6 +946,55 @@ async fn echo_from_the_cli_confirms_the_entry_without_the_transcript() {
 }
 
 #[tokio::test]
+async fn prompt_hooks_started_mark_the_entry_accepted_before_the_cli_echo() {
+    // A CLI escreveu a entrada e roda os hooks `UserPromptSubmit`; o eco só vem depois de todos. O marcador do
+    // `state_hook` já basta para a bolha sair de "entregando", sem confirmar: a prova continua sendo o eco.
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(config.join(".hangar-prompt")).unwrap();
+    std::fs::write(config.join(".hangar-prompt/sid-1.json"),r#"{"sha1":"a9993e364706816aba3e25717850c26c9cd0d89d","ts":4000000000.0}"#).unwrap();
+    let (cano,server) = claude_cano(vec![]).await;
+    let handle = claude_actor_with(dir.path(),cano,json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true,"config_dir":config})).await;
+    let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"abc","entry_id":"msg"}) };
+    assert!(handle.command(input).await.unwrap().disposition == Disposition::Accepted);
+    tokio::time::timeout(std::time::Duration::from_secs(3),async {
+        loop {
+            if queue_state(dir.path()).rows.iter().any(|row|row["id"] == "msg" && row["consumed"] == true) { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("hooks começados precisam dar a entrada por aceita");
+    assert!(queue_state(dir.path()).rows.iter().all(|row|row["confirmed"] != true),"aceita não é confirmada");
+    handle.stop().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn one_prompt_hook_start_accepts_only_one_of_two_equal_entries() {
+    // Duas entregas iguais à espera do eco e um só começo de hook: só a mais antiga sai de "entregando".
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(config.join(".hangar-prompt")).unwrap();
+    std::fs::write(config.join(".hangar-prompt/sid-1.json"),r#"{"sha1":"a9993e364706816aba3e25717850c26c9cd0d89d","ts":4000000000.0}"#).unwrap();
+    let (cano,server) = claude_cano(vec![]).await;
+    let handle = claude_actor_with(dir.path(),cano,json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true,"config_dir":config})).await;
+    for id in ["first","second"] {
+        // Já entregue: esperando na fila, a drenagem do ator a pegaria antes do despacho do teste.
+        handle.queue(format!("append-{id}"),Action::Append { text:"abc".into(),delivered:true,ts:None,pre_transcript:false,entry_id:Some(id.into()) }).await.unwrap();
+        handle.queue(format!("prepare-{id}"),Action::Prepare { id:id.into(),payload:json!({"kind":"input"}),entry_id:Some(id.into()) }).await.unwrap();
+        handle.queue(format!("begin-{id}"),Action::BeginDispatch { id:id.into(),wire_id:format!("w-{id}"),staged:false }).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // Uma entrada qualquer abre a janela em que o ator olha o marcador.
+    let other = RuntimeCommand { operation_id:"other".into(),kind:OperationKind::Input,payload:json!({"text":"zzz","entry_id":"other"}) };
+    handle.command(other).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let consumed:Vec<_> = queue_state(dir.path()).rows.iter().filter(|row|row["consumed"] == true).map(|row|row["id"].clone()).collect();
+    assert_eq!(consumed,vec![json!("first")]);
+    handle.stop().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn queued_entries_become_not_delivered_when_the_process_gives_up() {
     let dir = tempfile::tempdir().unwrap();
     // Permissão em aberto: a sessão não entrega, a mensagem espera na fila.
@@ -1101,8 +1150,12 @@ async fn claude_cano(lines:Vec<Value>) -> (std::net::SocketAddr,tokio::task::Joi
 }
 
 async fn claude_actor(dir:&std::path::Path,cano:std::net::SocketAddr) -> RuntimeHandle {
+    claude_actor_with(dir,cano,json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true})).await
+}
+
+async fn claude_actor_with(dir:&std::path::Path,cano:std::net::SocketAddr,metadata:Value) -> RuntimeHandle {
     let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
-        metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
+        metadata,
         binding:CanoBinding { pid:42,escuta:format!("tcp:{cano}"),token:"secret-test".into(),versao:2 },
         lease_path:dir.join("key.lock"),state_path:dir.join("key.queue-state.json"),projection_dir:dir.join("projection"),
         transcript:dir.join("chat.jsonl"),created:0.0 };
