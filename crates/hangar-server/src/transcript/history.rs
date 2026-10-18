@@ -25,7 +25,7 @@ const HANDOFF_GRACE_S: f64 = 15.0 * 60.0;
 const QUEUE_ORDER: u64 = 1_000_000_000;
 
 // pqueue.py:285, 294, 298
-static ATTACH: LazyLock<Regex> = LazyLock::new(|| py_re(r"(?s)(?:\s*—\s*)?📎\s*(?:imagem|arquivo):.*$"));
+static ATTACH: LazyLock<Regex> = LazyLock::new(|| py_re(r"(?s)(?:\s*—\s*)?📎\s*(?:imagem|arquivo|image|file):.*$"));
 static IMG_PREFIX: LazyLock<Regex> = LazyLock::new(|| py_re(r"\A(?:\[Image #\d+\])+\s*"));
 static IMG_SOURCE: LazyLock<Regex> = LazyLock::new(|| py_re(r"\[Image: source: ([^\]]+)\]"));
 // pqueue.py `_COMMAND_NAME`/`_COMMAND_ARGS`
@@ -458,6 +458,12 @@ pub fn history_etag(req: &HistoryRequest) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn english_attachment_marker_leaves_the_caption() {
+        assert_eq!(super::strip_attach("look — 📎 image: /a.png 📎 file: /b.txt"), "look");
+        assert_eq!(super::strip_attach("olha — 📎 arquivo: /b.txt"), "olha");
+    }
+
     use super::{chaves_de_commit, merged_history, merged_history_capped, queue_panel_entries, transcript_start_ts, HistoryRequest, Provider, TAIL_WINDOW};
 
     #[test]

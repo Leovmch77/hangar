@@ -293,7 +293,8 @@ def _transcript_start_ts(jsonl: str) -> float | None:
 
 # Marcador de anexo no texto do app ("legenda — 📎 imagem: <path>"): o transcript grava SO a
 # legenda -> tirar antes de casar com o transcript (senao msg com anexo nunca confirmaria).
-_ATTACH_RE = re.compile(r"(?:\s*—\s*)?📎\s*(?:imagem|arquivo):.*$", re.S)
+# O marcador sai no idioma da tela de quem enviou: `image:`/`file:` em inglês.
+_ATTACH_RE = re.compile(r"(?:\s*—\s*)?📎\s*(?:imagem|arquivo|image|file):.*$", re.S)
 
 
 def _strip_attach(text: str) -> str:
