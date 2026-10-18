@@ -136,7 +136,7 @@ function OptionButtonsContent({ question, options, interactionId, onSelect, onCa
                 style={[
                   styles.num,
                   { color: theme.tokens.text.secondary },
-                  isAllow && { color: '#fff' },
+                  isAllow && { color: theme.ink.onAccent },
                   isAlways && { color: theme.tokens.accent.base },
                   isDeny && { color: theme.tokens.status.error },
                 ]}
@@ -149,14 +149,14 @@ function OptionButtonsContent({ question, options, interactionId, onSelect, onCa
                   accessibilityElementsHidden
                   importantForAccessibility="no-hide-descendants"
                 >
-                  {marcada(opt) ? <Icon name="Check" size={12} color="#fff" /> : null}
+                  {marcada(opt) ? <Icon name="Check" size={12} color={theme.ink.onAccent} /> : null}
                 </View>
               ) : null}
               <Text
                 style={[
                   styles.optTxt,
                   { color: theme.tokens.text.primary },
-                  isAllow && { color: '#fff' },
+                  isAllow && { color: theme.ink.onAccent },
                   isAlways && { color: theme.tokens.accent.base },
                   isDeny && { color: theme.tokens.status.error },
                 ]}
@@ -184,7 +184,7 @@ function OptionButtonsContent({ question, options, interactionId, onSelect, onCa
                   accessibilityState={{ disabled: busy || !feedback.trim(), busy }}
                   style={[styles.btn, styles.feedbackSend, { backgroundColor: theme.tokens.accent.base, borderColor: theme.tokens.accent.base }, (busy || !feedback.trim()) && styles.off]}
                 >
-                  <Text style={[styles.sendTxt, { color: '#fff' }]}>{m.native_send()}</Text>
+                  <Text style={[styles.sendTxt, { color: theme.ink.onAccent }]}>{m.native_send()}</Text>
                 </Pressable>
               </View>
             ) : null}
@@ -199,8 +199,8 @@ function OptionButtonsContent({ question, options, interactionId, onSelect, onCa
             style={[styles.btn, { backgroundColor: theme.tokens.accent.base, borderColor: theme.tokens.accent.base }, marcadas === 0 && styles.off]}
             accessibilityRole="button"
           >
-            <Icon name="Send" size={14} color="#fff" />
-            <Text style={[styles.optTxt, { color: '#fff' }]}>{m.opcoes_enviar_marcadas({ n: marcadas })}</Text>
+            <Icon name="Send" size={14} color={theme.ink.onAccent} />
+            <Text style={[styles.optTxt, { color: theme.ink.onAccent }]}>{m.opcoes_enviar_marcadas({ n: marcadas })}</Text>
           </Pressable>
         ) : null}
         <Pressable
