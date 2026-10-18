@@ -8657,5 +8657,13 @@
   "mobile_git_status": "Status",
   "mobile_git_context_changed": "The session, Git folder or branch changed or is unavailable. The operation was stopped. Check the refreshed repository before trying again.",
   "mobile_git_read_timeout": "The Git read did not respond within 20 s. Reload to try again.",
-  "mobile_git_write_timeout": "The Git operation did not respond within 60 s. Its outcome is uncertain: it may have completed on the server. The repository will be reloaded; check before repeating it."
+  "mobile_git_write_timeout": "The Git operation did not respond within 60 s. Its outcome is uncertain: it may have completed on the server. The repository will be reloaded; check before repeating it.",
+  "file_card_open": "Open",
+  "file_card_download": "Download",
+  "file_card_downloading": "Downloading…",
+  "file_card_saved": "Downloaded",
+  "file_card_empty": "Empty file",
+  "file_card_missing": "File not found",
+  "file_card_failed": "Download failed",
+  "file_card_retry": "Try again"
 }
