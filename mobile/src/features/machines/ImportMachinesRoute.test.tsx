@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('expo-secure-store', () => ({ getItemAsync: async (k: string) => mocks.vault.get(k) ?? null,
   setItemAsync: async (k: string, v: string) => { mocks.vault.set(k, v); } }));
 vi.mock('expo-router', () => ({ useLocalSearchParams: () => mocks.params, useRouter: () => ({ replace: mocks.replace }) }));
+vi.mock('react-native-mmkv', () => ({ createMMKV: () => ({ getString: () => undefined, set: vi.fn() }) }));
 vi.mock('../../ui/Screen', () => ({ Screen: ({ children }: { children: ReactNode }) => <>{children}</> }));
 vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('sonner-native', () => ({ toast: Object.assign(vi.fn(), { success: mocks.success }), Toaster: () => null }));

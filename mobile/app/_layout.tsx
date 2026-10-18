@@ -10,11 +10,12 @@ import { configureCore } from '../src/net/configureCore';
 import { useServers } from '../src/stores/servers';
 import { discoverSavedMachines } from '../src/features/machines/importMachines';
 import { setChatsForeground } from '../src/stores/chat';
-import { useSessions } from '../src/stores/sessions';
+import { setMachineDiscovery, useSessions } from '../src/stores/sessions';
 import { aplicarTemaSalvo, useAparencia } from '../src/stores/aparencia';
 import { aplicarMaterial } from '../src/theme/aplicarMaterial';
 import { Toaster, toast } from '../src/ui/Toast';
 import { LiveVoiceRoot } from '../src/features/voice/LiveVoiceRoot';
+import { readFatalError, setFatalErrorRoute } from '../src/net/fatalErrors';
 import * as m from '../src/paraglide/messages';
 
 configureCore();
@@ -24,27 +25,31 @@ aplicarMaterial(useAparencia.getState());
 export default function Layout() {
   const router = useRouter();
   const segments = useSegments();
+  setFatalErrorRoute(segments);
   const ready = useServers((s) => s.ready);
   const servers = useServers((s) => s.servers);
   const aviso = useServers((s) => s.aviso);
   const limparAviso = useServers((s) => s.limparAviso);
 
   useEffect(() => {
-    void useServers.getState().load().then(() => discoverSavedMachines());
+    try { if (readFatalError()) toast.aviso(m.native_last_error_available()); }
+    catch { toast.erro(m.native_last_error_read_failed()); }
+  }, []);
+
+  useEffect(() => {
+    setMachineDiscovery((server) => { void discoverSavedMachines([server]); });
+    void useServers.getState().load();
+    return () => setMachineDiscovery(() => {});
   }, []);
 
   // Único dono do primeiro plano: os stores conservam transcript, pergunta e rascunho ao sair
   // e ignoram repetição do mesmo estado, então voltar não duplica REST/SSE.
   useEffect(() => {
     const initial = AppState.currentState ?? 'active';
-    let foreground = initial === 'active';
     const apply = (state: AppStateStatus) => {
       const active = state === 'active';
-      const resumed = active && !foreground;
-      foreground = active;
       setChatsForeground(active);
       useSessions.getState().setForeground(active);
-      if (resumed) void discoverSavedMachines();
     };
     apply(initial);
     const subscription = AppState.addEventListener('change', apply);

@@ -8,27 +8,33 @@ const { exp: config } = getConfig(projectRoot);
 const updateUrl = 'https://u.expo.dev/9fd06001-323e-4b82-835f-6dfc3674236d';
 
 describe('OTA na configuração nativa', () => {
-  it('gera o IPA local no canal preview com runtime da versão do app e sem esperar a rede', async () => {
+  it('gera o IPA local no canal preview com runtime nativo explícito e sem esperar a rede', async () => {
     const plist = await IOSConfig.Updates.setUpdatesConfigAsync(projectRoot, config, {}, null);
 
     expect(plist).toMatchObject({
       EXUpdatesEnabled: true,
       EXUpdatesURL: updateUrl,
       EXUpdatesRequestHeaders: { 'expo-channel-name': 'preview' },
-      EXUpdatesRuntimeVersion: '0.1.0',
+      EXUpdatesRuntimeVersion: 'native-2',
       EXUpdatesCheckOnLaunch: 'ALWAYS',
       EXUpdatesLaunchWaitMs: 0,
     });
     expect(plist.EXUpdatesHasEmbeddedUpdate).not.toBe(false);
   });
 
-  it('muda o runtime quando a versão do app sobe para um novo binário nativo', async () => {
+  it('preserva o runtime quando só a versão visível do app muda', async () => {
     const nextConfig = { ...config, version: '0.2.0' };
     const plist = await IOSConfig.Updates.setUpdatesConfigAsync(projectRoot, nextConfig, {}, null);
-    expect(plist.EXUpdatesRuntimeVersion).toBe('0.2.0');
+    expect(plist.EXUpdatesRuntimeVersion).toBe('native-2');
   });
 
-  it('gera o Android com a mesma busca automática e o runtime da versão do app', async () => {
+  it('muda o runtime quando a versão nativa explícita sobe', async () => {
+    const nextConfig = { ...config, runtimeVersion: 'native-3' };
+    const plist = await IOSConfig.Updates.setUpdatesConfigAsync(projectRoot, nextConfig, {}, null);
+    expect(plist.EXUpdatesRuntimeVersion).toBe('native-3');
+  });
+
+  it('gera o Android com a mesma busca automática e o runtime nativo explícito', async () => {
     const manifest = await AndroidConfig.Updates.setUpdatesConfigAsync(projectRoot, config, {
       manifest: {
         $: { 'xmlns:android': 'http://schemas.android.com/apk/res/android' },
@@ -48,6 +54,6 @@ describe('OTA na configuração nativa', () => {
       'expo.modules.updates.EXPO_UPDATES_CHECK_ON_LAUNCH': 'ALWAYS',
       'expo.modules.updates.EXPO_UPDATES_LAUNCH_WAIT_MS': '0',
     });
-    expect(strings.resources.string).toContainEqual({ $: { name: 'expo_runtime_version' }, _: '0.1.0' });
+    expect(strings.resources.string).toContainEqual({ $: { name: 'expo_runtime_version' }, _: 'native-2' });
   });
 });

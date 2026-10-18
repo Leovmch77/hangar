@@ -6,14 +6,17 @@ import plist from '@expo/plist';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const workflow = readFileSync(new URL('../../.github/workflows/ios-dev.yml', import.meta.url), 'utf8');
-const match = workflow.match(/python3 -I - Payload\/\*\.app <<'PY'\n([\s\S]*?)\n          PY/);
+const match = workflow.match(/python3 -I - \.\.\/app\.json Payload\/\*\.app <<'PY'\n([\s\S]*?)\n          PY/);
 if (!match) throw new Error('Verificação do IPA não encontrada no workflow');
 const verifyArtifact = match[1].split('\n').map((line) => line.slice(10)).join('\n');
 const temporaryDirectories: string[] = [];
 
-function releaseArtifact(channel = 'preview', runtime = '0.1.0') {
-  const app = mkdtempSync(join(tmpdir(), 'hangar-ota-'));
-  temporaryDirectories.push(app);
+function releaseArtifact(channel = 'preview', runtime = 'native-2', configuredRuntime = 'native-2') {
+  const directory = mkdtempSync(join(tmpdir(), 'hangar-ota-'));
+  temporaryDirectories.push(directory);
+  writeFileSync(join(directory, 'app.json'), JSON.stringify({ expo: { runtimeVersion: configuredRuntime } }));
+  const app = join(directory, 'Hangar.app');
+  mkdirSync(app);
   writeFileSync(join(app, 'main.jsbundle'), Buffer.from('c61fbc03c103191f', 'hex'));
   writeFileSync(join(app, 'Info.plist'), plist.build({ CFBundleShortVersionString: '0.1.0' }));
   writeFileSync(join(app, 'Expo.plist'), plist.build({
@@ -34,7 +37,7 @@ function releaseArtifact(channel = 'preview', runtime = '0.1.0') {
 }
 
 function verify(app: string) {
-  return spawnSync('python3', ['-I', '-', app], { input: verifyArtifact, encoding: 'utf8' });
+  return spawnSync('python3', ['-I', '-', join(app, '../app.json'), app], { input: verifyArtifact, encoding: 'utf8' });
 }
 
 afterEach(() => {
@@ -42,8 +45,14 @@ afterEach(() => {
 });
 
 describe('verificação OTA do IPA no GitHub', () => {
-  it('aceita o Release com preview e runtime igual à versão do binário', () => {
+  it('aceita o Release com preview e runtime nativo independente da versão visível', () => {
     const result = verify(releaseArtifact());
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+  });
+
+  it('aceita o Release quando app.json e artefato usam native-3', () => {
+    const result = verify(releaseArtifact('preview', 'native-3', 'native-3'));
     expect(result.stderr).toBe('');
     expect(result.status).toBe(0);
   });
@@ -54,7 +63,7 @@ describe('verificação OTA do IPA no GitHub', () => {
     expect(result.stderr).toContain('EXUpdatesRequestHeaders');
   });
 
-  it.each(['', '0.2.0'])('recusa o Release com runtime diferente da versão do binário: %j', (runtime) => {
+  it.each(['0.1.0', '', 'native-1'])('recusa o Release com runtime diferente do app.json: %j', (runtime) => {
     const result = verify(releaseArtifact('preview', runtime));
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('EXUpdatesRuntimeVersion');

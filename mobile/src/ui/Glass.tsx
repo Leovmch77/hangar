@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AccessibilityInfo, Platform, View, type ViewProps } from 'react-native';
+import { AccessibilityInfo, Platform, View, type ViewProps, type ViewStyle } from 'react-native';
 import { BlurView } from 'expo-blur';
 import { GlassView, isLiquidGlassAvailable } from 'expo-glass-effect';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -58,7 +58,23 @@ export function Glass({ variant = 'panel', style, children, ...rest }: Props) {
     // O chrome flutua sobre a conversa: tinta fraca deixava a caixa lavada e o texto de trás vazando;
     // inteira apaga a refração e o vidro vira caixa chapada.
     const tinta = variant === 'chrome' ? `rgba(${r},${g},${b},${alphaDoVidro(theme, variant) * 0.75})` : bg;
-    fundo = <GlassView key={rt.themeName} glassEffectStyle="regular" tintColor={tinta} isInteractive={variant === 'chrome'} style={StyleSheet.absoluteFillObject} pointerEvents="none" />;
+    const box = StyleSheet.flatten<ViewStyle>([styles.box, style]);
+    const width = box.borderWidth ?? 0;
+    const top = box.borderTopWidth ?? width;
+    const right = box.borderRightWidth ?? width;
+    const bottom = box.borderBottomWidth ?? width;
+    const left = box.borderLeftWidth ?? width;
+    const innerRadius = (radius: ViewStyle['borderRadius'], border: number) =>
+      typeof radius === 'number' ? Math.max(0, radius - border) : radius;
+    // O recorte do pai não arredonda o efeito: o próprio material precisa dos raios internos.
+    const corners = {
+      borderCurve: box.borderCurve,
+      borderTopLeftRadius: innerRadius(box.borderTopLeftRadius ?? box.borderRadius, Math.max(top, left)),
+      borderTopRightRadius: innerRadius(box.borderTopRightRadius ?? box.borderRadius, Math.max(top, right)),
+      borderBottomRightRadius: innerRadius(box.borderBottomRightRadius ?? box.borderRadius, Math.max(bottom, right)),
+      borderBottomLeftRadius: innerRadius(box.borderBottomLeftRadius ?? box.borderRadius, Math.max(bottom, left)),
+    };
+    fundo = <GlassView key={rt.themeName} glassEffectStyle="regular" tintColor={tinta} isInteractive={variant === 'chrome'} style={[StyleSheet.absoluteFillObject, corners]} pointerEvents="none" />;
   } else {
     fundo = (
       <BlurView

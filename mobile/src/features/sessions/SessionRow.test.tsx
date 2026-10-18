@@ -3,7 +3,7 @@ import { act, createElement, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Platform } from 'react-native';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AggSession } from '@hangar/core';
+import { rotuloEstado, type AggSession } from '@hangar/core';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -29,6 +29,11 @@ vi.mock('react-native', async (original) => {
 });
 vi.mock('expo-haptics', () => ({ impactAsync: () => Promise.resolve(), ImpactFeedbackStyle: { Medium: 'medium' } }));
 vi.mock('../../ui/HangarMark', () => ({ HangarMark: () => null }));
+vi.mock('react-native-svg', async (original) => ({
+  ...await original<typeof import('react-native-svg')>(),
+  default: ({ children, ...props }: { children?: ReactNode }) => createElement('svg', props, children),
+  Path: (props: { d: string }) => createElement('path', props),
+}));
 vi.mock('../../paraglide/messages', () => ({
   ask_perguntas: () => 'ask_perguntas',
   conta_padrao: () => 'conta_padrao',
@@ -41,6 +46,10 @@ vi.mock('../../paraglide/messages', () => ({
   sessao_retomar: () => 'sessao_retomar',
   sessao_sem_id: () => 'sessao_sem_id',
   sessao_worktree: () => 'sessao_worktree',
+  sessao_worktree_abrir: () => 'sessao_worktree_abrir',
+  sessao_limite: () => 'sessao_limite',
+  git_sync_titulo: (p: { ahead: number; behind: number }) => `sync ${p.ahead}/${p.behind}`,
+  sessao_limite_volta: (p: { n: string }) => `sessao_limite_volta ${p.n}`,
   worktree_apagada: () => 'worktree_apagada',
   native_par_convidar: () => 'native_par_convidar',
   native_par_menu: () => 'native_par_menu',
@@ -78,14 +87,62 @@ async function render(session: AggSession, extra: Record<string, unknown> = {}) 
 describe('SessionRow', () => {
   afterEach(() => { Platform.OS = 'android'; });
 
-  it('motor Claude substitui provedor no texto e na acessibilidade com marca real', async () => {
+  it.each([
+    { provider: 'claude', label: 'Claude', path: 'm4.7144' },
+    { provider: 'codex', label: 'Codex', path: 'M22.2819' },
+    { provider: 'kimi', label: 'Kimi', path: 'M21.765' },
+    { provider: 'pi', label: 'Pi', letter: 'π' },
+    { provider: 'omp', label: 'OMP', letter: 'Ω' },
+    { provider: undefined, label: 'Claude', path: 'm4.7144' },
+  ] as const)('marca de $label junto do nome, sem texto nos metadados, inclusive na linha compacta', async ({ provider, label, ...mark }) => {
+    for (const compact of [false, true]) {
+      const { container, root } = await render({ ...base, name: 'api', provider, cwd: '/repo', branch: 'main' }, { compact });
+      try {
+        const name = Array.from(container.querySelectorAll('span')).find(el => el.textContent === 'api');
+        const glyph = name?.previousElementSibling;
+        expect(glyph).not.toBeNull();
+        if ('path' in mark) expect(glyph?.querySelector('path')?.getAttribute('d')).toMatch(new RegExp(`^${mark.path}`));
+        else expect(glyph?.textContent).toBe(mark.letter);
+        expect(container.textContent).not.toContain(label);
+        expect(container.textContent).toContain('repo · main');
+        expect(container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label')).toContain(label);
+      } finally { act(() => root.unmount()); }
+    }
+  });
+
+  it.each(['gpt', 'local-gpt', 'gpt-6-1-sol', 'GPT-6', 'openai', 'codex'])('motor %s usa OpenAI ao lado do nome e preserva a engrenagem', async (engine) => {
+    Platform.OS = 'ios';
+    const { container, root } = await render({ ...base, name: 'api', provider: 'claude', engine });
+    try {
+      const name = Array.from(container.querySelectorAll('span')).find(el => el.textContent === 'api');
+      expect(name?.previousElementSibling?.querySelector('path')?.getAttribute('d')).toMatch(/^M22.2819/);
+      expect(container.querySelector('[data-symbol="gearshape"]')?.parentElement?.textContent).toBe(engine);
+      const label = container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label');
+      expect(label).toContain('Claude');
+      expect(label).toContain(engine);
+    } finally { act(() => root.unmount()); }
+  });
+
+  it.each(['unknown', 'orq'])('provider %s sem marca não cria ícone nem texto substituto', async (provider) => {
+    Platform.OS = 'ios';
+    const { container, root } = await render({ ...base, name: 'api', provider: provider as AggSession['provider'] });
+    try {
+      const name = Array.from(container.querySelectorAll('span')).find(el => el.textContent === 'api');
+      expect(name?.previousElementSibling).toBeNull();
+      expect(container.querySelector('svg')).toBeNull();
+      expect(container.textContent).not.toContain('unknown');
+      expect(container.textContent).not.toContain('?');
+    } finally { act(() => root.unmount()); }
+  });
+
+  it('motor Claude mantém a engrenagem nos metadados e o provedor na acessibilidade', async () => {
     Platform.OS = 'ios';
     const { container, root } = await render({ ...base, name: 'api', provider: 'claude', engine: 'gpt-6-1-sol', cwd: '/repo', branch: 'main' });
     try {
       expect(container.textContent).not.toContain('Claude');
       const row = container.querySelector('button[aria-label^="api,"]');
       expect(row?.getAttribute('aria-label')).toContain('gpt-6-1-sol');
-      expect(row?.getAttribute('aria-label')).not.toContain('Claude');
+      expect(row?.getAttribute('aria-label')).toContain('Claude');
       const mark = container.querySelector('[data-symbol="gearshape"]');
       expect(mark).not.toBeNull();
       const engine = Array.from(mark!.parentElement!.querySelectorAll('span')).find(el => el.textContent === 'gpt-6-1-sol');
@@ -137,7 +194,7 @@ describe('SessionRow', () => {
       const separator = server?.nextElementSibling as HTMLElement | null;
       expect(separator?.textContent).toBe(' · ');
       expect(separator?.style.flexShrink).toBe('0');
-      expect(separator?.nextElementSibling?.textContent).toContain(label);
+      expect(separator?.nextElementSibling?.textContent).toContain(engine || 'repo');
       if (engine) {
         const mark = server?.parentElement?.querySelector('[data-symbol="gearshape"]');
         expect(mark).not.toBeNull();
@@ -161,7 +218,7 @@ describe('SessionRow', () => {
       expect(container.textContent).not.toContain('gpt-6-1-sol');
       const accessible = container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label');
       if (label) {
-        expect(container.textContent).toContain(label);
+        expect(container.textContent).not.toContain(label);
         expect(accessible).toContain(label);
       } else {
         expect(accessible).not.toContain('Orq');
@@ -178,8 +235,8 @@ describe('SessionRow', () => {
     { conta: 'codex:C:\\Users\\user\\.codex\\', label: 'conta_padrao', name: 'conta_padrao', color: '#d3a781' },
     { conta: 'codex:C:\\Users\\user\\.codex-claude-x\\', label: 'claude-x', name: 'claude-x', color: '#ccbf87' },
     { conta: 'codex:/home/user/.codex-codex-x', label: 'x', name: 'codex-x', color: '#80bbc3' },
-  ])('chip de conta $conta mostra nome curto e ponto da cor PWA antes do tempo', async ({ conta, label, name, color }) => {
-    const { container, root } = await render({ ...base, name: 'api', provider: 'claude', conta });
+  ])('conta $conta fecha a linha de metadados com nome curto e ponto da cor PWA', async ({ conta, label, name, color }) => {
+    const { container, root } = await render({ ...base, name: 'api', provider: 'claude', conta, cwd: '/repo', branch: 'main' });
     try {
       const chip = container.querySelector<HTMLElement>(`[aria-label="conta ${name}"]`);
       expect(chip).not.toBeNull();
@@ -187,11 +244,10 @@ describe('SessionRow', () => {
       expect(chip!.querySelector<HTMLElement>('span')?.style.color).toBe('#666');
       expect(chip!.querySelector<HTMLElement>('div')?.style.backgroundColor).toBe(color);
       expect(chip!.style.maxWidth).toBe('96px');
-      expect(chip!.style.flexShrink).toBe('1');
-      const time = chip!.nextElementSibling as HTMLElement;
-      expect(time.textContent).not.toBe('');
-      expect(time.style.flexShrink).toBe('0');
-      expect(chip!.parentElement!.firstElementChild?.textContent).toBe('api');
+      expect(chip!.style.flexShrink, 'os metadados cedem antes da conta').toBe('0');
+      expect(chip!.nextElementSibling, 'a conta fecha a linha').toBeNull();
+      expect(chip!.parentElement!.textContent).toContain('repo · main');
+      expect(chip!.parentElement!.textContent).not.toContain('api');
       expect(container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label')).toContain(`conta ${name}`);
     } finally {
       act(() => root.unmount());
@@ -242,21 +298,86 @@ describe('SessionRow', () => {
     act(() => root.unmount());
   });
 
-  it('chip de worktree chama onWorktree com o caminho real', async () => {
+  it('worktree vira ação do menu, e a branch ganha o ícone de ramo', async () => {
+    Platform.OS = 'ios';
     const onWorktree = vi.fn();
     const { container, root } = await render(
-      { ...base, name: 'api', provider: 'claude', worktree: true, worktree_path: '/r/hangar-x', cwd: '/r/hangar' }, { onWorktree });
-    await act(async () => { (container.querySelector('[aria-label="sessao_worktree: hangar-x"]') as HTMLElement).click(); });
+      { ...base, name: 'api', provider: 'claude', worktree: true, worktree_path: '/r/hangar-x', cwd: '/r/hangar', branch: 'feat/x' }, { onWorktree });
+    try {
+      expect(container.textContent).not.toContain('hangar-x');
+      const icon = container.querySelector('[data-symbol="arrow.triangle.branch"]');
+      expect(icon?.nextElementSibling?.textContent).toBe('feat/x');
+    } finally { act(() => root.unmount()); }
+    Platform.OS = 'android';
+    const again = await render(
+      { ...base, name: 'api', provider: 'claude', worktree: true, worktree_path: '/r/hangar-x', cwd: '/r/hangar', branch: 'feat/x' }, { onWorktree });
+    expect(again.container.querySelector('[data-menu]')?.getAttribute('data-menu')).toBe('rename git worktree delete');
+    await act(async () => { again.container.querySelector<HTMLButtonElement>('[data-action="worktree"]')!.click(); });
     expect(onWorktree).toHaveBeenCalledWith(expect.objectContaining({ name: 'api' }), '/r/hangar-x');
+    act(() => again.root.unmount());
+  });
+
+  it('worktree sem branch (HEAD destacado) mostra o nome da worktree no lugar da branch', async () => {
+    Platform.OS = 'ios';
+    const { container, root } = await render(
+      { ...base, name: 'api', provider: 'claude', worktree: true, worktree_path: '/r/hangar-x', cwd: '/r/hangar', branch: null }, { onWorktree: undefined });
+    try {
+      const icon = container.querySelector('[data-symbol="arrow.triangle.branch"]');
+      expect(icon?.nextElementSibling?.textContent).toBe('hangar-x');
+    } finally { act(() => root.unmount()); }
+  });
+
+  it('git como no PWA: commits a enviar e a trazer e linhas alteradas na linha de metadados', async () => {
+    Platform.OS = 'ios';
+    const { container, root } = await render({ ...base, name: 'api', provider: 'claude', cwd: '/repo', branch: 'main',
+      git_ahead: 2, git_behind: 1, git_added: 10, git_removed: 3 });
+    try {
+      const after = (symbol: string) => {
+        const icon = container.querySelector(`[data-symbol="${symbol}"]`);
+        return icon?.nextElementSibling?.textContent;
+      };
+      expect(after('arrow.up'), 'a enviar').toBe('2');
+      expect(after('arrow.down'), 'a trazer').toBe('1');
+      expect(container.textContent).toContain('+10');
+      expect(container.textContent).toContain('−3');
+      expect(container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label')).toContain('sync 2/1');
+    } finally { act(() => root.unmount()); }
+  });
+
+  it('git em dia ou sem upstream não desenha nada', async () => {
+    Platform.OS = 'ios';
+    const { container, root } = await render({ ...base, name: 'api', provider: 'claude', cwd: '/repo', branch: 'main',
+      git_ahead: 0, git_behind: null, git_added: 0, git_removed: null });
+    try {
+      expect(container.querySelector('[data-symbol="arrow.up"]')).toBeNull();
+      expect(container.querySelector('[data-symbol="arrow.down"]')).toBeNull();
+      expect(container.textContent).not.toMatch(/[+−]\d/);
+      expect(container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label')).not.toContain('sync');
+    } finally { act(() => root.unmount()); }
+  });
+
+  it('servidor de convite: sem ação de worktree', async () => {
+    const { container, root } = await render(
+      { ...base, name: 'api', provider: 'claude', worktree: true, worktree_path: '/r/hangar-x', cwd: '/r/hangar', serverInvite: true }, { onWorktree: undefined });
+    expect(container.querySelector('[data-action="worktree"]')).toBeNull();
     act(() => root.unmount());
   });
 
-  it('servidor de convite: o chip de worktree é só texto', async () => {
-    const { container, root } = await render(
-      { ...base, name: 'api', provider: 'claude', worktree: true, worktree_path: '/r/hangar-x', cwd: '/r/hangar' }, { onWorktree: undefined });
-    expect(container.textContent).toContain('hangar-x');
-    expect(container.querySelector('[aria-label^="sessao_worktree"]')).toBeNull();
-    act(() => root.unmount());
+  it.each([
+    { state: 'idle', limited: false, symbol: 'checkmark.circle' },
+    { state: 'awaiting_input', limited: false, symbol: 'questionmark.circle' },
+    { state: 'idle', limited: true, symbol: 'hourglass' },
+  ] as const)('ícone próprio para $state (limite=$limited) e sem linha só com o nome do estado', async ({ state, limited, symbol }) => {
+    Platform.OS = 'ios';
+    const { container, root } = await render({ ...base, name: 'api', provider: 'claude', state, limited, limit_reset: limited ? '14:00' : undefined });
+    try {
+      expect(container.querySelector(`[data-symbol="${symbol}"]`)).not.toBeNull();
+      const linhas = [...container.querySelectorAll('span')].map((el) => el.textContent);
+      expect(linhas).not.toContain(rotuloEstado(state));
+      const label = container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label');
+      expect(label).toContain(rotuloEstado(state));
+      if (limited) expect(label, 'o limite que o ícone mostra também vai ao leitor de tela').toContain('sessao_limite_volta 14:00');
+    } finally { act(() => root.unmount()); }
   });
 
   it('convite oferece parar de acompanhar, nunca excluir a sessão', async () => {

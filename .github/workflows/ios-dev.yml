@@ -39,14 +39,16 @@ jobs:
           mkdir Payload
           cp -R "build/Build/Products/$CONFIGURATION-iphoneos/"*.app Payload/
           if [ "$CONFIGURATION" = Release ]; then
-            python3 -I - Payload/*.app <<'PY'
+            python3 -I - ../app.json Payload/*.app <<'PY'
           import json
           import plistlib
           import sys
           import uuid
           from pathlib import Path
 
-          for app_path in sys.argv[1:]:
+          with Path(sys.argv[1]).open() as stream:
+              runtime = json.load(stream)["expo"]["runtimeVersion"]
+          for app_path in sys.argv[2:]:
               app = Path(app_path)
               bundle = app / "main.jsbundle"
               if not bundle.is_file() or bundle.stat().st_size == 0:
@@ -59,13 +61,11 @@ jobs:
                       raise SystemExit(f"Recurso de desenvolvimento no Release: {name}")
               with (app / "Expo.plist").open("rb") as stream:
                   updates = plistlib.load(stream)
-              with (app / "Info.plist").open("rb") as stream:
-                  version = plistlib.load(stream)["CFBundleShortVersionString"]
               expected = {
                   "EXUpdatesEnabled": True,
                   "EXUpdatesURL": "https://u.expo.dev/9fd06001-323e-4b82-835f-6dfc3674236d",
                   "EXUpdatesRequestHeaders": {"expo-channel-name": "preview"},
-                  "EXUpdatesRuntimeVersion": version,
+                  "EXUpdatesRuntimeVersion": runtime,
                   "EXUpdatesCheckOnLaunch": "ALWAYS",
                   "EXUpdatesLaunchWaitMs": 0,
               }

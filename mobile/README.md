@@ -51,7 +51,9 @@ Instale primeiro um binário novo com `expo-updates`; o app já instalado sem el
 Publique em `mobile/`: `eas update --channel preview --message "Descrição da correção" --environment preview` (troque ambos para `production` no outro canal).
 Compile antes as traduções: `npm run i18n:compile:core && npm run i18n:compile`.
 Ao abrir, o app baixa em segundo plano, sem segurar a tela; a correção entra no próximo início completo (feche e abra de novo).
-O runtime segue `expo.version` (`appVersion`): mudança nativa (SDK, dependência, plugin ou configuração) exige subir essa versão e gerar/instalar binário novo antes de publicar JS para ela.
+O runtime é uma versão nativa explícita em `expo.runtimeVersion` (`native-2`, no formato `native-N`), independente de `expo.version` e do `VERSION` da raiz (ambos continuam em `0.1.0`).
+Mudança de plugin, SDK, dependência ou configuração nativa exige incrementar `native-N` e gerar/instalar um binário novo antes de publicar OTA para esse runtime.
+O binário já instalado com runtime `0.1.0` não recebe OTA de `native-2`; primeiro instale o novo binário por cima, preservando os dados.
 Metro, Expo Go e development client mantêm OTA automática desligada; no GitHub, selecione `Release` para OTA.
 Veja publicações, canal e runtime em [Expo → Hangar → Updates](https://expo.dev/accounts/jeffer1312/projects/hangar/updates) ou `eas update:list`.
 OTA não renova o perfil Apple gratuito de 7 dias: a assinatura ainda precisa ser renovada.
@@ -122,6 +124,15 @@ instalados assim e sem push da Apple.
 - Abra sem Metro para conferir que o binário é autossuficiente.
 
 ## Verificação
+
+Erros fatais de JavaScript são gravados de forma síncrona no aparelho antes do tratamento
+original do React Native. Na próxima abertura, o aviso aponta para **Ajustes > Sobre > Último
+erro**, com cópia e compartilhamento do relatório. Mensagens desconhecidas e valores variáveis
+são ocultados para não guardar conversa ou credenciais. O relatório conserva rota sem parâmetros,
+pilha recebida do runtime, componentes e identificação da atualização; uma pilha ofuscada de
+Release precisa do source map do mesmo bundle/OTA para chegar às linhas de origem.
+O diário do servidor próprio recebe um resumo na reabertura e só confirma o envio após o aceite
+do servidor. O relatório completo continua no aparelho, inclusive sem rede.
 
 `npm run typecheck` e `npm test` (em `mobile/`) rodam sob a trava `/tmp/hangar-verificacao.lock`,
 compartilhada com as outras sessões da máquina. No repositório, testes e typecheck só rodam

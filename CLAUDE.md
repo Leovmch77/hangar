@@ -333,7 +333,8 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   - Ícone Lucide novo ganha SF Symbol em `src/ui/sfSymbols.ts` quando houver um de mesmo sentido.
   - Texto ao vivo (prévia) publica no máximo a cada ~50 ms; nunca um render por token.
   - Composer e ChatHeader ficam em `memo` com callbacks estáveis; quem lê a prévia é só quem a desenha.
-  - Animação contínua para fora da tela e com a gaveta fechada, e roda a no máximo ~20 fps.
+  - Animação contínua para fora da tela e com a gaveta fechada. Na thread de UI, sem trabalho
+    por quadro no JS, acompanha a taxa da tela; animação que passa pelo JS fica em no máximo ~20 fps.
   - Lista, folha e vidro escondidos não montam: nascem na primeira abertura.
   - Linha que não mudou mantém o mesmo objeto (store e lista): evento novo não redesenha as outras.
 

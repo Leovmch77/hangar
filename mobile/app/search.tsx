@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, FlatList, Keyboard, Platform, Pressable, Text, TextInput, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Stack, useIsFocused, useRouter } from 'expo-router';
+import { Stack, useIsFocused, useLocalSearchParams, useRouter } from 'expo-router';
 import { useHeaderHeight } from 'expo-router/react-navigation';
 import type { Edge } from 'react-native-safe-area-context';
 import { askHistoryForServer, getSearchContextForServer, searchTranscriptsForServer, type ChatEvent, type SearchHit, type Server } from '@hangar/core';
@@ -100,7 +100,8 @@ export default function SearchScreen() {
   }), [glassHeader, title, canGoBack, router]);
   const servers = useServers((s) => s.servers);
   const activeId = useServers((s) => s.activeId);
-  const [query, setQuery] = useState('');
+  const params = useLocalSearchParams<{ q?: string }>();
+  const [query, setQuery] = useState(() => typeof params.q === 'string' ? params.q : '');
   const searchTerm = query.trim();
   const own = servers.filter((server) => !server.invite && !server.removed && !server.disabled);
   const serverKey = JSON.stringify(own.map((server) => [server.id, server.baseUrl, server.token]));

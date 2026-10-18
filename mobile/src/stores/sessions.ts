@@ -61,6 +61,8 @@ let aggCache: Aggregate = { rows: [], byServer: [], loading: false };
 // O aviso de tela vem de fora: o store não carrega o toast (e com ele o nativo) nos testes.
 let pairNotice: (text: string) => void = () => {};
 export function setPairNotice(fn: (text: string) => void) { pairNotice = fn; }
+let machineDiscovery: (server: Server) => void = () => {};
+export function setMachineDiscovery(fn: (server: Server) => void) { machineDiscovery = fn; }
 let storeGet: (() => SessionsState) | null = null;
 let storeSet: ((p: Partial<SessionsState>) => void) | null = null;
 
@@ -250,6 +252,7 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
   const s = attempt.server;
   let countedFailure = false;
   let countedHttpFailure = false;
+  let discovered = false;
   const failed = (alreadyCounted = false) => {
     if (countedFailure) return;
     countedFailure = true;
@@ -282,6 +285,10 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
     httpRetryAt.delete(s.id);
     lastFailureHttp.delete(s.id);
     answered();
+    if (!discovered) {
+      discovered = true;
+      machineDiscovery(s);
+    }
   };
   const rejected = (status: number) => {
     if (s.invite && (status === 401 || status === 410)) {

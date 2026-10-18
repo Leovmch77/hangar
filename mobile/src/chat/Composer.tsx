@@ -622,6 +622,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
     sendingRef.current = true;
     limparUndo();
     cancelarAuto();
+    // Como no app do Claude: enviou, o teclado desce e a conversa aparece inteira.
+    Keyboard.dismiss();
     setSending(true);
     setError('');
     const stop = () => {

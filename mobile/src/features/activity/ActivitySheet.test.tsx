@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({ getWorkflows: vi.fn(), getWorkflow: vi.fn(), get
 const route = vi.hoisted(() => ({ params: { server: 'a', name: 'sess' }, back: vi.fn(), focused: true }));
 const platform = vi.hoisted(() => ({ OS: 'ios' as 'ios' | 'android' }));
 const nativeBack = vi.hoisted(() => ({ listeners: new Set<() => boolean>() }));
+const screenOptions = vi.hoisted(() => [] as object[]);
 const stores = vi.hoisted(() => ({ servers: [
   { id: 'a', label: 'A', baseUrl: 'https://a.test', token: 'token-a' },
   { id: 'b', label: 'B', baseUrl: 'https://b.test', token: 'token-b' },
@@ -19,9 +20,11 @@ vi.mock('expo-router', () => ({
   useLocalSearchParams: () => route.params,
   useRouter: () => ({ back: route.back }),
   useFocusEffect: (effect: () => void | (() => void)) => useEffect(() => route.focused ? effect() : undefined, [effect, route.focused]),
-  Stack: { Screen: ({ options }: { options: { headerShown?: boolean; title?: string; headerLeft?: () => ReactNode; headerRight?: () => ReactNode } }) =>
-    platform.OS === 'android' || options.headerShown === false ? null : createElement('header', { 'data-shown': String(options.headerShown) },
-      options.headerLeft?.(), createElement('h1', null, options.title), options.headerRight?.()) },
+  Stack: { Screen: ({ options }: { options: { headerShown?: boolean; title?: string; headerLeft?: () => ReactNode; headerRight?: () => ReactNode } }) => {
+    screenOptions.push(options);
+    return platform.OS === 'android' || options.headerShown === false ? null : createElement('header', { 'data-shown': String(options.headerShown) },
+      options.headerLeft?.(), createElement('h1', null, options.title), options.headerRight?.());
+  } },
 }));
 vi.mock('expo-router/react-navigation', () => ({ useHeaderHeight: () => 64 }));
 vi.mock('../../stores/servers', () => ({ useServers: Object.assign(
@@ -686,6 +689,16 @@ describe('ActivitySheet real', () => {
     expect(nativeBack.listeners.size).toBe(0);
     expect(await hardwareBackPress()).toBe(false);
     expect(route.back).toHaveBeenCalledTimes(1);
+  });
+
+  it('iOS mantém as mesmas opções do cabeçalho enquanto nada do cabeçalho muda', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    await mount();
+    const before = screenOptions.at(-1);
+    screenOptions.length = 0;
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(screenOptions.length).toBeGreaterThan(0);
+    expect(screenOptions.every((options) => options === before)).toBe(true);
   });
 
   it('iOS não registra hardwareBackPress e preserva a navegação nativa', async () => {
