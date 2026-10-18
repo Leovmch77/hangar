@@ -6,7 +6,7 @@ import { configureApi, type SearchHit, type Server } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-const h = vi.hoisted(() => ({ search: vi.fn(), ask: vi.fn(), context: vi.fn(), push: vi.fn(), replace: vi.fn(), dismiss: vi.fn(), focused: true, canGoBack: true,
+const h = vi.hoisted(() => ({ params: {} as { q?: string }, search: vi.fn(), ask: vi.fn(), context: vi.fn(), push: vi.fn(), replace: vi.fn(), dismiss: vi.fn(), focused: true, canGoBack: true,
   options: null as { title?: string; headerShown?: boolean; headerTransparent?: boolean; headerLeft?: () => ReactNode } | null,
   edges: undefined as string[] | undefined, listInset: undefined as string | undefined }));
 const state = vi.hoisted(() => ({ activeId: 'b', servers: [] as Server[] }));
@@ -15,6 +15,7 @@ vi.mock('@hangar/core', async (original) => ({ ...await original<typeof import('
 }));
 vi.mock('../../stores/servers', () => ({ useServers: Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state }) }));
 vi.mock('expo-router', () => ({ useRouter: () => ({ push: h.push, replace: h.replace, back: () => {}, canGoBack: () => h.canGoBack }), useIsFocused: () => h.focused,
+  useLocalSearchParams: () => h.params,
   Stack: { Screen: ({ options }: { options: NonNullable<typeof h.options> }) => { h.options = options; return options.headerLeft?.() ?? null; } } }));
 vi.mock('expo-router/react-navigation', () => ({ useHeaderHeight: () => 88 }));
 vi.mock('expo-blur', async () => ({ BlurView: (await import('react-native')).View }));
@@ -54,7 +55,7 @@ async function typeQuery(container: HTMLElement, value: string) {
 const buttons = (container: HTMLElement, label: string) => [...container.querySelectorAll<HTMLButtonElement>('button')].filter((b) => b.getAttribute('aria-label') === label || b.textContent === label);
 async function tick(ms = 250) { await act(async () => vi.advanceTimersByTimeAsync(ms)); }
 
-beforeEach(() => { vi.resetAllMocks(); vi.useFakeTimers(); h.focused = true; h.canGoBack = true; h.options = null; h.edges = undefined; h.listInset = undefined;
+beforeEach(() => { vi.resetAllMocks(); vi.useFakeTimers(); h.params = {}; h.focused = true; h.canGoBack = true; h.options = null; h.edges = undefined; h.listInset = undefined;
   state.activeId = 'b'; state.servers = [
     { id: 'a', label: 'A', baseUrl: 'https://a.test', token: 'a' },
     { id: 'b', label: 'B', baseUrl: 'https://b.test', token: 'b' },
@@ -81,6 +82,14 @@ it('busca usa cabeçalho nativo e recuo medido, com voltar próprio só em link 
   h.canGoBack = false; await act(async () => root.render(createElement(SearchScreen)));
   const back = buttons(container, m.comum_voltar())[0]; expect(back).toBeDefined();
   await act(async () => back.click()); expect(h.replace).toHaveBeenCalledExactlyOnceWith('/');
+});
+
+it('abre já buscando o termo vindo da lista', async () => {
+  h.params = { q: 'agulha' };
+  const { container } = await mount();
+  expect(container.querySelector<HTMLInputElement>('input')?.value).toBe('agulha');
+  await tick();
+  expect(h.search.mock.calls.map(([server, term]) => [server.id, term])).toEqual([['a', 'agulha'], ['b', 'agulha']]);
 });
 
 it('recuperação contextual e controles têm alvo mínimo de toque', async () => {
