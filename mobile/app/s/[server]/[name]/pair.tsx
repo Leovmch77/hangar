@@ -346,7 +346,7 @@ const styles = StyleSheet.create((theme) => ({
   back: { minHeight: 44, lineHeight: 44, fontSize: theme.base.text.sm },
   actionError: { fontSize: theme.base.text.sm, lineHeight: 20 },
   contract: { gap: theme.base.space[2], borderTopWidth: 1, paddingTop: theme.base.space[3] },
-  sectionTitle: { fontSize: theme.base.text.sm, fontWeight: '700' },
+  sectionTitle: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.bold },
   contractBody: { borderWidth: 1, borderRadius: theme.base.radius.md, padding: theme.base.space[3] },
   path: { fontSize: theme.base.text.xs },
   contractError: { fontSize: theme.base.text.xs },

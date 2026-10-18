@@ -185,7 +185,7 @@ const styles = StyleSheet.create((theme) => ({
   heading: {
     color: theme.tokens.text.primary,
     fontSize: theme.base.text.base,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
     paddingHorizontal: theme.base.space[4],
     paddingTop: theme.base.space[2],
   },

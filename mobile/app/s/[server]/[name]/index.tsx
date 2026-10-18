@@ -672,7 +672,7 @@ const styles = StyleSheet.create((theme) => ({
   body: {
     flex: 1,
   },
-  carregando: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  carregando: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: theme.base.space[2] },
   inner: {
     flex: 1,
     overflow: 'hidden',
@@ -699,7 +699,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   currentStep: {
     color: theme.tokens.text.primary,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   // Faixa, não tela cheia: a conversa já carregada continua legível — o que parou foi só a
   // atualização ao vivo.
@@ -720,7 +720,7 @@ const styles = StyleSheet.create((theme) => ({
   // Ação de recuperação tem cara de botão: texto azul solto passava por link.
   retry: {
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
     color: theme.tokens.accent.base,
     textAlign: 'center',
     alignSelf: 'center',

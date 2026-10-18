@@ -103,7 +103,7 @@ export default function FilesSheet() {
 
   if (servidorSumiu) {
     return (
-      <View style={[styles.root, { backgroundColor: theme.tokens.bg.base, flex: 1, alignItems: 'center', justifyContent: 'center', gap: 8 }]}>
+      <View style={[styles.root, { backgroundColor: theme.tokens.bg.base, flex: 1, alignItems: 'center', justifyContent: 'center', gap: theme.base.space[2] }]}>
         <Text style={[styles.erro, { color: theme.tokens.status.error }]} accessibilityRole="alert">
           {m.chat_servidor_removido()}
         </Text>
@@ -197,14 +197,14 @@ const styles = StyleSheet.create((theme) => ({
   },
   tab: {
     flex: 1,
-    paddingVertical: 10,
+    paddingVertical: theme.base.space[2],
     alignItems: 'center',
     borderBottomWidth: 2,
     borderBottomColor: 'transparent',
   },
   tabTxt: {
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   center: {
     flex: 1,

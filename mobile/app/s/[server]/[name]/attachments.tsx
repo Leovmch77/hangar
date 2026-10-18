@@ -116,7 +116,7 @@ export default function AttachmentsSheet() {
 
   if (!target) {
     return (
-      <View style={[styles.container, { backgroundColor: theme.tokens.bg.base, flex: 1, alignItems: 'center', justifyContent: 'center', gap: 8 }]}>
+      <View style={[styles.container, { backgroundColor: theme.tokens.bg.base, flex: 1, alignItems: 'center', justifyContent: 'center', gap: theme.base.space[2] }]}>
         <Text style={[styles.err, { color: theme.tokens.status.error }]} accessibilityRole="alert">
           {m.chat_servidor_removido()}
         </Text>
@@ -154,7 +154,7 @@ export default function AttachmentsSheet() {
           </Pressable>
         </View>
         {webCarregando && !webErro ? (
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, padding: 12 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], padding: theme.base.space[3] }}>
             <ActivityIndicator color={theme.tokens.text.muted} />
             <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.comum_carregando()}</Text>
           </View>
@@ -245,13 +245,13 @@ const styles = StyleSheet.create((theme) => ({
   },
   title: {
     fontSize: theme.base.text.base,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   count: {
     fontSize: theme.base.text.xxs,
-    fontWeight: '700',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
+    fontWeight: theme.base.weight.bold,
+    paddingHorizontal: theme.base.space[2],
+    paddingVertical: theme.base.space[0.5],
     borderRadius: theme.base.radius.full,
     overflow: 'hidden',
   },
@@ -274,11 +274,11 @@ const styles = StyleSheet.create((theme) => ({
     borderWidth: 1,
     borderRadius: theme.base.radius.full,
     paddingHorizontal: theme.base.space[3],
-    paddingVertical: 6,
+    paddingVertical: theme.base.space[1.5],
   },
   retryText: {
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   list: {
     gap: theme.base.space[3],
@@ -305,12 +305,12 @@ const styles = StyleSheet.create((theme) => ({
   docTitle: {
     flex: 1,
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   docBtn: {
     width: 36,
     height: 36,
-    borderRadius: 18,
+    borderRadius: theme.base.radius.full,
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',

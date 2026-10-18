@@ -35,6 +35,6 @@ const styles = StyleSheet.create(theme => ({
   // Só layout: permite que a folha encontre o cabeçalho e a rolagem como filhos diretos.
   root: { flex: 1 },
   header: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[4], paddingVertical: theme.base.space[3] },
-  title: { flex: 1, fontSize: theme.base.text.lg, fontWeight: '600', color: theme.tokens.text.primary },
+  title: { flex: 1, fontSize: theme.base.text.lg, fontWeight: theme.base.weight.semibold, color: theme.tokens.text.primary },
   close: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
 }));

@@ -90,7 +90,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   title: {
     fontSize: theme.base.text.lg,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   subtitle: {
     fontSize: theme.base.text.xs,
@@ -121,7 +121,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   rowLabel: {
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   rowValue: {
     fontSize: theme.base.text.sm,

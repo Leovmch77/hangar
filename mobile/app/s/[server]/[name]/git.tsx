@@ -66,7 +66,7 @@ export default function GitRoute() {
 const styles = StyleSheet.create((theme) => ({
   root: { flex: 1 },
   header: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[4], paddingVertical: theme.base.space[3] },
-  title: { flex: 1, fontSize: theme.base.text.lg, fontWeight: '600', color: theme.tokens.text.primary },
+  title: { flex: 1, fontSize: theme.base.text.lg, fontWeight: theme.base.weight.semibold, color: theme.tokens.text.primary },
   close: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   text: { color: theme.tokens.text.secondary, fontSize: theme.base.text.sm },
   error: { padding: theme.base.space[3], color: theme.tokens.status.error, fontSize: theme.base.text.sm },
