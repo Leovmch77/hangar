@@ -19,6 +19,8 @@ const EVERY: Duration = Duration::from_secs(6 * 3600);
 /// Janela GPUI fria num disco lento leva segundos; 30 s cobre com folga sem deixar o usuário esperando à toa.
 const ALIVE_WAIT: Duration = Duration::from_secs(30);
 const ALIVE_ENV: &str = "HANGAR_NATIVE_ALIVE";
+/// O CI sobe os binários da release em poucos segundos: a segunda tentativa já encontra o arquivo novo inteiro.
+const RETRY_PAUSE: Duration = Duration::from_secs(5);
 pub const CURRENT: &str = env!("HANGAR_NATIVE_RELEASE");
 
 /// Mesma limpeza do passo de publicação do native.yml: mudar uma exige mudar a outra.
@@ -209,6 +211,24 @@ async fn relaunch(exe: &Path) -> Result<(), String> {
 /// O motivo técnico vai junto da frase da tela: sem ele, quem lê o erro não tem o que procurar no log.
 fn with_reason(text: String, reason: &str) -> String { format!("{text} ({reason})") }
 
+async fn fetch(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, reqwest::Error> {
+    Ok(client.get(url).send().await?.error_for_status()?.bytes().await?.into())
+}
+
+/// A release é republicada a cada push: o binário trocado no meio da transferência corta o corpo, e uma segunda
+/// tentativa pega o arquivo novo (o sha dele é conferido depois, contra o manifesto relido).
+async fn download(client: &reqwest::Client, url: &str, pause: Duration) -> Result<Vec<u8>, String> {
+    if let Ok(bytes) = fetch(client, url).await { return Ok(bytes) }
+    tokio::time::sleep(pause).await;
+    fetch(client, url).await.map_err(|error| tr("app_update_download_failed").replace("{reason}", &cause(error)))
+}
+
+/// A frase do reqwest leva a URL assinada inteira e esconde a causa: sai a URL, entra a cadeia de origens.
+fn cause(error: reqwest::Error) -> String {
+    let error = error.without_url();
+    std::iter::successors(Some(&error as &dyn std::error::Error), |e| e.source()).map(ToString::to_string).collect::<Vec<_>>().join(": ")
+}
+
 async fn install(client: reqwest::Client, exe: Option<PathBuf>, offer: Offer) -> Result<(), String> {
     // A oferta pode ter horas e a release é republicada a cada push: o sha que vale é o do manifesto de agora.
     let offer = check(&client, &offer.channel).await.ok().flatten().unwrap_or(offer);
@@ -219,8 +239,7 @@ async fn install(client: reqwest::Client, exe: Option<PathBuf>, offer: Offer) ->
     if placed.await.unwrap_or(false) {
         return relaunch(&exe).await.map_err(|reason| with_reason(tr("app_update_relaunch_failed"), &reason));
     }
-    let bytes = client.get(&offer.url).send().await.and_then(reqwest::Response::error_for_status).map_err(|e| e.to_string())?
-        .bytes().await.map_err(|e| e.to_string())?;
+    let bytes = download(&client, &offer.url, RETRY_PAUSE).await?;
     // O CI sobe os binários antes do manifesto: no meio da publicação o binário já é o novo e o sha ainda o antigo.
     let sha256 = if sha256_hex(&bytes) == offer.sha256 { offer.sha256 }
         else { check(&client, &offer.channel).await.ok().flatten().map_or(offer.sha256, |fresh| fresh.sha256) };
@@ -1069,6 +1088,46 @@ mod tests {
         assert!(swap(&exe, b"abc", &sha256_hex(b"abc")).is_err());
         assert!(!sibling(&exe, ".new").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Release falsa: a conexão `i` anuncia 100 bytes e entrega só `sent[i]`, como o binário trocado no meio da
+    /// transferência. Atende uma conexão por item e fecha a porta.
+    async fn cut_release(sent: Vec<usize>) -> (String, Arc<AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/Hangar-linux-x86_64", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            for size in sent {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                counter.fetch_add(1, Ordering::SeqCst);
+                let _ = socket.read(&mut [0u8; 4096]).await;
+                let mut reply = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n".to_vec();
+                reply.extend(std::iter::repeat_n(7u8, size));
+                socket.write_all(&reply).await.unwrap();
+            }
+        });
+        (url, hits)
+    }
+
+    #[tokio::test]
+    async fn download_tries_again_when_the_body_is_cut() {
+        // Os 100 bytes só vêm na segunda conexão.
+        let (url, _) = cut_release(vec![10, 100]).await;
+        let bytes = download(&reqwest::Client::new(), &url, Duration::ZERO).await.unwrap();
+        assert_eq!(bytes, vec![7u8; 100]);
+    }
+
+    #[tokio::test]
+    async fn download_failure_names_the_cause_without_the_url() {
+        let (url, hits) = cut_release(vec![10, 10]).await;
+        let error = download(&reqwest::Client::new(), &url, Duration::ZERO).await.unwrap_err();
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert!(!error.contains("127.0.0.1") && !error.contains("Hangar-linux-x86_64"), "{error}");
+        assert_ne!(error, tr("app_update_download_failed").replace("{reason}", ""));
     }
 
     #[test]
