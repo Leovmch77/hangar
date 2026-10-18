@@ -369,7 +369,10 @@ fn quota_switch(config_dir: Option<&str>, rows: &[Value]) -> Option<(String, Str
 }
 
 /// `Path(a).resolve() == Path(b).resolve()`, sem exigir que existam.
-fn same_dir(a: &str, b: &str) -> bool { a == b || crate::list::discover::real(a) == crate::list::discover::real(b) }
+fn same_dir(a: &str, b: &str) -> bool {
+    let trim = |p: &str| p.trim_end_matches(['/', '\\']).to_owned();
+    trim(a) == trim(b) || crate::list::discover::real(a) == crate::list::discover::real(b)
+}
 
 /// Validação na ordem do `_create_session_owned` (o primeiro erro vence), tudo antes de qualquer
 /// efeito. Devolve o modelo efetivo (a conta ChatGPT fixa tira o prefixo dela).
@@ -412,7 +415,7 @@ fn validate(request: &SessionOpenRequest, caller: &OpenCaller, provider: AgentPr
         AgentProvider::Codex => Some(facts.codex_home(codex_account.unwrap_or("default"))?),
         _ => None,
     };
-    if let Some(dir) = config_dir && !facts.config_dirs()?.iter().any(|known| known == dir) {
+    if let Some(dir) = config_dir && !facts.config_dirs()?.iter().any(|known| same_dir(known, dir)) {
         return Err(OpenError::new(400, "erro_config_dir_invalido", "config_dir invalido"));
     }
     if let Some(engine) = &request.engine {

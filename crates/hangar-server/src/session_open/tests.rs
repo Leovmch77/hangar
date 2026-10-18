@@ -611,6 +611,17 @@ fn an_omitted_provider_comes_from_the_creator_before_the_remembered_one() {
     assert_eq!(resolve_fixture(&explicit).unwrap().provider_source, None, "pedido explícito não tem origem a dizer");
 }
 
+/// `CLAUDE_CONFIG_DIR` com barra no fim é a mesma conta do catálogo, não um 400.
+#[test]
+fn a_config_dir_with_a_trailing_slash_is_the_same_account() {
+    let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_inherit_from_headless_creator").unwrap();
+    let known = resolve::OpenFacts::config_dirs(&FixtureFacts::of(&fixture)).unwrap().into_iter().find(|d| d.contains(".claude-")).expect("conta não padrão no catálogo");
+    let body = fixture["scenario"]["steps"][0]["json"].as_object_mut().unwrap();
+    body.retain(|k, _| k != "creator");
+    body.insert("config_dir".into(), json!(format!("{known}/")));
+    assert_eq!(resolve_fixture(&fixture).map(|_| ()).map_err(|e| e.code), Ok(()));
+}
+
 /// `claude --permission-mode default` (o nome que o Claude Code dá ao modo manual) abre no manual, como o
 /// CLI abria, em vez de recusar.
 #[test]
