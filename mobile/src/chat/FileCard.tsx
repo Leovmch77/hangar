@@ -112,11 +112,11 @@ const styles = StyleSheet.create((theme) => ({
   texts: {
     flex: 1,
     minWidth: 0,
-    gap: 2,
+    gap: theme.base.space[0.5],
   },
   name: {
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
   meta: {
     fontSize: theme.base.text.xs,
@@ -134,6 +134,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   actionText: {
     fontSize: theme.base.text.sm,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
   },
 }));
