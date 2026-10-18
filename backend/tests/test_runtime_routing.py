@@ -1183,3 +1183,4 @@ def test_a_terminal_claude_the_rust_already_adopted_opens_without_taking_its_que
         assert not binding.state_path.exists(), "a fila é do Rust: o Python não a reescreve"
     finally:
         rust.close()
+        owner.close_python_leases()
