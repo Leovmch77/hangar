@@ -1421,7 +1421,7 @@ test('ACK compara revisão mesmo quando a nova edição tem texto idêntico; ass
   expect(readDraft('srv1', 'sess')).toMatchObject({ text: 'oi', revision: 2, transcript: '/first', submission: null });
 });
 
-test('ACK retira chips de áudio só se o rascunho enviado não ganhou outro ditado', async () => {
+test('ACK retira os chips de áudio enviados e conserva os ditados depois', async () => {
   const recording = { id: 'voice-1', serverPath: '/uploaded/voice.m4a' };
   writeDraft('srv1', 'sess', { version: 1, text: 'ditado', revision: 7, transcript: '/first',
     recordings: [recording], attachments: [], submission: null });
@@ -1437,7 +1437,7 @@ test('ACK retira chips de áudio só se o rascunho enviado não ganhou outro dit
     recordings: [recording, { id: 'voice-2', serverPath: '/uploaded/new.m4a' }] });
   requests[1].responder(null);
   await later;
-  expect(readDraft('srv1', 'sess')?.recordings).toHaveLength(2);
+  expect(readDraft('srv1', 'sess')?.recordings).toEqual([{ id: 'voice-2', serverPath: '/uploaded/new.m4a' }]);
 });
 
 test('ACK limpa campo da mesma revisão e conserva demais metadados do rascunho', async () => {

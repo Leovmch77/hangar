@@ -80,6 +80,19 @@ describe('ditadoEstiloStore', () => {
     expect(store.getState()).toMatchObject({ valor: 'limpar', pronto: true, falhou: false, ceilingMs: 540_000 });
   });
 
+  it('releitura do teto que falha conserva o anterior e deixa rastro', async () => {
+    const registrar = vi.fn();
+    core.configureDiag({ registrar, novoReq: () => '' });
+    vi.mocked(core.getConfigForServer).mockResolvedValueOnce(campos('limpar', 9) as never);
+    const store = dictationStyleStore(a);
+    await store.getState().carregar();
+    vi.mocked(core.getConfigForServer).mockRejectedValueOnce(new Error('offline'));
+    await store.getState().refreshCeiling();
+    expect(store.getState().ceilingMs).toBe(540_000);
+    expect(registrar).toHaveBeenCalledWith({ evento: 'dictation.ceiling_stale', nivel: 'aviso',
+      codigo: 'ceiling_refresh_failed', detalhe: 'offline' }, undefined);
+  });
+
   it('A e B guardam valores separados e usam GET/PATCH explícitos com B ativo', async () => {
     vi.mocked(core.getConfigForServer).mockImplementation(async (server) => campos(server.id === a.id ? 'limpar' : 'briefing') as never);
     vi.mocked(core.patchConfigForServer).mockResolvedValue({ campos: {} } as never);

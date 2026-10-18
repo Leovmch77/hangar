@@ -1313,6 +1313,27 @@ describe('rascunho guardado no Composer', () => {
     return raw ? JSON.parse(raw) as { text: string; revision: number; transcript: string | null } : null;
   };
 
+  it('descartar ditado aplicado que falha ao apagar não tira o áudio do rascunho', async () => {
+    const recording = { id: 'v1', serverPath: '/uploads/v1.m4a' };
+    storage.memory.set('draft.v1:s1::sess', JSON.stringify({ version: 1, text: 'ditado', revision: 2, transcript: null,
+      dictationId: 'v1', recordings: [recording], attachments: [], submission: null }));
+    writeDictation('s1', 'sess', { version: 1, id: 'v1', audio: null, serverPath: recording.serverPath, transcript: null,
+      draftRevision: 1, before: '', motivo: 'botao', status: 'ready', text: 'ditado', raw: 'ditado', issue: '' });
+    const { container, root } = await render(createElement(Composer, props));
+    expect(container.textContent).toContain('composer_ditado_aplicado');
+    storage.failRemove = true;
+    act(() => button(container, 'composer_draft_discard')!.click());
+    expect(container.textContent).toContain('draft_clear_error');
+    expect(readDraft('s1', 'sess')?.recordings).toEqual([recording]);
+    expect(readDictation('s1', 'sess')?.status).toBe('applied');
+    storage.failRemove = false;
+    act(() => button(container, 'composer_draft_discard')!.click());
+    expect(readDictation('s1', 'sess')).toBeNull();
+    expect(readDraft('s1', 'sess')?.recordings).toEqual([]);
+    expect(container.textContent).not.toContain('composer_ditado_aplicado');
+    act(() => root.unmount());
+  });
+
   it.each(['sending', 'unknown', 'rejected'])('reabre upload confirmado com input %s sem reenviar; Recuperar devolve só o texto', async (status) => {
     composerChat.send.mockClear();
     const attachment = {

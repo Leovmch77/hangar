@@ -76,7 +76,8 @@ export function ComposerActions({ attach, mic, send, settings, beforeMic, afterM
 const styles = StyleSheet.create((theme) => ({
   box: { marginHorizontal: theme.base.space[2], borderRadius: theme.base.radius.xl, paddingHorizontal: theme.base.space[3], paddingTop: theme.base.space[3], paddingBottom: theme.base.space[2], gap: theme.base.space[1] },
   inputWrap: { minHeight: 40, justifyContent: 'center', paddingHorizontal: theme.base.space[1] },
-  hidden: { display: 'none' },
+  // Montado e sem altura: com display none o Fabric desmonta o campo nativo e ele perde o foco.
+  hidden: { height: 0, paddingVertical: 0, opacity: 0 },
   recordingWrap: { minHeight: 92 },
   wave: { justifyContent: 'center', paddingHorizontal: theme.base.space[1] },
   row: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5] },

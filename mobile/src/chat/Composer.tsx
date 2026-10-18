@@ -1088,17 +1088,20 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
 
   const handleDiscardDictation = useCallback(() => {
     if (!dictation || transcribingRef.current) return;
+    // O ditado sai antes do áudio no rascunho: falhar no meio deixa o chip, que se tira à parte.
+    try { clearDictation(origin.serverId, origin.name); } catch (e) {
+      setDraftIssue(e instanceof Error ? e.message : m.draft_clear_error());
+      return;
+    }
+    if (dictation.audio) dropCopy(dictation.audio.uri);
+    setDictation(null);
+    setError('');
+    if (dictation.status !== 'applied') return;
     try {
-      if (dictation.status === 'applied') {
-        const latest = removeDraftRecording(origin.serverId, origin.name, dictation.id);
-        draftRef.current = latest;
-        setRecordings(latest?.recordings ?? []);
-      }
-      clearDictation(origin.serverId, origin.name);
-      if (dictation.audio) dropCopy(dictation.audio.uri);
-      setDictation(null);
-      setError('');
-    } catch (e) { setDraftIssue(e instanceof Error ? e.message : m.draft_clear_error()); }
+      const latest = removeDraftRecording(origin.serverId, origin.name, dictation.id);
+      draftRef.current = latest;
+      setRecordings(latest?.recordings ?? []);
+    } catch (e) { setDraftIssue(e instanceof Error ? e.message : m.draft_write_error()); }
   }, [dictation, origin]);
 
   // Ditado que voltou fora da tela só entra no rascunho intacto com a conversa ativa e em foco.

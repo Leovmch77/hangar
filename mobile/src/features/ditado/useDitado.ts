@@ -18,6 +18,8 @@ import { dictationStyleStore } from './ditadoEstiloStore';
 import { beginVoiceDictation } from '../voice/audioSession';
 
 const STOP_STATUS_TIMEOUT_MS = 5_000;
+// Servidor lento não segura o microfone: passado isto vale o último teto conhecido.
+const CEILING_REFRESH_TIMEOUT_MS = 1_000;
 
 // O serviço de segundo plano precisa existir no binário, não só na atualização JS.
 const backgroundRecording = () => Platform.OS === 'ios'
@@ -46,6 +48,7 @@ interface Recording {
   error?: Error;
   errorReported?: boolean;
   ceilingMs?: number;
+  background: boolean;
   subscription?: { remove(): void };
 }
 
@@ -158,19 +161,21 @@ export function useDitado({ onFim, onErroParada, server }: Opts) {
     const finished = new Promise<RecordingStatus>((resolve) => { complete = resolve; });
     const recording: Recording = {
       recorder: null, releaseAudio: beginVoiceDictation(),
-      phase: 'permission', interrupted: false, onFim, onErroParada, finished,
+      phase: 'permission', interrupted: false, onFim, onErroParada, finished, background: false,
     };
     recordingRef.current = recording;
     try {
       const perm = await requestRecordingPermissionsAsync();
       if (recording.interrupted) return;
       if (!perm.granted) throw new Error('permission_denied');
-      const background = backgroundRecording();
+      let background = backgroundRecording();
       if (background && Platform.OS === 'android' && Number(Platform.Version) >= 33) {
         const notifications = await requestNotificationPermissionsAsync();
         if (recording.interrupted) return;
-        if (!notifications.granted) throw new Error(m.push_permissao_negada());
+        // Sem a notificação do serviço, grava só com o app na frente.
+        background = notifications.granted;
       }
+      recording.background = background;
       recording.phase = 'preparing';
       await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true, allowsBackgroundRecording: background });
       if (recording.interrupted) return;
@@ -193,14 +198,23 @@ export function useDitado({ onFim, onErroParada, server }: Opts) {
         }
         if (status.isFinished || recording.error) {
           complete(status);
-          if (recording.phase === 'recording') {
-            const atCeiling = recording.ceilingMs !== undefined && Date.now() - inicioRef.current >= recording.ceilingMs;
-            void finishRecording(recording, atCeiling ? 'teto' : 'escondeu');
-          }
+          // Sem erro e sem parada pedida, o nativo só termina sozinho no teto (forDuration);
+          // interrupção do sistema pausa a captação e é vista na volta ao app.
+          if (recording.phase === 'recording') void finishRecording(recording, recording.error ? 'escondeu' : 'teto');
         }
       });
       const styleStore = dictationStyleStore(server);
-      await Promise.all([recorder.prepareToRecordAsync(), styleStore.getState().refreshCeiling()]);
+      let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+      const refreshed = Promise.race([
+        styleStore.getState().refreshCeiling().then(() => true),
+        new Promise<false>((resolve) => { refreshTimer = setTimeout(() => resolve(false), CEILING_REFRESH_TIMEOUT_MS); }),
+      ]);
+      try {
+        const [, fresh] = await Promise.all([recorder.prepareToRecordAsync(), refreshed]);
+        if (!fresh) registrarDiag({ evento: 'dictation.ceiling_stale', nivel: 'aviso', codigo: 'ceiling_refresh_timeout' });
+      } finally {
+        clearTimeout(refreshTimer);
+      }
       if (recording.interrupted) return;
       const ceilingMs = styleStore.getState().ceilingMs;
       recording.ceilingMs = ceilingMs;
@@ -217,8 +231,10 @@ export function useDitado({ onFim, onErroParada, server }: Opts) {
         void finishRecording(recording, 'teto');
       }, ceilingMs);
 
+      // Fora da tela o VAD continua: a fala que termina encerra como 'escondeu', que guarda o áudio
+      // sem envio automático. Calado desde que saiu, só o teto encerra, para olhar outro app no meio.
       intervaloRef.current = setInterval(() => {
-        if (appStateRef.current !== 'active') return;
+        const hidden = appStateRef.current !== 'active';
         const st = recorder.getStatus();
         const dB = (st as unknown as { metering?: number }).metering;
         let rmsVal = 0;
@@ -231,7 +247,7 @@ export function useDitado({ onFim, onErroParada, server }: Opts) {
           // VAD usa o raw (0..1), não o ampliado
           const r = passoVad(vadRef.current, raw, Date.now());
           if (r === 'encerra') {
-            void finishRecording(recording, 'silencio');
+            void finishRecording(recording, hidden ? 'escondeu' : 'silencio');
             return;
           }
         } else {
@@ -265,7 +281,7 @@ export function useDitado({ onFim, onErroParada, server }: Opts) {
       if (!recording || recording.phase === 'permission') return;
       if (next !== 'active') {
         vadRef.current = novoEstadoVad();
-        if (recording.phase !== 'recording' || !backgroundRecording()) void pararRef.current('escondeu');
+        if (recording.phase !== 'recording' || !recording.background) void pararRef.current('escondeu');
       } else if (recording.phase === 'recording' && recording.recorder) {
         // Uma interrupção real do microfone não pode deixar a onda fingindo que ainda capta.
         try {

@@ -111,6 +111,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   recordDiagnostic.mockClear();
   configureDiag({ registrar: recordDiagnostic, novoReq: () => '' });
+  // Sem servidor no teste: a releitura real do teto falharia e registraria diagnóstico.
+  useDitadoEstiloStore.setState({ refreshCeiling: async () => {} });
   document.body.innerHTML = '';
   environment.os = 'android';
   environment.version = 35;
@@ -665,15 +667,40 @@ describe('useDitado — medidor e segundo plano', () => {
     await h.unmount();
   });
 
-  it('notificação negada no Android não abre gravação e libera a sessão de áudio', async () => {
+  it('notificação negada no Android grava só com o app na frente', async () => {
     vi.mocked(requestNotificationPermissionsAsync).mockResolvedValueOnce({ granted: false } as never);
     const onFim = vi.fn();
     const h = mountHook({ onFim });
     await h.mount({ onFim });
-    await act(async () => { await expect(h.getHook().iniciar()).rejects.toThrow(m.push_permissao_negada()); });
-    expect(createRecorder).not.toHaveBeenCalled();
-    expect(useVoiceAudioState.getState().dictations).toBe(0);
+    await act(async () => { await h.getHook().iniciar(); });
+    expect(setAudioMode).toHaveBeenCalledWith(expect.objectContaining({ allowsBackgroundRecording: false }));
+    expect(h.getHook().gravando).toBe(true);
+    await act(async () => { changeAppState('background'); });
+    expect(fakeRec.stop).toHaveBeenCalledTimes(1);
+    expect(onFim.mock.calls[0]?.[1]).toBe('escondeu');
     await h.unmount();
+  });
+
+  it('servidor lento não segura o início: grava com o teto anterior e registra', async () => {
+    const old = useDitadoEstiloStore.getState();
+    useDitadoEstiloStore.setState({ ceilingMs: 60_000, refreshCeiling: () => new Promise<void>(() => {}) });
+    const onFim = vi.fn();
+    const h = mountHook({ onFim });
+    try {
+      await h.mount({ onFim });
+      let starting!: Promise<void>;
+      await act(async () => { starting = h.getHook().iniciar(); });
+      expect(fakeRec.record).not.toHaveBeenCalled();
+      await act(async () => { vi.advanceTimersByTime(1_000); await starting; });
+      expect(fakeRec.record).toHaveBeenCalledExactlyOnceWith({ forDuration: 60 });
+      expect(h.getHook().gravando).toBe(true);
+      expect(recordDiagnostic).toHaveBeenCalledWith({ evento: 'dictation.ceiling_stale', nivel: 'aviso',
+        codigo: 'ceiling_refresh_timeout' }, undefined);
+      await act(async () => { await h.getHook().parar('botao'); });
+    } finally {
+      await h.unmount();
+      useDitadoEstiloStore.setState({ ceilingMs: old.ceilingMs, refreshCeiling: old.refreshCeiling });
+    }
   });
 
   it('o gravador nativo recebe o teto mesmo sem timers JS em segundo plano', async () => {
@@ -690,6 +717,8 @@ describe('useDitado — medidor e segundo plano', () => {
       await act(async () => { emitRecordingStatus(); });
       expect(h.getHook().gravando).toBe(false);
       expect(onFim).toHaveBeenCalledTimes(1);
+      // O fim nativo chega antes do relógio JS bater o teto: o motivo vem do evento, não do relógio.
+      expect(onFim.mock.calls[0]?.[1]).toBe('teto');
       await h.unmount();
     } finally {
       useDitadoEstiloStore.setState({ ceilingMs: old.ceilingMs, refreshCeiling: old.refreshCeiling });
@@ -756,6 +785,22 @@ describe('useDitado — VAD e teto', () => {
     await act(async () => { vi.advanceTimersByTime(2300); });
     expect(onFim.mock.calls[0]?.[1]).toBe('silencio');
     expect(fakeRec.stop).toHaveBeenCalledTimes(1);
+    await h.unmount();
+  });
+
+  it('fora da tela a fala que termina encerra pelo VAD como escondeu', async () => {
+    const onFim = vi.fn();
+    const h = mountHook({ onFim });
+    await h.mount({ onFim });
+    await act(async () => { await h.getHook().iniciar(); });
+    await act(async () => { changeAppState('background'); });
+    fakeRec.getStatus.mockReturnValue({ metering: -20 });
+    await act(async () => { vi.advanceTimersByTime(600); });
+    expect(fakeRec.stop).not.toHaveBeenCalled();
+    fakeRec.getStatus.mockReturnValue({ metering: -160 });
+    await act(async () => { vi.advanceTimersByTime(2300); });
+    expect(fakeRec.stop).toHaveBeenCalledTimes(1);
+    expect(onFim.mock.calls[0]?.[1]).toBe('escondeu');
     await h.unmount();
   });
 
