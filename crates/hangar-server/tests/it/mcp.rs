@@ -241,7 +241,7 @@ async fn new_session_opens_with_the_caller_as_creator_and_the_whole_request() {
     assert_eq!(s.python.hits_to("/api/sessions"), 0, "a abertura não passa pelo Python");
 }
 
-/// `resume` retoma uma conversa que existe no disco pela rota do Arquivo (D-012): a pasta vem da conversa;
+/// `resume` retoma uma conversa que existe no disco pela rota do Arquivo: a pasta vem da conversa;
 /// o que a retomada não aceita é recusado, nunca largado calado.
 #[tokio::test(flavor = "multi_thread")]
 async fn new_session_with_resume_goes_through_the_archive_resume() {

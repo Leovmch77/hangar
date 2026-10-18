@@ -190,7 +190,7 @@ const PARK_AFTER:Duration = Duration::from_secs(65 * 60);
 const PARK_ROUND:Duration = Duration::from_secs(60);
 
 /// Regra 1 do módulo de processo: cano gravado `Ours` conecta (mesmo sem `versao`); morto, de outro
-/// programa (pid reaproveitado, S-72) ou ausente, sobe outro com o ambiente calculado agora (nunca
+/// programa (pid reaproveitado) ou ausente, sobe outro com o ambiente calculado agora (nunca
 /// guardado): o Codex por `codex_launch`, o Claude pelo spec da sessão (`claude_launch`).
 pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTarget,sidecar_dir:&std::path::Path) -> Result<Option<process::Cano>,RuntimeError> {
     let recorded = target.binding.pid;
@@ -3217,7 +3217,7 @@ mod tests {
             "session_id":"0c657c79-1745-406b-a97f-bbbf5402ff19","permission_mode":"manual"}),..claude };
         let failed = launch_if_needed(&policy,&mut claude,dir.path()).await.err().expect("a subida sem cano precisa falhar");
         assert!(!failed.code.starts_with("policy_") && failed.code != "relaunch_recipe_missing","{}",failed.code);
-        // S-72: pid gravado vivo mas de outro programa (reaproveitado depois do boot) não é o cano da
+        // Pid gravado vivo mas de outro programa (reaproveitado depois do boot) não é o cano da
         // sessão: sobe outro em vez de dar a sessão por de pé.
         claude.binding.pid = std::process::id();
         assert!(launch_if_needed(&policy,&mut claude,dir.path()).await.is_err(),"pid alheio não vale como cano vivo");
@@ -3375,7 +3375,7 @@ mod tests {
         (child,format!("tcp:{address}"),lines,server)
     }
 
-    /// D-006: o vigia estaciona só a sessão parada há o prazo e sem nada na fila; o processo morre e o arquivo
+    /// O vigia estaciona só a sessão parada há o prazo e sem nada na fila; o processo morre e o arquivo
     /// da sessão fica igual. A mensagem seguinte reabre a sessão pelo arquivo e é entregue uma vez.
     #[cfg(target_os="linux")]
     #[tokio::test]

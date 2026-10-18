@@ -44,7 +44,7 @@ import { useServers } from './servers';
 import { readDraft, writeDraft } from './drafts';
 import {
   _resetNewConversationForTests, abandonUnknownAttempt, adoptCandidate, beginAttempt, discardAttempt, recoverAttempt,
-  restoreAttempt, useNewConversation, sendFirstInput, readFirstInput, confirmFirstInput,
+  restoreAttempt, useNewConversation, sendFirstInput, readFirstInput, confirmFirstInput, autoSessionName,
 } from './newConversation';
 
 const serverA = { id: 'server-a', label: 'A', baseUrl: 'http://a', token: 'secret-a' };
@@ -209,6 +209,13 @@ describe('newConversation', () => {
     await recoverAttempt('server-a');
     expect(issue()?.kind).toBe('rejected');
     expect(adoptCandidate('server-a', attempt()!.id)).toBe(false);
+  });
+
+  it('o nome automático das outras telas pula a lista e os recusados, e diz se a lista respondeu', async () => {
+    calls.sessions.mockResolvedValue([{ name: 'mobile', state: 'idle' }]);
+    expect(await autoSessionName(serverA, '/repo/mobile', ['mobile-2'])).toEqual({ name: 'mobile-3', known: true });
+    calls.sessions.mockRejectedValue(new Error('offline'));
+    expect(await autoSessionName(serverA, '/repo/mobile')).toEqual({ name: 'mobile', known: false });
   });
 
   it('nome automático em uso tenta uma vez com o próximo, mesmo sem a lista', async () => {

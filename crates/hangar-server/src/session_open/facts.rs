@@ -27,12 +27,19 @@ pub struct LocalFacts {
     slots: tokio::sync::Semaphore,
     mux: crate::list::mux::Mux,
     procs: std::sync::Arc<dyn ProcessView>,
+    serverless: bool,
 }
 
 impl LocalFacts {
     pub fn new(env: AccountEnvironment, runtime: tokio::runtime::Handle) -> Self {
         Self { accounts: AccountService::new(env), runtime, models: Default::default(), slots: tokio::sync::Semaphore::new(4),
-            mux: Default::default(), procs: std::sync::Arc::new(SystemProcs::default()) }
+            mux: Default::default(), procs: std::sync::Arc::new(SystemProcs::default()), serverless: false }
+    }
+
+    /// O comando do terminal com o servidor fora: ninguém limpa o que a sessão antiga deixou no nome.
+    pub fn without_server(mut self) -> Self {
+        self.serverless = true;
+        self
     }
 
     /// Só para teste: multiplexador e `/proc` de mentira, para nunca ler o tmux de quem roda o teste.
@@ -117,7 +124,7 @@ impl LocalFacts {
                 &mut Default::default(), name, &pane.cwd, pid).jsonl
         });
         let cache = Mutex::new(crate::list::capped::Capped::new(1));
-        // Sem fala no transcript, o modo de abertura (CRI-030).
+        // Sem fala no transcript, o modo de abertura.
         let permission_mode = transcript.and_then(|jsonl| crate::terminal_facts::transcript_mode(Path::new(&jsonl), &cache).ok().flatten()
             .or_else(|| super::record::launch_mode(&self.env().home, Path::new(&jsonl).file_stem()?.to_str()?)));
         Some(CreatorFacts { provider, headless: false, config_dir, permission_mode, codex_account: None })
@@ -529,7 +536,7 @@ impl OpenFacts for LocalFacts {
     }
 
     fn account_mode(&self, config_dir: Option<&str>) -> Result<Option<String>, String> {
-        // A conta padrão é a do servidor (`CLAUDE_CONFIG_DIR`), não `~/.claude` fixo (S-07).
+        // A conta padrão é a do servidor (`CLAUDE_CONFIG_DIR`), não `~/.claude` fixo.
         let dir = config_dir.map_or_else(|| self.env().claude_base.clone(), |dir| expand_home(dir, &self.env().home));
         Ok(read_json(&dir.join("settings.json"))?.and_then(|settings| text(&settings["permissions"]["defaultMode"])))
     }
@@ -544,6 +551,16 @@ impl OpenFacts for LocalFacts {
             Err(e) => return Err(super::open::mux_unavailable(e.code)),
         };
         Ok(panes.iter().any(|p| p.session == name))
+    }
+
+    fn name_has_leftovers(&self, name: &str) -> Result<bool, OpenError> {
+        let Some(path) = self.serverless.then(|| super::local::leftover(&self.env().claude_base, name)).flatten() else { return Ok(false) };
+        // Ilegível conta como sobra, e o nome seguinte também não se leria: recusa em vez de procurar sem fim.
+        match path.try_exists() {
+            Ok(_) => Ok(true),
+            Err(error) => Err(OpenError::new(409, "session_open_name_needs_server", format!(
+                "não deu para ler {} ({error}); com o servidor fora ninguém confere o nome — suba o servidor", path.display()))),
+        }
     }
 
     /// `transfer_active`: registro do índice da sessão com o mesmo nome e fase não terminal.

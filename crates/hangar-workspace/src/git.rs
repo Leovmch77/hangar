@@ -458,7 +458,7 @@ fn create_worktree_in(
         return Err(error(409, TARGET_TAKEN));
     }
     let text = target.to_string_lossy();
-    // S-67: a branch só remota vira local (`--track -b`); desfazer apaga as duas que nasceram aqui.
+    // A branch só remota vira local (`--track -b`); desfazer apaga as duas que nasceram aqui.
     let branch_created = new_branch || !local.iter().any(|b| b == branch);
     let created = if new_branch {
         let from = if local.iter().any(|b| b == start.as_str()) {

@@ -14,7 +14,7 @@
 #    --session-dir) -> cru.
 #  - fora do tmux + terminal -> `hangar-open omp …`: o lançador do Hangar abre a sessão (perfil por
 #    --profile ou OMP_PROFILE) e o terminal anexa nela. Argumento que o pedido não cobre, ou sem
-#    hangar-server -> cru com o caminho abaixo.
+#    hangar-server, ou sem hangar-open -> sessão tmux com o nome da pasta.
 #  - já no tmux / stdin não é tty -> cru com o --session + o export.
 #
 # Escape hatch: `command omp ...` roda o binário cru, sem este wrapper.
@@ -106,9 +106,43 @@ function omp
         else
             echo "hangar: hangar-open não encontrado; abrindo o omp sem o Hangar" >&2
         end
+
+        # Sem o tmux o CLI ficaria invisível pro app: sessão com o nome da pasta, única.
+        # Acento -> ASCII antes do filtro, mesma regra do backend (app/names.py).
+        set -l base (basename "$PWD")
+        if command -v iconv >/dev/null 2>&1
+            set -l ascii (printf '%s' "$base" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null)
+            test $status -eq 0; and test -n "$ascii"; and set base $ascii
+        end
+        set base (string replace -ra '[^A-Za-z0-9_-]' '-' -- $base)
+        set base (string replace -ra '^-+|-+$' '' -- $base)
+        test -n "$base"; or set base session
+        set -l name $base
+        set -l i 2
+        while tmux has-session -t "=$name" 2>/dev/null
+            set name "$base-$i"
+            set i (math $i + 1)
+        end
+        set -l id (uuidgen 2>/dev/null)
+        test -n "$id"; or set id (cat /proc/sys/kernel/random/uuid 2>/dev/null)
+        # O pane nasce do servidor tmux, não deste shell: perfil por `-e`, CP_PI_SESSION por export
+        # dentro do pane. Chamada duplicada: variável vazia na posição de comando é erro fatal no fish.
+        # CP_SESSION_NAME: identidade da sessão pro hangar-send de dentro do pane.
+        set -l envp
+        test -n "$perfil"; and set envp -e "OMP_PROFILE=$perfil"
+        if command -q systemd-run; and set -q XDG_RUNTIME_DIR; and systemd-run --user --scope --collect -q -- true >/dev/null 2>&1
+            systemd-run --user --scope --collect -q -- tmux new-session -s $name -c "$PWD" -e "CP_SESSION_NAME=$name" $envp \
+                sh -c 'export CP_PI_SESSION="$1"; alvo="$2"; shift 2; exec omp --session "$alvo" "$@"' \
+                _ "$id" (hangar_omp_alvo "$id") $argv
+        else
+            tmux new-session -s $name -c "$PWD" -e "CP_SESSION_NAME=$name" $envp \
+                sh -c 'export CP_PI_SESSION="$1"; alvo="$2"; shift 2; exec omp --session "$alvo" "$@"' \
+                _ "$id" (hangar_omp_alvo "$id") $argv
+        end
+        return
     end
 
-    # CLI cru com o caminho: já no tmux, stdin sem tty, ou o Hangar não abriu acima. Substituição que
+    # CLI cru com o caminho: já no tmux ou stdin sem tty. Substituição que
     # falha deixa a variável como LISTA VAZIA no fish: sem o fallback o nome do transcript nasceria
     # sem uuid, e o backend nunca acharia o arquivo pelo glob `*_<uuid>.jsonl`.
     set -l id (uuidgen 2>/dev/null)

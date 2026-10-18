@@ -1,6 +1,6 @@
 //! `resolve_open()`: o pedido vira o spec, na ordem do `create_session` do Python: provedor padrão →
-//! herança da criadora (D-001) → conta Codex padrão → regra dos 95% (D-003) → padrões da sessão
-//! completa (D-012) → validação. Os fatos entram por `OpenFacts`; nada aqui escreve em disco.
+//! herança da criadora → conta Codex padrão → regra dos 95% → padrões da sessão
+//! completa → validação. Os fatos entram por `OpenFacts`; nada aqui escreve em disco.
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -71,7 +71,7 @@ pub trait OpenFacts {
     /// Conta ChatGPT fixa do motor: confere conta e modelos e devolve o modelo sem o prefixo da conta.
     fn fixed_engine_model(&self, engine: &str, account: &str, model: Option<&str>) -> Result<String, OpenError>;
     /// Janela do modelo no catálogo do motor (`None` = o catálogo não traz o modelo ou o número).
-    /// Catálogo que não responde é erro; a abertura segue com a janela desconhecida (T-004).
+    /// Catálogo que não responde é erro; a abertura segue com a janela desconhecida.
     fn engine_window(&self, engine: &str, model: &str, account: Option<&str>) -> Result<Option<u64>, OpenError>;
     /// Pasta da conta Codex pelo id (`resolve_account`).
     fn codex_home(&self, account_id: &str) -> Result<String, OpenError>;
@@ -81,6 +81,8 @@ pub trait OpenFacts {
     fn account_mode(&self, config_dir: Option<&str>) -> Result<Option<String>, String>;
     /// Terminal, sidecar Codex ou sidecar sem terminal com este nome; `Err` = o multiplexador não respondeu.
     fn name_in_use(&self, name: &str) -> Result<bool, OpenError>;
+    /// Grupo, `then` ou fila de uma sessão antiga com este nome que ninguém vai limpar (servidor fora).
+    fn name_has_leftovers(&self, name: &str) -> Result<bool, OpenError>;
     /// Troca de agente em curso no nome (`conversation_transfer.transfer_active`).
     fn transfer_busy(&self, name: &str) -> Result<bool, OpenError>;
     /// `os.path.realpath(os.path.expanduser(path))`.
@@ -127,7 +129,7 @@ const EFFORT_CLAUDE: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 const EFFORT_PI: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 /// Uso da janela mais cheia a partir do qual a conta que ninguém escolheu não recebe sessão nova.
 const QUOTA_LIMIT: f64 = 95.0;
-/// `tmux` troca `.` por `_`, e o Rust já recusa nome maior que isso ao reabrir (S-53).
+/// `tmux` troca `.` por `_`, e o Rust já recusa nome maior que isso ao reabrir.
 const NAME_MAX: usize = 64;
 
 fn truthy(value: &Option<String>) -> bool { value.as_deref().is_some_and(|v| !v.is_empty()) }
@@ -137,7 +139,7 @@ fn conflict(msg: impl Into<String>) -> OpenError { OpenError::new(409, "erro_cri
 pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &dyn OpenFacts) -> Result<Resolved, OpenError> {
     let guest = matches!(caller, OpenCaller::Guest { .. });
     let mut warnings = Vec::new();
-    // D-001: o omitido vem da criadora; `inherit: false` deixa tudo no padrão da conta. O convidado
+    // O omitido vem da criadora; `inherit: false` deixa tudo no padrão da conta. O convidado
     // nunca herda conta nem modo de uma sessão do dono, e nem fica sabendo dela.
     let creator = request.creator.as_deref().filter(|_| request.inherit != Some(false) && !guest);
     let creator_info = match creator { Some(name) => facts.creator(name)?, None => None };
@@ -163,7 +165,9 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
     let mut config_dir = request.config_dir.clone();
     let mut codex_account = request.codex_account.clone();
     let mut headless = request.headless;
-    let mut permission = request.permission_mode.clone();
+    // `default` é o nome que o Claude Code dá ao manual (`claude --permission-mode default`).
+    let mut permission = request.permission_mode.clone()
+        .map(|mode| if provider == AgentProvider::Claude && mode == "default" { "manual".to_owned() } else { mode });
     // Fora do `permission`: o pedido explícito num Codex com terminal continua recusado, o herdado não.
     let mut inherited_codex_mode = None;
     let mut source = if explicit_account { AccountSource::Explicit } else { AccountSource::Default };
@@ -181,7 +185,7 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
                         "não consegui confirmar a conta da sessão '{creator}' — escolha a conta (`conta` no MCP, `--conta` no hangar-send)")))?;
                     source = AccountSource::Inherited;
                 }
-                // D-001 para o Codex: a conta Codex da criadora Codex.
+                // Para o Codex: a conta Codex da criadora Codex.
                 if provider == AgentProvider::Codex && codex_account.is_none() && info.provider == AgentProvider::Codex {
                     codex_account = Some(info.codex_account.clone().unwrap_or_else(|| "default".into()));
                     source = AccountSource::Inherited;
@@ -221,7 +225,7 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
         }
     }
 
-    // D-003: a conta que ninguém escolheu (herdada ou padrão) não recebe sessão acabando.
+    // A conta que ninguém escolheu (herdada ou padrão) não recebe sessão acabando.
     if !explicit_account && provider == AgentProvider::Claude && !truthy(&request.engine)
         && let Some((switched, warning)) = quota_switch(config_dir.as_deref(), &facts.claude_quotas())
     {
@@ -245,7 +249,7 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
         AgentProvider::Claude => Some(match permission.as_deref() {
             // `validate` já recusou o modo fora da lista.
             Some(mode) => PermissionMode::claude(mode).unwrap_or(PermissionMode::BypassPermissions),
-            // D-010: sem escolha nem criadora vale o modo da conta.
+            // Sem escolha nem criadora vale o modo da conta.
             None => account_mode(config_dir.as_deref(), facts)?,
         }),
         // O lançador do Codex sem modo abre em Full Access (`sem_terminal.MODO_PADRAO`).
@@ -258,7 +262,7 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
     let (context_window, context_window_unknown) = match (engine, model.as_deref().filter(|m| !m.is_empty())) {
         (Some(engine), Some(model)) => match facts.engine_window(engine, model, request.engine_account.as_deref()) {
             Ok(window) => (window, false),
-            // T-004: provedor fora do ar não impede abrir (escolha do Python); a janela fica
+            // Provedor fora do ar não impede abrir (escolha do Python); a janela fica
             // desconhecida no spec e é relida em cada reabertura.
             Err(error) => {
                 tracing::warn!(code = error.code, "janela do motor não lida na abertura; a sessão abre sem ela");
@@ -367,7 +371,10 @@ fn quota_switch(config_dir: Option<&str>, rows: &[Value]) -> Option<(String, Str
 }
 
 /// `Path(a).resolve() == Path(b).resolve()`, sem exigir que existam.
-fn same_dir(a: &str, b: &str) -> bool { a == b || crate::list::discover::real(a) == crate::list::discover::real(b) }
+fn same_dir(a: &str, b: &str) -> bool {
+    let trim = |p: &str| p.trim_end_matches(['/', '\\']).to_owned();
+    trim(a) == trim(b) || crate::list::discover::real(a) == crate::list::discover::real(b)
+}
 
 /// Validação na ordem do `_create_session_owned` (o primeiro erro vence), tudo antes de qualquer
 /// efeito. Devolve o modelo efetivo (a conta ChatGPT fixa tira o prefixo dela).
@@ -410,7 +417,7 @@ fn validate(request: &SessionOpenRequest, caller: &OpenCaller, provider: AgentPr
         AgentProvider::Codex => Some(facts.codex_home(codex_account.unwrap_or("default"))?),
         _ => None,
     };
-    if let Some(dir) = config_dir && !facts.config_dirs()?.iter().any(|known| known == dir) {
+    if let Some(dir) = config_dir && !facts.config_dirs()?.iter().any(|known| same_dir(known, dir)) {
         return Err(OpenError::new(400, "erro_config_dir_invalido", "config_dir invalido"));
     }
     if let Some(engine) = &request.engine {
@@ -488,7 +495,7 @@ fn validate_choice(provider: AgentProvider, model: Option<&str>, effort: Option<
 fn validate_name(raw: &str, provider: AgentProvider, headless: bool, request: &SessionOpenRequest, facts: &dyn OpenFacts)
     -> Result<String, OpenError> {
     let name = crate::list::discover_other::sanitize_session_name(raw);
-    // Um status só para o nome inválido, com ou sem `branch` (S-35).
+    // Um status só para o nome inválido, com ou sem `branch`.
     if name.is_empty() {
         return Err(conflict("nome invalido"));
     }
@@ -502,7 +509,7 @@ fn validate_name(raw: &str, provider: AgentProvider, headless: bool, request: &S
         if !matches!(provider, AgentProvider::Claude | AgentProvider::Codex) {
             return Err(conflict("sessao sem terminal so vale para provider claude ou codex"));
         }
-        // S-40: o prompt inicial é entregue em todo provedor; só leitura continua exigindo terminal.
+        // O prompt inicial é entregue em todo provedor; só leitura continua exigindo terminal.
         if request.read_only {
             return Err(conflict("sessao sem terminal nao aceita read_only"));
         }
@@ -526,7 +533,7 @@ fn validate_name(raw: &str, provider: AgentProvider, headless: bool, request: &S
     Ok(name)
 }
 
-/// S-52: o nome que ninguém escolheu, pela regra do `uniqueSessionName` das telas.
+/// O nome que ninguém escolheu, pela regra do `uniqueSessionName` das telas.
 fn folder_name(cwd: &str, facts: &dyn OpenFacts) -> Result<String, OpenError> {
     let folder = cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or_default();
     let base = Some(crate::list::discover_other::sanitize_session_name(folder)).filter(|n| !n.is_empty()).unwrap_or_else(|| "sessao".into());
@@ -534,7 +541,7 @@ fn folder_name(cwd: &str, facts: &dyn OpenFacts) -> Result<String, OpenError> {
     let fit = |suffix: &str| format!("{}{suffix}", base[..base.len().min(NAME_MAX - suffix.len())].trim_end_matches('-'));
     let mut name = fit("");
     for n in 2.. {
-        if !facts.name_in_use(&name)? && !super::open::NameClaim::opening(&name) { break; }
+        if !facts.name_in_use(&name)? && !super::open::NameClaim::opening(&name) && !facts.name_has_leftovers(&name)? { break; }
         name = fit(&format!("-{n}"));
     }
     Ok(name)

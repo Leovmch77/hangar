@@ -7,6 +7,7 @@ import { configureApi } from '@hangar/core';
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const mocks = vi.hoisted(() => ({ fetch: vi.fn(), vault: new Map<string, string>() }));
 vi.mock('expo-secure-store', () => ({ getItemAsync: async (k: string) => mocks.vault.get(k) ?? null, setItemAsync: async (k: string, v: string) => { mocks.vault.set(k, v); } }));
+vi.mock('react-native-mmkv', () => ({ createMMKV: () => ({ getString: () => undefined, set: vi.fn() }) }));
 vi.mock('react-native', async (original) => ({ ...await original<typeof import('react-native')>(),
   TextInput: (p: { accessibilityLabel?: string; value?: string; editable?: boolean; onChangeText?: (t: string) => void }) =>
     <input aria-label={p.accessibilityLabel} disabled={p.editable === false} value={p.value ?? ''} onChange={(e) => p.onChangeText?.(e.target.value)} />,

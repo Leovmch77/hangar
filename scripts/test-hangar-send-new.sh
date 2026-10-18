@@ -37,6 +37,9 @@ porta, destino = int(sys.argv[1]), sys.argv[2]
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+        if self.path.startswith("/api/claude-configs"):
+            self.wfile.write(b'[{"path":"/home/la/.claude","label":"default"}]')
+            return
         self.wfile.write(b'{"claude":{"disponivel":true,"default":true},"codex":{"disponivel":true,"default":false}}')
     def do_POST(self):
         corpo = self.rfile.read(int(self.headers.get("Content-Length", 0)))
@@ -92,6 +95,14 @@ checa "de uma sessão: a criadora vai" '"criadora"' "$(campo creator 2>/dev/null
 rm -f "$TMP/corpo.json"
 env -u TMUX -u TMUX_PANE -u CP_SESSION_KEY -u HANGAR_CANO_KEY -u CP_SESSION_NAME bash "$TMP/scripts/hangar-send" --new de-fora /tmp >/dev/null 2>&1
 checa "de fora: o padrão do servidor" '"claude"' "$(campo provider 2>/dev/null)"
+
+# 2c. Retomar noutra máquina: sem pasta, a pasta vem da conversa (lá), nunca a home de lá.
+printf '{"la":{"base_url":"http://127.0.0.1:%s","token":"teste"}}' "$PORTA" > "$TMP/backend/peers.json"
+rm -f "$TMP/corpo.json"
+bash "$TMP/scripts/hangar-send" --new la::retoma --resume abc123 >/dev/null 2>&1
+checa "--resume noutra máquina: código" '0' "$?"
+checa "--resume noutra máquina: sem cwd no corpo" 'null' "$(campo cwd 2>/dev/null)"
+rm -f "$TMP/backend/peers.json"
 
 # 3. Codex também aceita o modo sem terminal.
 rm -f "$TMP/corpo.json"

@@ -202,7 +202,7 @@ mod tests {
         assert_eq!(missing.list_panes().await, Err(MuxUnavailable { code: "mux_missing" }));
     }
 
-    /// T-019: sem sessão, o psmux responde com o próprio nome na frente.
+    /// Sem sessão, o psmux responde com o próprio nome na frente.
     #[test]
     fn the_psmux_absence_is_an_absence() {
         assert!(is_absence("psmux: no server running on session 'default'\n"));

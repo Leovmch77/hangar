@@ -30,6 +30,7 @@ const calls = vi.hoisted(() => ({
   pickerPeak: 0,
   pickerHistory: [] as number[],
   cotas: [] as unknown[],
+  worktrees: vi.fn(),
 }));
 const server = { id: 'server-b', label: 'Servidor B', baseUrl: 'https://b.local', token: 'token-b' };
 
@@ -153,6 +154,7 @@ vi.mock('@hangar/core', async (original) => ({
   prepareCodexAccountForServer: calls.prepare,
   getCodexPreparationForServer: calls.preparation,
   createSessionForServer: calls.create,
+  getWorktreesForServer: calls.worktrees,
   sendInputForServer: calls.send,
   getHistory: calls.history,
   getArchivePorCwd: calls.archives,
@@ -239,7 +241,8 @@ vi.mock('../../paraglide/messages', () => ({
     'native_ctl_fast native_ctl_fast_on native_ctl_fast_off native_ctl_fast_hint native_ctl_fast_unavailable ' +
     'reasoning_level_low reasoning_level_medium reasoning_level_high reasoning_level_xhigh reasoning_level_max reasoning_level_ultra ' +
     'native_mode_plan native_mode_manual native_mode_auto native_mode_acceptEdits native_mode_bypassPermissions native_mode_dontAsk chat_mode_plan config_motores_modelo_padrao ' +
-    'codex_contexto_titulo codex_contexto_padrao codex_contexto_salvando comum_falha_aplicar config_server_tentar_de_novo home_new_conversation'
+    'codex_contexto_titulo codex_contexto_padrao codex_contexto_salvando comum_falha_aplicar config_server_tentar_de_novo home_new_conversation ' +
+    'criar_criar criar_agente comum_voltar comum_cancelar criar_escolher_pasta native_create_worktrees native_create_worktrees_merged native_create_worktree_session'
   ).split(' ').map((k) => [k, () => k])),
 }));
 
@@ -300,6 +303,7 @@ describe('CreateSessionSheet Codex', () => {
     calls.prepare.mockReset().mockResolvedValue({ status: 'ready', trust_pending: false, issues: [] });
     calls.preparation.mockReset();
     calls.create.mockReset().mockResolvedValue({ name: 'nova', state: 'idle' });
+    calls.worktrees.mockReset().mockResolvedValue([]);
     calls.send.mockReset().mockResolvedValue(undefined);
     calls.history.mockReset().mockResolvedValue([]);
     calls.archives.mockReset().mockResolvedValue([]);
@@ -1824,5 +1828,201 @@ describe('CreateSessionSheet Codex', () => {
     expect(calls.send).toHaveBeenCalledTimes(2);
     expect(calls.send).toHaveBeenLastCalledWith(server, 'nova', 'oi');
     root.unmount();
+  });
+  describe('formulário completo', () => {
+    const folder = { name: 'hangar', path: '/repo/hangar', is_git: true, has_claude_md: true, mtime: 10 };
+    async function renderForm(onClose = vi.fn()) {
+      const container = document.createElement('div');
+      const root = createRoot(container);
+      await act(async () => root.render(createElement(CreateSessionSheet, { layout: 'form', onClose })));
+      await act(async () => Promise.resolve());
+      return { container, root, onClose };
+    }
+    async function pickFolder(container: HTMLElement) {
+      await act(async () => button(container, 'native_new_chat_folder: criar_escolher_pasta')!.click());
+      await act(async () => Promise.resolve());
+      await act(async () => button(container, 'hangar')!.click());
+      await act(async () => Promise.resolve());
+    }
+
+    it('mostra as escolhas como linhas e Criar abre a sessão nova com o que foi escolhido', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      const { container, root } = await renderForm();
+      try {
+        expect(button(container, 'native_new_chat_machine: Servidor B')).toBeDefined();
+        expect(button(container, 'criar_agente: Claude')).toBeDefined();
+        await pickFolder(container);
+        expect(button(container, 'native_new_chat_folder: hangar')).toBeDefined();
+        await act(async () => button(container, 'criar_criar')!.click());
+        await act(async () => Promise.resolve());
+        expect(calls.create).toHaveBeenCalledTimes(1);
+        const body = calls.create.mock.calls[0][1];
+        expect(body).toMatchObject({ cwd: '/repo/hangar', provider: 'claude' });
+        expect(body.name).toBe('hangar');
+        expect(calls.send).not.toHaveBeenCalled();
+        expect(calls.replace).toHaveBeenCalledWith('/s/server-b/nova');
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('sem nome digitado, a sessão segue a pasta como no servidor: a pasta já em uso vira pasta-2', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      calls.sessions.mockResolvedValue([{ name: 'hangar', cwd: '/repo/hangar' }]);
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        await act(async () => button(container, 'criar_criar')!.click());
+        await act(async () => Promise.resolve());
+        expect(calls.create.mock.calls[0][1].name).toBe('hangar-2');
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('nome automático que o servidor diz em uso tenta uma vez com o próximo, sem abrir a sessão antiga', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      calls.create.mockRejectedValueOnce(Object.assign(new Error('nome em uso'), { status: 409, code: 'erro_nome_em_uso' }));
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        await act(async () => button(container, 'criar_criar')!.click());
+        for (let i = 0; i < 5; i++) await act(async () => Promise.resolve());
+        expect(calls.create.mock.calls.map((call) => call[1].name)).toEqual(['hangar', 'hangar-2']);
+        expect(calls.replace).toHaveBeenCalledWith('/s/server-b/nova');
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('Criar fica desligado sem pasta', async () => {
+      const { container, root } = await renderForm();
+      try {
+        const create = button(container, 'criar_criar')!;
+        expect(create.getAttribute('aria-disabled') === 'true' || create.hasAttribute('disabled')).toBe(true);
+        await act(async () => create.click());
+        expect(calls.create).not.toHaveBeenCalled();
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('falha ao criar aparece na tela e não navega', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      calls.create.mockRejectedValue(new Error('nome em uso'));
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        await act(async () => button(container, 'criar_criar')!.click());
+        await act(async () => Promise.resolve());
+        expect([...container.querySelectorAll('[role="alert"]')].map((n) => n.textContent)).toContain('nome em uso');
+        expect(calls.replace).not.toHaveBeenCalled();
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('na tela de pasta as worktrees ficam dentro do repositório; mescladas só ao pedir', async () => {
+      const wt = (name: string, extra: object) => ({ path: `/repo/${name}`, repo: '/repo/hangar', exists: true, branch: `b/${name}`, base: 'main',
+        main_branch: 'main', merged: true, ahead: 0, dirty: 0, ignored: [], sessions: [], closed: 0, ...extra });
+      calls.scan.mockResolvedValue({ entries: [folder, { ...folder, name: 'hangar-menu', path: '/repo/hangar-menu', mtime: 20 },
+        { ...folder, name: 'hangar-anim', path: '/repo/hangar-anim', mtime: 5 }] });
+      calls.worktrees.mockResolvedValue([{ repo: '/repo/hangar', worktrees: [wt('hangar-menu', { sessions: ['mobile-menu'], merged: false }), wt('hangar-anim', {})] }]);
+      const { container, root } = await renderForm();
+      try {
+        await act(async () => button(container, 'native_new_chat_folder: criar_escolher_pasta')!.click());
+        await act(async () => Promise.resolve());
+        expect(button(container, 'hangar')).toBeDefined();
+        expect(button(container, 'hangar-menu')).toBeUndefined();
+        await act(async () => button(container, 'hangar: native_create_worktrees')!.click());
+        expect(button(container, 'hangar-menu')).toBeDefined();
+        expect(button(container, 'hangar-anim')).toBeUndefined();
+        await act(async () => button(container, 'native_create_worktrees_merged')!.click());
+        await act(async () => button(container, 'hangar-anim')!.click());
+        await act(async () => Promise.resolve());
+        expect(button(container, 'native_new_chat_folder: hangar-anim')).toBeDefined();
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('toque duplo em Criar cria uma sessão só', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      let release!: (v: { name: string; state: string }) => void;
+      calls.create.mockImplementation(() => new Promise((done) => { release = done; }));
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        const create = button(container, 'criar_criar')!;
+        await act(async () => { create.click(); create.click(); });
+        await act(async () => { release({ name: 'nova', state: 'idle' }); await Promise.resolve(); });
+        expect(calls.create).toHaveBeenCalledTimes(1);
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('rede cai depois do servidor criar: abre a sessão que nasceu em vez de criar outra', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      calls.create.mockRejectedValue(new Error('Network request failed'));
+      calls.sessions.mockImplementation(async () => calls.create.mock.calls.map((call) => ({ name: call[1].name, cwd: '/repo/hangar' })));
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        await act(async () => button(container, 'criar_criar')!.click());
+        await act(async () => Promise.resolve());
+        const created = calls.create.mock.calls[0][1].name;
+        expect(calls.replace).toHaveBeenCalledWith(`/s/server-b/${created}`);
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('rede cai e não dá para conferir: avisa que a criação ficou incerta e repete com o mesmo nome', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      calls.create.mockRejectedValue(new Error('Network request failed'));
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        calls.sessions.mockRejectedValue(new Error('offline'));
+        await act(async () => button(container, 'criar_criar')!.click());
+        await act(async () => Promise.resolve());
+        expect([...container.querySelectorAll('[role="alert"]')].map((n) => n.textContent)).toContain('nova_conversa_criacao_incerta');
+        await act(async () => button(container, 'criar_criar')!.click());
+        await act(async () => Promise.resolve());
+        expect(calls.create.mock.calls[1][1].name).toBe(calls.create.mock.calls[0][1].name);
+        expect(calls.replace).not.toHaveBeenCalled();
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('nome digitado que já existe (409 na primeira tentativa) mostra o erro e não abre a sessão antiga', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      calls.create.mockRejectedValue(Object.assign(new Error('nome em uso'), { status: 409 }));
+      calls.sessions.mockResolvedValue([{ name: 'antiga', cwd: '/repo/hangar' }]);
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        const field = container.querySelector('textarea[aria-label="comum_nome"]') as HTMLTextAreaElement;
+        await act(async () => { field.value = 'antiga'; field.dispatchEvent(new Event('input', { bubbles: true })); });
+        await act(async () => button(container, 'criar_criar')!.click());
+        await act(async () => Promise.resolve());
+        expect(calls.replace).not.toHaveBeenCalled();
+        expect([...container.querySelectorAll('[role="alert"]')].map((n) => n.textContent)).toContain('nome em uso');
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('recusa respondida não vira repetição: o segundo toque no nome em uso não abre a sessão existente', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      calls.create.mockRejectedValue(Object.assign(new Error('nome em uso'), { status: 409, code: 'erro_nome_em_uso' }));
+      calls.sessions.mockResolvedValue([{ name: 'antiga', cwd: '/repo/hangar' }]);
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        const field = container.querySelector('textarea[aria-label="comum_nome"]') as HTMLTextAreaElement;
+        await act(async () => { field.value = 'antiga'; field.dispatchEvent(new Event('input', { bubbles: true })); });
+        for (let press = 0; press < 2; press++) {
+          await act(async () => button(container, 'criar_criar')!.click());
+          await act(async () => Promise.resolve());
+        }
+        expect(calls.create).toHaveBeenCalledTimes(2);
+        expect(calls.replace).not.toHaveBeenCalled();
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('Cancelar fecha sem criar', async () => {
+      const { container, root, onClose } = await renderForm();
+      try {
+        const cancel = button(container, 'comum_cancelar')!;
+        expect(parseFloat(cancel.style.minHeight)).toBeGreaterThanOrEqual(44);
+        expect(parseFloat(cancel.style.minWidth)).toBeGreaterThanOrEqual(44);
+        await act(async () => cancel.click());
+        expect(onClose).toHaveBeenCalledTimes(1);
+        expect(calls.create).not.toHaveBeenCalled();
+      } finally { act(() => root.unmount()); }
+    });
   });
 });

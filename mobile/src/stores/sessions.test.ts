@@ -13,7 +13,7 @@ vi.mock('react-native-mmkv', () => ({
   }),
 }));
 import { useServers } from './servers';
-import { useSessions, _resetSessionsForTests, markLeavingPair, setPairNotice } from './sessions';
+import { useSessions, _resetSessionsForTests, markLeavingPair, setPairNotice, setMachineDiscovery } from './sessions';
 
 const avisos: string[] = [];
 const cooldownStorage = {
@@ -113,10 +113,33 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setMachineDiscovery(() => {});
   configureDiag({ registrar: () => {}, novoReq: () => '' });
   _resetSessionsForTests();
   vi.unstubAllGlobals();
   vi.useRealTimers();
+});
+
+test('descoberta espera lista válida e roda uma vez por conexão, inclusive após retomar', async () => {
+  const discover = vi.fn();
+  setMachineDiscovery(discover);
+  const release = useSessions.getState().retain();
+  await settle();
+  expect(discover).not.toHaveBeenCalled();
+  created[0].trigger('sessions', 'invalid');
+  expect(discover).not.toHaveBeenCalled();
+  created[0].trigger('sessions', '[]');
+  created[0].trigger('sessions', '[]');
+  expect(discover).toHaveBeenCalledExactlyOnceWith(useServers.getState().servers[0]);
+  useSessions.getState().setForeground(false);
+  created[0].trigger('sessions', '[]');
+  expect(discover).toHaveBeenCalledTimes(1);
+  useSessions.getState().setForeground(true);
+  await settle();
+  expect(discover).toHaveBeenCalledTimes(1);
+  created.at(-1)!.trigger('sessions', '[]');
+  expect(discover).toHaveBeenCalledTimes(2);
+  release();
 });
 
 test('dois retain() = um createEventSource; release dos dois = close() uma vez', async () => {

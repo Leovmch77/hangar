@@ -1,7 +1,7 @@
 //! `POST /api/sessions/{name}/resume`: a sessão Claude volta numa conversa que já existe no disco (a
 //! sessão aberta sem id passa a ser rastreada). Sem `session_id` o Rust escolhe a mais recente da pasta,
 //! ou devolve as candidatas quando outra sessão divide a pasta. A reabertura é a do spec
-//! (`RuntimeRegistry::resume_claude_session`), como as outras (S-22). Port do `resume_session` com
+//! (`RuntimeRegistry::resume_claude_session`), como as outras. Port do `resume_session` com
 //! `registry.resume_candidates`/`resume`.
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -78,7 +78,7 @@ fn choose(found: &[(PathBuf, f64)], in_use: &dyn Fn(&Path) -> Option<String>, si
         return Choice::Ambiguous(found.iter().map(|(path, mtime)| json!({"session_id": stem(path), "mtime": mtime,
             "preview": preview(path), "in_use": in_use(path).is_some()})).collect());
     }
-    // S-19: a conversa que outra sessão já escreve nunca é a escolhida.
+    // A conversa que outra sessão já escreve nunca é a escolhida.
     match found.iter().find(|(path, _)| in_use(path).is_none()) {
         Some((path, _)) => Choice::Pick(stem(path)),
         None => Choice::Busy(found.first().and_then(|(path, _)| in_use(path))),
@@ -182,7 +182,7 @@ mod tests {
     fn the_automatic_choice_never_takes_a_conversation_another_session_writes() {
         let found = vec![(PathBuf::from("/p/a.jsonl"), 3.0), (PathBuf::from("/p/b.jsonl"), 2.0)];
         let a_taken = |p: &Path| (p == Path::new("/p/a.jsonl")).then(|| "outra".to_owned());
-        assert_eq!(choose(&found, &a_taken, false), Choice::Pick("b".into()), "S-19: a mais recente é de outra sessão");
+        assert_eq!(choose(&found, &a_taken, false), Choice::Pick("b".into()), "A mais recente é de outra sessão");
         let all_taken = |_: &Path| Some("outra".to_owned());
         assert_eq!(choose(&found, &all_taken, false), Choice::Busy(Some("outra".into())));
         let free = |_: &Path| None;

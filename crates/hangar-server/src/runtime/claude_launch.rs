@@ -35,7 +35,7 @@ pub const READ_ONLY_MSG: &str = "sessão read-only só roda no terminal protegid
 const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// Herdadas do backend subido de dentro de outra sessão (ou dele mesmo), dariam a esta o pane, o motor,
-/// a ponte, o subagente, o Jev, o portão de hooks ou o segredo de outra (S-64).
+/// a ponte, o subagente, o Jev, o portão de hooks ou o segredo de outra.
 const DROPPED: [&str; 22] = ["TMUX", "TMUX_PANE", "CP_ENGINE_ACCOUNT", "CP_ENGINE_CREDENTIAL_ID", "CP_ENGINE_ACCOUNT_BASE_URL",
     "CP_ENGINE_SERVICE_TIER", "HANGAR_PLUGIN_URL", "HANGAR_PLUGIN_TOKEN", "CLAUDE_CODE_SUBAGENT_MODEL",
     "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS", "TYPESAFE_API_KEY", "JEV_ENDPOINT", "JEV_MODEL", "JEV_TEXTO_BASE_URL",
@@ -46,7 +46,7 @@ const SECRETS: [&str; 2] = ["HANGAR_INTERNAL_SECRET", "HANGAR_RUNTIME_INSTANCE"]
 fn refused(code: &str, message: &str) -> RuntimeError { RuntimeError::new(code, message) }
 
 /// Falha que nenhuma nova tentativa resolve (motor, conta fixa, modo, Fast, só leitura, cano ausente):
-/// a religação para na hora e mostra o motivo, sem gastar as esperas (S-30).
+/// a religação para na hora e mostra o motivo, sem gastar as esperas.
 pub fn permanent(code: &str) -> bool { code.starts_with("launch_") || matches!(code, "headless_read_only" | "cano_ausente") }
 
 fn text<'a>(meta: &'a Value, key: &str) -> Option<&'a str> { meta[key].as_str().filter(|v| !v.is_empty()) }
@@ -62,7 +62,7 @@ pub fn transcript(env: &AccountEnvironment, spec: &SessionSpec, sid: &str) -> Pa
 }
 
 /// `permissions.defaultMode` do `settings.json` da conta (a do servidor sem pasta própria), como a
-/// abertura decide: ausente ou fora da lista é bypass, `default` é manual; ilegível recusa (T-002).
+/// abertura decide: ausente ou fora da lista é bypass, `default` é manual; ilegível recusa.
 pub(crate) fn account_mode(env: &AccountEnvironment, config_dir: Option<&str>) -> Result<PermissionMode, RuntimeError> {
     let dir = config_dir.map_or_else(|| env.claude_base.clone(), PathBuf::from);
     let mode = match std::fs::read(dir.join("settings.json")) {
@@ -119,7 +119,7 @@ pub fn plan(spec: &SessionSpec, meta: &Value, ctx: &Context) -> Result<Launch, R
         claude.push("--allow-dangerously-skip-permissions".into());
     }
     if let Some(model) = spec.model.as_deref().filter(|m| !m.is_empty()) { claude.extend(["--model".into(), model.into()]); }
-    // `ultracode` só existe no `/effort` em voo: a flag não o aceita (S-13).
+    // `ultracode` só existe no `/effort` em voo: a flag não o aceita.
     if let Some(effort) = spec.effort.as_deref().filter(|e| EFFORTS.contains(e)) { claude.extend(["--effort".into(), effort.into()]); }
     // O modo também no `--resume`: sem a flag a CLI volta ao `defaultMode` da conta.
     claude.extend(["--permission-mode".into(), mode.name().into()]);
@@ -174,7 +174,7 @@ pub fn relaunch_meta(mut sidecar: Value, conversation: &str, mode: &str, model: 
     sidecar
 }
 
-/// T-004: a janela do motor que a abertura não leu é relida a cada subida; lida, vai ao sidecar.
+/// A janela do motor que a abertura não leu é relida a cada subida; lida, vai ao sidecar.
 pub(crate) fn refresh_window(spec: &mut SessionSpec, facts: &dyn crate::session_open::OpenFacts, sidecar_dir: &Path, name: &str) {
     if !matches!(spec.account, Account::Engine { context_window_unknown: true, .. }) { return; }
     spec.refresh_engine_window(facts);
@@ -283,7 +283,7 @@ mod tests {
         let minted = &launch.env["HANGAR_PLUGIN_TOKEN"];
         assert!(minted.starts_with(&format!("{}.", case.key)) && minted.len() == 32 + 1 + 32, "token da ponte pela chave: {minted}");
         *token = minted.clone();
-        // S-64: o bearer do dono nunca chega ao `claude`.
+        // O bearer do dono nunca chega ao `claude`.
         env.remove("CP_AUTH_TOKEN");
         // Matriz, item 1: `CP_PROVIDER` em toda sessão.
         env.insert("CP_PROVIDER".into(), "claude".into());
@@ -341,7 +341,7 @@ mod tests {
         assert!(!launch.program.contains(&"--allow-dangerously-skip-permissions".to_owned()), "em bypass a flag de volta não entra");
     }
 
-    /// S-11: a vida nova nunca sai de uma ficha montada às pressas; do spec gravado vêm a janela do
+    /// A vida nova nunca sai de uma ficha montada às pressas; do spec gravado vêm a janela do
     /// motor, a base fora do plano e o só leitura (que segue recusado sem terminal).
     #[test]
     fn relaunch_from_the_spec_keeps_engine_window_base_mode_and_read_only() {

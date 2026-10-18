@@ -15,7 +15,7 @@
 #    --session-dir) -> cru.
 #  - fora do tmux + terminal -> `hangar-open omp …`: o lançador do Hangar abre a sessão (perfil por
 #    --profile ou OMP_PROFILE) e o terminal anexa nela. Argumento que o pedido não cobre, ou sem
-#    hangar-server -> cru com o caminho abaixo.
+#    hangar-server, ou sem hangar-open -> sessão tmux com o nome da pasta.
 #  - já no tmux / stdin não é tty -> cru com o --session + o export.
 #
 # Escape hatch: `command omp ...` roda o binário cru, sem este wrapper.
@@ -104,9 +104,40 @@ read|render|say|search|setup|share|shell|ssh|stats|tiny-models|token|ttsr|update
         else
             echo "hangar: hangar-open não encontrado; abrindo o omp sem o Hangar" >&2
         fi
+
+        # Sem o tmux o CLI ficaria invisível pro app: sessão com o nome da pasta, única.
+        # Acento -> ASCII antes do filtro, mesma regra do backend (app/names.py).
+        local base name i ascii run=()
+        base=$(basename "$PWD")
+        if command -v iconv >/dev/null 2>&1; then
+            ascii=$(printf '%s' "$base" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null) \
+                && [ -n "$ascii" ] && base=$ascii
+        fi
+        base=$(printf '%s' "$base" | tr -c 'A-Za-z0-9_-' '-')
+        while [ "${base#-}" != "$base" ]; do base=${base#-}; done
+        while [ "${base%-}" != "$base" ]; do base=${base%-}; done
+        [ -n "$base" ] || base=session
+        name=$base; i=2
+        while tmux has-session -t "=$name" 2>/dev/null; do
+            name="$base-$i"; i=$((i + 1))
+        done
+        # O probe confere que o systemd do usuário aceita scope transiente, não só que o binário existe.
+        if command -v systemd-run >/dev/null 2>&1 && [ -n "${XDG_RUNTIME_DIR:-}" ] \
+           && systemd-run --user --scope --collect -q -- true >/dev/null 2>&1; then
+            run=(systemd-run --user --scope --collect -q --)
+        fi
+        local id envp=()
+        id=$(uuidgen 2>/dev/null) || id=$(cat /proc/sys/kernel/random/uuid)
+        # O pane nasce do servidor tmux, não deste shell: perfil por `-e`, CP_PI_SESSION por export
+        # dentro do pane. CP_SESSION_NAME: identidade da sessão pro hangar-send de dentro do pane.
+        [ -n "$perfil" ] && envp=(-e "OMP_PROFILE=$perfil")
+        "${run[@]}" tmux new-session -s "$name" -c "$PWD" -e "CP_SESSION_NAME=$name" "${envp[@]}" \
+            sh -c 'export CP_PI_SESSION="$1"; alvo="$2"; shift 2; exec omp --session "$alvo" "$@"' \
+            _ "$id" "$(hangar_omp_alvo "$id")" "$@"
+        return
     fi
 
-    # CLI cru com o caminho: já no tmux, stdin sem tty, ou o Hangar não abriu acima.
+    # CLI cru com o caminho: já no tmux ou stdin sem tty.
     local id
     id=$(uuidgen 2>/dev/null) || id=$(cat /proc/sys/kernel/random/uuid)
     export CP_PI_SESSION="$id"

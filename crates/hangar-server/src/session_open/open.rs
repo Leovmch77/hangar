@@ -85,7 +85,7 @@ impl Diary {
     fn refused(&mut self, level: &str, code: &str, etapa: Option<&str>, detail: Option<&str>) {
         let mut e = json!({"evento": "sessao.criar_recusada", "nivel": level, "sessao": self.session(), "provider": self.provider, "operacao": self.op});
         match (etapa, detail) {
-            // S-15: falha de lançamento leva a etapa, o código e o stderr resumido.
+            // Falha de lançamento leva a etapa, o código e o stderr resumido.
             (Some(etapa), detail) => { e["etapa"] = etapa.into(); e["codigo"] = code.into(); e["detalhe"] = detail.unwrap_or("").into(); }
             (None, _) => e["detalhe"] = code.into(),
         }
@@ -232,7 +232,7 @@ async fn read_only_prefix(host: &dyn OpenHost, cwd: &str, config_dir: Option<&st
 }
 
 /// O envelope do só leitura com o ambiente, a casa e quem roda programas: a abertura e o relançamento do
-/// Codex (que o reaplica, S-28) usam o mesmo.
+/// Codex (que o reaplica) usam o mesmo.
 pub(crate) async fn read_only_envelope<'a>(env: &BTreeMap<String, String>, home: &Path, cwd: &str, config_dir: Option<&str>,
     run: &'a (dyn Fn(Vec<String>, Duration) -> BoxFuture<'a, MuxOutput> + Sync)) -> Result<Vec<String>, OpenError> {
     let refuse = |msg: String| OpenError::new(400, "erro_criacao_sessao", msg);
@@ -354,14 +354,14 @@ pub async fn open_session(host: &dyn OpenHost, resolved: Resolved, caller: &Open
         Account::Codex { account_id } => Some(super::codex::home(host.env(), account_id)?),
         _ => None,
     };
-    // CRI-004: antes de qualquer efeito; a worktree troca a pasta e o envelope é refeito sobre ela.
+    // Antes de qualquer efeito; a worktree troca a pasta e o envelope é refeito sobre ela.
     let read_only_home = spec.account.config_dir().map(str::to_owned).or_else(|| codex_home.clone());
     let mut read_only = match spec.read_only {
         true => Some(read_only_prefix(host, &spec.cwd, read_only_home.as_deref()).await?),
         false => None,
     };
     let engine = matches!(spec.account, Account::Engine { .. });
-    // CRI-025: modelo de motor deixado no `settings.json` faria a sessão Anthropic nascer nele.
+    // Modelo de motor deixado no `settings.json` faria a sessão Anthropic nascer nele.
     if !engine && spec.provider == AgentProvider::Claude { warnings.extend(claude::drop_foreign_model(host.home(), spec.account.config_dir())); }
     let mut undo = None;
     if let Some(wt) = spec.worktree.clone() {
@@ -576,7 +576,7 @@ async fn headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, previous_non
     }
     // Antes do sidecar: depois dele o runtime pode adotar a sessão nova no meio da limpeza.
     host.release_name(&spec.name).await?;
-    // S-40: a primeira mensagem já está na fila durável quando a criação responde; quem sobe a sessão
+    // A primeira mensagem já está na fila durável quando a criação responde; quem sobe a sessão
     // (o acordar, a subida do servidor, a próxima escrita) a entrega, e falhar a subida não a perde.
     if let Some(text) = initial_prompt.filter(|p| !p.is_empty()) {
         progress_step(&spec.name, "recado", json!({}));
@@ -718,7 +718,7 @@ async fn terminal_life(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: O
     // A sessão que volta já tem registro (plugins, worktree, criadora): a falha do pane o devolve como estava.
     let previous = restore.then(|| super::record::read(host.home(), &spec.key).ok().flatten()).flatten();
     write_record(host, spec, diary, "criar_terminal")?;
-    // S-40: o Claude e o Codex levam o prompt no comando; os outros, na fila.
+    // O Claude e o Codex levam o prompt no comando; os outros, na fila.
     let queued = match initial_prompt.filter(|p| !claude && codex_home.is_none() && !p.is_empty()) {
         None => None,
         Some(text) => {

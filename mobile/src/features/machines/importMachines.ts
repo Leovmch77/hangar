@@ -1,12 +1,13 @@
 import {
   confirmImportedMachine, discoverMachineCandidates, isOwnMachine, machineImportIssue, mergeImportedMachines, parseMachineImportPayload, readMachineIdentity,
-  type MachineImportIssue, type MachineImportResult, type Server,
+  registrarDiag, type MachineImportIssue, type MachineImportResult, type Server,
 } from '@hangar/core';
 import { useServers } from '../../stores/servers';
+import { prefs } from '../../stores/prefs';
 import { toast } from '../../ui/Toast';
 import * as m from '../../paraglide/messages';
 
-const warnedAutomaticIssues = new Set<string>();
+const warningKey = 'cp_machine_discovery_warned';
 
 export function machineImportIssueMessage(issue: MachineImportIssue): string {
   const messages = {
@@ -86,17 +87,18 @@ export async function discoverSavedMachines(sources?: Server[]): Promise<Machine
     toast.passive(useServers.getState().vaultReadable ? m.mobile_machines_invalid_response() : m.servers_warning_vault_unread());
     return { added: [], issues: [{ stage: 'invalid_item' }] };
   }
-  const freshIssues = result.issues.filter((issue) => {
-    const key = JSON.stringify([issue.machine, issue.source, issue.stage, issue.status]);
-    if (warnedAutomaticIssues.has(key)) return false;
-    warnedAutomaticIssues.add(key);
-    return true;
-  });
-  if (freshIssues.length) {
-    // A busca roda a cada abertura: o aviso diz só onde falhou; o motivo de cada uma fica na importação explícita.
-    const hosts = [...new Set(freshIssues.flatMap((issue) => [issue.machine, issue.source])
-      .map(shortHost).filter(Boolean))];
-    toast.passive(hosts.length ? m.machine_import_warning_short({ hosts: hosts.join(', ') }) : m.machine_import_warning({ count: freshIssues.length }));
+  const savedHosts = new Set(useServers.getState().servers.map((server) => new URL(server.baseUrl).host));
+  let warned: string[] = [];
+  try {
+    const stored: unknown = JSON.parse(prefs.getString(warningKey) ?? '[]');
+    if (Array.isArray(stored)) warned = stored.filter((host): host is string => typeof host === 'string');
+  } catch { registrarDiag({ evento: 'machines.warning_unreadable', nivel: 'aviso' }); }
+  // Falha da fonte não prova queda da máquina; outra credencial pode ter confirmado a candidata.
+  const hosts = [...new Set(result.issues.filter((issue) => issue.stage === 'candidate' || issue.stage === 'peer_token')
+    .map((issue) => issue.machine).filter((host): host is string => !!host && !savedHosts.has(host) && !warned.includes(host)))];
+  if (hosts.length) {
+    prefs.set(warningKey, JSON.stringify([...warned, ...hosts]));
+    toast.passive(m.machine_discovery_unconfirmed({ hosts: hosts.map(shortHost).join(', ') }));
   }
   return result;
 }

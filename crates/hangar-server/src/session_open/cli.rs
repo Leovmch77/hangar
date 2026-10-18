@@ -1,10 +1,10 @@
-//! `hangar-server open|resolve`: o lançador do Hangar como comando de terminal (D-013, T-006). O mesmo
+//! `hangar-server open|resolve`: o lançador do Hangar como comando de terminal. O mesmo
 //! `resolve_open()` do servidor, lendo os mesmos arquivos, para o terminal decidir igual com o servidor
 //! fora do ar. Subcomando do `hangar-server` porque ele já está instalado em toda máquina.
 //!
 //!   hangar-server resolve [PEDIDO]  resolve nesta máquina e imprime o spec, sem efeito nenhum
-//!   hangar-server open [PEDIDO]     pede ao servidor; fora do ar, abre aqui a sessão com terminal (e o
-//!                                   Claude e o Codex sem terminal; o servidor adota quando voltar)
+//!   hangar-server open [PEDIDO]     pede ao servidor; fora do ar, abre aqui só a sessão com terminal
+//!                                   (o servidor adota quando voltar); sem terminal, só resolve
 //!
 //! Token, porta e as opções `CP_*` vêm do `backend/.env` da cópia do Hangar: a de onde o binário mora
 //! (checkout) ou a que o servidor anotou ao subir (`~/.hangar/backend-dir`, para o `~/.hangar/bin`).
@@ -79,7 +79,7 @@ pub fn run(args: &[String]) -> ExitCode {
             Ask::Down(reason) => eprintln!("hangar-server: servidor fora do ar ({reason}); segue nesta máquina"),
         }
     }
-    let facts = LocalFacts::new(AccountEnvironment::from_map(server_env(std::env::vars(), &server)), runtime.handle().clone());
+    let facts = LocalFacts::new(AccountEnvironment::from_map(server_env(std::env::vars(), &server)), runtime.handle().clone()).without_server();
     // Quem roda o comando no terminal da máquina é o dono.
     let resolved = match resolve_open(&request, &OpenCaller::Owner, &facts) {
         Ok(resolved) => resolved,
@@ -87,7 +87,7 @@ pub fn run(args: &[String]) -> ExitCode {
     };
     // Sem terminal o processo é do servidor: com ele fora, o comando só resolve.
     if command == "open" && opens_here(&resolved.spec) && resolved.spec.surface == super::Surface::Terminal {
-        // A mesma abertura do servidor (D-013): token e porta do `.env` dele, para a ponte do plugin
+        // A mesma abertura do servidor: token e porta do `.env` dele, para a ponte do plugin
         // valer quando ele voltar.
         let bridge = server.get("CP_AUTH_TOKEN").filter(|t| !t.is_empty())
             .map(|token| PluginBridge { port: server.get("CP_PORT").and_then(|p| p.parse().ok()).unwrap_or(8765), secret: token.clone() });
@@ -131,9 +131,11 @@ fn server_env(caller: impl Iterator<Item = (String, String)>, server: &BTreeMap<
 
 enum Ask { Answered(u16, String), Down(String), Uncertain(String) }
 
+// Acima dos 180 s que a abertura no servidor pode levar: a resposta dele chega antes da desistência.
+const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(190);
+
 async fn ask_server(base: &str, token: &str, body: &[u8]) -> Ask {
-    // O mesmo prazo das telas: a criação pode preparar conta e worktree.
-    let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(120)).build() {
+    let client = match reqwest::Client::builder().timeout(OPEN_TIMEOUT).build() {
         Ok(client) => client,
         Err(error) => return Ask::Uncertain(error.to_string()),
     };
@@ -182,9 +184,16 @@ pub fn publish_backend_dir(home: &std::path::Path, backend: &std::path::Path) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{Ask, answer};
+    use super::{Ask, OPEN_TIMEOUT, answer};
 
-    /// O Hangar no modo Python (Rust caído) não abre: o comando abre na máquina, como com ele fora (D-013).
+    /// A abertura no servidor pode levar até 180 s (bastão com resumo pelo modelo): desistir antes vira erro
+    /// falso, e tentar de novo abre uma segunda sessão `-2`.
+    #[test]
+    fn the_command_waits_longer_than_the_server_open() {
+        assert!(OPEN_TIMEOUT > std::time::Duration::from_secs(180), "{OPEN_TIMEOUT:?}");
+    }
+
+    /// O Hangar no modo Python (Rust caído) não abre: o comando abre na máquina, como com ele fora.
     #[test]
     fn a_server_without_rust_counts_as_down() {
         let python = r#"{"detail":{"code":"session_open_needs_rust_server","params":{},"msg":"abrir e reabrir sessão precisam do servidor Rust, que não está rodando"}}"#;

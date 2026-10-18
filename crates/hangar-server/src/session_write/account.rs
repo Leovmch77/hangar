@@ -113,7 +113,7 @@ impl Between for MoveConversation {
                 return Err(RuntimeError::new("erro_conversa_ja_na_conta","a conta destino ja tem esta conversa"));
             }
             // A confiança na pasta é por conta: sem ela o terminal abre no aviso, em "No, exit". O arquivo
-            // é o que o CLI daquela conta lê, pela mesma regra do `-e CLAUDE_CONFIG_DIR` (S-07). Antes de
+            // é o que o CLI daquela conta lê, pela mesma regra do `-e CLAUDE_CONFIG_DIR`. Antes de
             // encerrar: confiar a mais numa troca recusada não muda nada.
             let terminal=crate::session_open::terminal::TerminalEnv { windows:self.windows,program:String::new(),display:Vec::new(),
                 server_config_dir:self.env.base.get("CLAUDE_CONFIG_DIR").filter(|v|!v.is_empty()).cloned(),
@@ -266,7 +266,7 @@ fn without_claude_spec(provider: Result<Option<&str>, &'static str>) -> Option<(
 mod tests {
     use super::*;
 
-    /// CRA-045: sem spec Claude, a sessão que não existe é 404 e a de outro provedor (Pi, omp, Kimi,
+    /// Sem spec Claude, a sessão que não existe é 404 e a de outro provedor (Pi, omp, Kimi,
     /// Codex com `config_dir`) é 409, como o Python; lista fora do ar é 503 com o código dela.
     #[test]
     fn without_a_claude_spec_the_refusal_is_the_python_one() {

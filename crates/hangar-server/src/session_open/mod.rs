@@ -103,7 +103,7 @@ pub enum Account {
     Codex { account_id: String },
     Omp { profile: String, config_dir: Option<String> },
     /// Claude num motor do `engines.json`; `account` é a conta ChatGPT fixa do CLIProxyAPI.
-    /// `context_window_unknown`: o catálogo do motor não respondeu na abertura (T-004); a janela é
+    /// `context_window_unknown`: o catálogo do motor não respondeu na abertura; a janela é
     /// relida a cada reabertura (`SessionSpec::refresh_engine_window`).
     Engine {
         name: String, account: Option<String>, config_dir: Option<String>, context_window: Option<u64>,
@@ -146,13 +146,13 @@ pub struct ClaudeCustomizations {
     pub blocked_skills: Vec<String>,
 }
 
-/// O pedido de abertura no fio: os 23 campos do `CreateBody` (`api.py`) mais `inherit` (D-001).
+/// O pedido de abertura no fio: os 23 campos do `CreateBody` (`api.py`) mais `inherit`.
 /// Ausente e `null` são casos diferentes onde o Python os distingue: `provider` ausente é o padrão
 /// do servidor e `null` é recusado; booleanos não aceitam `null` nem texto.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionOpenRequest {
-    /// Omitido: o servidor deriva da pasta (S-52).
+    /// Omitido: o servidor deriva da pasta.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub cwd: String,
@@ -306,7 +306,7 @@ pub struct SessionSpec {
     pub creator: Option<String>,
     pub created_at: f64,
     /// A conversa com que a vida de agora nasceu (`--session-id`/`--resume` do Claude, o id do Pi e do
-    /// omp, a do Kimi retomado): o restore depois do reboot volta nela (S-69).
+    /// omp, a do Kimi retomado): o restore depois do reboot volta nela.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<String>,
 }
@@ -334,7 +334,7 @@ pub struct SessionChange {
 }
 
 impl SessionSpec {
-    /// T-004: janela do motor que ficou desconhecida é lida de novo; o catálogo ainda fora a deixa
+    /// Janela do motor que ficou desconhecida é lida de novo; o catálogo ainda fora a deixa
     /// desconhecida, e a sessão abre sem ela, como na criação.
     pub fn refresh_engine_window(&mut self, facts: &dyn OpenFacts) {
         let Account::Engine { name, account, context_window, context_window_unknown: unknown @ true, .. } = &mut self.account else { return };

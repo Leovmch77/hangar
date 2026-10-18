@@ -1,10 +1,10 @@
 //! Reabrir o Claude pelo spec: `reopen_session(nome, SessionChange)` para troca de modo (terminal ⇄ sem
 //! terminal), recarregar, bypass e troca de conta. A ordem é a da spec: monta a vida nova (comando,
-//! ambiente, conta) antes de tocar em processo; encerra a antiga e confirma que ela saiu, a árvore inteira
-//! (S-18); dá a partida na nova e confirma que ela está viva na conversa e no modo pedidos; grava o spec.
+//! ambiente, conta) antes de tocar em processo; encerra a antiga e confirma que ela saiu, a árvore inteira;
+//! dá a partida na nova e confirma que ela está viva na conversa e no modo pedidos; grava o spec.
 //! Falha antes de encerrar não muda nada; falha depois volta a sessão pelo spec antigo e o erro sai com
 //! código. O modo vem do spec e do que o Rust observou da sessão, nunca de uma leitura do rodapé feita na
-//! hora: sem modo conhecido, recusa (S-01).
+//! hora: sem modo conhecido, recusa.
 use super::gateway::RuntimeRegistry;
 use super::protocol::RuntimeError;
 use super::terminal::TerminalTarget;
@@ -176,7 +176,7 @@ fn force_kill(left:&[(i64,f64)]) {
 
 /// A política que a CLI aplica ao bypass (`permissions.disableBypassPermissionsMode`), lida antes de
 /// encerrar a vida antiga: a conta, o projeto, a gerenciada da máquina e as escolhas da sessão. Arquivo
-/// ilegível recusa (CRA-066).
+/// ilegível recusa.
 fn bypass_policy(config:&std::path::Path,cwd:&std::path::Path,settings:Option<&Value>,env:&std::collections::BTreeMap<String,String>) -> Result<(),RuntimeError> {
     let forbids=|value:&Value|value["permissions"]["disableBypassPermissionsMode"]=="disable";
     let mut paths=vec![config.join("settings.json"),cwd.join(".claude/settings.json"),cwd.join(".claude/settings.local.json")];
@@ -425,6 +425,18 @@ impl RuntimeRegistry {
         Ok(meta)
     }
 
+    /// Fecha com Esc o menu do limite do Claude Code com terminal, se ele está no rodapé do pane. `Ok(false)`: sem
+    /// terminal (o menu é da TUI) ou sem o menu.
+    pub async fn dismiss_claude_limit_menu(&self,name:&str) -> Result<bool,RuntimeError> {
+        use crate::mods::click::{PaneOp,PaneReply};
+        let Some((_,handle))=self.claude_terminal_entry(name).await else { return Ok(false) };
+        let PaneReply::Screen(screen)=handle.pane(PaneOp::Screen,std::time::Instant::now()+std::time::Duration::from_secs(5)).await? else { return Ok(false) };
+        if !crate::session_write::limit_switch::limit_menu_open(&screen) { return Ok(false); }
+        let reply=handle.control(crate::mods::state::random_hex(16),"navigation_key".into(),json!({"key":"Escape"})).await?;
+        if reply.disposition!=crate::runtime::protocol::Disposition::Accepted { return Err(refused("limit_menu_escape","o Esc não chegou ao menu do limite")); }
+        Ok(true)
+    }
+
     /// O modo que o Rust confirmou por último na conversa (memória dele, sem leitura do rodapé).
     pub fn observed_claude_mode(&self,conversation:&str) -> Option<String> { self.permission_view(conversation).map(|view|view.current) }
 
@@ -459,8 +471,8 @@ impl RuntimeRegistry {
     }
 
     /// `/resume`: a sessão Claude `name` volta na conversa `sid`, que já existe, pelo mesmo caminho das outras
-    /// reaberturas (S-22): a vida nova é montada antes, a antiga sai inteira antes de a nova subir (S-17) e a
-    /// falha volta pelo spec de antes (S-16). O pane sem conversa provada também. `None` = não é Claude daqui.
+    /// reaberturas: a vida nova é montada antes, a antiga sai inteira antes de a nova subir e a
+    /// falha volta pelo spec de antes. O pane sem conversa provada também. `None` = não é Claude daqui.
     pub async fn resume_claude_session(&self,name:&str,sid:&str) -> Option<Result<Reopened,ReopenFailure>> {
         if let Err(error)=self.claude_resume_spec(name).await? {return Some(Err(ReopenFailure::refused(error)));}
         let change=SessionChange { reason:crate::session_open::ChangeReason::Resume,surface:None,account:None,permission_mode:None,
@@ -539,7 +551,7 @@ impl RuntimeRegistry {
             },
             Err(Stop::After(error))=>return Err(self.restore_claude(name,&current,error).await),
         }
-        // Sem terminal, o processo antigo saiu sem gravar o que recebeu: a vida nova responde (S-20).
+        // Sem terminal, o processo antigo saiu sem gravar o que recebeu: a vida nova responde.
         if resume.is_none() && matches!(current.life,Life::Headless{..}) {
             let transcript=super::claude_launch::transcript(&self.codex_environment(),&current.spec,&current.sid);
             if let Err(error)=self.requeue_unanswered(&current.spec.key,transcript).await {
@@ -591,7 +603,7 @@ impl RuntimeRegistry {
                 if checks && view["alive"]==true && view["initialized"]!=true {return Err(busy("erro_sessao_iniciando"));}
                 if checks && (!view["question"].is_null() || view["pending"].as_array().is_some_and(|p|!p.is_empty())) {return Err(busy("erro_sessao_esperando_resposta"));}
                 if checks && view["in_progress"]==true {return Err(busy("erro_sessao_trabalhando"));}
-                // O modo e as escolhas que a CLI mudou sozinha valem (S-02); com motor, o do sidecar.
+                // O modo e as escolhas que a CLI mudou sozinha valem; com motor, o do sidecar.
                 if let Some(mode)=view["permission_mode"].as_str().and_then(PermissionMode::claude) {spec.permission_mode=Some(mode);}
                 if !matches!(spec.account,Account::Engine{..}) {
                     if let Some(model)=view["model"].as_str().filter(|m|!m.is_empty()) {spec.model=Some(model.into());}
@@ -627,7 +639,7 @@ impl RuntimeRegistry {
         spec.surface=Surface::Terminal;
         if !matches!(spec.account,Account::Engine{..}) && let Ok(Some(choices))=super::lifecycle::terminal_choices(&target) {
             if let Some(model)=choices.model.filter(|m|!m.is_empty()) {spec.model=Some(model);}
-            // `ultracode` só existe no `/effort` em voo: a linha de comando não o aceita (S-13).
+            // `ultracode` só existe no `/effort` em voo: a linha de comando não o aceita.
             if let Some(effort)=choices.effort.filter(|e|EFFORTS.contains(&e.as_str())) {spec.effort=Some(effort);}
         }
         let observed=self.permission_view(&target.binding.conversation);
@@ -1011,7 +1023,7 @@ mod tests {
         fn start_time(&self,_:i64) -> Option<f64> { None }
     }
 
-    /// CRA-012: sem ler o ambiente não se sabe se a sessão roda protegida (só leitura) nem em que conta:
+    /// Sem ler o ambiente não se sabe se a sessão roda protegida (só leitura) nem em que conta:
     /// recusa, como o Python, em vez de reabrir fora da proteção.
     #[test]
     fn an_unreadable_environment_refuses_instead_of_guessing_not_read_only() {

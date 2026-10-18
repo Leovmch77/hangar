@@ -16,7 +16,7 @@
 #    --output-format, --help/-h, --version/-V. Wrapping these would open a TUI that never prints.
 #  - resume flags (-S/--session, -c/--continue) -> raw.
 #  - outside tmux + terminal -> `hangar-open kimi …`: the Hangar launcher opens the session and
-#    the terminal attaches to it. An argument the request doesn't cover, or no hangar-server -> raw.
+#    the terminal attaches to it. An argument the request doesn't cover, no hangar-server or no hangar-open -> a tmux session named after the folder.
 #  - already in tmux ($TMUX) / stdin not a tty (pipe/script) -> raw: the hook ticket links the pane.
 #
 # Escape hatch: `command kimi ...` runs the raw binary, bypassing this wrapper.
@@ -72,9 +72,37 @@ kimi() {
         else
             echo "hangar: hangar-open não encontrado; abrindo o kimi sem o Hangar" >&2
         fi
+
+        # Sem o tmux o CLI ficaria invisível pro app: sessão com o nome da pasta, única.
+        # Acento -> ASCII antes do filtro, mesma regra do backend (app/names.py).
+        local base name i ascii run=()
+        base=$(basename "$PWD")
+        if command -v iconv >/dev/null 2>&1; then
+            ascii=$(printf '%s' "$base" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null) \
+                && [ -n "$ascii" ] && base=$ascii
+        fi
+        base=$(printf '%s' "$base" | tr -c 'A-Za-z0-9_-' '-')
+        while [ "${base#-}" != "$base" ]; do base=${base#-}; done
+        while [ "${base%-}" != "$base" ]; do base=${base%-}; done
+        [ -n "$base" ] || base=session
+        name=$base; i=2
+        while tmux has-session -t "=$name" 2>/dev/null; do
+            name="$base-$i"; i=$((i + 1))
+        done
+        # O probe confere que o systemd do usuário aceita scope transiente, não só que o binário existe.
+        if command -v systemd-run >/dev/null 2>&1 && [ -n "${XDG_RUNTIME_DIR:-}" ] \
+           && systemd-run --user --scope --collect -q -- true >/dev/null 2>&1; then
+            run=(systemd-run --user --scope --collect -q --)
+        fi
+        # CP_SESSION_NAME: identidade da sessão pro hangar-send de dentro do pane.
+        # KIMI_CODE_TUI_FULL_SCREEN=1: mesma TUI das sessões que o app abre.
+        "${run[@]}" tmux new-session -s "$name" -c "$PWD" -e "CP_SESSION_NAME=$name" \
+            -e "KIMI_CODE_TUI_FULL_SCREEN=1" \
+            sh -c 'exec kimi "$@"' _ "$@"
+        return
     fi
 
-    # já dentro de tmux, stdin sem tty, ou o Hangar não abriu acima: nada a injetar — o bilhete do
+    # já dentro de tmux ou stdin sem tty: nada a injetar — o bilhete do
     # hook liga o pane à sessão sem nenhuma variável nossa.
     command kimi "$@"
 }

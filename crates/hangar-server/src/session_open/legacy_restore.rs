@@ -229,8 +229,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let program = dir.path().join("tmux");
             let socket = format!("hangar-legacy-{}", std::process::id());
-            std::fs::write(&program, format!("#!/bin/sh\nSHELL=/bin/sh exec tmux -L {socket} -f /dev/null \"$@\"\n")).unwrap();
-            std::fs::set_permissions(&program, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            crate::write_test_executable(&program, format!("#!/bin/sh\nSHELL=/bin/sh exec tmux -L {socket} -f /dev/null \"$@\"\n"));
             Self { program, _dir: dir }
         }
         fn run(&self, args: &[&str]) -> bool { Command::new(&self.program).args(args).status().unwrap().success() }

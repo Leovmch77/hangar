@@ -472,7 +472,7 @@ async fn open_waits_for_launched_cano_to_listen() {
     server.abort();
 }
 
-/// CSH-073: a sessão sem terminal que não sobe grava `headless_nao_subiu` no arquivo dela, como o
+/// A sessão sem terminal que não sobe grava `headless_nao_subiu` no arquivo dela, como o
 /// `_registrar_problema` do Python: a próxima vida (e o restart do backend) ainda mostram o motivo.
 #[tokio::test]
 async fn a_failed_open_is_written_to_the_sidecar() {
@@ -488,7 +488,7 @@ async fn a_failed_open_is_written_to_the_sidecar() {
     assert!(meta["problema"][1].as_str().unwrap_or("").contains("cano_connect"),"{meta}");
 }
 
-/// CSH-066: a religação sem terminal toma a guarda da conta como a abertura: com a conta presa por quem
+/// A religação sem terminal toma a guarda da conta como a abertura: com a conta presa por quem
 /// a troca ou desloga (guarda exclusiva), recusa antes de encerrar o processo.
 #[tokio::test]
 async fn the_headless_relaunch_takes_the_account_guard_like_the_open() {

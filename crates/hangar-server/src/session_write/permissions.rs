@@ -94,7 +94,7 @@ async fn serve(st:Arc<AppState>,peer:SocketAddr,req:Request,set:bool)->Response 
     let mut response=json_response(status,body);cors(&headers,response.headers_mut());response
 }
 /// Bypass fora do ciclo do terminal: a sessão reabre pelo spec já em bypass. A falha depois de encerrar
-/// volta pelo spec de antes (S-21) e diz onde a sessão ficou.
+/// volta pelo spec de antes e diz onde a sessão ficou.
 async fn bypass_reopen(st:&Arc<AppState>,runtime:Arc<crate::runtime::gateway::RuntimeRegistry>,name:&str)->(StatusCode,Value) {
     use crate::session_open::{ChangeReason,PermissionMode,SessionChange};
     let change=SessionChange {reason:ChangeReason::Bypass,surface:None,account:None,permission_mode:Some(PermissionMode::BypassPermissions),model:None,effort:None,service_tier:None};

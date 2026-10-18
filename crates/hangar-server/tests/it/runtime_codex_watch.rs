@@ -298,7 +298,7 @@ async fn an_old_sidecar_without_endpoint_is_relaunched_by_the_rust_and_a_failure
 }
 
 /// O relançamento usa o lançador único da criação: o pane roda o `hangar-codex-tui` com a chave, o
-/// ambiente da sessão por `-e` (cores, Kimi, provedor) e a política explícita do modo gravado (S-56, S-57).
+/// ambiente da sessão por `-e` (cores, Kimi, provedor) e a política explícita do modo gravado.
 #[tokio::test]
 async fn the_relaunch_pane_is_the_creation_launcher_with_the_session_environment() {
     let fx = fixture();
@@ -625,7 +625,7 @@ async fn refused_preconditions_leave_the_terminal_owned_and_untouched() {
     finish(&mut [&mut app,&mut tui]);
 }
 
-/// S-28: o terminal só leitura (bwrap) não vai para sem terminal, onde a proteção não existe; nada morre.
+/// O terminal só leitura (bwrap) não vai para sem terminal, onde a proteção não existe; nada morre.
 #[tokio::test]
 async fn a_read_only_terminal_refuses_to_go_headless_and_kills_nothing() {
     let fx = fixture();
@@ -1286,7 +1286,7 @@ async fn clear_of_a_codex_terminal_of_the_rust_stays_in_the_rust() {
     finish(&mut [&mut app,&mut tui]);
 }
 
-/// CDX-064: sidecar que aponta para uma transferência cujo registro sumiu ou não se lê é erro com código
+/// Sidecar que aponta para uma transferência cujo registro sumiu ou não se lê é erro com código
 /// próprio, como o `RuntimeError` do `list_all` do Python; nunca o "ainda não tem app-server" calado.
 #[tokio::test]
 async fn a_missing_or_corrupt_transfer_record_is_a_visible_error() {
@@ -1315,7 +1315,7 @@ impl hangar_server::share::life::LifeProbe for KeyProbe {
     fn sidecar_exists(&self,_:&str) -> bool { true }
 }
 
-/// CDX-099: a troca de modo do Codex passa pela troca de vida, como o `_durante_troca` do Python: o
+/// A troca de modo do Codex passa pela troca de vida, como o `_durante_troca` do Python: o
 /// convite da sessão segue a vida nova (também quando a troca falha, que pode ter mudado a vida).
 #[tokio::test]
 async fn the_codex_mode_switch_carries_the_invite_to_the_new_life() {
@@ -1348,7 +1348,7 @@ async fn the_codex_mode_switch_carries_the_invite_to_the_new_life() {
     assert_eq!(lives,vec![Some("k:k-new".into())],"o convite foi para a vida nova");
 }
 
-/// T-014 (D-014): na subida o Rust abre sozinho o Codex sem terminal que é dele e tem o que fazer (fila
+/// Na subida o Rust abre sozinho o Codex sem terminal que é dele e tem o que fazer (fila
 /// pendente ou cano vivo), sem o Python pedir; o parado sem pendência
 /// fica fechado e o próximo envio o abre. Nada fica sem dono depois de o Rust voltar.
 #[tokio::test]

@@ -7,6 +7,7 @@ import { Pagina } from '../../src/features/config/Pagina';
 import { PageHeader } from '../../src/features/config/PageHeader';
 import { SectionCard } from '../../src/features/config/SectionCard';
 import { SettingsRow } from '../../src/features/config/SettingsRow';
+import { LastErrorSection } from '../../src/features/config/LastErrorSection';
 import { toast } from '../../src/ui/Toast';
 import { useServers } from '../../src/stores/servers';
 import * as m from '../../src/paraglide/messages';
@@ -59,6 +60,7 @@ export default function Sobre() {
           />
         </SectionCard>
       ) : null}
+      <LastErrorSection />
       <SectionCard icon="Server" title={m.native_settings_about_server_group()}>
         <SettingsRow
           title={m.config_sobre_servidor()}

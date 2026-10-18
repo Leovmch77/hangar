@@ -56,12 +56,11 @@ pub fn prepare(scenario: &Value, root: &Path, repo: &Path) -> std::io::Result<()
     write(&fake_backend(root).join(".venv/bin/python"), b"")?;
     write(&fake_backend(root).join("app/skill_bridge.py"), b"")?;
     write(&bin.join("panes.txt"), panes.as_bytes())?;
-    write(&bin.join("tmux"), b"#!/bin/sh\n[ \"$1\" = list-panes ] || exit 1\ncat \"$(dirname \"$0\")/panes.txt\"\n")?;
-    std::fs::set_permissions(bin.join("tmux"), std::fs::Permissions::from_mode(0o755))?;
+    crate::write_test_executable(&bin.join("tmux"), b"#!/bin/sh\n[ \"$1\" = list-panes ] || exit 1\ncat \"$(dirname \"$0\")/panes.txt\"\n");
     let roots: String = ["hangar", "github-actions"].iter().map(|m| format!("{}\n", repo.join("plugins").join(m).display())).collect();
     write(&root.join("home/.hangar/plugin-dir"), roots.as_bytes())?;
-    write(&bin.join("hangar-conta"), format!("#!/bin/sh\nexec python3 '{}' \"$@\"\n", repo.join("scripts/hangar-conta").display()).as_bytes())?;
-    std::fs::set_permissions(bin.join("hangar-conta"), std::fs::Permissions::from_mode(0o755))
+    crate::write_test_executable(&bin.join("hangar-conta"), format!("#!/bin/sh\nexec python3 '{}' \"$@\"\n", repo.join("scripts/hangar-conta").display()));
+    Ok(())
 }
 
 /// O que o harness grava, na forma do lado Python.
@@ -182,6 +181,7 @@ impl OpenFacts for Facts {
     }
     fn account_mode(&self, config_dir: Option<&str>) -> Result<Option<String>, String> { self.local.account_mode(config_dir) }
     fn name_in_use(&self, name: &str) -> Result<bool, OpenError> { self.local.name_in_use(name) }
+    fn name_has_leftovers(&self, name: &str) -> Result<bool, OpenError> { self.local.name_has_leftovers(name) }
     fn transfer_busy(&self, name: &str) -> Result<bool, OpenError> { self.local.transfer_busy(name) }
     fn real_path(&self, path: &str) -> PathBuf { self.local.real_path(path) }
     fn new_key(&self) -> String { self.local.new_key() }

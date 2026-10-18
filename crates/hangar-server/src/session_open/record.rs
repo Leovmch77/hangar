@@ -76,7 +76,7 @@ pub fn read(home: &Path, key: &str) -> io::Result<Option<SessionSpec>> {
 
 /// O spec que vale para reabrir a sessão viva `name`: o registro dela (pela `key` do sidecar), senão
 /// o montado do sidecar. No Codex o modo que o `hangar-codex-tui` gravou por último no sidecar (só
-/// valor válido) vence o da criação: o estado observado vale, como no S-02 do Claude.
+/// valor válido) vence o da criação: o estado observado vale, como no Claude.
 pub fn live(home: &Path, name: &str) -> io::Result<Option<SessionSpec>> {
     let Some(sidecar) = from_sidecars(home, name)? else { return Ok(None) };
     let Some(mut spec) = read(home, &sidecar.key)? else { return Ok(Some(sidecar)) };
@@ -90,7 +90,7 @@ pub fn live(home: &Path, name: &str) -> io::Result<Option<SessionSpec>> {
 fn text(meta: &Value, key: &str) -> Option<String> { meta[key].as_str().filter(|s| !s.is_empty()).map(str::to_owned) }
 
 /// O spec que relança o Claude sem terminal: o sidecar manda no que ele guarda (o modo, o modelo e o
-/// esforço que a CLI mudou sozinha, S-02; a conta trocada), e o registro da `key` traz o que só ele tem
+/// esforço que a CLI mudou sozinha; a conta trocada), e o registro da `key` traz o que só ele tem
 /// (escolhas de plugins e skills, worktree, criadora, de onde veio a conta).
 pub fn claude_live(home: &Path, meta: &Value, name: &str) -> io::Result<SessionSpec> {
     let mut spec = claude_from_meta(meta, name, 0.0)?;
@@ -164,7 +164,7 @@ pub fn from_sidecars(home: &Path, name: &str) -> io::Result<Option<SessionSpec>>
         surface: if meta["headless"] == true { Surface::Headless } else { Surface::Terminal },
         account: Account::Codex { account_id: text(&meta, "codex_account").unwrap_or_else(|| "default".into()) },
         account_source: AccountSource::Explicit, model: text(&meta, "model"), effort: text(&meta, "effort"), service_tier: tier(&meta),
-        // Modo gravado fora da lista fica ausente: quem reabre recusa em vez de abrir em Full Access (S-05).
+        // Modo gravado fora da lista fica ausente: quem reabre recusa em vez de abrir em Full Access.
         permission_mode: text(&meta, "permission_mode").as_deref().and_then(PermissionMode::codex),
         subagent_model: None, customizations: None, jev: meta["jev"] == true, read_only: meta["read_only"] == true,
         worktree: None, creator: None, created_at: created(&codex_path), conversation: text(&meta, "thread_id"),

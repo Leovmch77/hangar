@@ -3,8 +3,13 @@ import { configureApi, _resetRotasForTests, decidirRota, baseOf, type Server } f
 import { hmacSha256Hex } from '../../../../packages/core/src/hmac';
 import { importMachines, discoverSavedMachines } from './importMachines';
 import { useServers } from '../../stores/servers';
+import { prefs } from '../../stores/prefs';
 
-const mocks = vi.hoisted(() => ({ vault: new Map<string, string>(), fetch: vi.fn(), warning: vi.fn() }));
+const mocks = vi.hoisted(() => ({ vault: new Map<string, string>(), fetch: vi.fn(), warning: vi.fn(), prefs: new Map<string, string>() }));
+vi.mock('react-native-mmkv', () => ({ createMMKV: () => ({
+  getString: (key: string) => mocks.prefs.get(key),
+  set: (key: string, value: string) => { mocks.prefs.set(key, value); },
+}) }));
 vi.mock('expo-secure-store', () => ({
   getItemAsync: async (key: string) => mocks.vault.get(key) ?? null,
   setItemAsync: async (key: string, value: string) => { mocks.vault.set(key, value); },
@@ -21,7 +26,7 @@ function deferred<T>() { let resolve!: (v: T) => void; const promise = new Promi
 const settle = () => new Promise<void>((r) => setImmediate(r));
 
 beforeEach(async () => {
-  mocks.vault.clear(); mocks.fetch.mockReset(); mocks.warning.mockClear(); _resetRotasForTests();
+  mocks.vault.clear(); mocks.prefs.clear(); mocks.fetch.mockReset(); mocks.warning.mockClear(); _resetRotasForTests();
   mocks.vault.set('cp_servers_v1', JSON.stringify({ servers: [owner, other], activeId: other.id }));
   useServers.setState({ servers: [], activeId: null });
   await useServers.getState().load();
@@ -42,6 +47,54 @@ function network(extra: (url: string, init: RequestInit) => Response | Promise<R
     return json({}, 404);
   });
 }
+
+describe('aviso somente de máquina nova não confirmada', () => {
+  test.each([401, 503, 'network', 'abort', 'timeout'] as const)('falha %s da fonte salva fica silenciosa e preserva o motivo', async (failure) => {
+    network((url) => {
+      if (!url.endsWith('/api/peers/app-list')) return undefined;
+      if (typeof failure === 'number') return json({}, failure);
+      if (failure === 'network') throw new TypeError('fixture-network');
+      throw new DOMException('fixture-stop', failure === 'abort' ? 'AbortError' : 'TimeoutError');
+    });
+    const result = await discoverSavedMachines();
+    expect(result.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stage: 'source_app_list', machine: 'owner.test',
+        ...(typeof failure === 'number' ? { status: failure } : {}) }),
+    ]));
+    expect(mocks.warning).not.toHaveBeenCalled();
+    expect(useServers.getState().servers).toEqual([owner, other]);
+  });
+
+  test('falha da nova candidata avisa uma vez por máquina, mesmo mudando status', async () => {
+    let status = 503;
+    network((url) => {
+      if (url === `${owner.baseUrl}/api/peers/app-list`) return json({ rev: 'r1', servers: [
+        { id: remote.id, label: remote.label, address: remote.baseUrl, token: remote.token },
+      ] });
+      if (url.startsWith(remote.baseUrl)) return json({}, status);
+      return undefined;
+    });
+    await discoverSavedMachines([owner]);
+    status = 504;
+    await discoverSavedMachines([owner]);
+    expect(mocks.warning).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(mocks.warning.mock.calls)).toContain('remote.test');
+    expect(prefs.getString('cp_machine_discovery_warned')).toContain('remote.test');
+    expect(prefs.getString('cp_machine_discovery_warned')).not.toContain(remote.token);
+  });
+
+  test('aviso já persistido não reaparece na próxima abertura', async () => {
+    prefs.set('cp_machine_discovery_warned', JSON.stringify(['remote.test']));
+    network((url) => {
+      if (url === `${owner.baseUrl}/api/peers`) return json([{ id: remote.id, base_url: remote.baseUrl }]);
+      if (url.endsWith('/remote/token')) return json({}, 503);
+      return undefined;
+    });
+    const result = await discoverSavedMachines([owner]);
+    expect(result.issues).toContainEqual({ stage: 'peer_token', status: 503, machine: 'remote.test', source: 'owner.test' });
+    expect(mocks.warning).not.toHaveBeenCalled();
+  });
+});
 
 describe('política de redirecionamento da candidata', () => {
   test.each(['/api/sessions', '/api/peers/identificador'])('fetch recusando redirect em %s retorna falha sem guardar candidata', async (path) => {
@@ -91,8 +144,7 @@ describe('identidades confirmadas das máquinas', () => {
     expect(stored().servers[0].lan).toEqual({ id: 'owner-machine', url: 'http://192.168.0.5:8765' });
     expect(useServers.getState().servers).toHaveLength(2);
     expect(useServers.getState().activeId).toBe(other.id);
-    expect(JSON.stringify(mocks.warning.mock.calls)).toContain(host);
-    expect(JSON.stringify(mocks.warning.mock.calls)).not.toContain(owner.token);
+    expect(mocks.warning).not.toHaveBeenCalled();
   });
   test('origem retornando por alias é identificada antes da candidata e sobrevive a nova hidratação sem duplicar', async () => {
     const original = { ...owner, label: 'fixture-custom-owner', disabled: true };
@@ -173,35 +225,31 @@ describe('identidades confirmadas das máquinas', () => {
     expect(useServers.getState().servers.find((s) => s.id === owner.id)?.lan).toBeUndefined();
   });
 
-  test('avisos automáticos iguais aparecem uma vez sem retirar issues, e outra máquina ou status avisa', async () => {
+  test('falha repetida de fonte conserva detalhes sem aviso, mesmo mudando status', async () => {
     let status = 502;
     network((url) => url.endsWith('/api/peers') ? json({ detail: 'never-show-secret' }, status) : undefined);
     const first = await discoverSavedMachines([owner]);
     const second = await discoverSavedMachines([owner]);
     expect(first.issues).toEqual([{ stage: 'source_peers', status: 502, machine: 'owner.test' }]);
     expect(second.issues).toEqual(first.issues);
-    expect(mocks.warning).toHaveBeenCalledTimes(1);
+    expect(mocks.warning).not.toHaveBeenCalled();
     await discoverSavedMachines([other]);
-    expect(mocks.warning).toHaveBeenCalledTimes(2);
+    expect(mocks.warning).not.toHaveBeenCalled();
     status = 504;
     await discoverSavedMachines([owner]);
-    expect(mocks.warning).toHaveBeenCalledTimes(3);
+    expect(mocks.warning).not.toHaveBeenCalled();
   });
 });
 
 describe('descoberta autenticada só acrescenta', () => {
-  test('busca automática avisa brevemente em canal separado sem perder detalhes da falha', async () => {
+  test('busca automática conserva a falha da fonte sem tratá-la como máquina nova', async () => {
     const source = { ...owner, baseUrl: 'https://automatic-warning.test' };
     network((url) => url === `${source.baseUrl}/api/peers` ? json({}, 503) : undefined);
 
     const result = await discoverSavedMachines([source]);
 
     expect(result.issues).toEqual([{ stage: 'source_peers', status: 503, machine: 'automatic-warning.test' }]);
-    expect(mocks.warning).toHaveBeenCalledTimes(1);
-    const [message, options] = mocks.warning.mock.calls[0];
-    expect(message).toContain('automatic-warning.test');
-    expect(options.duration).toBeLessThanOrEqual(3_500);
-    expect(options.toasterId).toBe('passive');
+    expect(mocks.warning).not.toHaveBeenCalled();
   });
 
   test.each(['source', 'peer', 'candidate'] as const)('identifica duas falhas 403 distintas no aviso de %s sem corpo, caminho ou token', async (kind) => {
@@ -227,8 +275,11 @@ describe('descoberta autenticada só acrescenta', () => {
       status: 403, machine, ...(kind === 'peer' ? { source: 'owner.test' } : {}),
     }))));
     const warning = JSON.stringify(mocks.warning.mock.calls);
-    for (const machine of expected) expect(warning).toContain(machine);
-    if (kind === 'peer') expect(warning).toContain('owner.test');
+    if (kind === 'source') expect(mocks.warning).not.toHaveBeenCalled();
+    else {
+      for (const machine of expected) expect(warning).toContain(machine);
+      expect(warning).not.toContain('owner.test');
+    }
     expect(warning).not.toContain('private-path'); expect(warning).not.toContain('secret'); expect(warning).not.toContain('leaked');
   });
   test('tenta o token do peer quando app-list trouxe uma credencial antiga da mesma máquina', async () => {
@@ -245,7 +296,7 @@ describe('descoberta autenticada só acrescenta', () => {
     expect(result.added).toEqual([{ ...remote, label: 'real-machine', lan: { id: 'real-machine', url: '' } }]);
     expect(useServers.getState().servers.filter((s) => s.baseUrl === remote.baseUrl)).toHaveLength(1);
     expect(result.issues).toContainEqual({ stage: 'candidate', status: 401, machine: 'remote.test' });
-    expect(mocks.warning).toHaveBeenCalled();
+    expect(mocks.warning).not.toHaveBeenCalled();
   });
 
   test('duas fontes com tokens diferentes para a mesma máquina não perdem a credencial válida', async () => {
@@ -316,7 +367,7 @@ describe('descoberta autenticada só acrescenta', () => {
     expect(result.added).toEqual([{ ...remote, label: 'real-machine', disabled: true, lan: { id: 'real-machine', url: '' } }]);
     expect(result.issues).toContainEqual({ stage: 'invalid_item', machine: 'owner.test' });
     expect(paths().some((url) => url.includes('/token') || url.startsWith('https://guest.test') || url.startsWith('http://[::1]'))).toBe(false);
-    expect(mocks.warning).toHaveBeenCalled();
+    expect(mocks.warning).not.toHaveBeenCalled();
   });
 
   test('falhas independentes de fonte, token e candidata continuam e avisam sem expor corpo/credencial', async () => {

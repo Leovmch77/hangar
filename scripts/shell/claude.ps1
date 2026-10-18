@@ -3,7 +3,8 @@
 # Faz todo `claude` interativo aberto no terminal nascer como sessao do Hangar, igual as do app:
 # fora do multiplexador, o lancador do Hangar (`hangar-server open`) abre a sessao no psmux e o
 # terminal anexa nela. --session-id/--resume/-c/--continue, modo -p, entrada redirecionada, ja
-# dentro do psmux, argumento que o pedido nao cobre ou sem hangar-server -> claude cru.
+# dentro do psmux ou subcomando -> claude cru; argumento que o pedido nao cobre ou sem
+# hangar-server -> sessao no psmux com o nome da pasta.
 #
 # Instalado pelo install.ps1, que adiciona um bloco marcado no $PROFILE chamando este arquivo.
 # Compativel com Windows PowerShell 5.1 (nada de operador ternario nem API de .NET Core).
@@ -63,7 +64,7 @@ function claude {
     # Fora do multiplexador e interativo: a sessao nasce pelo lancador do Hangar
     # (`hangar-server open`), igual as do app, e o terminal anexa nela. Mesmas regras do
     # claude.posix.sh / scripts/hangar-open: argumento que o pedido nao cobre, ou sem
-    # hangar-server -> claude cru abaixo; recusa -> erro, sem segunda abertura.
+    # hangar-server -> sessao no psmux abaixo; recusa -> erro, sem segunda abertura.
     if (-not $env:TMUX -and -not $modoPrint -and -not [Console]::IsInputRedirected) {
         $pedido = [ordered]@{ provider = 'claude'; cwd = (Get-Location).ProviderPath; headless = $false }
         if ($env:CLAUDE_CONFIG_DIR) { $pedido.config_dir = $env:CLAUDE_CONFIG_DIR }
@@ -147,10 +148,40 @@ function claude {
                 }
             }
         }
+
+        # O Hangar nao abriu: sem o psmux o claude ficaria invisivel pro app. Subcomando roda cru.
+        if ($args.Count -eq 0 -or $subcomandos -cnotcontains [string]$args[0]) {
+            # Sessao com o nome da pasta, unica. FormD + descarte da marca = acento vira ASCII,
+            # mesma regra do backend (app/names.py).
+            $base = Split-Path -Leaf (Get-Location).ProviderPath
+            $base = -join ($base.Normalize([Text.NormalizationForm]::FormD).ToCharArray() | Where-Object {
+                [Globalization.CharUnicodeInfo]::GetUnicodeCategory($_) -ne 'NonSpacingMark'
+            })
+            $base = ($base -replace '[^A-Za-z0-9_-]', '-').Trim('-')
+            if (-not $base) { $base = 'session' }
+            $nome = $base; $n = 2
+            while ($true) {
+                # `=`: match exato; sem ele "proj-2" viva responderia por "proj".
+                tmux has-session -t "=$nome" 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) { break }
+                $nome = "$base-$n"; $n++
+            }
+            # So com a variavel: no psmux o pane herda o ambiente de quem chama, e
+            # CLAUDE_CONFIG_DIR apontando pro padrao faria o Claude ler o .claude.json errado.
+            if ($env:CLAUDE_CONFIG_DIR) { $cfg = @('-e', "CLAUDE_CONFIG_DIR=$($env:CLAUDE_CONFIG_DIR)") }
+            else { $cfg = @() }
+            # CP_SESSION_NAME: identidade da sessao pro hangar-send de dentro do pane.
+            $cmd = @('tmux', 'new-session', '-s', $nome, '-c', (Get-Location).ProviderPath,
+                     '-e', 'COLORTERM=truecolor', '-e', 'CLAUDE_CODE_TMUX_TRUECOLOR=1',
+                     '-e', "CP_SESSION_NAME=$nome") +
+                   $cfg + $pre + @('claude', '--session-id', $id) + $plug + $args
+            $r = @($cmd[1..($cmd.Count - 1)])
+            & $cmd[0] @r
+            return
+        }
     }
 
-    # Claude cru com o id: ja dentro do multiplexador, modo -p, entrada redirecionada, ou o Hangar
-    # nao abriu acima.
+    # Claude cru com o id: ja dentro do multiplexador, modo -p, entrada redirecionada ou subcomando.
     $env:COLORTERM = 'truecolor'; $env:CLAUDE_CODE_TMUX_TRUECOLOR = '1'
     if ($pre.Count -eq 0) { & $claudeExe --session-id $id @plug @args }
     else { $r = @($pre[1..($pre.Count - 1)]) + @('claude', '--session-id', $id) + $plug + $args

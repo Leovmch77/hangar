@@ -333,9 +333,18 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   - Ícone Lucide novo ganha SF Symbol em `src/ui/sfSymbols.ts` quando houver um de mesmo sentido.
   - Texto ao vivo (prévia) publica no máximo a cada ~50 ms; nunca um render por token.
   - Composer e ChatHeader ficam em `memo` com callbacks estáveis; quem lê a prévia é só quem a desenha.
-  - Animação contínua para fora da tela e com a gaveta fechada, e roda a no máximo ~20 fps.
+  - Animação contínua para fora da tela e com a gaveta fechada. Na thread de UI, sem trabalho
+    por quadro no JS, acompanha a taxa da tela; animação que passa pelo JS fica em no máximo ~20 fps.
   - Lista, folha e vidro escondidos não montam: nascem na primeira abertura.
   - Linha que não mudou mantém o mesmo objeto (store e lista): evento novo não redesenha as outras.
+- **App mobile chega por OTA (expo-updates), canal `preview`, iOS e Android.** Mudança só de
+  JavaScript/assets em `mobile/`, `packages/core` ou `messages/` vai por OTA, sem build: o workflow
+  `Mobile OTA` publica sozinho quando entra na main (`[skip ota]` no commit pula). À mão, de
+  `mobile/`: `EXPO_TOKEN=… npx eas-cli@latest update --channel preview --environment preview
+  --platform all --message "…"`. Mudança nativa (pacote com código nativo, permissão, plugin,
+  versão do Expo) não vai por OTA: sobe `runtimeVersion` (`native-N`) no `mobile/app.json` e gera
+  binário novo (iOS: `ios-dev.yml` Release + SideStore; Android: `eas build --profile preview`).
+  Nunca publicar OTA de um push que falhou. Passo a passo em `mobile/README.md`.
 
 ### Harnesses — Claude, Codex, Pi, omp, Kimi → [`docs/decisoes/harnesses.md`](docs/decisoes/harnesses.md)
 

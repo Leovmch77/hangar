@@ -449,7 +449,7 @@ impl Watcher {
     }
 
     /// O spec gravado acompanha a troca (passo 4 da `SessionChange`): a superfície e o que a sessão tem
-    /// agora no sidecar (o modo que o lançador gravou vence, T-003). Falha não desfaz a troca, que já
+    /// agora no sidecar (o modo que o lançador gravou vence). Falha não desfaz a troca, que já
     /// valeu; aparece no log com o código.
     async fn remember_switch(&self,name:&str) {
         use crate::session_open::{ChangeReason,SessionChange,record};
@@ -495,7 +495,7 @@ impl Watcher {
     }
 
     /// O pane do terminal pelo lançador único, o mesmo da criação: a receita sai do sidecar desta vida
-    /// (modo gravado, nunca Full Access calado) e o só leitura do registro volta com ela (S-28). Montado
+    /// (modo gravado, nunca Full Access calado) e o só leitura do registro volta com ela. Montado
     /// antes de mexer em processo: lançador ausente ou envelope que não sobe recusam com tudo intacto.
     async fn terminal_pane(&self,registry:&RuntimeRegistry,name:&str,key:&str,meta:&Meta) -> Result<PaneSpec,RuntimeError> {
         use crate::session_open::codex;
@@ -540,7 +540,7 @@ impl Watcher {
         let EntryHandle::CodexTerminal { target,handle,cell } = found.handle else { return Err(gone()) };
         let meta = self.load(name).await.filter(|meta|terminal::text(meta,"key") == Some(target.key.as_str())).ok_or_else(gone)?;
         let mut view = self.preconditions(registry,&handle,&meta,false).await?;
-        // S-28: sem terminal não há o envelope do só leitura; a sessão protegida fica no terminal.
+        // Sem terminal não há o envelope do só leitura; a sessão protegida fica no terminal.
         let marked = match terminal::pid(&meta,"app_pid").map(i64::from) {
             Some(pid)=>tokio::task::spawn_blocking(move||SystemProcs::default().env_var(pid,"HANGAR_ORQ_READ_ONLY")).await.map_err(|_|job())?
                 .map_err(|_|refuse("Não consegui ler o ambiente do terminal (só leitura); a sessão foi mantida."))?.is_some_and(|v|v == "1"),

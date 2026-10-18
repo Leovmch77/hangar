@@ -33,6 +33,7 @@ export const Animated = {
 };
 export const Linking = { openURL: (_url: string) => Promise.resolve() };
 export const Platform = { OS: 'android', select: (x: any) => x.android ?? x.default };
+export const BackHandler = { addEventListener: () => ({ remove() {} }), exitApp() {} };
 export const TextInput = (props: any) => React.createElement('textarea', domProps(props));
 export const TurboModuleRegistry = { get: () => null };
 export const StyleSheet = { create: (x: any) => x, flatten: (x: any) => x };

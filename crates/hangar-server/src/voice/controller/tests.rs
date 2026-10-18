@@ -1116,14 +1116,14 @@ async fn open_session_passes_what_the_user_said_and_leaves_the_mode_to_the_accou
     assert_eq!((created[1]["permission_mode"].as_str(), created[1]["headless"].as_bool(), created[1]["config_dir"].as_str()),
         (Some("plan"), Some(true), Some("/h/.claude-b")));
     // Sem escolha, o corpo é o da tela de criação sem toque: modelo e esforço nulos (vale o settings.json da conta),
-    // e execução, conta e modo ausentes (o backend aplica `headless_default`, a conta com cota e o modo da conta, D-010).
+    // e execução, conta e modo ausentes (o backend aplica `headless_default`, a conta com cota e o modo da conta).
     assert!(created[2]["model"].is_null() && created[2]["effort"].is_null(), "{}", created[2]);
     for key in ["headless", "config_dir", "engine", "permission_mode"] {
         assert!(created[2].get(key).is_none(), "{key}: {}", created[2]);
     }
 }
 
-/// D-003: a troca de conta perto do limite é dita, como nas telas de criação, com ou sem troca de tela.
+/// A troca de conta perto do limite é dita, como nas telas de criação, com ou sem troca de tela.
 #[tokio::test]
 async fn open_session_says_the_account_switch_warning() {
     let aviso = "A conta b estava em 96%; a sessão nasceu na conta c.";

@@ -1,12 +1,16 @@
-import { useEffect, useState } from 'react';
-import { Pressable, ScrollView, Text, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { ScrollView, Text, TextInput, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
-import { sortSessions } from '@hangar/core';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import type { AggSession } from '@hangar/core';
 import { Sheet } from '../ui/Sheet';
-import { StateDot } from '../ui/StateDot';
+import { superficie } from '../theme/superficie';
 import { useSessions } from '../stores/sessions';
+import { SessionRow } from '../features/sessions/SessionRow';
+import { SessionSectionCard, SessionSectionHeader } from '../features/sessions/SessionSection';
+import { buildSessionSections, sessionGroupKey } from '../features/sessions/sessionSections';
 import * as m from '../paraglide/messages';
 
 // Trocar de sessão sem voltar pra lista. `replace` e não `push`: empilhar chats faria o voltar
@@ -26,10 +30,9 @@ export function SessionPickerSheet({
   const [shown, setShown] = useState(open);
   if (open && !shown) setShown(true);
   useEffect(() => {
-    if (!open) return;
-    const release = useSessions.getState().retain();
-    return () => release();
-  }, [open]);
+    if (!shown) return;
+    return useSessions.getState().retain();
+  }, [shown]);
 
   return (
     <Sheet open={open} sizes={['medium', 'large']} onDismiss={() => { setShown(false); onClose(); }} scrollable>
@@ -40,52 +43,84 @@ export function SessionPickerSheet({
 
 function PickerList({ onClose, atual, serverId }: { onClose: () => void; atual: string; serverId: string }) {
   const { theme } = useUnistyles();
+  const insets = useSafeAreaInsets();
   const router = useRouter();
   const rows = useSessions((s) => s.rows);
-  const ordenadas = sortSessions(rows) as AggSession[];
+  const byServer = useSessions((s) => s.byServer);
+  const loading = useSessions((s) => s.loading);
+  const machineStatus = byServer.filter((bucket) => bucket.server.inviteEnded || bucket.error || !bucket.loaded);
+  const effectiveLoading = byServer.length
+    ? byServer.some((bucket) => !bucket.server.inviteEnded && !bucket.loaded && !bucket.error)
+    : loading;
+  const [query, setQuery] = useState('');
+  const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(() => new Set());
+  const search = query.trim().toLowerCase();
+  const liveRows = useMemo(() => rows.filter((s) => s.state !== 'dead'), [rows]);
+  const groups = useMemo(() => {
+    const current = liveRows.find((s) => s.name === atual && s.serverId === serverId);
+    const currentServer = current?.outside?.localServerId ?? serverId;
+    return buildSessionSections(liveRows, 'server', search, collapsedGroups, currentServer);
+  }, [liveRows, atual, serverId, search, collapsedGroups]);
+  const multipleServers = useMemo(() => new Set(liveRows.map((s) => s.serverId)).size > 1, [liveRows]);
+  const toggleGroup = useCallback((id: string) => setCollapsedGroups((current) => {
+    const next = new Set(current);
+    const key = sessionGroupKey('server', id);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    return next;
+  }), []);
+  const selectSession = useCallback((session: AggSession) => {
+    if (session.name === atual && session.serverId === serverId) return;
+    onClose();
+    router.replace(`/s/${session.serverId}/${session.name}` as never);
+  }, [atual, serverId, onClose, router]);
 
   return (
-    <ScrollView contentContainerStyle={styles.inner}>
+    <KeyboardAvoidingView behavior="padding" automaticOffset style={styles.container}>
+    <ScrollView style={styles.container}
+      contentContainerStyle={[styles.inner, { paddingBottom: insets.bottom + theme.base.space[3] }]}
+      keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
       <Text style={[styles.title, { color: theme.tokens.text.primary }]}>{m.sessao_trocar_de()}</Text>
-      {ordenadas.map((s) => (
-        <Pressable
-          key={`${s.serverId}::${s.name}`}
-          onPress={() => {
-            onClose();
-            router.replace(`/s/${s.serverId}/${s.name}` as never);
-          }}
-          style={styles.item}
-          accessibilityRole="button"
-          accessibilityLabel={s.name}
-          accessibilityState={{ selected: s.name === atual && s.serverId === serverId }}
-        >
-          <StateDot state={s.state} />
-          <Text
-            style={[styles.nome, { color: theme.tokens.text.primary, fontWeight: s.name === atual && s.serverId === serverId ? '700' : '500' }]}
-            numberOfLines={1}
-          >
-            {s.name}
-          </Text>
-          <Text style={[styles.servidor, { color: theme.tokens.text.muted }]} numberOfLines={1}>
-            {s.serverLabel}
-          </Text>
-        </Pressable>
-      ))}
+      {liveRows.length > 8 || query ? <TextInput
+        value={query}
+        onChangeText={setQuery}
+        placeholder={m.switcher_buscar_sessao()}
+        accessibilityLabel={m.switcher_buscar_sessao()}
+        placeholderTextColor={theme.tokens.text.muted}
+        autoCapitalize="none"
+        autoCorrect={false}
+        returnKeyType="search"
+        style={[styles.search, { color: theme.tokens.text.primary, backgroundColor: superficie(theme, 0.6) }]}
+      /> : null}
+      {machineStatus.map((bucket) => <Text key={bucket.server.id}
+        accessibilityRole={bucket.error ? 'alert' : undefined}
+        style={[styles.meta, { color: bucket.error ? theme.tokens.status.error : theme.tokens.text.muted }]}>
+        {bucket.server.inviteEnded ? `${bucket.server.label}: ${m.convite_encerrado()}`
+          : bucket.error === 'offline' ? m.lista_servidor_offline({ label: bucket.server.label })
+          : `${bucket.server.label}: ${bucket.error || m.lista_carregando()}`}
+      </Text>)}
+      {effectiveLoading && !machineStatus.length ? <Text style={[styles.meta, { color: theme.tokens.text.muted }]}>{m.lista_carregando()}</Text> : null}
+      {!groups.length && !effectiveLoading && machineStatus.every((bucket) => bucket.server.inviteEnded) ? <Text style={[styles.meta, { color: theme.tokens.text.muted }]}>
+        {search ? m.lista_vazia_filtro() : m.lista_nenhuma_ativa()}
+      </Text> : null}
+      {groups.map((group) => <View key={group.id}>
+        <SessionSectionHeader section={group} onToggle={toggleGroup} />
+        {group.data.map((session, index) => <SessionSectionCard key={`${session.serverId}::${session.name}`} index={index} total={group.data.length}>
+          <SessionRow session={session} compact
+            selected={session.name === atual && session.serverId === serverId}
+            mostrarServidor={!!session.outside || (multipleServers && group.id.startsWith('state:'))}
+            onPress={selectSession} />
+        </SessionSectionCard>)}
+      </View>)}
     </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
-  inner: { gap: theme.base.space[1], padding: theme.base.space[3] },
+  container: { flex: 1 },
+  inner: { padding: theme.base.space[3] },
   title: { fontSize: theme.base.text.base, fontWeight: '600', marginBottom: theme.base.space[2] },
-  item: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.base.space[3],
-    minHeight: 48,
-    paddingHorizontal: theme.base.space[2],
-    borderRadius: theme.base.radius.md,
-  },
-  nome: { flex: 1, fontSize: theme.base.text.base },
-  servidor: { fontSize: theme.base.text.xs, maxWidth: 120 },
+  search: { fontSize: theme.base.text.sm, minHeight: 44, paddingHorizontal: theme.base.space[3], borderRadius: theme.base.radius.md, marginBottom: theme.base.space[2] },
+  meta: { fontSize: theme.base.text.xs, flexShrink: 1 },
 }));

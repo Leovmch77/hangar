@@ -126,6 +126,16 @@ function newId(): string {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
+// Nome de quem deixou o campo em branco, pela regra das outras telas e do servidor (pasta, depois pasta-2). A lista
+// só evita um nome já visível: o backend arbitra. `known` diz se ela respondeu.
+export async function autoSessionName(server: Server, cwd: string, refused: Iterable<string> = []): Promise<{ name: string; known: boolean }> {
+  let taken = new Set<string>();
+  let known = true;
+  try { taken = new Set((await fetchSessionsForServer(server)).map((s) => s.name)); } catch { known = false; }
+  for (const name of refused) taken.add(name);
+  return { name: uniqueSessionName(basename(cwd), taken), known };
+}
+
 // Processo reaberto: creating/sending não voltam a disparar POST, viram incertos.
 export function restoreAttempt(serverId: string): FirstConversationAttempt | null {
   const raw = prefs.getString(KEY(serverId));
@@ -166,14 +176,8 @@ async function runCreate(serverId: string, input: NewConversationInput, retried 
   // Nome escolhido pela pessoa não ganha sufixo: conflito volta como 409 e ela decide.
   const explicit = input.body.name?.trim();
   const id = newId();
-  // O nome automático é o das outras telas; o backend ainda arbitra o conflito, a lista só evita um nome já visível.
-  let taken = new Set<string>();
-  if (!explicit) {
-    try { taken = new Set((await fetchSessionsForServer(server)).map((s) => s.name)); } catch { /* backend decide */ }
-    // Nome automático já recusado não volta: sem a lista, o mesmo nome seria recusado a cada envio.
-    for (const name of refusedNames.get(serverId) ?? []) taken.add(name);
-  }
-  const finalName = explicit || uniqueSessionName(basename(input.body.cwd), taken);
+  // Nome automático já recusado não volta: sem a lista, o mesmo nome seria recusado a cada envio.
+  const finalName = explicit || (await autoSessionName(server, input.body.cwd, refusedNames.get(serverId) ?? [])).name;
   // Branch nova sem nome digitado segue o nome final da sessão, só conhecido aqui, com a limpeza que o
   // backend faz no nome: o digitado pode ter espaço e acento.
   const draft: FirstConversationAttempt = Object.assign({

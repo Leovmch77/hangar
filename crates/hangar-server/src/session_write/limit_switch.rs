@@ -1,4 +1,4 @@
-//! D-002: a sessão Claude que para no limite de uso da conta reabre sozinha na conta de mais folga, pela
+//! A sessão Claude que para no limite de uso da conta reabre sozinha na conta de mais folga, pela
 //! mesma reabertura do `/conta`, e recebe pela fila um recado para continuar de onde parou.
 use std::collections::BTreeMap;
 use std::sync::{Arc,Mutex};
@@ -125,6 +125,15 @@ pub trait Host: Send + Sync {
     /// O recado para continuar, pelo mesmo `/input` do app, depois da reabertura e da fila solta: a vida nova
     /// o recebe como mensagem dela. `Ok(true)`: entregue; `Ok(false)`: na fila dela, esperando a vez.
     fn send_continue<'a>(&'a self,name:&'a str) -> BoxFuture<'a,Result<bool,String>>;
+    /// Fecha com Esc o menu do Claude Code ao bater o limite, se ele está na tela. `Ok(true)`: fechou.
+    fn dismiss_limit_menu<'a>(&'a self,name:&'a str) -> BoxFuture<'a,Result<bool,String>>;
+}
+
+/// O menu "What do you want to do?" do Claude Code ao bater o limite, no rodapé do pane.
+pub fn limit_menu_open(screen:&str) -> bool {
+    // Só o rodapé: o menu que subiu com a conversa já foi respondido.
+    let tail:Vec<&str> = screen.trim_end().lines().rev().take(12).collect();
+    tail.iter().any(|line|line.contains("What do you want to do?")) && tail.iter().any(|line|line.contains("Stop and wait for limit to reset"))
 }
 
 #[derive(Debug,PartialEq)]
@@ -170,8 +179,15 @@ impl Switcher {
             match host.reopen(&hit.name,&spec,&path).await {
                 Reopen::NotRust=>break Outcome::Stayed("limit_switch_not_rust"),
                 Reopen::Failed(code)=>break Outcome::Failed(code),
-                Reopen::Busy(code) if tries >= BUSY_TRIES=>break Outcome::Busy(code),
-                Reopen::Busy(_)=>{
+                Reopen::Busy(code)=>{
+                    host.diary(&hit.name,&super::input::diary_code(&format!("limit_switch_busy:{code}")),"limite de uso: a sessão recusou a reabertura por estar ocupada; a troca tenta de novo");
+                    if tries >= BUSY_TRIES { break Outcome::Busy(code); }
+                    // Parada no menu do limite, a sessão recusaria até a pessoa responder: o Esc é o Cancelar dele.
+                    match host.dismiss_limit_menu(&hit.name).await {
+                        Ok(true)=>host.diary(&hit.name,"limit_switch_menu_dismissed","limite de uso: a troca fechou o menu do limite do Claude Code com Esc"),
+                        Ok(false)=>{},
+                        Err(code)=>host.diary(&hit.name,&super::input::diary_code(&format!("limit_switch_menu_failed:{code}")),"limite de uso: o menu do limite não fechou"),
+                    }
                     host.pause().await;
                     // A pessoa pode ter trocado de conta pelo `/conta` na espera: a escolha dela vence.
                     match host.spec(&hit.name).await {
@@ -271,6 +287,9 @@ pub fn spawn(st:Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
 struct Native { st:Arc<AppState>, runtime:Arc<RuntimeRegistry> }
 
 impl Host for Native {
+    fn dismiss_limit_menu<'a>(&'a self,name:&'a str) -> BoxFuture<'a,Result<bool,String>> {
+        Box::pin(async move { self.runtime.dismiss_claude_limit_menu(name).await.map_err(|error|error.code) })
+    }
     fn spec<'a>(&'a self,name:&'a str) -> BoxFuture<'a,Option<Result<SessionSpec,String>>> {
         Box::pin(async move { self.runtime.claude_spec(name).await.map(|spec|spec.map_err(|error|error.code)) })
     }
@@ -451,13 +470,15 @@ mod tests {
         undelivered:std::sync::atomic::AtomicBool,
         /// O `/input` do recado recusa.
         continue_fails:std::sync::atomic::AtomicBool,
+        /// A tela do pane: com o menu do limite aberto, a reabertura recusa até ele fechar.
+        screen:Mutex<String>,
     }
 
     impl Fake {
         fn new(dir:&str,quotas:Vec<Value>) -> Self {
             Fake { spec:Mutex::new(spec(claude(dir))),catalog:catalog(&["/a","/b","/c"]),quotas:Mutex::new(Ok(quotas)),
                 reopens:Mutex::new(Vec::new()),log:Mutex::new(Vec::new()),diary:Mutex::new(Vec::new()),problems:Mutex::new(Vec::new()),gone:Default::default(),
-                on_pause:Mutex::new(None),undelivered:Default::default(),continue_fails:Default::default() }
+                on_pause:Mutex::new(None),undelivered:Default::default(),continue_fails:Default::default(),screen:Mutex::new(String::new()) }
         }
         fn log(&self) -> Vec<String> { self.log.lock().unwrap().clone() }
         fn diary(&self) -> Vec<String> { self.diary.lock().unwrap().clone() }
@@ -491,6 +512,17 @@ mod tests {
         }
         fn diary(&self,_:&str,code:&str,_:&'static str) { self.diary.lock().unwrap().push(code.to_owned()); }
         fn now(&self) -> f64 { 1000.0 }
+        fn dismiss_limit_menu<'a>(&'a self,_:&'a str) -> BoxFuture<'a,Result<bool,String>> {
+            Box::pin(async move {
+                let mut screen = self.screen.lock().unwrap();
+                if !limit_menu_open(&screen) { return Ok(false); }
+                self.log.lock().unwrap().push("esc".into());
+                screen.clear();
+                // Fechado o menu, a sessão para de recusar.
+                self.reopens.lock().unwrap().retain(|r|!matches!(r,Reopen::Busy(code) if code=="erro_sessao_esperando_resposta"));
+                Ok(true)
+            })
+        }
         fn send_continue<'a>(&'a self,_:&'a str) -> BoxFuture<'a,Result<bool,String>> {
             Box::pin(async move {
                 self.log.lock().unwrap().push("continue".into());
@@ -551,13 +583,36 @@ mod tests {
         assert!(!switcher.spent.is_spent("/b",1000.0),"a conta atual não bateu limite nenhum");
     }
 
+    /// O menu como o Claude Code 2.1.302 o desenha ao bater o limite (opções do binário).
+    const LIMIT_MENU:&str = "  ⎿  You've hit your session limit · resets 2pm\n\n╭──────────────────────────────────────────────╮\n│ What do you want to do?                      │\n│                                              │\n│ ❯ 1. Stop and wait for limit to reset        │\n│   2. Wait here, then continue automatically when the limit resets │\n│   3. Upgrade your plan                       │\n╰──────────────────────────────────────────────╯\n";
+
+    #[test]
+    fn the_limit_menu_is_recognised_only_on_the_bottom_of_the_pane() {
+        assert!(limit_menu_open(LIMIT_MENU));
+        assert!(!limit_menu_open("❯ \n"));
+        let scrolled = format!("{LIMIT_MENU}{}", "linha da conversa\n".repeat(30));
+        assert!(!limit_menu_open(&scrolled),"o menu que subiu com a conversa já foi respondido");
+    }
+
+    /// A sessão parada no menu do limite recusa a reabertura com pergunta aberta: a troca fecha o menu com Esc
+    /// (o Cancelar, nunca a opção de créditos) e reabre, sem esperar a pessoa. Cada recusa vai ao diário.
+    #[tokio::test]
+    async fn the_switch_closes_the_limit_menu_itself_and_reopens() {
+        let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/c",20.0)]);
+        *fake.screen.lock().unwrap() = LIMIT_MENU.into();
+        fake.reopens.lock().unwrap().extend((0..BUSY_TRIES).map(|_|Reopen::Busy("erro_sessao_esperando_resposta".into())));
+        Switcher::default().handle(&fake,hit("/a",2000.0)).await;
+        assert_eq!(fake.log(),vec!["reopen /c","esc","pause","reopen /c","release","continue"]);
+        assert_eq!(fake.diary(),vec!["limit_switch_busy_erro_sessao_esperando_resposta","limit_switch_menu_dismissed","switched","limit_switch_continue_delivered"]);
+    }
+
     #[tokio::test]
     async fn a_busy_session_is_tried_again_and_the_queue_is_let_go_only_at_the_end() {
         let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/c",20.0)]);
         fake.reopens.lock().unwrap().push(Reopen::Busy("erro_sessao_trabalhando".into()));
         Switcher::default().handle(&fake,hit("/a",2000.0)).await;
         assert_eq!(fake.log(),vec!["reopen /c","pause","reopen /c","release","continue"]);
-        assert_eq!(fake.diary(),vec!["switched","limit_switch_continue_delivered"]);
+        assert_eq!(fake.diary(),vec!["limit_switch_busy_erro_sessao_trabalhando","switched","limit_switch_continue_delivered"]);
     }
 
     #[tokio::test]
@@ -575,6 +630,18 @@ mod tests {
         assert!(!fake.log().contains(&"continue".to_owned()));
     }
 
+    /// Troca que falhou não marca o aviso como tratado: o mesmo aviso, relido, tenta de novo.
+    #[tokio::test]
+    async fn a_failed_switch_tries_again_with_the_same_notice() {
+        let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/c",20.0)]);
+        fake.reopens.lock().unwrap().push(Reopen::Failed("erro_troca".into()));
+        let switcher = Switcher::default();
+        switcher.handle(&fake,hit("/a",2000.0)).await;
+        switcher.handle(&fake,hit("/a",2000.0)).await;
+        assert_eq!(fake.log().iter().filter(|l|*l=="reopen /c").count(),2);
+        assert_eq!(fake.diary().last().map(String::as_str),Some("limit_switch_continue_delivered"));
+    }
+
     #[tokio::test]
     async fn a_session_busy_to_the_end_is_not_marked_handled_and_lets_the_queue_go() {
         let fake = Fake::new("/a",vec![quota("/a",100.0),quota("/c",20.0)]);
@@ -582,7 +649,9 @@ mod tests {
         let switcher = Switcher::default();
         switcher.handle(&fake,hit("/a",2000.0)).await;
         assert_eq!(fake.log().last().map(String::as_str),Some("release"));
-        assert_eq!(fake.diary(),vec!["erro_sessao_esperando_resposta"]);
+        let busy = "limit_switch_busy_erro_sessao_esperando_resposta";
+        assert_eq!(fake.diary().iter().filter(|code|*code==busy).count(),BUSY_TRIES,"cada recusa vai ao diário");
+        assert_eq!(fake.diary().last().map(String::as_str),Some("erro_sessao_esperando_resposta"));
         // O mesmo limite, quando a sessão voltar a parar, ainda troca.
         switcher.handle(&fake,hit("/a",2000.0)).await;
         assert_eq!(fake.diary().last().map(String::as_str),Some("limit_switch_continue_delivered"));
