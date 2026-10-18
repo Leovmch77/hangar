@@ -48,6 +48,39 @@ describe('documentos citados', () => {
     expect(name).toBe('Relatório final.docx');
   });
 
+  it('cartão do documento mostra nome, extensão e o resultado do download', async () => {
+    component = mount(FileAttachment, { target, props: { sessionName: 's', refs: parseFilePaths('/tmp/dados.zip') } });
+    await tick();
+    const card = target.querySelector('.file-card')!;
+    expect(card.textContent).toContain('dados.zip');
+    expect(card.textContent).toContain('ZIP');
+    const btn = card.querySelector<HTMLButtonElement>('button')!;
+    expect(btn.textContent).toContain(m.file_card_download());
+    btn.click();
+    await vi.waitFor(() => expect(card.textContent).toContain(m.file_card_saved()));
+  });
+
+  it.each([
+    [Object.assign(new Error('HTTP 404'), { status: 404 }), () => m.file_card_missing()],
+    [new Error('rede caiu'), () => m.file_card_failed()],
+  ])('falha no download aparece no cartão com tentar de novo', async (err, msg) => {
+    vi.mocked(saveFile).mockRejectedValueOnce(err);
+    component = mount(FileAttachment, { target, props: { sessionName: 's', refs: parseFilePaths('/tmp/notas.txt') } });
+    await tick();
+    const card = target.querySelector('.file-card')!;
+    card.querySelector<HTMLButtonElement>('button')!.click();
+    await vi.waitFor(() => expect(card.textContent).toContain(msg()));
+    expect(card.querySelector('button')!.textContent).toContain(m.file_card_retry());
+  });
+
+  it('arquivo vazio avisa em vez de baixar nada', async () => {
+    vi.mocked(saveFile).mockResolvedValueOnce('empty');
+    component = mount(FileAttachment, { target, props: { sessionName: 's', refs: parseFilePaths('/tmp/vazio.csv') } });
+    await tick();
+    target.querySelector<HTMLButtonElement>('.file-card button')!.click();
+    await vi.waitFor(() => expect(target.querySelector('.file-card')!.textContent).toContain(m.file_card_empty()));
+  });
+
   it('PDF mantém a prévia e permite baixar tanto no cartão quanto no visor', async () => {
     component = mount(FileAttachment, { target, props: {
       sessionName: 's', refs: parseFilePaths('/tmp/relatorio.pdf'),

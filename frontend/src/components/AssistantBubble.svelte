@@ -3,7 +3,7 @@
   import { renderMarkdown } from '../lib/markdown';
   import { intlLocale } from '../lib/locale';
   import * as m from '../paraglide/messages';
-  import { fileKind, parseFilePaths, parseCodePaths, parseMediaUrls, splitTodoBlock } from '@hangar/core';
+  import { fileKind, hideAttachmentPaths, parseFilePaths, parseCodePaths, parseMediaUrls, splitTodoBlock } from '@hangar/core';
   import { copyText } from '../lib/clipboard';
   import { textoFalavelComCodigo } from '../lib/speakable';
   import { abrirComTexto } from '../lib/ttsSelection.svelte';
@@ -92,7 +92,6 @@
   const textoPrevia = $derived(preview ? tw.texto : textoPreviaBruto);
 
   const previewHtml = $derived(preview && md ? comCaret(renderMarkdown(textoPrevia, { fileLinks: !!sessionName })) : '');
-  const html = $derived(preview ? '' : renderMarkdown(text, { fileLinks: !!sessionName, commandActions: !!onRunCommand && !!sessionName }));
 
   function runCodeClick(event: MouseEvent) {
     if (!(event.target instanceof Element)) return;
@@ -112,6 +111,8 @@
     ? parseFilePaths(text).filter((ref) => !codePaths.has(ref.path)) : []);
   // Midia remota (URL http) -> preview inline; nao depende do backend/sessionName.
   const mediaRefs = $derived(preview ? [] : parseMediaUrls(text));
+  // O caminho fica no transcript (autoriza o servidor a servir o arquivo); na tela, só o anexo.
+  const html = $derived(preview ? '' : renderMarkdown(hideAttachmentPaths(text, fileRefs), { fileLinks: !!sessionName, commandActions: !!onRunCommand && !!sessionName }));
 
   // Máscara do topo SÓ com transbordo real — mesmo padrão do .bc-body.masked (BoardCard:333). Ligada
   // sempre, ela apagava a 1ª linha de toda prévia curta, onde não há corte nenhum pra disfarçar.
