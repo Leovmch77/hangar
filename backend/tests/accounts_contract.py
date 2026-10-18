@@ -295,7 +295,10 @@ else send(loginReply);
 }else if(m.method==='account/read'){
 if(read('hold-read.json',false) && !fs.existsSync(p.join(d,'release-read.json'))){
 fs.writeFileSync(p.join(d,'read-entered.json'),'true');
-const watcher=fs.watch(d,()=>{if(fs.existsSync(p.join(d,'release-read.json'))){watcher.close();send({id:m.id,result:{account:read('identity.json',null),requiresOpenaiAuth:true}});}});
+// A liberação pode chegar antes da vigia ligar: confere de novo depois, senão a leitura espera o prazo de 6 s.
+const release=()=>{if(!fs.existsSync(p.join(d,'release-read.json'))||release.done)return;release.done=true;watcher.close();send({id:m.id,result:{account:read('identity.json',null),requiresOpenaiAuth:true}});};
+const watcher=fs.watch(d,release);
+release();
 return;
 }
 if(read('mutate-auth-on-read.json',false))fs.writeFileSync(p.join(d,'auth.json'),JSON.stringify({fixtureGeneration:++readGeneration,pid:process.pid}));
