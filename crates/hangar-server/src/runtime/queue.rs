@@ -241,6 +241,8 @@ pub enum Action {
     BumpAttempts { entry_id:String },
     EntryDelivered { entry_id:String },
     Confirm { entry_ids:Vec<String> },
+    /// Os hooks `UserPromptSubmit` começaram para a entrada já entregue: aceita, falta o registro real.
+    MarkConsumed { entry_ids:Vec<String> },
     Prune { min_ts:f64 },
     Reconcile { committed:Vec<String>, min_ts:f64, now:f64, grace:f64, max_attempts:u64,
         confirm_only:bool, na_fila_tui:Vec<String> },
@@ -856,6 +858,15 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             .map(|r|json!(r["delivered"].as_bool().unwrap_or(false))).unwrap_or(Value::Null),
         // Prova direta da CLI (eco da mensagem ou resposta de comando local): vale mesmo com a escrita ainda sem
         // desfecho (o eco e o `result` podem vir antes do `Finish`) e resgata a desistida.
+        Action::MarkConsumed { entry_ids } => {
+            let mut count = 0;
+            for row in &mut state.rows {
+                if entry_ids.iter().any(|id| id == row_id(row)) && row["delivered"] == true && row["confirmed"] != true && row["consumed"] != true {
+                    row["consumed"] = json!(true); count += 1;
+                }
+            }
+            json!(count)
+        }
         Action::Confirm { entry_ids } => {
             let mut count = 0;
             let mut confirmed = Vec::new();
@@ -1439,6 +1450,19 @@ mod headless_delivery_tests {
         let outcome=store.exec(1,"give-up",clock(500.0),Action::GiveUpUnproved { now:500.0,grace:60.0 }).unwrap();
         assert_eq!(outcome["given_up"],json!([]));
         assert!(row(&store,"steer")["desistiu"].is_null());
+    }
+
+    #[test]
+    fn prompt_hooks_started_mark_only_a_delivered_unconfirmed_row_as_consumed() {
+        let dir=tempfile::tempdir().unwrap(); let mut store=store(&dir);
+        append(&mut store,"sent",10.0); append(&mut store,"waiting",10.5);
+        store.exec(1,"prepare",clock(11.0),Action::Prepare { id:"sent".into(),payload:json!({"kind":"input"}),entry_id:Some("sent".into()) }).unwrap();
+        store.exec(1,"begin",clock(11.0),Action::BeginDispatch { id:"sent".into(),wire_id:"w".into(),staged:false }).unwrap();
+        assert_eq!(store.exec(1,"started",clock(11.2),Action::MarkConsumed { entry_ids:vec!["sent".into(),"waiting".into()] }).unwrap(),json!(1));
+        assert_eq!(row(&store,"sent")["consumed"],true);
+        assert!(row(&store,"waiting")["consumed"].is_null(),"na fila do Hangar não começou hook nenhum");
+        store.exec(1,"confirm",clock(12.0),Action::Confirm { entry_ids:vec!["sent".into()] }).unwrap();
+        assert_eq!(store.exec(1,"again",clock(12.1),Action::MarkConsumed { entry_ids:vec!["sent".into()] }).unwrap(),json!(0));
     }
 
     #[test]

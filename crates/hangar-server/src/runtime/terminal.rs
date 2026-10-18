@@ -213,6 +213,10 @@ impl TerminalServices for Services {
         let (path,text)=(self.target.transcript.clone(),text.to_owned());
         tokio::task::spawn_blocking(move||crate::terminal_input::enqueued_since(&path,mark,&text)).await.map_err(|_|ServiceError("terminal_transcript_unavailable"))
     })}
+    fn prompt_started<'a>(&'a self,since:f64,text:&'a str)->ServiceFuture<'a,bool> {Box::pin(async move {
+        let (dir,conversation,text)=(self.target.metadata.config_dir.clone(),self.target.binding.conversation.clone(),text.to_owned());
+        tokio::task::spawn_blocking(move||crate::terminal_input::prompt_started_in(&dir,&conversation,since,&text)).await.map_err(|_|ServiceError("terminal_prompt_mark_unavailable"))
+    })}
 }
 
 struct Executor {

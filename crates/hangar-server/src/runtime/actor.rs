@@ -742,6 +742,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
     // a prova é a mesma do `confirm_inputs`. Prazo para não vigiar uma entrada que nunca chega.
     let mut confirm_until: Option<Instant> = None;
     let mut confirm_seen: Option<u64> = None;
+    let prompt_check = Arc::new(AtomicBool::new(false));
+    let prompt_env = crate::accounts::environment::AccountEnvironment::capture();
     // Claude sem terminal: próxima conferência da fila enquanto houver entrada entregue sem prova. Nasce
     // vencida para a subida acertar o que ficou da vida anterior.
     let mut confirm_recheck: Option<Instant> = (target.provider == "claude").then(Instant::now);
@@ -2049,6 +2051,11 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                 if confirm_until.is_some_and(|until|Instant::now() >= until) { confirm_until = None; continue; }
                 // O transcript da conversa vigente: a TUI do Codex com terminal pode ter trocado de conversa.
                 let view = engine.view();
+                if target.provider == "claude" && !prompt_check.swap(true,Ordering::AcqRel) {
+                    let base = account_base(&target,&prompt_env);
+                    let conversation = view["conversation"].as_str().unwrap_or("").to_owned();
+                    jobs.spawn(mark_prompt_started(queue.clone(),base,conversation,target.generation,clock(start),prompt_check.clone()));
+                }
                 let transcript = transcript_of(&target,&view);
                 let len = std::fs::metadata(&transcript).ok().map(|m|m.len());
                 if len != confirm_seen {
@@ -2227,9 +2234,7 @@ fn write_state_marker_in(target:&RuntimeTarget,view:&Value,state:&str,env:&crate
         }
         return;
     };
-    let base = target.metadata["config_dir"].as_str().filter(|dir|!dir.is_empty()).map(std::path::PathBuf::from)
-        .unwrap_or_else(||env.claude_base.clone());
-    let dir = base.join(".hangar-state");
+    let dir = account_base(target,env).join(".hangar-state");
     let tmp = dir.join(format!("{sid}.json.tmp"));
     let written = std::fs::create_dir_all(&dir)
         .and_then(|()|std::fs::write(&tmp,json!({"state":state,"ts":clock(Instant::now()).epoch_s}).to_string()))
@@ -2237,6 +2242,29 @@ fn write_state_marker_in(target:&RuntimeTarget,view:&Value,state:&str,env:&crate
     if let Err(error) = written && crate::warn_limit::allow(Some(&target.key),"state_marker_write") {
         tracing::warn!(key=%target.key,session=%target.name,%error,"marcador de estado não gravado");
     }
+}
+
+fn account_base(target:&RuntimeTarget,env:&crate::accounts::environment::AccountEnvironment) -> std::path::PathBuf {
+    target.metadata["config_dir"].as_str().filter(|dir|!dir.is_empty()).map(std::path::PathBuf::from)
+        .unwrap_or_else(||env.claude_base.clone())
+}
+
+/// Claude sem terminal: a entrada entregue cujos hooks `UserPromptSubmit` já começaram passa a aceita
+/// (`consumed`) antes de a CLI ecoá-la, o que só acontece depois de todos os hooks.
+async fn mark_prompt_started(queue:Arc<QueueActor>,base:std::path::PathBuf,conversation:String,generation:u64,sample:ClockSample,busy:Arc<AtomicBool>) -> Job {
+    let result = async {
+        let state = queue.snapshot().await.map_err(io_failure)?;
+        let candidates:Vec<(String,f64,String)> = state.rows.iter().filter(|row|row["delivered"] == true && row["confirmed"] != true && row["consumed"] != true)
+            .filter_map(|row|Some((row["id"].as_str()?.to_owned(),row["dispatched_ts"].as_f64()?,row["text"].as_str()?.to_owned()))).collect();
+        if candidates.is_empty() || conversation.is_empty() { return Ok(()); }
+        let started = tokio::task::spawn_blocking(move ||candidates.into_iter()
+            .filter(|(_,since,text)|crate::terminal_input::prompt_started_in(&base,&conversation,*since,text)).map(|(id,..)|id).collect::<Vec<_>>())
+            .await.map_err(|_|failure("prompt_mark_panic"))?;
+        if started.is_empty() { return Ok(()); }
+        queue.exec(generation,&format!("prompt-started:{}",unique()),sample,Action::MarkConsumed { entry_ids:started }).await.map(|_|()).map_err(io_failure)
+    }.await;
+    busy.store(false,Ordering::Release);
+    Job::Saved(result)
 }
 
 /// O processo não sobe mais: o que esperava na fila vira "não chegou" (descartável), em vez de sair horas

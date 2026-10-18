@@ -74,8 +74,22 @@ pub trait TerminalServices: Send + Sync {
     fn transcript_mark<'a>(&'a self) -> ServiceFuture<'a, Option<u64>> { Box::pin(async { Ok(None) }) }
     /// O Claude pôs `text` na fila dele depois de `mark`, ou seja, aceitou o Enter.
     fn transcript_enqueued<'a>(&'a self, _mark: u64, _text: &'a str) -> ServiceFuture<'a, bool> { Box::pin(async { Ok(false) }) }
+    /// Os hooks `UserPromptSubmit` começaram para `text` depois de `since` (epoch): o Claude passou da
+    /// recusa dele e só um hook ainda pode barrar, o que o transcript mostra como erro.
+    fn prompt_started<'a>(&'a self, _since: f64, _text: &'a str) -> ServiceFuture<'a, bool> { Box::pin(async { Ok(false) }) }
     /// Tira a publicação do plugin já provada pelo transcript, sem esperar o aviso dele.
     fn abandon_publication<'a>(&'a self, _publication_id: &'a str) -> ServiceFuture<'a, ()> { Box::pin(async { Ok(()) }) }
+}
+
+fn epoch_now() -> f64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |t| t.as_secs_f64()) }
+
+/// `<config_dir>/.hangar-prompt/<conversa>.json` do `state_hook`: o SHA-1 do texto aparado cujos hooks
+/// `UserPromptSubmit` começaram e quando. Arquivo ausente ou torto não prova nada.
+pub(crate) fn prompt_started_in(config_dir: &std::path::Path, conversation: &str, since: f64, text: &str) -> bool {
+    let Ok(bytes) = std::fs::read(config_dir.join(".hangar-prompt").join(format!("{conversation}.json"))) else { return false };
+    let Ok(mark) = serde_json::from_slice::<Value>(&bytes) else { return false };
+    mark["ts"].as_f64().is_some_and(|ts| ts >= since)
+        && mark["sha1"].as_str() == Some(sha1_smol::Sha1::from(text.trim()).digest().to_string().as_str())
 }
 
 /// O Claude grava a entrada ao aceitar o Enter, antes dos hooks `UserPromptSubmit` da conta; o composer
@@ -983,6 +997,7 @@ impl TerminalDriver {
             _ => return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, "submission_blocked"),
         }
         let mark = if expected.is_none() && !text.trim_start().starts_with('/') { self.services.transcript_mark().await.ok().flatten() } else { None };
+        let since = epoch_now();
         if let Err(error) = self.key_guarded("Enter", expected.map(|expected| GuardedText { expected,closed:true,pane:None,input:Some((text,before)),allow_owned:true })).await {
             return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, if expected.is_some() { "erro_sem_confirmacao_resposta" } else { error.code });
         }
@@ -994,6 +1009,10 @@ impl TerminalDriver {
         let slash = text.trim_start().starts_with('/');
         for attempt in 0..self.limits.proof_attempts.max(1) {
             if attempt > 0 || slash { self.settle().await; }
+            // Antes do segundo Enter da barra: com os hooks rodando o composer ainda mostra o comando.
+            if expected.is_none() && self.services.prompt_started(since, text).await.unwrap_or(false) {
+                return DeliveryResult::new(Disposition::Accepted, DeliveryStage::SubmitProof, "prompt_started");
+            }
             let capture = if clear {
                 match self.verify_pane().await { Ok(()) => self.composer_capture_unverified().await, Err(e) => Err(e) }
             } else { self.composer_capture().await };
@@ -1093,22 +1112,25 @@ impl TerminalDriver {
             if self.services.writing().await.is_err() { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Plugin, "write_journal"); }
             // Modo `user`: o aviso do plugin só sai depois dos hooks da conta. Vale o que vier antes,
             // ele ou o `enqueue` no transcript, como no Python.
-            let mark = if mode == PluginMode::User { self.services.transcript_mark().await.ok().flatten() } else { None };
+            let user = mode == PluginMode::User;
+            let mark = if user { self.services.transcript_mark().await.ok().flatten() } else { None };
+            let since = epoch_now();
             let publish = self.services.publish(&self.binding, request);
             tokio::pin!(publish);
             let reply = loop {
-                let Some(mark) = mark else { break (&mut publish).await };
+                if !user { break (&mut publish).await }
                 tokio::select! {
                     reply = &mut publish => break reply,
                     _ = tokio::time::sleep(Duration::from_millis(50)) => {
-                        if self.services.transcript_enqueued(mark, text).await.unwrap_or(false) {
-                            drop(publish);
-                            // Falhar aqui deixa a publicação no lugar: a próxima entrega sai incerta até o prazo dela.
-                            if let Err(error) = self.services.abandon_publication(id).await {
-                                tracing::warn!(code = error.0, "publicação do plugin não saiu depois da prova pelo transcript");
-                            }
-                            return DeliveryResult::new(Disposition::Accepted, DeliveryStage::Plugin, "plugin_enqueued");
+                        let code = if let Some(mark) = mark && self.services.transcript_enqueued(mark, text).await.unwrap_or(false) { "plugin_enqueued" }
+                            else if self.services.prompt_started(since, text).await.unwrap_or(false) { "prompt_started" }
+                            else { continue };
+                        drop(publish);
+                        // Falhar aqui deixa a publicação no lugar: a próxima entrega sai incerta até o prazo dela.
+                        if let Err(error) = self.services.abandon_publication(id).await {
+                            tracing::warn!(code = error.0, "publicação do plugin não saiu depois da prova pelo transcript");
                         }
+                        return DeliveryResult::new(Disposition::Accepted, DeliveryStage::Plugin, code);
                     }
                 }
             };
@@ -1749,7 +1771,19 @@ pub fn review_matches(screen: &str, answers: &[QuestionAnswer]) -> bool {
 
 #[cfg(test)]
 mod enqueued_tests {
-    use super::enqueued_since;
+    use super::{enqueued_since, prompt_started_in};
+
+    #[test]
+    fn prompt_started_reads_the_state_hook_mark() {
+        // O mesmo marcador do `state_hook.py` para o prompt "abc" (SHA-1 conhecido).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".hangar-prompt")).unwrap();
+        std::fs::write(dir.path().join(".hangar-prompt/sid.json"), r#"{"sha1":"a9993e364706816aba3e25717850c26c9cd0d89d","ts":100.5}"#).unwrap();
+        assert!(prompt_started_in(dir.path(), "sid", 100.0, " abc\n"));
+        assert!(!prompt_started_in(dir.path(), "sid", 101.0, "abc"), "marca de antes do envio");
+        assert!(!prompt_started_in(dir.path(), "sid", 100.0, "abd"), "outro texto");
+        assert!(!prompt_started_in(dir.path(), "outra", 100.0, "abc"), "outra conversa");
+    }
 
     fn transcript(lines: &[&str]) -> tempfile::NamedTempFile {
         let file = tempfile::NamedTempFile::new().unwrap();
