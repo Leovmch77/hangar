@@ -270,6 +270,7 @@ def test_codex_shutdown_does_not_abandon_owned_auth_reader(tmp_path, drain):
 def test_codex_lost_http_response_keeps_owned_auth_reader_until_cleanup(tmp_path):
     import http.client
     import psutil
+    import select
     import time
     from urllib.parse import urlsplit
     from accounts_contract import RustCodex
@@ -303,6 +304,8 @@ def test_codex_lost_http_response_keeps_owned_auth_reader_until_cleanup(tmp_path
         for pid in json.loads((account / "reader-pids.json").read_text(encoding="utf-8")):
             process = psutil.Process(pid)
             owned.append((process, process.create_time()))
+        ready, _, _ = select.select([connection.sock], [], [], 0)
+        assert not ready, "A resposta não ficou retida pela barreira nativa."
         connection.close()
         assert all(process.is_running() for process, _ in owned), "Perder a resposta abandonou a operação."
         (account / "release-read.json").write_text("true", encoding="utf-8")
