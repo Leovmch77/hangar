@@ -295,14 +295,11 @@ def refresh_members(proc):
             containment.swept = now
     else:
         # Fechado o último handle, o nome do Job some antes de os membros saírem: o reinício só espera os gravados.
-        try:
-            found = containment.job.members()
-        except OSError:
-            found = []
+        found = containment.job.members()
     for pid in found:
         try:
             members[str(pid)] = psutil.Process(pid).create_time()
-        except psutil.NoSuchProcess:
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     from app import atomico
     with _record_guard:
