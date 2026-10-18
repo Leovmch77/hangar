@@ -1995,6 +1995,24 @@ describe('CreateSessionSheet Codex', () => {
       } finally { act(() => root.unmount()); }
     });
 
+    it('recusa respondida não vira repetição: o segundo toque no nome em uso não abre a sessão existente', async () => {
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      calls.create.mockRejectedValue(Object.assign(new Error('nome em uso'), { status: 409, code: 'erro_nome_em_uso' }));
+      calls.sessions.mockResolvedValue([{ name: 'antiga', cwd: '/repo/hangar' }]);
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        const field = container.querySelector('textarea[aria-label="comum_nome"]') as HTMLTextAreaElement;
+        await act(async () => { field.value = 'antiga'; field.dispatchEvent(new Event('input', { bubbles: true })); });
+        for (let press = 0; press < 2; press++) {
+          await act(async () => button(container, 'criar_criar')!.click());
+          await act(async () => Promise.resolve());
+        }
+        expect(calls.create).toHaveBeenCalledTimes(2);
+        expect(calls.replace).not.toHaveBeenCalled();
+      } finally { act(() => root.unmount()); }
+    });
+
     it('Cancelar fecha sem criar', async () => {
       const { container, root, onClose } = await renderForm();
       try {

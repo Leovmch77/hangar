@@ -879,6 +879,8 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
       // no nome automático só se ele estava livre na lista: senão a sessão com esse nome pode ser outra.
       const status = (cause as { status?: unknown } | null)?.status;
       const lost = typeof status !== 'number' || status >= 500 || status === 408 || (status === 409 && retry && chosen.known);
+      // Recusa respondida encerra a tentativa: o próximo toque escolhe o nome de novo, sem contar como repetição.
+      if (!lost) attemptName.current = null;
       const exists = !lost ? false : await fetchSessionsForServer(active)
         .then((list) => list.some((session) => session.name === finalName), () => null);
       if (exists) open(finalName);
