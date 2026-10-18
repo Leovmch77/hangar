@@ -7,6 +7,7 @@ import { cwdParts, isOrq, loopBadge, pairExternals, providerName, relativeTime, 
 import { Chip, type Tone } from '../../ui/Chip';
 import { HangarMark } from '../../ui/HangarMark';
 import { WorkingMark } from '../../ui/WorkingMark';
+import { ProviderGlyph } from '../../ui/ProviderGlyph';
 import { Icon } from '../../ui/Icon';
 import { superficie } from '../../theme/superficie';
 import { useWorktreeStatus } from '../worktrees/worktreeStatus';
@@ -131,7 +132,8 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
   // o rótulo do grupo (ex.: o ticket) diz mais que o nome do par; sem ele, o par ou o tamanho
   const pairLabel = peers.length ? (s.pair_task ?? (peers.length === 1 ? peers[0] : String(peers.length + 1))) : null;
   const engineLabel = !orq && s.provider === 'claude' ? s.engine : null;
-  const providerLabel = orq ? null : engineLabel || providerName(s.provider);
+  const providerLabel = orq ? null : [providerName(s.provider), engineLabel].filter(Boolean).join(', ');
+  const iconProvider = engineLabel && /gpt|openai|codex/i.test(engineLabel) ? 'codex' : s.provider ?? 'claude';
   const account = accountChip(s.conta);
   const juntada = useWorktreeStatus(s.serverId, wtPath)?.merged === true;
   // Na worktree a branch sai do texto e ganha o ícone de ramo; a pasta some quando repete o nome
@@ -139,7 +141,6 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
   // Sem branch (HEAD destacado), o nome da worktree ocupa o lugar dela.
   const branchWt = wtNome && !s.worktree_gone ? `${s.branch ?? wtNome}${juntada ? ' ✓' : ''}` : null;
   const meta = [
-    engineLabel ? null : providerLabel,
     s.cwd && cwd.base !== s.name && cwd.base !== wtNome ? cwd.base : null,
     branchWt ? null : s.branch,
     pairLabel,
@@ -212,6 +213,7 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
       </View>
       <View style={styles.col}>
         <View style={styles.linha}>
+          {!orq ? <ProviderGlyph provider={iconProvider} size={theme.base.text.base} inline /> : null}
           <Text style={[styles.nome, { color: theme.tokens.text.primary }]} numberOfLines={1}>{s.name}</Text>
           {pendingQuestions > 0 ? <Chip tone="warning">{`? ${pendingQuestions}`}</Chip> : null}
           {orq ? <Chip>{m.orq_row_badge()}</Chip> : null}

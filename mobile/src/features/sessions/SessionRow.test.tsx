@@ -29,6 +29,11 @@ vi.mock('react-native', async (original) => {
 });
 vi.mock('expo-haptics', () => ({ impactAsync: () => Promise.resolve(), ImpactFeedbackStyle: { Medium: 'medium' } }));
 vi.mock('../../ui/HangarMark', () => ({ HangarMark: () => null }));
+vi.mock('react-native-svg', async (original) => ({
+  ...await original<typeof import('react-native-svg')>(),
+  default: ({ children, ...props }: { children?: ReactNode }) => createElement('svg', props, children),
+  Path: (props: { d: string }) => createElement('path', props),
+}));
 vi.mock('../../paraglide/messages', () => ({
   ask_perguntas: () => 'ask_perguntas',
   conta_padrao: () => 'conta_padrao',
@@ -82,14 +87,62 @@ async function render(session: AggSession, extra: Record<string, unknown> = {}) 
 describe('SessionRow', () => {
   afterEach(() => { Platform.OS = 'android'; });
 
-  it('motor Claude substitui provedor no texto e na acessibilidade com marca real', async () => {
+  it.each([
+    { provider: 'claude', label: 'Claude', path: 'm4.7144' },
+    { provider: 'codex', label: 'Codex', path: 'M22.2819' },
+    { provider: 'kimi', label: 'Kimi', path: 'M21.765' },
+    { provider: 'pi', label: 'Pi', letter: 'π' },
+    { provider: 'omp', label: 'OMP', letter: 'Ω' },
+    { provider: undefined, label: 'Claude', path: 'm4.7144' },
+  ] as const)('marca de $label junto do nome, sem texto nos metadados, inclusive na linha compacta', async ({ provider, label, ...mark }) => {
+    for (const compact of [false, true]) {
+      const { container, root } = await render({ ...base, name: 'api', provider, cwd: '/repo', branch: 'main' }, { compact });
+      try {
+        const name = Array.from(container.querySelectorAll('span')).find(el => el.textContent === 'api');
+        const glyph = name?.previousElementSibling;
+        expect(glyph).not.toBeNull();
+        if ('path' in mark) expect(glyph?.querySelector('path')?.getAttribute('d')).toMatch(new RegExp(`^${mark.path}`));
+        else expect(glyph?.textContent).toBe(mark.letter);
+        expect(container.textContent).not.toContain(label);
+        expect(container.textContent).toContain('repo · main');
+        expect(container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label')).toContain(label);
+      } finally { act(() => root.unmount()); }
+    }
+  });
+
+  it.each(['gpt', 'local-gpt', 'gpt-6-1-sol', 'GPT-6', 'openai', 'codex'])('motor %s usa OpenAI ao lado do nome e preserva a engrenagem', async (engine) => {
+    Platform.OS = 'ios';
+    const { container, root } = await render({ ...base, name: 'api', provider: 'claude', engine });
+    try {
+      const name = Array.from(container.querySelectorAll('span')).find(el => el.textContent === 'api');
+      expect(name?.previousElementSibling?.querySelector('path')?.getAttribute('d')).toMatch(/^M22.2819/);
+      expect(container.querySelector('[data-symbol="gearshape"]')?.parentElement?.textContent).toBe(engine);
+      const label = container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label');
+      expect(label).toContain('Claude');
+      expect(label).toContain(engine);
+    } finally { act(() => root.unmount()); }
+  });
+
+  it.each(['unknown', 'orq'])('provider %s sem marca não cria ícone nem texto substituto', async (provider) => {
+    Platform.OS = 'ios';
+    const { container, root } = await render({ ...base, name: 'api', provider: provider as AggSession['provider'] });
+    try {
+      const name = Array.from(container.querySelectorAll('span')).find(el => el.textContent === 'api');
+      expect(name?.previousElementSibling).toBeNull();
+      expect(container.querySelector('svg')).toBeNull();
+      expect(container.textContent).not.toContain('unknown');
+      expect(container.textContent).not.toContain('?');
+    } finally { act(() => root.unmount()); }
+  });
+
+  it('motor Claude mantém a engrenagem nos metadados e o provedor na acessibilidade', async () => {
     Platform.OS = 'ios';
     const { container, root } = await render({ ...base, name: 'api', provider: 'claude', engine: 'gpt-6-1-sol', cwd: '/repo', branch: 'main' });
     try {
       expect(container.textContent).not.toContain('Claude');
       const row = container.querySelector('button[aria-label^="api,"]');
       expect(row?.getAttribute('aria-label')).toContain('gpt-6-1-sol');
-      expect(row?.getAttribute('aria-label')).not.toContain('Claude');
+      expect(row?.getAttribute('aria-label')).toContain('Claude');
       const mark = container.querySelector('[data-symbol="gearshape"]');
       expect(mark).not.toBeNull();
       const engine = Array.from(mark!.parentElement!.querySelectorAll('span')).find(el => el.textContent === 'gpt-6-1-sol');
@@ -141,7 +194,7 @@ describe('SessionRow', () => {
       const separator = server?.nextElementSibling as HTMLElement | null;
       expect(separator?.textContent).toBe(' · ');
       expect(separator?.style.flexShrink).toBe('0');
-      expect(separator?.nextElementSibling?.textContent).toContain(label);
+      expect(separator?.nextElementSibling?.textContent).toContain(engine || 'repo');
       if (engine) {
         const mark = server?.parentElement?.querySelector('[data-symbol="gearshape"]');
         expect(mark).not.toBeNull();
@@ -165,7 +218,7 @@ describe('SessionRow', () => {
       expect(container.textContent).not.toContain('gpt-6-1-sol');
       const accessible = container.querySelector('button[aria-label^="api,"]')?.getAttribute('aria-label');
       if (label) {
-        expect(container.textContent).toContain(label);
+        expect(container.textContent).not.toContain(label);
         expect(accessible).toContain(label);
       } else {
         expect(accessible).not.toContain('Orq');
