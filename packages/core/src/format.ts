@@ -439,7 +439,7 @@ export function hideAttachmentPaths(text: string, refs: FileRef[]): string {
   const alt = paths.slice().sort((a, b) => b.length - a.length)
     .map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
   const re = new RegExp(
-    `\\[([^\\]\\n]*)\\]\\(<?(?:${alt})>?\\)|(\`?)(?<![\\w.~/-])(${alt})(?![\\w-]|\\.\\w)\\2`, 'g');
+    `!?\\[([^\\]\\n]*)\\]\\(<?(?:${alt})>?\\)|(\`?)(?<![\\w.~/-])(${alt})(?![\\w-]|\\.\\w)\\2`, 'g');
   const name = (p: string) => p.split('/').filter(Boolean).pop() || p;
   let fence = false;
   let squeeze = false;

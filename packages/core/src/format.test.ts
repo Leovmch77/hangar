@@ -1134,6 +1134,7 @@ describe('hideAttachmentPaths', () => {
     expect(hide('Salvei em /tmp/print.png. Veja.')).toBe('Salvei em print.png. Veja.');
     expect(hide('Gerei `docs/rel.pdf` agora')).toBe('Gerei `rel.pdf` agora');
     expect(hide('O [relatório](</tmp/Relatório final.docx>) saiu')).toBe('O relatório saiu');
+    expect(hide('Tela ![antes](/tmp/a.png) e depois')).toBe('Tela antes e depois');
   });
 
   it('item de lista só com caminho some', () => {
