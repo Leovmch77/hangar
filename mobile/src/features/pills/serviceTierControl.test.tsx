@@ -9,7 +9,7 @@ import { SessionSettingsButton, SessionSettingsControl } from '../../chat/Sessio
 
 const routing = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock('expo-router', () => ({ useRouter: () => routing }));
-const api = vi.hoisted(() => ({ codex: vi.fn(), models: vi.fn(), tier: vi.fn(), permissions: vi.fn(), modelWrite: vi.fn(), modeWrite: vi.fn() }));
+const api = vi.hoisted(() => ({ credentials: vi.fn(), codex: vi.fn(), models: vi.fn(), tier: vi.fn(), permissions: vi.fn(), modelWrite: vi.fn(), modeWrite: vi.fn() }));
 const state = vi.hoisted(() => ({
   servers: [] as Server[], activeId: 'b',
   rows: [] as (SessionInfo & { serverId: string })[],
@@ -18,6 +18,7 @@ const state = vi.hoisted(() => ({
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
   getCodexModels: api.codex, getModelOptions: api.models, setServiceTier: api.tier, getPermissionModes: api.permissions,
+  getCredentialsForServer: api.credentials,
   setModelEffort: api.modelWrite, setEngineModel: api.modelWrite, setCodexModel: api.modelWrite,
   setPermissionMode: api.modeWrite, setCodexMode: api.modeWrite,
 }));
@@ -31,13 +32,19 @@ vi.mock('../../ui/AnchoredPanel', () => ({
 }));
 vi.mock('react-native', async (original) => ({
   ...await original<typeof import('react-native')>(),
+  Pressable: ({ accessibilityValue, ...props }: Record<string, any>) => createElement('button', {
+    'aria-label': props.accessibilityLabel, 'aria-valuetext': accessibilityValue?.text,
+    role: props.accessibilityRole, disabled: props.disabled, onClick: props.onPress,
+    style: Object.assign({}, ...[typeof props.style === 'function' ? props.style({ pressed: false }) : props.style].flat(Infinity).filter(Boolean)),
+  }, props.children),
   Switch: ({ value, onValueChange, disabled, accessibilityLabel, accessibilityState }: {
     value: boolean; onValueChange: (value: boolean) => void; disabled?: boolean;
     accessibilityLabel?: string; accessibilityState?: { busy?: boolean };
   }) => createElement('button', { role: 'switch', 'aria-checked': value, disabled, 'aria-label': accessibilityLabel,
     'aria-busy': accessibilityState?.busy, onClick: () => onValueChange(!value) }),
 }));
-vi.mock('../../paraglide/messages', () => ({
+vi.mock('../../paraglide/messages', async original => ({
+  ...await original<typeof import('../../paraglide/messages')>(),
   ...Object.fromEntries((
     'reasoning_level_low reasoning_level_medium reasoning_level_high reasoning_level_xhigh reasoning_level_max reasoning_level_ultra '
     + 'composer_session_settings composer_session_settings_hint composer_modelo native_close native_ctl_model_title native_ctl_search '
@@ -98,6 +105,7 @@ const checked = (container: HTMLElement) => toggle(container).getAttribute('aria
 
 beforeEach(() => {
   vi.resetAllMocks();
+  api.credentials.mockResolvedValue([]);
   state.servers = [
     { id: 'a', label: 'A', baseUrl: 'https://a.test', token: 'a' },
     { id: 'b', label: 'B', baseUrl: 'https://b.test', token: 'b' },
@@ -114,6 +122,19 @@ beforeEach(() => {
 afterEach(() => { act(() => { for (const root of roots.splice(0)) root.unmount(); }); });
 
 describe('Conta atual na folha de ajustes real', () => {
+  it('linha no topo mostra nome amigável e as duas cotas do servidor da conversa', async () => {
+    state.rows[0] = { ...state.rows[0], provider: 'claude', conta: 'claude:/home/test/.claude-team' };
+    api.credentials.mockResolvedValue([{ id: 'claude:/home/test/.claude-team', nome: 'Equipe', tipo: 'claude',
+      login: { estado: 'ok', loggedIn: true }, cota: { estado: 'lida', janelas: [{ rotulo: '5h', pct: 36 }, { rotulo: '7d', pct: 67 }] } }]);
+    const { container } = await mount('claude');
+    const account = container.querySelector('[aria-label="accounts_switch_title"]');
+    expect(account?.textContent).toContain('Equipe');
+    expect(account?.textContent).toContain('5h 36%');
+    expect(account?.textContent).toContain('7d 67%');
+    expect(account?.getAttribute('aria-valuetext')).toContain('5h 36%');
+    expect(account?.getAttribute('aria-valuetext')).toContain('7d 67%');
+    expect(api.credentials).toHaveBeenCalledWith(state.servers[0]);
+  });
   it.each([
     { provider: 'claude', account: { conta: 'claude:/home/test/.claude-route-account' }, label: 'route-account' },
     { provider: 'claude', account: { engine: 'local-gpt', conta: 'chave:local-gpt' }, label: 'local-gpt' },
