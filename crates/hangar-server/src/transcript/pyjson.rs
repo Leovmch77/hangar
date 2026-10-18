@@ -37,6 +37,11 @@ pub fn loads_lossless(s: &str) -> Option<Value> {
 
 /// Troca cada `\uD8xx`..`\uDFxx` sem par, dentro de string JSON, pelo marcador cru.
 fn mark_lone_surrogates(s: &str) -> String {
+    mark_lone_surrogates_using(s, |code| py::mark(code).to_string())
+}
+
+/// Permite que outro leitor preserve a identidade dos surrogates sem colidir com texto legítimo.
+pub(crate) fn mark_lone_surrogates_using(s: &str, mark: impl Fn(u32) -> String) -> String {
     let b = s.as_bytes();
     let mut out = String::with_capacity(s.len());
     let (mut i, mut copied, mut in_str) = (0, 0, false);
@@ -51,7 +56,7 @@ fn mark_lone_surrogates(s: &str) -> String {
                 Some(0xD800..=0xDBFF) if low_follows(b, i + 6) => i += 12,
                 Some(code @ 0xD800..=0xDFFF) => {
                     out.push_str(&s[copied..i]);
-                    out.push(py::mark(code));
+                    out.push_str(&mark(code));
                     i += 6;
                     copied = i;
                 }

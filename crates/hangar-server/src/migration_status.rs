@@ -97,6 +97,7 @@ pub fn area_of(path: &str) -> usize {
 /// O Rust atende este pedido do dono sem repassar? Mesma decisão do `routes::router`: as rotas
 /// GET registradas lá, mais os `matches` de Git/arquivos e de worktrees que o `pass_any` consulta.
 pub fn rust_route(method: &Method, path: &str) -> bool {
+    if crate::orq_conductor::matches(method, path) { return true; }
     if crate::session_media::is_media(method, path) { return true; }
     if crate::accounts::http::matches(method, path) { return true; }
     if *method == Method::GET {
@@ -210,7 +211,8 @@ const PROBES: &[(&str, &str)] = &[
     ("GET", "/api/costs"), ("GET", "/api/uso"), ("GET", "/api/cotacao"), ("GET", "/api/sessions/x/cost"),
     ("GET", "/api/cotas"), ("GET", "/api/sessions/x/limits"),
     ("GET", "/api/codex-contas"), ("POST", "/api/sessions/x/codex-permissions"),
-    ("GET", "/api/orq"), ("POST", "/api/sessions/x/pi"), ("POST", "/api/sessions/x/kimi"),
+    ("GET", "/api/orq"), ("GET", "/api/orq/x/conductor"), ("GET", "/api/sessions/x/pi/models"), ("POST", "/api/sessions/x/pi/model"),
+    ("GET", "/api/sessions/x/kimi/models"), ("POST", "/api/sessions/x/kimi/model"), ("GET", "/api/omp/plugin-sync"),
     ("GET", "/api/claude-configs"), ("GET", "/api/engines"), ("POST", "/api/sessions/x/conta"),
     ("GET", "/api/guests"), ("POST", "/api/sessions/x/share"),
     ("GET", "/api/peers"), ("POST", "/api/sessions/x/pair"),

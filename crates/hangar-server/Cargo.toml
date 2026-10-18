@@ -23,7 +23,7 @@ bench = false
 # alloc (aqui, no serde e o signal do tokio): as features que o resto do workspace pede. Sem elas,
 # `cargo test -p hangar-server` e `cargo test --workspace` compilam o servidor com features diferentes
 # e cada um guarda a sua cópia de tudo no target.
-serde_json = { workspace = true, features = ["float_roundtrip", "alloc"] }
+serde_json = { workspace = true, features = ["float_roundtrip", "alloc", "unbounded_depth"] }
 indexmap.workspace = true
 hangar-api.workspace = true
 hangar-codex.workspace = true
@@ -128,3 +128,7 @@ path = "tests/scope_retry.rs"
 [[test]]
 name = "costs_hook"   # gancho de pânico global (install_panic_hook)
 path = "tests/costs_hook/main.rs"
+
+[[test]]
+name = "contract_orq_conductor"
+path = "tests/contract_orq_conductor.rs"

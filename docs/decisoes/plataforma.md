@@ -2811,3 +2811,35 @@ defeitos achados nele (todos consertados no Rust, decisão do usuário) estão n
   valendo para ele. Convidado da 8766 continua decidido pelo porteiro, sem Origin, como antes.
 - Removidos por ficarem sem chamador: `crates/hangar-server/src/term/origin.rs` e a rota interna
   `POST /internal/term/origin`; contrato interno 74 → 75.
+
+
+## Feed do condutor no Rust, watchdog compartilhado no Python
+
+Em 18/10/2026, `GET /api/orq/{exec_id}/conductor` passou a montar registro, sombra do Jev e eventos
+no `hangar-server`. O contrato foi congelado executando `orq_conductor.py` e `orq.py` do commit
+`70d0b9ef4`, em `backend/tests/fixtures/contract/orq-conductor/`: o gerador registra a origem e o
+comando, e o teste Rust compara os valores sem produzir o esperado.
+
+O watchdog não foi migrado: `GET /api/orq`, `runs._active_run` e os fatos da lista dependem dele.
+O Rust faz uma ida a `/internal/orq/{exec_id}/conductor-facts` para receber caminho validado e
+watchdog. Esse fato só lê arquivos e systemd pelo pool interno; não importa `api` nem `registry`,
+nem chama o Rust. Assim não há volta Rust → Python → Rust. A pasta existente continua válida sem
+`eventos.jsonl`. O protocolo interno foi atualizado nos dois lados.
+
+A rota Python pública conserva somente autenticação e repasse privado, inclusive na porta do
+Connect. Sem Rust, responde 503 `orq_conductor_need_rust_server`, sem montar uma segunda resposta.
+A tabela de migração conserva as rotas de orquestração e provedores ainda atendidas no Python;
+a área permanece mista. O texto de erro de execução ausente ganhou acentos, preservando código
+e status.
+
+O parser preserva números inteiros grandes, ordem de veto e desempates, linhas físicas, Unicode,
+normalização de sombra, janela inclusiva de dez segundos e limite de 500 entradas. Datas sem fuso
+usam a hora local; o contrato injeta um deslocamento fixo para ser igual no Linux e no Windows,
+sem mudar `TZ` global. JSON com aninhamento profundo usa uma thread com pilha proporcional:
+decodificação, representação textual, serialização e descarte da árvore ficam na mesma thread;
+o caminho comum não a cria. Os cenários de profundidade 200 e 2000 vêm do Python original.
+
+NaN em probabilidades continua nulo; valor não finito em campo devolvido cru e surrogate sem par
+continuam erro HTTP, como a serialização Python. Erros originais de tipo de evento não hashável e
+inteiro grande demais para probabilidade permanecem recusas visíveis, sem feed parcial. O
+watchdog e os auxiliares ainda compartilhados com a timeline ficaram no Python.
