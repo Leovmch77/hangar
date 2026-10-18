@@ -611,6 +611,18 @@ fn an_omitted_provider_comes_from_the_creator_before_the_remembered_one() {
     assert_eq!(resolve_fixture(&explicit).unwrap().provider_source, None, "pedido explícito não tem origem a dizer");
 }
 
+/// `claude --permission-mode default` (o nome que o Claude Code dá ao modo manual) abre no manual, como o
+/// CLI abria, em vez de recusar.
+#[test]
+fn claude_permission_mode_default_opens_in_manual() {
+    let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_inherit_from_headless_creator").unwrap();
+    let body = fixture["scenario"]["steps"][0]["json"].as_object_mut().unwrap();
+    body.retain(|k, _| k != "creator");
+    body.insert("provider".into(), json!("claude"));
+    body.insert("permission_mode".into(), json!("default"));
+    assert_eq!(resolve_fixture(&fixture).map(|r| r.spec.permission_mode).map_err(|e| e.code), Ok(Some(PermissionMode::Manual)));
+}
+
 /// D-001 `inherit: false`: o mesmo que pedir sem criadora (fixture irmã com o corpo sem `creator`).
 #[test]
 fn inherit_false_resolves_like_no_creator() {

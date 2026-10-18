@@ -163,7 +163,9 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
     let mut config_dir = request.config_dir.clone();
     let mut codex_account = request.codex_account.clone();
     let mut headless = request.headless;
-    let mut permission = request.permission_mode.clone();
+    // `default` é o nome que o Claude Code dá ao manual (`claude --permission-mode default`).
+    let mut permission = request.permission_mode.clone()
+        .map(|mode| if provider == AgentProvider::Claude && mode == "default" { "manual".to_owned() } else { mode });
     // Fora do `permission`: o pedido explícito num Codex com terminal continua recusado, o herdado não.
     let mut inherited_codex_mode = None;
     let mut source = if explicit_account { AccountSource::Explicit } else { AccountSource::Default };
