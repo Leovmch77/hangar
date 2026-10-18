@@ -61,9 +61,9 @@ export function EditDiff({ oldText, newText, modo = 'unificado' }: { oldText: st
 }
 
 const styles = StyleSheet.create((theme) => ({
-  line: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs, paddingHorizontal: 6, paddingVertical: 1 },
+  line: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs, paddingHorizontal: theme.base.space[1.5], paddingVertical: 1 },
   row: { flexDirection: 'row' },
-  cell: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs, minWidth: 180, paddingHorizontal: 6 },
-  mais: { paddingVertical: 8, paddingHorizontal: 6, minHeight: 44, justifyContent: 'center' },
-  maisTxt: { fontSize: theme.base.text.xs, fontWeight: '600' },
+  cell: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs, minWidth: 180, paddingHorizontal: theme.base.space[1.5] },
+  mais: { paddingVertical: theme.base.space[2], paddingHorizontal: theme.base.space[1.5], minHeight: 44, justifyContent: 'center' },
+  maisTxt: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.semibold },
 }));

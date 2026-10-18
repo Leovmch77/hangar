@@ -102,8 +102,8 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.base.space[1],
     borderRadius: theme.base.radius.sm,
   },
-  verbo: { flexShrink: 0, maxWidth: '40%', fontSize: theme.base.text.xs, fontWeight: '500' },
-  vivo: { fontWeight: '600' },
+  verbo: { flexShrink: 0, maxWidth: '40%', fontSize: theme.base.text.xs, fontWeight: theme.base.weight.medium },
+  vivo: { fontWeight: theme.base.weight.semibold },
   alvo: { flexShrink: 1, minWidth: 0, fontSize: theme.base.text.xs, fontFamily: theme.base.fontMono },
   semMono: { fontFamily: undefined },
   fim: { flexShrink: 0, maxWidth: '45%', fontSize: theme.base.text.xs },
@@ -117,5 +117,5 @@ const styles = StyleSheet.create((theme) => ({
   },
   chipVerbo: { minWidth: 56, flexShrink: 0, fontSize: theme.base.text.xs },
   chipAlvo: { flex: 1 },
-  fimLinha: { flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 0, maxWidth: '45%' },
+  fimLinha: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], flexShrink: 0, maxWidth: '45%' },
 }));

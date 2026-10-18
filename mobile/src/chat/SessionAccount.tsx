@@ -228,7 +228,7 @@ export function SessionAccount({ serverId, name }: { serverId: string; name: str
 const styles = StyleSheet.create(theme => ({
   scroll: { flex: 1 },
   grow: { flex: 1 },
-  explanation: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },
+  explanation: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingVertical: theme.base.space[2] },
   content: { padding: theme.base.space[4], paddingBottom: theme.base.space[8], gap: theme.base.space[3] },
   notice: { gap: theme.base.space[2] },
   caption: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted },

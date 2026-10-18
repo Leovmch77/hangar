@@ -51,11 +51,11 @@ const styles = StyleSheet.create((theme) => ({
   dot: {
     width: 8,
     height: 8,
-    borderRadius: 4,
+    borderRadius: theme.base.radius.full,
   },
   text: {
     fontSize: theme.base.text.sm,
-    fontWeight: '500',
+    fontWeight: theme.base.weight.medium,
     flexShrink: 1,
   },
 }));

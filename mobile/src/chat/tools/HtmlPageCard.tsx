@@ -109,7 +109,7 @@ function LivePageCard({ page, sessionName, serverId }: { page: HtmlPageRef; sess
 }
 
 const styles = StyleSheet.create((theme) => ({
-  page: { width: '100%', borderRadius: 8, borderCurve: 'continuous', overflow: 'hidden', backgroundColor: 'transparent' },
+  page: { width: '100%', borderRadius: theme.base.radius.sm, borderCurve: 'continuous', overflow: 'hidden', backgroundColor: 'transparent' },
   web: { flex: 1, backgroundColor: 'transparent' },
   loading: { flex: 1, justifyContent: 'center' },
   note: { paddingVertical: theme.base.space[3], fontSize: theme.base.text.xs, color: theme.tokens.text.muted },
@@ -117,11 +117,11 @@ const styles = StyleSheet.create((theme) => ({
   errorText: { flexShrink: 1 },
   retry: { minHeight: 44, justifyContent: 'center', paddingHorizontal: theme.base.space[1] },
   site: { alignItems: 'flex-start', paddingTop: theme.base.space[2] },
-  siteTitle: { fontSize: theme.base.text.sm, fontWeight: '600', color: theme.tokens.text.primary },
-  retryText: { fontSize: theme.base.text.xs, fontWeight: '600', color: theme.tokens.accent.base },
+  siteTitle: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold, color: theme.tokens.text.primary },
+  retryText: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.semibold, color: theme.tokens.accent.base },
   // Como o T3 no celular: botão redondo no canto, sempre à vista.
   expand: {
-    position: 'absolute', top: 6, right: 6, width: 32, height: 32, borderRadius: 16, alignItems: 'center',
+    position: 'absolute', top: 6, right: 6, width: 32, height: 32, borderRadius: theme.base.radius.full, alignItems: 'center',
     justifyContent: 'center', backgroundColor: theme.tokens.bg.surface, borderWidth: 1, borderColor: theme.tokens.border.subtle,
   },
 }));

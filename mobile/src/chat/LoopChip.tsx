@@ -40,15 +40,15 @@ const styles = StyleSheet.create((theme) => ({
   chip: {
     minHeight: 28,
     maxWidth: 68,
-    paddingHorizontal: 7,
-    borderRadius: 9999,
+    paddingHorizontal: theme.base.space[1.5],
+    borderRadius: theme.base.radius.full,
     borderWidth: 1,
     alignItems: 'center',
     justifyContent: 'center',
   },
   text: {
     fontSize: theme.base.text.xxs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
     fontVariant: ['tabular-nums'],
   },
 }));

@@ -111,7 +111,7 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.base.space[3],
     maxHeight: '90%',
   },
-  title: { fontSize: theme.base.text.base, fontWeight: '600' },
+  title: { fontSize: theme.base.text.base, fontWeight: theme.base.weight.semibold },
   excerpt: { flexGrow: 0, maxHeight: 220, borderLeftWidth: 3, paddingLeft: theme.base.space[2] },
   field: {
     minHeight: 88,
@@ -131,5 +131,5 @@ const styles = StyleSheet.create((theme) => ({
     borderWidth: 1,
     justifyContent: 'center',
   },
-  btnTxt: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  btnTxt: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
 }));

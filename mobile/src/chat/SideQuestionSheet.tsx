@@ -144,13 +144,13 @@ export function SideQuestionSheet({ open, serverId, name, question, onClose }: {
 
 const styles = StyleSheet.create((theme) => ({
   wrap: { padding: theme.base.space[3], gap: theme.base.space[2] },
-  title: { fontSize: theme.base.text.base, fontWeight: '600' },
+  title: { fontSize: theme.base.text.base, fontWeight: theme.base.weight.semibold },
   hint: { fontSize: theme.base.text.sm },
   list: { maxHeight: 420 },
   listContent: { gap: theme.base.space[2] },
   item: { borderRadius: theme.base.radius.md, padding: theme.base.space[2], gap: theme.base.space[1] },
   questionRow: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
-  question: { flex: 1, fontSize: theme.base.text.sm, fontWeight: '600' },
+  question: { flex: 1, fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
   time: { fontSize: theme.base.text.xs },
   warn: { fontSize: theme.base.text.xs },
   field: { flexDirection: 'row', alignItems: 'flex-end', gap: theme.base.space[2] },
@@ -171,6 +171,6 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.base.radius.full,
     paddingHorizontal: theme.base.space[3],
   },
-  sendText: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  sendText: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
   disabled: { opacity: 0.5 },
 }));

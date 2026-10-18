@@ -73,5 +73,5 @@ const styles = StyleSheet.create((theme) => ({
   desc: { flex: 1, fontSize: theme.base.text.xs },
   errorRow: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[2] },
   retry: { minHeight: 44, justifyContent: 'center' },
-  retryTxt: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  retryTxt: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
 }));

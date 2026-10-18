@@ -122,7 +122,7 @@ const styles = StyleSheet.create((theme) => ({
   linha: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], minHeight: 32 },
   verbo: { flexShrink: 1, fontSize: theme.base.text.xs },
   tempo: { flexShrink: 0, fontSize: theme.base.text.xxs, fontVariant: ['tabular-nums'] },
-  pensamento: { gap: 2 },
+  pensamento: { gap: theme.base.space[0.5] },
   cauda: { fontSize: theme.base.text.xs, fontStyle: 'italic', paddingLeft: 23 },
   agentes: { gap: theme.base.space[1] },
   agente: {
@@ -133,10 +133,10 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.base.space[3],
     paddingVertical: theme.base.space[2],
     borderWidth: 1,
-    borderRadius: 10,
+    borderRadius: theme.base.radius.sm,
   },
-  agenteCorpo: { flex: 1, minWidth: 0, gap: 2 },
+  agenteCorpo: { flex: 1, minWidth: 0, gap: theme.base.space[0.5] },
   agenteCab: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], minWidth: 0 },
   agenteDesc: { flexShrink: 1, fontSize: theme.base.text.sm },
-  tag: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xxxs, paddingHorizontal: 6, paddingVertical: 1, borderRadius: theme.base.radius.full, overflow: 'hidden' },
+  tag: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xxxs, paddingHorizontal: theme.base.space[1.5], paddingVertical: 1, borderRadius: theme.base.radius.full, overflow: 'hidden' },
 }));
