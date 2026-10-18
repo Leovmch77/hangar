@@ -31,12 +31,16 @@ async fn configuration(state: &AppState) -> Result<ConfigSnapshot, Transcription
 /// rota privada, sem passar pelo Python.
 pub(crate) async fn transcribe_here(state: &AppState, content: bytes::Bytes, filename: Option<String>, profile: Profile)
     -> Result<super::model::Transcription, TranscriptionError> {
-    let Ok(_slot) = state.transcription_slots.clone().try_acquire_owned() else {
-        return Err(TranscriptionError { status: 503, code: "transcription_busy".into(), detail: "As vagas de transcrição estão ocupadas. Tente novamente.".into() });
+    let result = match state.transcription_slots.clone().try_acquire_owned() {
+        Err(_) => Err(TranscriptionError { status: 503, code: "transcription_busy".into(), detail: "As vagas de transcrição estão ocupadas. Tente novamente.".into() }),
+        Ok(_slot) => match configuration(state).await {
+            Ok(snapshot) => {
+                state.transcription.configure(snapshot).await;
+                state.transcription.transcribe(content, filename, profile).await
+            }
+            Err(error) => Err(error),
+        },
     };
-    let snapshot = configuration(state).await?;
-    state.transcription.configure(snapshot).await;
-    let result = state.transcription.transcribe(content, filename, profile).await;
     if let Err(error) = &result {
         state.diag.report("transcription.failed", "", &error.code, "A transcrição falhou.");
     }

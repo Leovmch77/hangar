@@ -230,6 +230,7 @@ mod terminal_input_tmux;
 mod terminal_routes;
 mod terminal_runtime;
 mod terminal_runtime_tmux;
+mod uploads_contract;
 mod uploads_store;
 mod voice_settings;
 mod voice_ws;

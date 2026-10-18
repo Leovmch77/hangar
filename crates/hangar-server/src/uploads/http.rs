@@ -3,15 +3,15 @@ use super::{
     media,
     store::{UploadStore, project_key},
 };
-use crate::{accounts::quotas::now, routes::AppState};
+use crate::routes::AppState;
 use axum::{
-    extract::{ConnectInfo, Path, Request, State},
+    extract::Request,
     http::{Method, StatusCode},
     response::{IntoResponse, Response},
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 pub struct Facts {
     pub cwd: PathBuf,
@@ -85,13 +85,25 @@ pub fn retention_days(runtime: &Value, env: Option<&str>) -> i64 {
     from_file.or_else(|| env?.trim().parse().ok()).unwrap_or(30)
 }
 
+/// Arquivo ausente vale o ambiente e o padrão; ilegível ou torto é erro, nunca os 30 dias: com a
+/// retenção errada a poda apagaria anexos que a pessoa mandou guardar.
+pub fn retention_from(read: std::io::Result<Vec<u8>>, env: Option<&str>) -> Result<i64, &'static str> {
+    let runtime = match read {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| "upload_retention_config_invalid")?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Null,
+        Err(_) => return Err("upload_retention_config_unreadable"),
+    };
+    Ok(retention_days(&runtime, env))
+}
+
+/// Sem retenção legível, nada expira nem é podado; a causa vai ao diário.
 async fn retention(st: &AppState) -> i64 {
     let path = st.accounts.env.claude_base.join("runtime-config.json");
-    let runtime = match tokio::fs::read(&path).await {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-        Err(_) => Value::Null,
-    };
-    retention_days(&runtime, std::env::var("CP_UPLOAD_RETENTION_DAYS").ok().as_deref())
+    let env = std::env::var("CP_UPLOAD_RETENTION_DAYS").ok();
+    retention_from(tokio::fs::read(&path).await, env.as_deref()).unwrap_or_else(|code| {
+        st.diag.report("rust.uploads_failed", "", code, "a retenção de anexos não pôde ser lida; nada é podado");
+        0
+    })
 }
 
 /// Sessão, pasta e configuração do cofre, pela descoberta da lista; o envio confere antes a troca
@@ -143,33 +155,6 @@ pub async fn public(st: Arc<AppState>, req: Request) -> Response {
     handle(&st, &name, &tail, req).await
 }
 
-pub async fn private(
-    State(st): State<Arc<AppState>>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    Path(name): Path<String>,
-    req: Request,
-) -> Response {
-    if !crate::workspace_routes::private_ok(&st, peer, req.headers()) {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let query: HashMap<String, String> =
-        form_urlencoded::parse(req.uri().query().unwrap_or("").as_bytes())
-            .into_owned()
-            .collect();
-    let action = query.get("action").map(String::as_str).unwrap_or("");
-    let tail = match action {
-        "save" if *req.method() == Method::POST => "upload".to_owned(),
-        "list" if *req.method() == Method::GET => "uploads".to_owned(),
-        "download" if matches!(*req.method(), Method::GET | Method::HEAD) => format!(
-            "uploads/{}",
-            query.get("filename").map(String::as_str).unwrap_or("")
-        ),
-        "resolve" if *req.method() == Method::GET => "resolve".to_owned(),
-        _ => return StatusCode::BAD_REQUEST.into_response(),
-    };
-    handle(&st, &name, &tail, req).await
-}
-
 async fn handle(st: &AppState, name: &str, tail: &str, req: Request) -> Response {
     let query: HashMap<String, String> =
         form_urlencoded::parse(req.uri().query().unwrap_or("").as_bytes())
@@ -188,13 +173,9 @@ async fn handle(st: &AppState, name: &str, tail: &str, req: Request) -> Response
             .strip_prefix("uploads/")
             .map(str::to_owned)
             .unwrap_or_else(|| query.get("filename").cloned().unwrap_or_default());
-        if tail == "resolve" {
-            raw
-        } else {
-            match percent_encoding::percent_decode_str(&raw).decode_utf8() {
-                Ok(v) => v.into_owned(),
-                Err(_) => return StatusCode::BAD_REQUEST.into_response(),
-            }
+        match percent_encoding::percent_decode_str(&raw).decode_utf8() {
+            Ok(v) => v.into_owned(),
+            Err(_) => return StatusCode::BAD_REQUEST.into_response(),
         }
     };
     let facts = match facts(st, name, &filename, writing).await {
@@ -227,8 +208,9 @@ pub(super) async fn execute(
         Ok(p) => p,
         Err(e) => return storage_error(e, false),
     };
+    let now = st.upload_naming.now.clone();
     let store = match UploadStore::new(&facts.root) {
-        Ok(s) => s,
+        Ok(s) => s.with_naming(st.upload_naming.clone()),
         Err(e) => return storage_error(e, false),
     };
     if writing {
@@ -254,7 +236,8 @@ pub(super) async fn execute(
         };
         let prune = {
             let (store, project, retention) = (store.clone(), project.clone(), facts.retention);
-            blocking(move || store.prune(&project, retention, now())).await
+            let now = now();
+            blocking(move || store.prune(&project, retention, now)).await
         };
         if prune.is_err() {
             tracing::warn!(
@@ -277,8 +260,8 @@ pub(super) async fn execute(
         );
     }
     if tail == "uploads" {
-        let (session, retention) = (facts.session.clone(), facts.retention);
-        return match blocking(move || store.list(&project, &session, retention, now())).await {
+        let (session, retention, now) = (facts.session.clone(), facts.retention, now());
+        return match blocking(move || store.list(&project, &session, retention, now)).await {
             Ok(files) => response(json!({"files":files}), 200),
             Err(e) => storage_error(e, false),
         };

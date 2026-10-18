@@ -41,16 +41,19 @@ pub fn with_provider(mut result: Value, provider: &str, aviso: Option<&str>) -> 
     result
 }
 
-/// Corpo JSON de uma resposta de anexo que deu certo, ou a própria resposta de erro.
-async fn ok_json(response: Response) -> Result<Value, Response> {
+/// O caminho gravado ou resolvido pelo cofre, ou a própria resposta de erro dele.
+async fn saved_path(st: &AppState, name: &str, response: Response) -> Result<String, Response> {
     if response.status() != StatusCode::OK {
         return Err(response);
     }
-    let bytes = response.into_body().collect().await.map_err(|_| unavailable())?.to_bytes();
-    serde_json::from_slice(&bytes).map_err(|_| unavailable())
+    let bytes = response.into_body().collect().await.map_err(|_| unavailable(st, name, "upload_storage_reply_lost"))?.to_bytes();
+    serde_json::from_slice::<Value>(&bytes).ok()
+        .and_then(|v| v["path"].as_str().filter(|p| !p.is_empty()).map(str::to_owned))
+        .ok_or_else(|| unavailable(st, name, "upload_storage_reply_invalid"))
 }
 
-fn unavailable() -> Response {
+fn unavailable(st: &AppState, name: &str, cause: &'static str) -> Response {
+    st.diag.report("rust.uploads_failed", name, cause, "o cofre de anexos não respondeu ao transcrever");
     json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body("upload_storage_unavailable", "não foi possível acessar o cofre de anexos", json!({})))
 }
 
@@ -93,13 +96,17 @@ pub async fn serve(st: &AppState, name: &str, req: Request, guest: bool) -> Resp
         Some(arquivo) => {
             let allow = HashMap::from([("allow_absolute".to_owned(), (!guest).to_string())]);
             let resolved = http::execute(&st, "resolve", Request::new(Body::empty()), facts, &arquivo, allow).await;
-            let path = match ok_json(resolved).await {
-                Ok(value) => value["path"].as_str().unwrap_or_default().to_owned(),
+            let path = match saved_path(st, name, resolved).await {
+                Ok(path) => path,
                 Err(response) => return response,
             };
             let data = match tokio::fs::read(&path).await {
                 Ok(data) => data,
-                Err(_) => return unavailable(),
+                // A poda pode tirar o áudio entre a resolução e a leitura.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return http::failure(404, "erro_upload_inexistente", "arquivo não encontrado");
+                }
+                Err(_) => return unavailable(st, name, "upload_audio_unreadable"),
             };
             let filename = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned());
             (path, data, filename)
@@ -110,13 +117,17 @@ pub async fn serve(st: &AppState, name: &str, req: Request, guest: bool) -> Resp
                 return http::failure(413, "erro_arquivo_grande", "arquivo maior que 100 MiB");
             }
             let filename = req.headers().get("x-filename").and_then(|v| v.to_str().ok()).map(str::to_owned).or_else(|| text("name"));
-            let Ok(data) = axum::body::to_bytes(req.into_body(), MAX_UPLOAD_BYTES as usize).await else {
-                return http::failure(413, "erro_arquivo_grande", "arquivo maior que 100 MiB");
+            let data = match axum::body::to_bytes(req.into_body(), MAX_UPLOAD_BYTES as usize).await {
+                Ok(data) => data,
+                Err(e) if std::error::Error::source(&e).is_some_and(|s| s.is::<http_body_util::LengthLimitError>()) => {
+                    return http::failure(413, "erro_arquivo_grande", "arquivo maior que 100 MiB");
+                }
+                Err(_) => return http::failure(400, "erro_upload_interrompido", "o envio do áudio foi interrompido"),
             };
             let audio = HashMap::from([("audio_only".to_owned(), "true".to_owned())]);
-            let saved = http::execute(&st, "upload", Request::new(Body::from(data.clone())), facts, filename.as_deref().unwrap_or(""), audio).await;
-            let path = match ok_json(saved).await {
-                Ok(value) => value["path"].as_str().unwrap_or_default().to_owned(),
+            let saved = http::execute(st, "upload", Request::new(Body::from(data.clone())), facts, filename.as_deref().unwrap_or(""), audio).await;
+            let path = match saved_path(st, name, saved).await {
+                Ok(path) => path,
                 Err(response) => return response,
             };
             (path, data.to_vec(), filename)
@@ -139,7 +150,10 @@ pub async fn serve(st: &AppState, name: &str, req: Request, guest: bool) -> Resp
         "harness_allowed": !guest, "include_recent_messages": include_recent, "recent_messages": null});
     let started = tokio::time::Instant::now();
     let result = match serde_json::from_value::<OrganizationRequest>(payload) {
-        Ok(request) => serde_json::to_value(crate::dictation::routes::organize_request(&st, request, started).await).unwrap_or(Value::Null),
+        Ok(request) => match serde_json::to_value(crate::dictation::routes::organize_request(st, request, started).await) {
+            Ok(value) => value,
+            Err(_) => return unavailable(st, name, "dictation_result_unserializable"),
+        },
         // Estilo ou modo desconhecido: o texto transcrito volta cru, com o motivo.
         Err(_) => json!({"text": transcription.text, "raw": transcription.text, "aviso": "Pedido de organização inválido.",
             "estilo_aplicado": "cru", "organization_mode": mode, "organization_code": "dictation_request_invalid"}),

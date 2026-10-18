@@ -143,7 +143,11 @@ fn served_media(media: Option<&str>) -> &'static str {
 
 /// A `idx`-ésima imagem base64 de topo da mensagem `uuid`: a primeira linha com esse uuid decide.
 pub fn find_image(jsonl: &Path, uuid: &str, idx: i64) -> std::io::Result<Option<(Vec<u8>, &'static str)>> {
-    let Ok(file) = std::fs::File::open(jsonl) else { return Ok(None) };
+    let file = match std::fs::File::open(jsonl) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
     let needle = uuid.as_bytes();
     let mut reader = BufReader::new(file);
     let mut line = Vec::new();
@@ -220,7 +224,7 @@ async fn serve_transcript_image(st: &AppState, name: &str, uuid: String, idx: &s
             response
         }
         Ok(Ok(None)) => json_response(StatusCode::NOT_FOUND, detail_body("erro_imagem_nao_encontrada", "image not found", json!({}))),
-        Ok(Err(_)) => json_response(StatusCode::CONFLICT, detail_body("session_transfer_history_invalid", "histórico da transferência indisponível", json!({}))),
+        Ok(Err(_)) => route_failed(st, headers, "rust.transcript_image_failed", name, "transcript_image_io", "o transcript não pôde ser lido"),
         Err(_) => route_failed(st, headers, "rust.transcript_image_failed", name, "transcript_image_panic", "a leitura da imagem caiu no servidor"),
     }
 }
@@ -237,15 +241,23 @@ pub fn is_task_output(path: &Path) -> bool {
         && path.components().any(|c| c.as_os_str().to_string_lossy().starts_with("claude"))
 }
 
-/// Os últimos `max` bytes, com o caractere cortado no começo trocado por U+FFFD.
-pub fn read_tail(path: &Path, max: u64) -> Option<String> {
+/// Os últimos `max` bytes, com o caractere cortado no começo trocado por U+FFFD. Arquivo que sumiu
+/// (o comando acabou e o Claude Code apagou) é `None`; outro erro de leitura é erro.
+pub fn read_tail(path: &Path, max: u64) -> Result<Option<String>, &'static str> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
-    file.seek(SeekFrom::Start(len.saturating_sub(max))).ok()?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    let read = || -> std::io::Result<String> {
+        let mut file = std::fs::File::open(path)?;
+        let len = file.metadata()?.len();
+        file.seek(SeekFrom::Start(len.saturating_sub(max)))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    };
+    match read() {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err("bash_output_file_unreadable"),
+    }
 }
 
 /// Para onde vai a saída padrão do processo.
@@ -268,16 +280,16 @@ pub fn stdout_files(_pid: i64) -> Vec<std::path::PathBuf> {
 
 /// A saída ao vivo de um Bash da sessão `sid`: só os processos abaixo do agente dela contam, e o
 /// comando é o texto do `eval` da linha de comando do shell.
-pub fn bash_output(dirs: &[std::path::PathBuf], sid: &str, command: &str, procs: &dyn crate::list::procs::ProcessView) -> Option<String> {
+pub fn bash_output(dirs: &[std::path::PathBuf], sid: &str, command: &str, procs: &dyn crate::list::procs::ProcessView) -> Result<Option<String>, &'static str> {
     let wanted = command.trim();
     if wanted.is_empty() || sid.is_empty() {
-        return None;
+        return Ok(None);
     }
     let roots = crate::list::facts_files::native_pids(dirs, sid);
     if roots.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let children = procs.children(SCAN_TTL).ok()?;
+    let children = procs.children(SCAN_TTL).map_err(|_| "bash_output_procs_unreadable")?;
     let mut queue: Vec<i64> = roots.iter().filter_map(|r| children.get(r)).flatten().copied().collect();
     let mut seen = std::collections::HashSet::new();
     while let Some(pid) = queue.pop() {
@@ -292,7 +304,7 @@ pub fn bash_output(dirs: &[std::path::PathBuf], sid: &str, command: &str, procs:
             return read_tail(&file, OUTPUT_TAIL);
         }
     }
-    None
+    Ok(None)
 }
 
 /// `psutil.Process.open_files()`: os handles do processo, duplicados aqui, e só os de arquivo em
@@ -445,11 +457,15 @@ async fn serve_bash_output(st: &AppState, name: &str, req: Request) -> Response 
     let list = st.list.clone();
     let found = tokio::task::spawn_blocking(move || {
         let (dirs, _) = list.state_dirs_blocking().map_err(|e| e.code)?;
-        Ok::<_, &'static str>(bash_output(&dirs, &sid, &command, &*list.env().procs))
+        bash_output(&dirs, &sid, &command, &*list.env().procs)
     })
     .await;
     match found {
         Ok(Ok(text)) => json_response(StatusCode::OK, json!({"text": text})),
+        Ok(Err(code)) if code.starts_with("bash_output_") => {
+            st.diag.report("rust.bash_output_failed", name, code, "a saída do comando não pôde ser lida");
+            json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body(code, "a saída do comando não pôde ser lida", json!({})))
+        }
         Ok(Err(code)) => {
             st.diag.report("rust.bash_output_failed", name, code, "pastas das contas indisponíveis");
             json_response(StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_lista_indisponivel",

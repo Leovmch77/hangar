@@ -525,8 +525,12 @@ async def forward_stream(request, *, guest: bool):
             if chunked:
                 await asyncio.to_thread(connection.send, b"0\r\n\r\n")
         response = await asyncio.to_thread(connection.getresponse)
-    except (OSError, http.client.HTTPException):
+    except (OSError, http.client.HTTPException) as error:
         connection.close()
+        from app import diag
+        # Só a classe: a mensagem pode trazer trecho do pedido.
+        diag.registrar("rust.forward_failed", "aviso", codigo="account_bridge_unavailable",
+                       detalhe=request.url.path, causa=type(error).__name__)
         return JSONResponse({"detail": {"code": "account_bridge_unavailable"}}, status_code=503)
     except BaseException:
         connection.close()

@@ -60,6 +60,8 @@ pub struct AppState {
     pub origins_home: std::path::PathBuf,
     /// `~/.hangar`: etapas de ferramenta e cofre de anexos; o teste troca por uma pasta temporária.
     pub hangar_dir: std::path::PathBuf,
+    /// Relógio e sufixo dos nomes do cofre de anexos; o teste de contrato fixa os da referência.
+    pub upload_naming: crate::uploads::store::Naming,
     pub origins: std::sync::Mutex<indexmap::IndexMap<std::path::PathBuf, crate::costs::origins::Origins>>,
     pub list: Arc<crate::list::bridge::ListBridge>,
     /// Produtor único da lista do dono; liga com a primeira lista aberta.
@@ -161,6 +163,7 @@ impl AppState {
             costs, fx, reports: Arc::new(crate::costs::ReportCache::default()),
             origins_home: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()),
             hangar_dir: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()).join(".hangar"),
+            upload_naming: Default::default(),
             origins: std::sync::Mutex::new(indexmap::IndexMap::new()),
             list, state,
             hub: Arc::default(),
@@ -452,7 +455,6 @@ fn terminal_router_with(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> 
         .route("/__hangar_server/forwarded", axum::routing::any(crate::forwarded::private))
         .route("/__hangar_server/list", axum::routing::post(crate::list::bridge::private))
         .route("/__hangar_server/accounts", axum::routing::post(crate::accounts::http::private))
-        .route("/__hangar_server/uploads/{name}", axum::routing::any(crate::uploads::http::private))
         .route("/__hangar_server/quotas", axum::routing::post(crate::accounts::quotas::private))
         .route("/__hangar_server/accounts/claude", axum::routing::post(crate::accounts::http::private_claude))
         .route("/__hangar_server/accounts/public", axum::routing::any(crate::accounts::http::private_public))

@@ -505,6 +505,42 @@ async fn forwarded_from_python_ports_is_served_here_and_keeps_the_guest_limits()
 }
 
 #[test]
+fn unreadable_retention_config_never_prunes_with_the_default() {
+    use hangar_server::uploads::http::retention_from;
+    assert_eq!(retention_from(Ok(br#"{"upload_retention_days": 365}"#.to_vec()), None), Ok(365));
+    assert_eq!(retention_from(Err(std::io::ErrorKind::NotFound.into()), Some("9")), Ok(9));
+    assert_eq!(retention_from(Err(std::io::ErrorKind::NotFound.into()), None), Ok(30));
+    assert_eq!(retention_from(Ok(b"{trunc".to_vec()), None), Err("upload_retention_config_invalid"));
+    assert_eq!(retention_from(Err(std::io::ErrorKind::PermissionDenied.into()), None), Err("upload_retention_config_unreadable"));
+}
+
+#[test]
+fn bash_output_says_when_the_process_table_cannot_be_read() {
+    use hangar_server::list::procs::{ChildrenMap, ProcessView};
+    struct Broken;
+    impl ProcessView for Broken {
+        fn children(&self, _: std::time::Duration) -> std::io::Result<Arc<ChildrenMap>> { Err(std::io::ErrorKind::PermissionDenied.into()) }
+        fn cwd(&self, _: i64) -> Option<PathBuf> { None }
+        fn env_var(&self, _: i64, _: &str) -> std::io::Result<Option<std::ffi::OsString>> { Ok(None) }
+        fn start_time(&self, _: i64) -> Option<f64> { None }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("sessions")).unwrap();
+    std::fs::write(dir.path().join(format!("sessions/{}.json", std::process::id())),
+        json!({"sessionId": "sa", "pid": std::process::id(), "status": "busy", "updatedAt": 1000}).to_string()).unwrap();
+    let result = hangar_server::session_media::bash_output(&[dir.path().to_path_buf()], "sa", "ls", &Broken);
+    assert_eq!(result, Err("bash_output_procs_unreadable"));
+}
+
+#[test]
+fn transcript_image_read_failure_is_an_error_not_a_missing_image() {
+    let dir = tempfile::tempdir().unwrap();
+    // Um diretório no lugar do transcript: abrir dá certo no Unix e ler falha.
+    let result = hangar_server::session_media::find_image(dir.path(), "u", 0);
+    assert!(result.is_err(), "{result:?}");
+}
+
+#[test]
 fn dictation_uses_the_dictation_deadline_and_attachments_the_file_one() {
     use hangar_server::uploads::transcribe::profile;
     assert_eq!(serde_json::to_value(profile(true)).unwrap(), json!("dictation"));
@@ -592,10 +628,11 @@ fn bash_output_tail_is_16000_bytes_decoded_with_replacement() {
     let mut bytes = "é".as_bytes().to_vec();
     bytes.extend(std::iter::repeat_n(b'a', 15_999));
     std::fs::write(&path, &bytes).unwrap();
-    let text = hangar_server::session_media::read_tail(&path, 16_000).unwrap();
+    let text = hangar_server::session_media::read_tail(&path, 16_000).unwrap().unwrap();
     assert!(text.starts_with('\u{fffd}'), "{:?}", &text[..4]);
     assert_eq!(text.chars().filter(|&c| c == 'a').count(), 15_999);
-    assert_eq!(hangar_server::session_media::read_tail(&dir.path().join("sumiu"), 16_000), None);
+    assert_eq!(hangar_server::session_media::read_tail(&dir.path().join("sumiu"), 16_000), Ok(None));
+    assert_eq!(hangar_server::session_media::read_tail(dir.path(), 16_000), Err("bash_output_file_unreadable"));
 }
 
 #[test]
@@ -687,10 +724,10 @@ fn bash_output_reads_only_the_command_under_the_session_agent() {
     let procs = SystemProcs::default();
     let dirs = [cfg];
     let command = "  printenv MARK; sleep 30 ";
-    assert_eq!(bash_output(&dirs, "sa", command, &procs).as_deref(), Some("a\n"));
-    assert_eq!(bash_output(&dirs, "sb", command, &procs).as_deref(), Some("b\n"));
-    assert_eq!(bash_output(&dirs, "sc", command, &procs), None, "saída fora de tasks/ não conta");
-    assert_eq!(bash_output(&dirs, "sd", command, &procs), None, "sessão sem agente não lê a de outra");
-    assert_eq!(bash_output(&dirs, "sa", "outro comando", &procs), None);
-    assert_eq!(bash_output(&dirs, "sa", "   ", &procs), None);
+    assert_eq!(bash_output(&dirs, "sa", command, &procs), Ok(Some("a\n".to_owned())));
+    assert_eq!(bash_output(&dirs, "sb", command, &procs), Ok(Some("b\n".to_owned())));
+    assert_eq!(bash_output(&dirs, "sc", command, &procs), Ok(None), "saída fora de tasks/ não conta");
+    assert_eq!(bash_output(&dirs, "sd", command, &procs), Ok(None), "sessão sem agente não lê a de outra");
+    assert_eq!(bash_output(&dirs, "sa", "outro comando", &procs), Ok(None));
+    assert_eq!(bash_output(&dirs, "sa", "   ", &procs), Ok(None));
 }
