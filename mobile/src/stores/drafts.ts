@@ -28,6 +28,7 @@ const draftSchema = z.preprocess(legacyAttachment, z.object({
   revision: z.number().int().nonnegative(),
   transcript: z.string().min(1).nullable(),
   dictationId: z.string().min(1).optional(),
+  recordings: z.array(z.object({ id: z.string().min(1), serverPath: z.string().min(1) })).optional(),
   attachments: z.array(attachmentSchema),
   submission: z.object({
     text: z.string(),
@@ -81,6 +82,14 @@ const recoverableKeyOf = (serverId: string, name: string) => `draft.v1.recoverab
 export const readDraft = (serverId: string, name: string) => readAt(keyOf(serverId, name));
 export const writeDraft = (serverId: string, name: string, value: ConversationDraft) => writeAt(keyOf(serverId, name), value);
 export const clearDraft = (serverId: string, name: string) => clearAt(keyOf(serverId, name));
+
+export function removeDraftRecording(serverId: string, name: string, id: string): ConversationDraft | null {
+  const latest = readDraft(serverId, name);
+  if (!latest) return null;
+  const next = { ...latest, recordings: latest.recordings?.filter((recording) => recording.id !== id) };
+  writeDraft(serverId, name, next);
+  return next;
+}
 export const readRecoverableDraft = (serverId: string, name: string) => readAt(recoverableKeyOf(serverId, name));
 export const writeRecoverableDraft = (serverId: string, name: string, value: ConversationDraft) =>
   writeAt(recoverableKeyOf(serverId, name), value);
@@ -206,7 +215,10 @@ export function applyReadyDictation(serverId: string, name: string, transcript: 
 function insertDictation(serverId: string, name: string, latest: ConversationDraft, voice: DictationDraft): ReturnType<typeof finishDictation> {
   // Texto e identidade entram juntos; falhar a limpeza depois não reoferece a mesma inserção.
   const next = { ...latest, text: latest.text.trim() ? `${latest.text.trim()} ${voice.text}` : voice.text,
-    revision: latest.revision + 1, dictationId: voice.id };
+    revision: latest.revision + 1, dictationId: voice.id,
+    ...(voice.serverPath ? { recordings: [...(latest.recordings ?? []).filter((recording) => recording.id !== voice.id),
+      { id: voice.id, serverPath: voice.serverPath }] } : {}),
+  };
   writeDraft(serverId, name, next);
   try { clearDictation(serverId, name); } catch {
     return { draft: next, dictation: { ...voice, status: 'applied', issue: m.draft_clear_error() } };

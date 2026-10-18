@@ -1,8 +1,9 @@
+import { useRef } from 'react';
 import { View } from 'react-native';
 
 // Animação não roda no teste: o valor final entra direto e o estilo animado vira estilo comum.
 const passa = (v: any) => v;
-export const useSharedValue = (v: any) => ({ value: v });
+export const useSharedValue = (v: any) => useRef({ value: v }).current;
 export const useDerivedValue = (fn: () => any) => ({ value: fn() });
 export const useAnimatedStyle = (fn: () => any) => fn();
 export const useAnimatedProps = (fn: () => any) => fn();
