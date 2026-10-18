@@ -20,7 +20,7 @@ export type FatalErrorReport = {
   componentStack: string;
   metadata: FatalErrorMetadata;
 };
-type StoredError = { report: FatalErrorReport; pending: boolean };
+type StoredError = { report: FatalErrorReport; pending: boolean; noticed?: boolean };
 type Runtime = {
   errorUtils?: { getGlobalHandler(): ErrorHandler; setGlobalHandler(handler: ErrorHandler): void };
   exceptions: { unstable_setExceptionDecorator(decorator: (data: Exception) => Exception): void };
@@ -140,6 +140,14 @@ function readStored(): StoredError | null {
 
 export function readFatalError(): FatalErrorReport | null {
   return readStored()?.report ?? null;
+}
+
+// O aviso sai uma vez por erro; o relatório continua em Ajustes > Sobre.
+export function takeFatalErrorNotice(): boolean {
+  const stored = readStored();
+  if (!stored || stored.noticed) return false;
+  prefs.set(KEY, JSON.stringify({ ...stored, noticed: true } satisfies StoredError));
+  return true;
 }
 
 export async function replayFatalError(send: (report: FatalErrorReport) => Promise<boolean>): Promise<void> {

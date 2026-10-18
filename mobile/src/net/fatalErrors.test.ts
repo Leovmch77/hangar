@@ -166,3 +166,14 @@ it.each(['Rendered more hooks texto da conversa.', "Couldn't find the header hei
   app.report(Error(message));
   expect(app.errors.readFatalError()?.message).toBe('[redacted]');
 });
+
+it('avisa uma vez por erro e de novo quando surge outro', async () => {
+  const app = await boot();
+  expect(app.errors.takeFatalErrorNotice()).toBe(false);
+  app.decorate({ isFatal: true, name: 'Error', message: 'Out of memory' });
+  expect(app.errors.takeFatalErrorNotice()).toBe(true);
+  expect(app.errors.takeFatalErrorNotice()).toBe(false);
+  expect(app.errors.readFatalError()?.message).toBe('Out of memory');
+  app.decorate({ isFatal: true, name: 'Error', message: 'Maximum update depth exceeded.' });
+  expect(app.errors.takeFatalErrorNotice()).toBe(true);
+});
