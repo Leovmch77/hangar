@@ -1,6 +1,7 @@
 import { Platform, Share } from 'react-native';
 import { Directory, File, Paths } from 'expo-file-system';
 import { startActivityAsync } from 'expo-intent-launcher';
+import { Asset, requestPermissionsAsync } from 'expo-media-library';
 import * as m from '../../paraglide/messages';
 
 const FLAG_GRANT_READ_URI_PERMISSION = 1;
@@ -60,6 +61,47 @@ export const canShareFile = Platform.OS === 'ios';
 export async function shareFile(uri: string, headers: Record<string, string> | undefined, name: string): Promise<void> {
   const f = await localCopy(uri, headers, name);
   await Share.share({ url: f.uri });
+}
+
+const MIME: Record<string, string> = {
+  doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  odt: 'application/vnd.oasis.opendocument.text', rtf: 'application/rtf',
+  xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ods: 'application/vnd.oasis.opendocument.spreadsheet',
+  ppt: 'application/vnd.ms-powerpoint', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  odp: 'application/vnd.oasis.opendocument.presentation',
+  csv: 'text/csv', tsv: 'text/tab-separated-values', txt: 'text/plain',
+  zip: 'application/zip', tar: 'application/x-tar', gz: 'application/gzip', tgz: 'application/gzip',
+  '7z': 'application/x-7z-compressed', rar: 'application/vnd.rar',
+};
+
+export function mimeType(name: string): string {
+  return MIME[name.split('.').pop()?.toLowerCase() ?? ''] ?? '*/*';
+}
+
+// Documento citado: o iOS entrega pela folha do sistema (Salvar em Arquivos, Abrir em…); o Android não
+// compartilha arquivo pelo Share do RN, então abre direto no app que lê o tipo. 'empty' = o servidor
+// mandou 0 bytes e não há o que entregar.
+export async function deliverFile(uri: string, headers: Record<string, string> | undefined, name: string): Promise<'done' | 'empty'> {
+  const f = await localCopy(uri, headers, name);
+  if (f.size === 0) return 'empty';
+  if (Platform.OS === 'ios') await Share.share({ url: f.uri });
+  else await startActivityAsync('android.intent.action.VIEW', { data: f.contentUri, type: mimeType(name), flags: FLAG_GRANT_READ_URI_PERMISSION });
+  return 'done';
+}
+
+// Imagem do visor: no iOS a folha já traz "Salvar imagem"; no Android vai direto para a galeria.
+// Devolve true quando gravou na galeria (o iOS só abre a folha e não sabe o que a pessoa escolheu).
+export async function saveImage(uri: string, headers: Record<string, string> | undefined, name: string): Promise<boolean> {
+  const f = await localCopy(uri, headers, name);
+  if (Platform.OS === 'ios') {
+    await Share.share({ url: f.uri });
+    return false;
+  }
+  const perm = await requestPermissionsAsync(true);
+  if (!perm.granted) throw new Error(m.composer_sem_acesso_fotos());
+  await Asset.create(f.uri);
+  return true;
 }
 
 // Texto que já está na tela vira arquivo do cache e vai pela mesma folha: sem baixar de novo nem depender da rede.
