@@ -55,12 +55,13 @@ interface Props {
   session: AggSession;
   mostrarServidor: boolean; // false quando a lista já está agrupada por servidor
   compact?: boolean;
+  selected?: boolean;
   // recebem a sessão: a lista passa a mesma função a todas as linhas, e o memo segura o render
   onPress: (s: AggSession) => void;
-  onGit: (s: AggSession) => void;
-  onExcluir: (s: AggSession) => void;
-  onRenomear: (s: AggSession) => void;
-  onResume: (s: AggSession) => void;
+  onGit?: (s: AggSession) => void;
+  onExcluir?: (s: AggSession) => void;
+  onRenomear?: (s: AggSession) => void;
+  onResume?: (s: AggSession) => void;
   // Ausente em servidor de convite: o backend recusa worktrees ao convidado, e o chip é só texto.
   onWorktree?: (s: AggSession, path: string) => void;
   // Ausente em servidor de convite: lá a pessoa é convidada, não dona do par.
@@ -71,7 +72,7 @@ interface Props {
 const vibrarAoAbrir =
   Platform.OS === 'android' ? () => void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {}) : undefined;
 
-export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor, compact = false, onPress, onGit, onExcluir, onRenomear, onResume, onWorktree, onPair }: Props) {
+export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor, compact = false, selected, onPress, onGit, onExcluir, onRenomear, onResume, onWorktree, onPair }: Props) {
   const { theme } = useUnistyles();
   // O orquestrador não se renomeia nem se fecha: o backend recusa, então a linha nem oferece.
   const orq = isOrq(s);
@@ -87,29 +88,29 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
   // Sem o arrasto, o menu é o único caminho visível pro Git: o orquestrador fica só com ele.
   // A sessão de fora é de outra pessoa: nem renomear, nem fechar, só sair do par.
   const acoesMenu = useMemo(
-    () => fora ? [{ id: 'leave', title: m.pair_leave_outside({ dono: fora.owner }), attributes: { destructive: true } }] : [
-      ...(orq ? [] : [{ id: 'rename', title: m.sessao_renomear(), image: Platform.select({ ios: 'pencil', android: 'ic_menu_edit' }) }]),
-      ...(s.cwd && !s.serverInvite ? [{ id: 'git', title: m.sessao_git(), image: Platform.select({ ios: 'arrow.triangle.branch' }) }] : []),
+    () => fora ? (onPair ? [{ id: 'leave', title: m.pair_leave_outside({ dono: fora.owner }), attributes: { destructive: true } }] : []) : [
+      ...(orq || !onRenomear ? [] : [{ id: 'rename', title: m.sessao_renomear(), image: Platform.select({ ios: 'pencil', android: 'ic_menu_edit' }) }]),
+      ...(onGit && s.cwd && !s.serverInvite ? [{ id: 'git', title: m.sessao_git(), image: Platform.select({ ios: 'arrow.triangle.branch' }) }] : []),
       ...(wtAcao ? [{ id: 'worktree', title: m.sessao_worktree_abrir(), image: Platform.select({ ios: 'folder' }) }] : []),
       ...(parAtivo ? [
         { id: 'pair-invite', title: m.native_par_convidar(), image: Platform.select({ ios: 'link' }) },
         { id: 'pair-accept', title: m.native_par_menu(), image: Platform.select({ ios: 'link.badge.plus' }) },
         ...pares.map((p, i) => ({ id: `undo:${i}`, title: m.pair_undo_own({ dono: donoDo(p) }) })),
       ] : []),
-      ...(orq ? [] : [{
+      ...(orq || !onExcluir ? [] : [{
         id: s.serverInvite ? 'stop-following' : 'delete',
         title: s.serverInvite ? m.convite_parar() : m.sessao_excluir_curto(),
         image: Platform.select({ ios: 'trash', android: 'ic_menu_delete' }),
         attributes: { destructive: true },
       }]),
     ],
-    [s.cwd, s.serverInvite, orq, fora, parAtivo, pares, wtAcao],
+    [s.cwd, s.serverInvite, orq, fora, parAtivo, pares, wtAcao, onPair, onRenomear, onGit, onExcluir],
   );
   const acao = (nome: string) => {
-    if (nome === 'rename') onRenomear(s);
-    else if (nome === 'git') onGit(s);
+    if (nome === 'rename') onRenomear?.(s);
+    else if (nome === 'git') onGit?.(s);
     else if (nome === 'worktree' && wtAcao) onWorktree?.(s, wtAcao);
-    else if (nome === 'delete' || nome === 'stop-following') onExcluir(s);
+    else if (nome === 'delete' || nome === 'stop-following') onExcluir?.(s);
     else if (nome === 'leave') onPair?.(s, { kind: 'leave' });
     else if (nome === 'pair-invite') onPair?.(s, { kind: 'invite' });
     else if (nome === 'pair-accept') onPair?.(s, { kind: 'accept' });
@@ -186,14 +187,16 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
       onLongPress={acoesMenu.length === 0 ? undefined : Platform.OS === 'ios' ? abrirAcoesIOS : () => {}}
       // kimi sem id é estado NORMAL pré-1º prompt, e codex sem thread ainda está no startup:
       // a tela da conversa espera o vínculo sem herdar transcript de outra sessão
-      disabled={untracked && s.provider !== 'kimi' && s.provider !== 'codex'}
-      style={({ pressed }) => [styles.row, compact && styles.compact, fora && styles.fora, pressed && { backgroundColor: superficie(theme, 0.6) }]}
+      disabled={selected || (!!onResume && untracked && s.provider !== 'kimi' && s.provider !== 'codex')}
+      style={({ pressed }) => [styles.row, compact && styles.compact, fora && styles.fora,
+        (selected || pressed) && { backgroundColor: superficie(theme, selected ? 0.8 : 0.6) }]}
+      accessibilityState={selected === undefined ? undefined : { selected, disabled: selected }}
       accessibilityRole="button"
       // rótulo composto: um label explícito no pai faz o RN descartar o texto dos filhos, e o
       // estado e a pergunta sumiriam do leitor de tela.
       // Máquina e projeto entram mesmo quando a tela os esconde (lista agrupada, pasta = nome):
       // é o que distingue duas conversas de mesmo nome no leitor de tela.
-      accessibilityLabel={`${s.name}${fora ? `, ${m.pair_from_owner({ dono: fora.owner })}${s.guest_kind === 'share' ? '' : `, ${m.pair_level_view()}`}` : ''}, ${rotuloEstado(s.state)}${s.limited ? `, ${s.limit_reset ? m.sessao_limite_volta({ n: s.limit_reset }) : m.sessao_limite()}` : ''}${pendingQuestions > 0 ? `, ${m.ask_perguntas()}: ${pendingQuestions}` : ''}${sub ? `, ${sub}` : ''}${providerLabel ? `, ${providerLabel}` : ''}${account ? `, ${m.sessao_conta({ n: account.name })}` : ''}, ${s.serverLabel}${s.cwd ? `, ${cwd.base}` : ''}${s.branch ? `, ${s.branch}` : ''}${gitAhead || gitBehind ? `, ${m.git_sync_titulo({ ahead: gitAhead, behind: gitBehind })}` : ''}`}
+      accessibilityLabel={`${s.name}${fora ? `, ${m.pair_from_owner({ dono: fora.owner })}${s.guest_kind === 'share' ? '' : `, ${m.pair_level_view()}`}` : ''}, ${rotuloEstado(s.state)}${s.limited ? `, ${s.limit_reset ? m.sessao_limite_volta({ n: s.limit_reset }) : m.sessao_limite()}` : ''}${pendingQuestions > 0 ? `, ${m.ask_perguntas()}: ${pendingQuestions}` : ''}${sub ? `, ${sub}` : ''}${providerLabel ? `, ${providerLabel}` : ''}${account ? `, ${m.sessao_conta({ n: account.name })}` : ''}, ${s.serverLabel}${s.cwd ? `, ${cwd.base}` : ''}${s.branch ? `, ${s.branch}` : ''}${gitAhead || gitBehind ? `, ${m.git_sync_titulo({ ahead: gitAhead, behind: gitBehind })}` : ''}${selected ? `, ${m.switcher_atual()}` : ''}`}
       accessibilityActions={acoesA11y}
       onAccessibilityAction={({ nativeEvent }) => {
         acao(nativeEvent.actionName);
@@ -285,7 +288,7 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
             {loop ? <Chip tone={TOM_DO_LOOP[loop.tone]}>{loop.label}</Chip> : null}
           </View>
         ) : null}
-        {untracked && s.provider !== 'kimi' && s.provider !== 'pi' && s.provider !== 'omp' ? (
+        {onResume && untracked && s.provider !== 'kimi' && s.provider !== 'pi' && s.provider !== 'omp' ? (
           <Pressable onPress={() => onResume(s)} style={styles.resume} accessibilityRole="button" accessibilityLabel={m.sessao_retomar()}>
             <Icon name="RotateCw" size={12} color={theme.tokens.text.secondary} />
             <Text style={[styles.metaTxt, { color: theme.tokens.text.primary }]}>{m.sessao_retomar()}</Text>
@@ -294,6 +297,7 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
           <Text style={[styles.metaTxt, { color: muted }]}>{untrackedReason(s.provider)}</Text>
         ) : null}
       </View>
+      {selected ? <Icon name="Check" size={18} color={theme.tokens.accent.base} /> : null}
     </Pressable>,
   );
 });

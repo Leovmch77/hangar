@@ -69,7 +69,7 @@ vi.mock('./SessionRow', async (original) => {
     if (calls.realRow) return React.createElement(actual.SessionRow, props);
     const { session, onExcluir, onPress, compact } = props;
     return React.createElement('div', null,
-      React.createElement('button', { 'data-row': `${session.serverId}::${session.name}`, 'data-compact': String(!!compact), onClick: () => onExcluir(session) }, session.name),
+      React.createElement('button', { 'data-row': `${session.serverId}::${session.name}`, 'data-compact': String(!!compact), onClick: () => onExcluir?.(session) }, session.name),
       React.createElement('button', { 'data-open': `${session.serverId}::${session.name}`, onClick: () => onPress(session) }));
   } };
 });

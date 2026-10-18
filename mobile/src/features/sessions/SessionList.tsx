@@ -5,14 +5,12 @@ import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MenuView } from '@react-native-menu/menu';
 import {
-  agruparSessoes,
   deleteSession,
   effectiveGroupBy,
   formataErro,
   renameSession,
   setPairAccess,
   resumeSession,
-  sortSessions,
   type AggSession,
   type GroupBy,
   type Server,
@@ -25,7 +23,8 @@ import { LiveVoiceChatButton } from '../voice/LiveVoiceChatButton';
 import { Icon } from '../../ui/Icon';
 import { toast } from '../../ui/Toast';
 import { SessionRow, type PairAction } from './SessionRow';
-import { placeOutside } from './outsideRows';
+import { buildSessionSections, sessionGroupKey, type SessionSection } from './sessionSections';
+import { SessionSectionCard, SessionSectionHeader } from './SessionSection';
 import { PairInviteSheet, type PairTarget } from '../pair/PairInviteSheet';
 import { PairAcceptSheet, type PairAcceptTarget } from '../pair/PairAcceptSheet';
 import { leaveExternal } from '../pair/leaveExternal';
@@ -41,19 +40,6 @@ const mensagemDe = (e: unknown): string => (e instanceof Error ? e.message : Str
 
 // O formulário remonta a home ao trocar de máquina; a memória pertence à vista, não à gaveta.
 const homeView = { collapsedGroups: new Set<string>() as ReadonlySet<string>, contentOffset: { x: 0, y: 0 } };
-
-// Seções de estado não dependem do agrupamento: recolher "Trabalhando" vale nos dois modos.
-const chaveGrupo = (modo: GroupBy, id: string) => (id.startsWith('state:') ? id : `${modo}:${id}`);
-
-// `total` sobrevive ao grupo recolhido: `data` fica vazio, mas o cabeçalho continua contando.
-interface Section {
-  id: string;
-  label: string;
-  color: string | null;
-  total: number;
-  collapsed: boolean;
-  data: AggSession[];
-}
 
 interface Props {
   onClose: () => void;
@@ -76,7 +62,7 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
   const organizar = useAparencia((s) => s.organizar);
   const conversas = !home && organizar === 'conversations';
   const initialHomeOffset = useRef(homeView.contentOffset).current;
-  const homeList = useRef<SectionList<AggSession, Section>>(null);
+  const homeList = useRef<SectionList<AggSession, SessionSection>>(null);
   const pendingHomeOffset = useRef<{ x: number; y: number } | null>(
     home && (initialHomeOffset.x !== 0 || initialHomeOffset.y !== 0) ? initialHomeOffset : null,
   );
@@ -252,34 +238,14 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
   const busca = filtro.trim().toLowerCase();
   // Filtrar + ordenar + agrupar a lista inteira a cada render é caro, e arrastar um slider de
   // material re-renderiza todo mundo que lê o tema — inclusive esta tela.
-  const sections = useMemo<Section[]>(() => {
-    const liveRows = rows.filter((r) => r.state !== 'dead');
-    const visiveis = busca
-      ? liveRows.filter((r) => r.name.toLowerCase().includes(busca) || (r.cwd ?? '').toLowerCase().includes(busca))
-      : liveRows;
-    const proprias = visiveis.filter((r) => !r.outside);
-    // Quem espera você ou está trabalhando sobe para o topo; o resto fica no agrupamento escolhido.
-    const topo = [
-      { id: 'state:awaiting_input', label: m.home_sessions_awaiting(), color: null, sessions: sortSessions(proprias.filter((r) => r.state === 'awaiting_input')) },
-      { id: 'state:working', label: m.home_sessions_working(), color: null, sessions: sortSessions(proprias.filter((r) => r.state === 'working')) },
-    ];
-    const resto = agruparSessoes(proprias.filter((r) => r.state !== 'awaiting_input' && r.state !== 'working'), modo);
-    if (modo === 'server') resto.sort((a, b) => a.label.localeCompare(b.label));
-    // Sem rótulo, as paradas pareceriam continuação de "Trabalhando".
-    if (modo === 'none' && topo.some((g) => g.sessions.length)) resto[0].label = m.home_sessions_ready();
-    const groups = placeOutside([...topo, ...resto], visiveis.filter((r) => r.outside), modo, liveRows);
-    return groups.filter((g) => g.sessions.length).map((g) => {
-      const collapsed = !!g.label && recolhidos.has(chaveGrupo(modo, g.id));
-      return { id: g.id, label: g.label, color: g.color, total: g.sessions.length, collapsed, data: collapsed ? [] : g.sessions };
-    });
-  }, [rows, busca, modo, recolhidos]);
+  const sections = useMemo(() => buildSessionSections(rows, modo, busca, recolhidos), [rows, busca, modo, recolhidos]);
   const variosServidores = servers.length > 1;
 
   const alternarGrupo = useCallback(
     (id: string) =>
       setRecolhidos((atual) => {
         const novo = new Set(atual);
-        const chave = chaveGrupo(modo, id);
+        const chave = sessionGroupKey(modo, id);
         if (novo.has(chave)) novo.delete(chave);
         else novo.add(chave);
         if (home) homeView.collapsedGroups = novo;
@@ -476,36 +442,9 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
             {itemNav('List', m.native_sidebar_all_sessions(), mostrarTodas, rows.length)}
           </View>
         )}
-        renderSectionHeader={({ section }) => {
-          if (!section.label) return null;
-          const cor = section.id === 'state:awaiting_input' ? theme.tokens.pill.input.fg
-            : section.id === 'state:working' ? theme.tokens.pill.working.fg
-              : section.color ?? theme.tokens.text.muted;
-          return (
-            <Pressable
-              onPress={() => alternarGrupo(section.id)}
-              style={styles.grupo}
-              accessibilityRole="button"
-              accessibilityLabel={`${section.label}, ${section.total} ${m.lista_sessoes_plural()}`}
-              accessibilityState={{ expanded: !section.collapsed }}
-              accessibilityHint={section.collapsed ? m.sessao_expandir() : m.sessao_recolher()}
-            >
-              <View style={[styles.ponto, { backgroundColor: cor }]} />
-              <Text style={[styles.grupoTxt, { color: theme.tokens.text.primary }]} numberOfLines={1}>{section.label}</Text>
-              <View style={[styles.groupBadge, { backgroundColor: superficie(theme, 0.5) }]}>
-                <Text style={[styles.grupoConta, { color: theme.tokens.text.muted }]}>{section.total}</Text>
-              </View>
-              <View style={styles.groupArrow}>
-                <Icon name={section.collapsed ? 'ChevronRight' : 'ChevronDown'} size={12} color={theme.tokens.text.muted} />
-              </View>
-            </Pressable>
-          );
-        }}
+        renderSectionHeader={({ section }) => <SessionSectionHeader section={section} onToggle={alternarGrupo} />}
         renderItem={({ item, section, index }) => (
-          // Cartão por grupo, como as listas do iOS: só a primeira e a última linha arredondam.
-          <View style={[styles.cartao, { backgroundColor: superficie(theme, 0.4) }, index === 0 && styles.cartaoTopo,
-            index === section.data.length - 1 && styles.cartaoFim]}>
-            {index > 0 ? <View style={[styles.divisor, { backgroundColor: theme.tokens.border.subtle }]} /> : null}
+          <SessionSectionCard index={index} total={section.data.length}>
             <SessionRow
               session={item}
               compact={home}
@@ -519,7 +458,7 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
               onWorktree={proprios.has(item.serverId) ? abrirWorktree : undefined}
               onPair={proprios.has(item.serverId) || item.outside ? fazerPar : undefined}
             />
-          </View>
+          </SessionSectionCard>
         )}
         ListEmptyComponent={home && machineErrors.length ? null
           : busca ? vazio(m.lista_vazia_filtro(), null, true) : vazio(m.lista_nenhuma_ativa(), null)}
@@ -573,16 +512,6 @@ const styles = StyleSheet.create((theme) => ({
   navTxt: { flexShrink: 1, fontSize: theme.base.text.base },
   navAtual: { fontWeight: '600' },
   navConta: { marginLeft: 'auto', fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
-  grupo: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 44, paddingTop: 14, paddingBottom: 6, paddingHorizontal: 6, backgroundColor: 'transparent' },
-  grupoTxt: { flexShrink: 1, fontSize: theme.base.text.lg, fontWeight: '700' },
-  cartao: { overflow: 'hidden' },
-  cartaoTopo: { borderTopLeftRadius: theme.base.radius.lg, borderTopRightRadius: theme.base.radius.lg },
-  cartaoFim: { borderBottomLeftRadius: theme.base.radius.lg, borderBottomRightRadius: theme.base.radius.lg },
-  // recua até o texto, como o separador das listas do iOS
-  divisor: { height: StyleSheet.hairlineWidth, marginLeft: 46 },
-  groupBadge: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: theme.base.radius.full },
-  grupoConta: { fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
-  groupArrow: { marginLeft: 'auto' },
   ponto: { width: 7, height: 7, borderRadius: 4 },
   rodape: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingTop: 4, paddingLeft: 12, borderTopWidth: StyleSheet.hairlineWidth },
   ativo: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, minWidth: 0, minHeight: 44 },
