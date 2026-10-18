@@ -825,6 +825,8 @@ mod tests {
         assert!(feed("<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>").is_empty());
         assert!(feed("<local-command-stdout>Set model to opus</local-command-stdout>").is_empty());
         assert!(feed("Base directory for this skill: /s\n\n# Skill").is_empty());
+        // Só o que a pessoa digita começa com `/`.
+        assert!(feed("<command-name>skill</command-name>").is_empty());
     }
 
     #[test]

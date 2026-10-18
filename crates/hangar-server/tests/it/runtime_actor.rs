@@ -969,6 +969,31 @@ async fn prompt_hooks_started_mark_the_entry_accepted_before_the_cli_echo() {
 }
 
 #[tokio::test]
+async fn one_prompt_hook_start_accepts_only_one_of_two_equal_entries() {
+    // Duas entregas iguais à espera do eco e um só começo de hook: só a mais antiga sai de "entregando".
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(config.join(".hangar-prompt")).unwrap();
+    std::fs::write(config.join(".hangar-prompt/sid-1.json"),r#"{"sha1":"a9993e364706816aba3e25717850c26c9cd0d89d","ts":4000000000.0}"#).unwrap();
+    let (cano,server) = claude_cano(vec![]).await;
+    let handle = claude_actor_with(dir.path(),cano,json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true,"config_dir":config})).await;
+    for id in ["first","second"] {
+        handle.queue(format!("append-{id}"),Action::Append { text:"abc".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(id.into()) }).await.unwrap();
+        handle.queue(format!("prepare-{id}"),Action::Prepare { id:id.into(),payload:json!({"kind":"input"}),entry_id:Some(id.into()) }).await.unwrap();
+        handle.queue(format!("begin-{id}"),Action::BeginDispatch { id:id.into(),wire_id:format!("w-{id}"),staged:false }).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // Uma entrada qualquer abre a janela em que o ator olha o marcador.
+    let other = RuntimeCommand { operation_id:"other".into(),kind:OperationKind::Input,payload:json!({"text":"zzz","entry_id":"other"}) };
+    handle.command(other).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let consumed:Vec<_> = queue_state(dir.path()).rows.iter().filter(|row|row["consumed"] == true).map(|row|row["id"].clone()).collect();
+    assert_eq!(consumed,vec![json!("first")]);
+    handle.stop().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn queued_entries_become_not_delivered_when_the_process_gives_up() {
     let dir = tempfile::tempdir().unwrap();
     // Permissão em aberto: a sessão não entrega, a mensagem espera na fila.

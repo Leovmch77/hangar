@@ -86,11 +86,17 @@ fn epoch_now() -> f64 { std::time::SystemTime::now().duration_since(std::time::U
 /// `<config_dir>/.hangar-prompt/<conversa>.json` do `state_hook`: o SHA-1 do texto aparado cujos hooks
 /// `UserPromptSubmit` começaram e quando. Arquivo ausente ou torto não prova nada.
 pub(crate) fn prompt_started_in(config_dir: &std::path::Path, conversation: &str, since: f64, text: &str) -> bool {
-    let Ok(bytes) = std::fs::read(config_dir.join(".hangar-prompt").join(format!("{conversation}.json"))) else { return false };
-    let Ok(mark) = serde_json::from_slice::<Value>(&bytes) else { return false };
-    mark["ts"].as_f64().is_some_and(|ts| ts >= since)
-        && mark["sha1"].as_str() == Some(sha1_smol::Sha1::from(text.trim()).digest().to_string().as_str())
+    prompt_mark(config_dir, conversation).is_some_and(|(sha1, ts)| ts >= since && sha1 == prompt_sha1(text))
 }
+
+/// O marcador lido: (SHA-1, instante).
+pub(crate) fn prompt_mark(config_dir: &std::path::Path, conversation: &str) -> Option<(String, f64)> {
+    let bytes = std::fs::read(config_dir.join(".hangar-prompt").join(format!("{conversation}.json"))).ok()?;
+    let mark = serde_json::from_slice::<Value>(&bytes).ok()?;
+    Some((mark["sha1"].as_str()?.to_owned(), mark["ts"].as_f64()?))
+}
+
+pub(crate) fn prompt_sha1(text: &str) -> String { sha1_smol::Sha1::from(text.trim()).digest().to_string() }
 
 /// O Claude grava a entrada ao aceitar o Enter, antes dos hooks `UserPromptSubmit` da conta; o composer
 /// só esvazia depois deles. Com turno em curso é o `enqueue` com `content`; parado, o `enqueue` vem sem

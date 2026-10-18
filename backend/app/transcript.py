@@ -341,7 +341,8 @@ def comando_digitado(text: str) -> str | None:
     if not nome:
         return None
     args = _COMMAND_ARGS.search(t)
-    return f"{nome.group(1).strip()} {args.group(1).strip() if args else ''}".strip() or None
+    comando = f"{nome.group(1).strip()} {args.group(1).strip() if args else ''}".strip()
+    return comando if comando.startswith("/") else None
 
 
 def _strip_meta_blocks(text: str) -> str:

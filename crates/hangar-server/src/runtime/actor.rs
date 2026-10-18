@@ -743,6 +743,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
     let mut confirm_until: Option<Instant> = None;
     let mut confirm_seen: Option<u64> = None;
     let prompt_check = Arc::new(AtomicBool::new(false));
+    let prompt_last = Arc::new(std::sync::Mutex::new(0.0_f64));
     let prompt_env = crate::accounts::environment::AccountEnvironment::capture();
     // Claude sem terminal: próxima conferência da fila enquanto houver entrada entregue sem prova. Nasce
     // vencida para a subida acertar o que ficou da vida anterior.
@@ -2054,7 +2055,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                 if target.provider == "claude" && !prompt_check.swap(true,Ordering::AcqRel) {
                     let base = account_base(&target,&prompt_env);
                     let conversation = view["conversation"].as_str().unwrap_or("").to_owned();
-                    jobs.spawn(mark_prompt_started(queue.clone(),base,conversation,target.generation,clock(start),prompt_check.clone()));
+                    jobs.spawn(mark_prompt_started(queue.clone(),base,conversation,target.generation,clock(start),prompt_last.clone(),prompt_check.clone()));
                 }
                 let transcript = transcript_of(&target,&view);
                 let len = std::fs::metadata(&transcript).ok().map(|m|m.len());
@@ -2250,21 +2251,28 @@ fn account_base(target:&RuntimeTarget,env:&crate::accounts::environment::Account
 }
 
 /// Claude sem terminal: a entrada entregue cujos hooks `UserPromptSubmit` já começaram passa a aceita
-/// (`consumed`) antes de a CLI ecoá-la, o que só acontece depois de todos os hooks.
-async fn mark_prompt_started(queue:Arc<QueueActor>,base:std::path::PathBuf,conversation:String,generation:u64,sample:ClockSample,busy:Arc<AtomicBool>) -> Job {
-    let result = async {
+/// (`consumed`) antes de a CLI ecoá-la, o que só acontece depois de todos os hooks. Cada marcador aceita uma
+/// entrada só, a mais antiga com o texto: duas iguais entregues juntas precisam de dois começos de hook.
+/// É só uma antecipação: falhar aqui fica no diário e a prova normal segue.
+async fn mark_prompt_started(queue:Arc<QueueActor>,base:std::path::PathBuf,conversation:String,generation:u64,sample:ClockSample,last:Arc<std::sync::Mutex<f64>>,busy:Arc<AtomicBool>) -> Job {
+    let result:Result<(),RuntimeError> = async {
+        if conversation.is_empty() { return Ok(()); }
+        let Some((sha1,ts)) = tokio::task::spawn_blocking(move ||crate::terminal_input::prompt_mark(&base,&conversation)).await.map_err(|_|failure("prompt_mark_panic"))? else { return Ok(()) };
+        if ts <= *last.lock().map_err(|_|failure("prompt_mark_panic"))? { return Ok(()); }
         let state = queue.snapshot().await.map_err(io_failure)?;
-        let candidates:Vec<(String,f64,String)> = state.rows.iter().filter(|row|row["delivered"] == true && row["confirmed"] != true && row["consumed"] != true)
-            .filter_map(|row|Some((row["id"].as_str()?.to_owned(),row["dispatched_ts"].as_f64()?,row["text"].as_str()?.to_owned()))).collect();
-        if candidates.is_empty() || conversation.is_empty() { return Ok(()); }
-        let started = tokio::task::spawn_blocking(move ||candidates.into_iter()
-            .filter(|(_,since,text)|crate::terminal_input::prompt_started_in(&base,&conversation,*since,text)).map(|(id,..)|id).collect::<Vec<_>>())
-            .await.map_err(|_|failure("prompt_mark_panic"))?;
-        if started.is_empty() { return Ok(()); }
-        queue.exec(generation,&format!("prompt-started:{}",unique()),sample,Action::MarkConsumed { entry_ids:started }).await.map(|_|()).map_err(io_failure)
+        let Some(entry) = state.rows.iter().filter(|row|row["delivered"] == true && row["confirmed"] != true && row["consumed"] != true)
+            .filter(|row|row["dispatched_ts"].as_f64().is_some_and(|since|since <= ts) && row["text"].as_str().is_some_and(|text|crate::terminal_input::prompt_sha1(text) == sha1))
+            .min_by(|a,b|a["dispatched_ts"].as_f64().partial_cmp(&b["dispatched_ts"].as_f64()).unwrap_or(std::cmp::Ordering::Equal))
+            .and_then(|row|row["id"].as_str().map(str::to_owned)) else { return Ok(()) };
+        queue.exec(generation,&format!("prompt-started:{}",unique()),sample,Action::MarkConsumed { entry_ids:vec![entry] }).await.map_err(io_failure)?;
+        *last.lock().map_err(|_|failure("prompt_mark_panic"))? = ts;
+        Ok(())
     }.await;
     busy.store(false,Ordering::Release);
-    Job::Saved(result)
+    if let Err(failure) = result && crate::warn_limit::allow(None,"prompt_mark") {
+        tracing::warn!(code=%failure.code,"aceite antecipado pelo hook não gravado; a entrada segue esperando o eco");
+    }
+    Job::Saved(Ok(()))
 }
 
 /// O processo não sobe mais: o que esperava na fila vira "não chegou" (descartável), em vez de sair horas

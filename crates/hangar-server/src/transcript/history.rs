@@ -313,7 +313,7 @@ pub(crate) fn typed_command(text: &str) -> Option<String> {
     if !t.starts_with("<command-name>") && !t.starts_with("<command-message>") { return None; }
     let c = COMMAND_NAME.captures(t)?;
     let args = COMMAND_ARGS.captures(t).map(|a| strip(&a[1]).to_string()).unwrap_or_default();
-    Some(strip(&format!("{} {args}", strip(&c[1])))).filter(|s| !s.is_empty()).map(str::to_string)
+    Some(strip(&format!("{} {args}", strip(&c[1])))).filter(|s| s.starts_with('/')).map(str::to_string)
 }
 
 /// `PromptQueue.load` (pqueue.py:875): `splitlines` do Python, linha que não é objeto JSON pula.
