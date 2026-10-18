@@ -218,6 +218,10 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Lógica (API, formatação, parser, tipos) entra em `packages/core` e serve as duas. Tela é por
   interface, escrita duas vezes. O check completo, quando pedido, é `npm run check` **na raiz**,
   que cobre as três.
+- **Melhoria visual ou recurso que o usuário vê entra nos três clientes quando faz sentido nos
+  três: app Expo (`mobile/`), desktop nativo (`desktop-native/`) e PWA (`frontend/`, vista
+  celular).** O nativo costuma estar à frente e é a referência de comportamento. Quem implementa
+  num cliente leva aos outros no mesmo trabalho ou deixa a pendência dita no relato.
 - **Desktop evolui no Rust (`desktop-native/`); web (`frontend/`) evolui para PWA/mobile.**
   Mudanças desktop entram só no nativo. No Svelte entra apenas o que serve ao PWA/celular; a
   tela desktop web e o Electron ficam parados onde estão, sem recurso novo. Recursos usados no
