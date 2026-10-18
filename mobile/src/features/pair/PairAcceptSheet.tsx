@@ -136,13 +136,13 @@ export function PairAcceptSheet({ target, onClose }: { target: PairAcceptTarget 
 
 const styles = StyleSheet.create((theme) => ({
   inner: { padding: theme.base.space[4], gap: theme.base.space[3] },
-  titulo: { fontSize: theme.base.text.lg, fontWeight: '600' },
-  secao: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  titulo: { fontSize: theme.base.text.lg, fontWeight: theme.base.weight.semibold },
+  secao: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
   dica: { fontSize: theme.base.text.sm, lineHeight: 20 },
   campo: { minHeight: 44, borderWidth: 1, borderRadius: theme.base.radius.md, paddingHorizontal: theme.base.space[3], fontSize: theme.base.text.base },
-  lista: { gap: 2 },
-  item: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 44, paddingHorizontal: theme.base.space[2] },
+  lista: { gap: theme.base.space[0.5] },
+  item: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], minHeight: 44, paddingHorizontal: theme.base.space[2] },
   nome: { flex: 1, fontSize: theme.base.text.base },
-  botao: { flexDirection: 'row', gap: 8, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: theme.base.radius.full, paddingHorizontal: theme.base.space[4] },
-  botaoTxt: { fontSize: theme.base.text.base, fontWeight: '600' },
+  botao: { flexDirection: 'row', gap: theme.base.space[2], minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: theme.base.radius.full, paddingHorizontal: theme.base.space[4] },
+  botaoTxt: { fontSize: theme.base.text.base, fontWeight: theme.base.weight.semibold },
 }));

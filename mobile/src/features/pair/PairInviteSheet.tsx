@@ -138,16 +138,16 @@ export function PairInviteSheet({ target, onClose }: { target: PairTarget | null
 
 const styles = StyleSheet.create((theme) => ({
   inner: { padding: theme.base.space[4], gap: theme.base.space[3] },
-  titulo: { fontSize: theme.base.text.lg, fontWeight: '600' },
-  secao: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  titulo: { fontSize: theme.base.text.lg, fontWeight: theme.base.weight.semibold },
+  secao: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
   niveis: { gap: theme.base.space[2] },
-  opcao: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, padding: theme.base.space[3], borderRadius: theme.base.radius.md, borderWidth: 1, minHeight: 44 },
-  opcaoTxt: { flex: 1, gap: 2 },
-  opcaoTitulo: { fontSize: theme.base.text.base, fontWeight: '600' },
+  opcao: { flexDirection: 'row', alignItems: 'flex-start', gap: theme.base.space[2], padding: theme.base.space[3], borderRadius: theme.base.radius.md, borderWidth: 1, minHeight: 44 },
+  opcaoTxt: { flex: 1, gap: theme.base.space[0.5] },
+  opcaoTitulo: { fontSize: theme.base.text.base, fontWeight: theme.base.weight.semibold },
   dica: { fontSize: theme.base.text.sm, lineHeight: 20 },
   link: { fontSize: theme.base.text.sm, fontFamily: theme.base.fontMono, padding: theme.base.space[3], borderRadius: theme.base.radius.md },
   esperando: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
   botoes: { flexDirection: 'row', gap: theme.base.space[2] },
   botao: { flex: 1, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: theme.base.radius.full, paddingHorizontal: theme.base.space[4] },
-  botaoTxt: { fontSize: theme.base.text.base, fontWeight: '600' },
+  botaoTxt: { fontSize: theme.base.text.base, fontWeight: theme.base.weight.semibold },
 }));

@@ -41,11 +41,11 @@ export function PairFeed({ sessionName, feed, failed, loading }: Props) {
 
 const styles = StyleSheet.create((theme) => ({
   wrap: { gap: theme.base.space[2], borderTopWidth: 1, paddingTop: theme.base.space[3] },
-  title: { fontSize: theme.base.text.sm, fontWeight: '700' },
+  title: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.bold },
   warning: { fontSize: theme.base.text.xs, lineHeight: 18 },
   empty: { fontSize: theme.base.text.sm, textAlign: 'center', paddingVertical: theme.base.space[3] },
   list: { gap: theme.base.space[2] },
-  item: { gap: 3, paddingHorizontal: theme.base.space[3], paddingVertical: theme.base.space[2], borderWidth: 1, borderRadius: theme.base.radius.md },
+  item: { gap: theme.base.space[0.5], paddingHorizontal: theme.base.space[3], paddingVertical: theme.base.space[2], borderWidth: 1, borderRadius: theme.base.radius.md },
   meta: { fontSize: theme.base.text.xs },
   text: { fontSize: theme.base.text.sm, lineHeight: 20 },
 }));
