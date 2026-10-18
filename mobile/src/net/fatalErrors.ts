@@ -97,7 +97,7 @@ function storeFatal(error: unknown, metadata: FatalErrorMetadata): void {
   capturing = true;
   try {
     const e = error && typeof error === 'object' ? error as Partial<Exception> : {};
-    const name = typeof e.name === 'string' && /^(?:Error|TypeError|ReferenceError|SyntaxError|RangeError|URIError|EvalError|Invariant Violation)$/.test(e.name) ? e.name : 'Error';
+    const name = typeof e.name === 'string' && /^(?:Error|TypeError|ReferenceError|SyntaxError|RangeError|URIError|EvalError|Invariant Violation)$/.test(e.name) ? e.name : Error.name;
     const report: FatalErrorReport = {
       timestamp: new Date().toISOString(), name,
       message: safeMessage(e.originalMessage ?? e.message), route,
