@@ -978,7 +978,8 @@ async fn one_prompt_hook_start_accepts_only_one_of_two_equal_entries() {
     let (cano,server) = claude_cano(vec![]).await;
     let handle = claude_actor_with(dir.path(),cano,json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true,"config_dir":config})).await;
     for id in ["first","second"] {
-        handle.queue(format!("append-{id}"),Action::Append { text:"abc".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(id.into()) }).await.unwrap();
+        // Já entregue: esperando na fila, a drenagem do ator a pegaria antes do despacho do teste.
+        handle.queue(format!("append-{id}"),Action::Append { text:"abc".into(),delivered:true,ts:None,pre_transcript:false,entry_id:Some(id.into()) }).await.unwrap();
         handle.queue(format!("prepare-{id}"),Action::Prepare { id:id.into(),payload:json!({"kind":"input"}),entry_id:Some(id.into()) }).await.unwrap();
         handle.queue(format!("begin-{id}"),Action::BeginDispatch { id:id.into(),wire_id:format!("w-{id}"),staged:false }).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
