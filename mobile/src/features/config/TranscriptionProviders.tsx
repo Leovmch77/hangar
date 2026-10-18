@@ -211,18 +211,18 @@ function Labeled({ label, children }: { label: string; children: ReactNode }) {
 }
 
 const styles = StyleSheet.create((theme) => ({
-  line: { borderTopWidth: 1, paddingVertical: 14, paddingHorizontal: 16 },
-  item: { gap: 10 },
-  addLine: { paddingVertical: 10, flexDirection: 'row' },
-  head: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  title: { flex: 1, minWidth: 0, fontSize: theme.base.text.sm, fontWeight: '500' },
+  line: { borderTopWidth: 1, paddingVertical: theme.base.space[3], paddingHorizontal: theme.base.space[4] },
+  item: { gap: theme.base.space[2] },
+  addLine: { paddingVertical: theme.base.space[2], flexDirection: 'row' },
+  head: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5] },
+  title: { flex: 1, minWidth: 0, fontSize: theme.base.text.sm, fontWeight: theme.base.weight.medium },
   iconBtn: { width: 32, height: 32, alignItems: 'center', justifyContent: 'center' },
   off: { opacity: 0.4 },
-  remove: { flexDirection: 'row', alignItems: 'center', gap: 4, height: 32, paddingHorizontal: 6 },
-  removeText: { fontSize: theme.base.text.xs, fontWeight: '500' },
-  labeled: { gap: 4 },
+  remove: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], height: 32, paddingHorizontal: theme.base.space[1.5] },
+  removeText: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.medium },
+  labeled: { gap: theme.base.space[1] },
   small: { fontSize: theme.base.text.xs, lineHeight: 17 },
   help: { fontSize: theme.base.text.xs, lineHeight: 18 },
-  errorLine: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 4 },
+  errorLine: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[1] },
   flex: { flex: 1 },
 }));

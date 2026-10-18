@@ -14,7 +14,7 @@ export function InfoNotice({ text }: { text: string }) {
 }
 
 const styles = StyleSheet.create((theme) => ({
-  box: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10 },
+  box: { flexDirection: 'row', alignItems: 'flex-start', gap: theme.base.space[2], borderRadius: theme.base.radius.sm, paddingHorizontal: theme.base.space[3], paddingVertical: theme.base.space[2] },
   icon: { paddingTop: 1 },
   text: { flex: 1, fontSize: theme.base.text.xs, lineHeight: 18 },
 }));

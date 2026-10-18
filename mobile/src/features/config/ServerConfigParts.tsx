@@ -8,9 +8,12 @@ import { Pagina } from './Pagina';
 import { PageHeader, Pill } from './PageHeader';
 import { InfoNotice } from './InfoNotice';
 import { Segmented } from './Segmented';
-import { useSettingsColors } from './colors';
+import { useSettingsColors, withAlpha } from './colors';
 import { FIELDS, VERDICTS, textOf, type ServerConfig } from './serverConfig';
 import * as m from '../../paraglide/messages';
+
+// O controle de baixo recua até o texto: caixa do ícone + o vão da linha.
+const ICON_BOX = 36;
 
 /**
  * Casca das páginas de configuração do servidor (Voz, Jev, Notificações, Anexos, Avançado): os quatro
@@ -42,7 +45,7 @@ export function ServerConfigPage({ title, cfg, children, extra }: { title: strin
         {footer ? <View style={{ height: 64 + insets.bottom }} /> : null}
       </Pagina>
       {footer ? (
-        <View style={[styles.footer, { paddingBottom: 10 + insets.bottom, borderTopColor: c.border, backgroundColor: superficie(theme, 0.95) }]}>
+        <View style={[styles.footer, { paddingBottom: theme.base.space[2] + insets.bottom, borderTopColor: c.border, backgroundColor: superficie(theme, 0.95) }]}>
           {/* O motivo do Salvar desligado vem antes de um erro antigo: é o que trava o botão agora. */}
           {cfg.saveBlocked ? (
             <Text accessibilityLiveRegion="polite" numberOfLines={3} style={[styles.footerText, { color: theme.tokens.status.warning }]}>
@@ -83,7 +86,7 @@ export function Chip({ text, tone = 'muted' }: { text: string; tone?: 'muted' | 
   const { theme } = useUnistyles();
   const c = useSettingsColors();
   const [fg, bg] = tone === 'accent' ? [c.accentText, c.accentDim]
-    : tone === 'success' ? [theme.tokens.status.success, 'rgba(52,199,89,0.14)'] : [c.muted, c.inset];
+    : tone === 'success' ? [theme.tokens.status.success, withAlpha(theme.tokens.status.success, 0.14)] : [c.muted, c.inset];
   return <View style={[styles.chip, { backgroundColor: bg }]}><Text style={[styles.chipText, { color: fg }]}>{text}</Text></View>;
 }
 
@@ -247,36 +250,36 @@ export function ConfigRow({ cfg, k, removable }: { cfg: ServerConfig; k: string;
 
 const styles = StyleSheet.create((theme) => ({
   fill: { flex: 1 },
-  flex: { flex: 1, minWidth: 0, gap: 2 },
+  flex: { flex: 1, minWidth: 0, gap: theme.base.space[0.5] },
   row: { flexDirection: 'row' },
-  muted: { fontSize: theme.base.text.sm, lineHeight: 20, paddingHorizontal: 4 },
-  errorBox: { gap: 10 },
+  muted: { fontSize: theme.base.text.sm, lineHeight: 20, paddingHorizontal: theme.base.space[1] },
+  errorBox: { gap: theme.base.space[2] },
   footer: {
     position: 'absolute', left: 0, right: 0, bottom: 0, borderTopWidth: 1,
-    paddingTop: 10, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingTop: theme.base.space[2], paddingHorizontal: theme.base.space[4], flexDirection: 'row', alignItems: 'center', gap: theme.base.space[3],
   },
   footerText: { flex: 1, fontSize: theme.base.text.xs },
-  save: { height: 40, paddingHorizontal: 18, borderRadius: 9999, alignItems: 'center', justifyContent: 'center' },
-  saveText: { color: '#fff', fontSize: theme.base.text.sm, fontWeight: '600' },
-  box: { borderRadius: 14, borderWidth: 1, overflow: 'hidden' },
+  save: { height: 40, paddingHorizontal: theme.base.space[4], borderRadius: theme.base.radius.full, alignItems: 'center', justifyContent: 'center' },
+  saveText: { color: theme.ink.onAccent, fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
+  box: { borderRadius: theme.base.radius.md, borderWidth: 1, overflow: 'hidden' },
   bare: { marginTop: -1 },
-  chip: { paddingHorizontal: 6, paddingVertical: 1, borderRadius: 9999 },
-  chipText: { fontSize: theme.base.text.xxxs, fontWeight: '700' },
-  disclosure: { flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start', minHeight: 32 },
-  disclosureText: { fontSize: theme.base.text.sm, fontWeight: '500' },
+  chip: { paddingHorizontal: theme.base.space[1.5], paddingVertical: 1, borderRadius: theme.base.radius.full },
+  chipText: { fontSize: theme.base.text.xxxs, fontWeight: theme.base.weight.bold },
+  disclosure: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], alignSelf: 'flex-start', minHeight: 32 },
+  disclosureText: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.medium },
   disclosureSmall: { fontSize: theme.base.text.xs },
-  blockHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, paddingHorizontal: 4, marginTop: 8 },
-  blockTitle: { fontSize: theme.base.text.sm, fontWeight: '600' },
-  rowShell: { borderTopWidth: 1, paddingVertical: 14, paddingHorizontal: 16, gap: 10 },
-  headLine: { flexDirection: 'row', alignItems: 'flex-start', gap: 14 },
-  iconBox: { width: 36, height: 36, borderRadius: 10, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
-  titleLine: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
-  title: { fontSize: theme.base.text.sm, fontWeight: '500' },
+  blockHead: { flexDirection: 'row', alignItems: 'flex-start', gap: theme.base.space[3], paddingHorizontal: theme.base.space[1], marginTop: theme.base.space[2] },
+  blockTitle: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
+  rowShell: { borderTopWidth: 1, paddingVertical: theme.base.space[3], paddingHorizontal: theme.base.space[4], gap: theme.base.space[2] },
+  headLine: { flexDirection: 'row', alignItems: 'flex-start', gap: theme.base.space[3] },
+  iconBox: { width: ICON_BOX, height: ICON_BOX, borderRadius: theme.base.radius.sm, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
+  titleLine: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: theme.base.space[2] },
+  title: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.medium },
   help: { fontSize: theme.base.text.xs, lineHeight: 18 },
-  below: { paddingLeft: 50, gap: 8 },
-  input: { minHeight: 44, borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, fontSize: theme.base.text.sm },
-  numberLine: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  below: { paddingLeft: ICON_BOX + theme.base.space[3], gap: theme.base.space[2] },
+  input: { minHeight: 44, borderWidth: 1, borderRadius: theme.base.radius.sm, paddingHorizontal: theme.base.space[3], fontSize: theme.base.text.sm },
+  numberLine: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
   number: { width: 96 },
-  secret: { gap: 6 },
-  verdict: { gap: 6 },
+  secret: { gap: theme.base.space[1.5] },
+  verdict: { gap: theme.base.space[1.5] },
 }));

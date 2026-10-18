@@ -47,7 +47,7 @@ export function LastErrorSection() {
 
 const styles = StyleSheet.create(theme => ({
   report: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xxs, color: theme.tokens.text.primary },
-  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
-  action: { minHeight: 44, paddingHorizontal: 12, justifyContent: 'center' },
+  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[3] },
+  action: { minHeight: 44, paddingHorizontal: theme.base.space[3], justifyContent: 'center' },
   actionText: { fontSize: theme.base.text.sm, color: theme.tokens.accent.base },
 }));

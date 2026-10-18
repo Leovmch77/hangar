@@ -105,7 +105,7 @@ function QuietHours({ server }: { server: Server }) {
 }
 
 const styles = StyleSheet.create((theme) => ({
-  line: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
+  line: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: theme.base.space[2] },
   help: { fontSize: theme.base.text.xs, lineHeight: 18 },
   time: { width: 84, textAlign: 'center' },
 }));

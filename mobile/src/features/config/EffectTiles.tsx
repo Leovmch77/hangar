@@ -87,11 +87,11 @@ export function EffectTiles({
 }
 
 const styles = StyleSheet.create((theme) => ({
-  row: { flexDirection: 'row', gap: 6 },
+  row: { flexDirection: 'row', gap: theme.base.space[1.5] },
   cell: { flex: 1, minWidth: 0 },
-  frame: { borderRadius: 11, borderWidth: 2 },
-  button: { padding: 4, borderRadius: 9, gap: 5 },
-  art: { height: 48, borderRadius: 7, overflow: 'hidden' },
-  caption: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 3 },
+  frame: { borderRadius: theme.base.radius.md, borderWidth: 2 },
+  button: { padding: theme.base.space[1], borderRadius: theme.base.radius.sm, gap: theme.base.space[1] },
+  art: { height: 48, borderRadius: theme.base.radius.sm, overflow: 'hidden' },
+  caption: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: theme.base.space[0.5] },
   captionText: { fontSize: theme.base.text.xxs, flexShrink: 1 },
 }));

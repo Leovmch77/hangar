@@ -166,11 +166,11 @@ export default function UsageLogPage() {
 }
 
 const styles = StyleSheet.create((theme) => ({
-  row: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  note: { paddingHorizontal: 16, paddingVertical: 14, fontSize: theme.base.text.xs },
+  row: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[2] },
+  note: { paddingHorizontal: theme.base.space[4], paddingVertical: theme.base.space[3], fontSize: theme.base.text.xs },
   lines: { maxHeight: 420 },
-  line: { borderTopWidth: 1, paddingHorizontal: 16, paddingVertical: 8, gap: 2 },
-  lineHead: { flexDirection: 'row', gap: 10, alignItems: 'baseline' },
-  event: { flexShrink: 1, fontWeight: '600' },
+  line: { borderTopWidth: 1, paddingHorizontal: theme.base.space[4], paddingVertical: theme.base.space[2], gap: theme.base.space[0.5] },
+  lineHead: { flexDirection: 'row', gap: theme.base.space[2], alignItems: 'baseline' },
+  event: { flexShrink: 1, fontWeight: theme.base.weight.semibold },
   mono: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs },
 }));

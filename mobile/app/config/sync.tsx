@@ -178,12 +178,12 @@ export default function SyncPage() {
 }
 
 const styles = StyleSheet.create((theme) => ({
-  inner: { paddingHorizontal: 16, paddingBottom: 16, gap: 12 },
-  block: { gap: 10 },
-  row: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  inner: { paddingHorizontal: theme.base.space[4], paddingBottom: theme.base.space[4], gap: theme.base.space[3] },
+  block: { gap: theme.base.space[2] },
+  row: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[2] },
   text: { fontSize: theme.base.text.sm, lineHeight: 20 },
-  strong: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  strong: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
   error: { fontSize: theme.base.text.sm, color: theme.tokens.status.error },
-  address: { borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10 },
+  address: { borderWidth: 1, borderRadius: theme.base.radius.sm, paddingHorizontal: theme.base.space[3], paddingVertical: theme.base.space[2] },
   mono: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs },
 }));

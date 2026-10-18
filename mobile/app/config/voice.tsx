@@ -270,10 +270,10 @@ function TuneRow({ cfg, t }: { cfg: ServerConfig; t: Tune }) {
 }
 
 const styles = StyleSheet.create((theme) => ({
-  links: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 12 },
+  links: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: theme.base.space[3] },
   small: { fontSize: theme.base.text.xs, lineHeight: 17 },
-  ends: { flexDirection: 'row', justifyContent: 'space-between', gap: 12 },
+  ends: { flexDirection: 'row', justifyContent: 'space-between', gap: theme.base.space[3] },
   right: { textAlign: 'right' },
-  menuPill: { flexDirection: 'row', alignItems: 'center', gap: 6, height: 32, paddingHorizontal: 12, borderWidth: 1, borderRadius: 9999, maxWidth: 260 },
-  menuText: { fontSize: theme.base.text.xs, fontWeight: '500', flexShrink: 1 },
+  menuPill: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5], height: 32, paddingHorizontal: theme.base.space[3], borderWidth: 1, borderRadius: theme.base.radius.full, maxWidth: 260 },
+  menuText: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.medium, flexShrink: 1 },
 }));

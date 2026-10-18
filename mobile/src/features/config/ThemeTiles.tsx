@@ -96,17 +96,17 @@ export function ThemeTiles({
 }
 
 const styles = StyleSheet.create((theme) => ({
-  row: { flexDirection: 'row', gap: 12 },
-  tile: { flex: 1, minWidth: 0, alignItems: 'center', gap: 8 },
-  frame: { alignSelf: 'stretch', borderWidth: 2, borderRadius: 10 },
-  art: { height: 72, borderRadius: 8, overflow: 'hidden' },
+  row: { flexDirection: 'row', gap: theme.base.space[3] },
+  tile: { flex: 1, minWidth: 0, alignItems: 'center', gap: theme.base.space[2] },
+  frame: { alignSelf: 'stretch', borderWidth: 2, borderRadius: theme.base.radius.sm },
+  art: { height: 72, borderRadius: theme.base.radius.sm, overflow: 'hidden' },
   split: { flex: 1, flexDirection: 'row' },
   half: { flex: 1 },
-  window: { flex: 1, flexDirection: 'row', gap: 6, padding: 8, borderRadius: 8 },
-  side: { width: '30%', paddingTop: 4 },
-  main: { flex: 1, borderRadius: 6, padding: 8 },
-  bars: { gap: 5 },
-  bar: { height: 4, borderRadius: 2 },
-  caption: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  window: { flex: 1, flexDirection: 'row', gap: theme.base.space[1.5], padding: theme.base.space[2], borderRadius: theme.base.radius.sm },
+  side: { width: '30%', paddingTop: theme.base.space[1] },
+  main: { flex: 1, borderRadius: theme.base.radius.sm, padding: theme.base.space[2] },
+  bars: { gap: theme.base.space[1] },
+  bar: { height: 4, borderRadius: theme.base.radius.full },
+  caption: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1] },
   captionText: { fontSize: theme.base.text.xs },
 }));

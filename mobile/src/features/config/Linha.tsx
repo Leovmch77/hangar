@@ -86,7 +86,7 @@ const styles = StyleSheet.create((theme) => ({
   secao: { gap: theme.base.space[1] },
   secaoTitulo: {
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
+    fontWeight: theme.base.weight.semibold,
     color: theme.tokens.text.muted,
     paddingHorizontal: theme.base.space[3],
   },
@@ -115,7 +115,7 @@ const styles = StyleSheet.create((theme) => ({
     minHeight: 44,
     borderRadius: theme.base.radius.md,
   },
-  textos: { flex: 1, gap: 2 },
-  titulo: { fontSize: theme.base.text.base, color: theme.tokens.text.primary, fontWeight: '500' },
+  textos: { flex: 1, gap: theme.base.space[0.5] },
+  titulo: { fontSize: theme.base.text.base, color: theme.tokens.text.primary, fontWeight: theme.base.weight.medium },
   descricao: { fontSize: theme.base.text.xs, color: theme.tokens.text.muted },
 }));

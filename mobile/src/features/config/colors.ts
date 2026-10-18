@@ -6,7 +6,7 @@ import { hexParaRgb } from '@hangar/core';
 const LINE = { dark: '255,248,244', light: '50,40,35' } as const;
 const INSET = { dark: '14,12,15', light: '240,235,227' } as const;
 
-const withAlpha = (hex: string, a: number) => {
+export const withAlpha = (hex: string, a: number) => {
   const rgb = hexParaRgb(hex);
   return rgb ? `rgba(${rgb.join(',')},${a})` : hex;
 };

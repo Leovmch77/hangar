@@ -52,9 +52,9 @@ export function SectionTabs<K extends string>({
 }
 
 const styles = StyleSheet.create((theme) => ({
-  sticky: { paddingVertical: 6 },
-  rail: { flexGrow: 0, borderWidth: 1, borderRadius: 10 },
-  railContent: { padding: 3, gap: 4 },
-  tab: { height: 32, paddingHorizontal: 11, borderRadius: 7, justifyContent: 'center' },
-  text: { fontSize: theme.base.text.sm, fontWeight: '500' },
+  sticky: { paddingVertical: theme.base.space[1.5] },
+  rail: { flexGrow: 0, borderWidth: 1, borderRadius: theme.base.radius.sm },
+  railContent: { padding: theme.base.space[0.5], gap: theme.base.space[1] },
+  tab: { height: 32, paddingHorizontal: theme.base.space[3], borderRadius: theme.base.radius.sm, justifyContent: 'center' },
+  text: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.medium },
 }));

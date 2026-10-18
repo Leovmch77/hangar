@@ -15,6 +15,7 @@ import { InfoNotice } from '../../src/features/config/InfoNotice';
 import { Box, Chip, Disclosure } from '../../src/features/config/ServerConfigParts';
 import { useSettingsColors } from '../../src/features/config/colors';
 import { superficie } from '../../src/theme/superficie';
+import { INK } from '../../src/theme/scale';
 import { Icon } from '../../src/ui/Icon';
 import { useServers } from '../../src/stores/servers';
 import { getLocale } from '../../src/paraglide/runtime';
@@ -531,7 +532,7 @@ function Button({ label, primary, disabled, onPress }: { label: string; primary?
         disabled && styles.disabled,
       ]}
     >
-      <Text style={[styles.buttonText, { color: primary ? '#fff' : c.text }]}>{label}</Text>
+      <Text style={[styles.buttonText, { color: primary ? INK.onAccent : c.text }]}>{label}</Text>
     </Pressable>
   );
 }
@@ -539,30 +540,30 @@ function Button({ label, primary, disabled, onPress }: { label: string; primary?
 const MONO = Platform.select({ ios: 'Menlo', default: 'monospace' });
 
 const styles = StyleSheet.create((theme) => ({
-  field: { gap: 8 },
-  fieldLabel: { fontSize: theme.base.text.sm, fontWeight: '600', paddingHorizontal: 4 },
+  field: { gap: theme.base.space[2] },
+  fieldLabel: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold, paddingHorizontal: theme.base.space[1] },
   self: { alignSelf: 'flex-start' },
-  origin: { flexDirection: 'row', alignItems: 'center', gap: 6, height: 36, paddingHorizontal: 12, borderWidth: 1, borderRadius: 9999, alignSelf: 'flex-start', maxWidth: '100%' },
-  dot: { width: 7, height: 7, borderRadius: 4 },
+  origin: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5], height: 36, paddingHorizontal: theme.base.space[3], borderWidth: 1, borderRadius: theme.base.radius.full, alignSelf: 'flex-start', maxWidth: '100%' },
+  dot: { width: 7, height: 7, borderRadius: theme.base.radius.full },
   body: { fontSize: theme.base.text.sm },
-  strong: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  strong: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
   small: { fontSize: theme.base.text.xs, lineHeight: 17 },
   mono: { fontSize: theme.base.text.xs, fontFamily: MONO },
-  note: { fontSize: theme.base.text.xs, paddingHorizontal: 4 },
+  note: { fontSize: theme.base.text.xs, paddingHorizontal: theme.base.space[1] },
   right: { marginLeft: 'auto' },
-  line: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', columnGap: 10, rowGap: 4 },
-  buttons: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  button: { height: 40, paddingHorizontal: 18, borderRadius: 9999, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
-  buttonText: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  line: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', columnGap: theme.base.space[2], rowGap: theme.base.space[1] },
+  buttons: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[2] },
+  button: { height: 40, paddingHorizontal: theme.base.space[4], borderRadius: theme.base.radius.full, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
+  buttonText: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
   disabled: { opacity: 0.45 },
-  row: { borderTopWidth: 1, paddingVertical: 12, paddingHorizontal: 16, gap: 4 },
-  check: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, minHeight: 48, borderTopWidth: 1, paddingVertical: 12, paddingHorizontal: 16 },
+  row: { borderTopWidth: 1, paddingVertical: theme.base.space[3], paddingHorizontal: theme.base.space[4], gap: theme.base.space[1] },
+  check: { flexDirection: 'row', alignItems: 'flex-start', gap: theme.base.space[3], minHeight: 48, borderTopWidth: 1, paddingVertical: theme.base.space[3], paddingHorizontal: theme.base.space[4] },
   // Dentro do cartão da prévia o recuo já é o do cartão.
   compact: { paddingHorizontal: 0 },
-  checkBody: { flex: 1, minWidth: 0, gap: 4 },
-  card: { borderRadius: 14, borderWidth: 1, padding: 14, gap: 10 },
-  group: { gap: 2 },
-  groupTitle: { fontSize: theme.base.text.xs, fontWeight: '600', paddingTop: 4 },
-  script: { marginTop: 4, paddingLeft: 10, borderLeftWidth: 1, gap: 2 },
-  result: { gap: 2 },
+  checkBody: { flex: 1, minWidth: 0, gap: theme.base.space[1] },
+  card: { borderRadius: theme.base.radius.md, borderWidth: 1, padding: theme.base.space[3], gap: theme.base.space[2] },
+  group: { gap: theme.base.space[0.5] },
+  groupTitle: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.semibold, paddingTop: theme.base.space[1] },
+  script: { marginTop: theme.base.space[1], paddingLeft: theme.base.space[2], borderLeftWidth: 1, gap: theme.base.space[0.5] },
+  result: { gap: theme.base.space[0.5] },
 }));

@@ -52,7 +52,7 @@ const styles = StyleSheet.create((theme) => ({
   trilho: {
     flexDirection: 'row',
     gap: theme.base.space[1],
-    padding: 3,
+    padding: theme.base.space[0.5],
     borderRadius: theme.base.radius.md,
     backgroundColor: superficie(theme, 0.4),
   },
@@ -64,5 +64,5 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.base.space[2],
     borderRadius: theme.base.radius.sm,
   },
-  txt: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  txt: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
 }));

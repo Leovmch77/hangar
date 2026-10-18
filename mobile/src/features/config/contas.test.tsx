@@ -80,7 +80,7 @@ vi.mock('../../paraglide/messages', async original => ({
   login_fechar: () => 'Fechar',
   erro_desconhecido: () => 'Erro',
 }));
-vi.mock('react-native-unistyles', () => ({ StyleSheet: { create: (fn: any) => typeof fn === 'function' ? fn({ tokens: { border: { default: '#ccc' }, bg: { surface: '#eee' }, text: { primary: '#000', secondary: '#666', muted: '#999' }, accent: { base: '#00f' }, status: { error: '#f00', success: '#0a0' } }, base: { space: [0, 4, 8, 12, 16], text: { xs: 12, sm: 14, base: 16, lg: 18, xl: 20 }, radius: { md: 8, lg: 12 }, fontMono: 'monospace' } }) : fn } }));
+vi.mock('react-native-unistyles', () => ({ StyleSheet: { create: (fn: any) => typeof fn === 'function' ? fn({ tokens: { border: { default: '#ccc' }, bg: { surface: '#eee' }, text: { primary: '#000', secondary: '#666', muted: '#999' }, accent: { base: '#00f' }, status: { error: '#f00', success: '#0a0' } }, base: { space: { 0.5: 2, 1: 4, 1.5: 6, 2: 8, 3: 12, 4: 16, 5: 20, 6: 24 }, weight: { normal: '400', medium: '500', semibold: '600', bold: '700' }, text: { xs: 12, sm: 14, base: 16, lg: 18, xl: 20 }, radius: { xs: 4, sm: 8, md: 12, lg: 18, full: 9999 }, fontMono: 'monospace' } }) : fn } }));
 
 import { motivoLoginIndisponivel, type Credencial } from '@hangar/core';
 import Contas from '../../../app/config/contas';

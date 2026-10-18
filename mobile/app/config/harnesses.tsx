@@ -488,7 +488,7 @@ export default function Harnesses() {
         <View style={styles.itemRow}>
           <Text style={[styles.glyph, { color }]}>{glyph}</Text>
           <Text style={[styles.itemText, { color: c.muted }]}>
-            <Text style={{ color: c.text, fontWeight: '600' }}>{label}</Text>{'  '}{itemText(item)}
+            <Text style={{ color: c.text, fontWeight: theme.base.weight.semibold }}>{label}</Text>{'  '}{itemText(item)}
           </Text>
           {fix ? (
             <Pressable
@@ -615,7 +615,7 @@ export default function Harnesses() {
           <View style={styles.plugins}>
             {plugins.map((pl) => (
               <Text key={pl.id} style={[styles.small, { color: c.muted }]}>
-                <Text style={{ color: c.text, fontWeight: '600' }}>{pl.id}</Text>{` · ${pl.versao} · ${pl.origem}`}
+                <Text style={{ color: c.text, fontWeight: theme.base.weight.semibold }}>{pl.id}</Text>{` · ${pl.versao} · ${pl.origem}`}
               </Text>
             ))}
           </View>
@@ -835,48 +835,48 @@ export default function Harnesses() {
 
 const styles = StyleSheet.create((theme) => ({
   flex: { flex: 1, minWidth: 0 },
-  pad: { paddingHorizontal: 4 },
-  gap3: { gap: 3 },
-  gap4: { gap: 4 },
-  gap8: { gap: 8 },
+  pad: { paddingHorizontal: theme.base.space[1] },
+  gap3: { gap: theme.base.space[0.5] },
+  gap4: { gap: theme.base.space[1] },
+  gap8: { gap: theme.base.space[2] },
   body: { fontSize: theme.base.text.sm, lineHeight: 20 },
   small: { fontSize: theme.base.text.xs, lineHeight: 18 },
   link: { textDecorationLine: 'underline' },
-  scopeRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 4 },
-  scope: { fontSize: theme.base.text.xs, fontWeight: '500', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, borderWidth: 1, overflow: 'hidden' },
-  loading: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 4 },
+  scopeRow: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[1] },
+  scope: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.medium, paddingHorizontal: theme.base.space[2], paddingVertical: theme.base.space[0.5], borderRadius: theme.base.radius.sm, borderWidth: 1, overflow: 'hidden' },
+  loading: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[1] },
   retry: { flexDirection: 'row' },
-  card: { paddingHorizontal: 16, paddingVertical: 14, gap: 4 },
-  cardHead: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingBottom: 4 },
-  dot: { width: 8, height: 8, borderRadius: 4 },
-  tmux: { width: 22, height: 22, borderRadius: 4, alignItems: 'center', justifyContent: 'center' },
-  tmuxText: { fontSize: theme.base.text.xs, fontWeight: '700' },
-  cliName: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  card: { paddingHorizontal: theme.base.space[4], paddingVertical: theme.base.space[3], gap: theme.base.space[1] },
+  cardHead: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingBottom: theme.base.space[1] },
+  dot: { width: 8, height: 8, borderRadius: theme.base.radius.full },
+  tmux: { width: 22, height: 22, borderRadius: theme.base.radius.xs, alignItems: 'center', justifyContent: 'center' },
+  tmuxText: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.bold },
+  cliName: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
   version: { flexShrink: 1, fontSize: theme.base.text.xs },
-  item: { gap: 2 },
-  itemRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingVertical: 3 },
-  glyph: { width: 14, fontSize: theme.base.text.sm, fontWeight: '700', lineHeight: 20 },
+  item: { gap: theme.base.space[0.5] },
+  itemRow: { flexDirection: 'row', alignItems: 'flex-start', gap: theme.base.space[2], paddingVertical: theme.base.space[0.5] },
+  glyph: { width: 14, fontSize: theme.base.text.sm, fontWeight: theme.base.weight.bold, lineHeight: 20 },
   itemText: { flex: 1, minWidth: 0, fontSize: theme.base.text.sm, lineHeight: 20 },
-  indent: { paddingLeft: 22 },
-  why: { gap: 4, paddingBottom: 4 },
-  whyHead: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 },
+  indent: { paddingLeft: theme.base.space[5] },
+  why: { gap: theme.base.space[1], paddingBottom: theme.base.space[1] },
+  whyHead: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: theme.base.space[1.5] },
   smallButton: {
-    flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 32, paddingHorizontal: 12,
-    borderWidth: 1, borderRadius: 8, flexShrink: 0,
+    flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5], minHeight: 32, paddingHorizontal: theme.base.space[3],
+    borderWidth: 1, borderRadius: theme.base.radius.sm, flexShrink: 0,
   },
-  smallButtonText: { fontSize: theme.base.text.xs, fontWeight: '500' },
-  block: { marginTop: 6, paddingTop: 8, borderTopWidth: 1, gap: 6 },
-  headRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  rowTitle: { fontSize: theme.base.text.sm, fontWeight: '600' },
-  switchRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10, borderTopWidth: 1 },
-  radios: { gap: 2 },
-  radio: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 40 },
-  radioRing: { width: 20, height: 20, borderRadius: 10, borderWidth: 2, alignItems: 'center', justifyContent: 'center' },
-  radioDot: { width: 10, height: 10, borderRadius: 5 },
-  track: { height: 6, borderRadius: 3, overflow: 'hidden' },
-  fill: { height: 6, borderRadius: 3 },
-  plugins: { paddingLeft: 12, gap: 2 },
-  chip: { alignSelf: 'flex-start', fontSize: theme.base.text.xs, paddingHorizontal: 6, paddingVertical: 3, borderRadius: 4, overflow: 'hidden' },
-  log: { maxHeight: 220, borderRadius: 6, padding: 8 },
+  smallButtonText: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.medium },
+  block: { marginTop: theme.base.space[1.5], paddingTop: theme.base.space[2], borderTopWidth: 1, gap: theme.base.space[1.5] },
+  headRow: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[3] },
+  rowTitle: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
+  switchRow: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[3], paddingVertical: theme.base.space[2], borderTopWidth: 1 },
+  radios: { gap: theme.base.space[0.5] },
+  radio: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], minHeight: 40 },
+  radioRing: { width: 20, height: 20, borderRadius: theme.base.radius.full, borderWidth: 2, alignItems: 'center', justifyContent: 'center' },
+  radioDot: { width: 10, height: 10, borderRadius: theme.base.radius.full },
+  track: { height: 6, borderRadius: theme.base.radius.full, overflow: 'hidden' },
+  fill: { height: 6, borderRadius: theme.base.radius.full },
+  plugins: { paddingLeft: theme.base.space[3], gap: theme.base.space[0.5] },
+  chip: { alignSelf: 'flex-start', fontSize: theme.base.text.xs, paddingHorizontal: theme.base.space[1.5], paddingVertical: theme.base.space[0.5], borderRadius: theme.base.radius.xs, overflow: 'hidden' },
+  log: { maxHeight: 220, borderRadius: theme.base.radius.sm, padding: theme.base.space[2] },
   logText: { fontSize: theme.base.text.xxs, lineHeight: 16 },
 }));

@@ -47,18 +47,18 @@ export function Pill({ label, icon, onPress, disabled = false }: PageAction) {
 }
 
 const styles = StyleSheet.create((theme) => ({
-  top: { gap: 14, paddingHorizontal: 4 },
-  title: { fontSize: theme.base.text.lg, fontWeight: '600' },
-  subtitle: { marginTop: 6, fontSize: theme.base.text.sm, lineHeight: 20 },
-  pills: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  top: { gap: theme.base.space[3], paddingHorizontal: theme.base.space[1] },
+  title: { fontSize: theme.base.text.lg, fontWeight: theme.base.weight.semibold },
+  subtitle: { marginTop: theme.base.space[1.5], fontSize: theme.base.text.sm, lineHeight: 20 },
+  pills: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[2] },
   pill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: theme.base.space[1.5],
     height: 32,
-    paddingHorizontal: 12,
+    paddingHorizontal: theme.base.space[3],
     borderWidth: 1,
-    borderRadius: 9999,
+    borderRadius: theme.base.radius.full,
   },
-  pillText: { fontSize: theme.base.text.xs, fontWeight: '500' },
+  pillText: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.medium },
 }));

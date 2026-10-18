@@ -288,8 +288,8 @@ function ServerAccounts({ server }: { server: Server | null }) {
 }
 
 const styles = StyleSheet.create((theme) => ({
-  muted: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted, paddingHorizontal: 4 },
-  error: { fontSize: theme.base.text.sm, color: theme.tokens.status.error, paddingHorizontal: 4 },
-  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  login: { paddingHorizontal: 16, paddingBottom: 16 },
+  muted: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted, paddingHorizontal: theme.base.space[1] },
+  error: { fontSize: theme.base.text.sm, color: theme.tokens.status.error, paddingHorizontal: theme.base.space[1] },
+  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[2] },
+  login: { paddingHorizontal: theme.base.space[4], paddingBottom: theme.base.space[4] },
 }));

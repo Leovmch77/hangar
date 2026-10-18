@@ -36,9 +36,10 @@ export function ColorDots({ dots, label }: { dots: Dot[]; label: string }) {
   );
 }
 
-const styles = StyleSheet.create({
-  row: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6 },
-  ring: { borderWidth: 2, borderRadius: 8 },
-  target: { width: 24, height: 24, padding: 2, borderRadius: 6 },
-  swatch: { flex: 1, borderRadius: 6 },
-});
+// Raio interno = externo menos o anel de 2, para as curvas ficarem concêntricas.
+const styles = StyleSheet.create((theme) => ({
+  row: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: theme.base.space[1.5] },
+  ring: { borderWidth: 2, borderRadius: theme.base.radius.sm },
+  target: { width: 24, height: 24, padding: theme.base.space[0.5], borderRadius: theme.base.radius.sm - 2 },
+  swatch: { flex: 1, borderRadius: theme.base.radius.sm - 2 },
+}));

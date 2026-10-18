@@ -96,7 +96,7 @@ describe('organização do ditado na tela de Voz', () => {
       await click(m.native_voice_organization_harness());
       expect(button(m.native_voice_organization_harness()).getAttribute('aria-selected')).toBe('true');
       expect(button(m.native_voice_organization_none()).getAttribute('aria-selected')).toBe('false');
-      expect(input(m.native_voice_harness_model_claude())?.parentElement?.style.paddingLeft).toBe('50px');
+      expect(input(m.native_voice_harness_model_claude())?.parentElement?.style.paddingLeft).toBe('48px');
       await edit(m.native_voice_harness_model_claude(), 'claude-draft');
       expect(calls.patch).not.toHaveBeenCalled();
       expect(fields.dictation_organization_mode.valor).toBe('none');

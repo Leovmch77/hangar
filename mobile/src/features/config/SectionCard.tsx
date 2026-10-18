@@ -51,11 +51,11 @@ export function SectionCard({
 }
 
 const styles = StyleSheet.create((theme) => ({
-  box: { borderRadius: 14, borderWidth: 1, overflow: 'hidden' },
-  head: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 14, paddingHorizontal: 16 },
-  square: { width: 32, height: 32, borderRadius: 9, alignItems: 'center', justifyContent: 'center' },
-  texts: { flex: 1, minWidth: 0, gap: 2 },
-  title: { fontSize: theme.base.text.sm, fontWeight: '600' },
+  box: { borderRadius: theme.base.radius.md, borderWidth: 1, overflow: 'hidden' },
+  head: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[3], paddingVertical: theme.base.space[3], paddingHorizontal: theme.base.space[4] },
+  square: { width: 32, height: 32, borderRadius: theme.base.radius.sm, alignItems: 'center', justifyContent: 'center' },
+  texts: { flex: 1, minWidth: 0, gap: theme.base.space[0.5] },
+  title: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
   subtitle: { fontSize: theme.base.text.xs },
   bare: { marginTop: -1 },
 }));

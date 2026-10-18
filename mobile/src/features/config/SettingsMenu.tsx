@@ -32,8 +32,8 @@ export function SettingsMenuItem({ icon, label, onPress }: { icon?: IconName; la
 }
 
 const styles = StyleSheet.create((theme) => ({
-  group: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 10, paddingTop: 12, paddingBottom: 6 },
-  groupText: { flex: 1, fontSize: theme.base.text.xs, fontWeight: '500' },
-  item: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6 },
+  group: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[2], paddingTop: theme.base.space[3], paddingBottom: theme.base.space[1.5] },
+  groupText: { flex: 1, fontSize: theme.base.text.xs, fontWeight: theme.base.weight.medium },
+  item: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[2], paddingVertical: theme.base.space[1.5], borderRadius: theme.base.radius.sm },
   itemText: { flex: 1, fontSize: theme.base.text.sm },
 }));

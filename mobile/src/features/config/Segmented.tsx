@@ -55,7 +55,7 @@ export function Segmented<T extends string>({
 }
 
 const styles = StyleSheet.create((theme) => ({
-  rail: { flexDirection: 'row', alignSelf: 'stretch', borderWidth: 1, borderRadius: 6, overflow: 'hidden' },
-  option: { flex: 1, minHeight: 36, paddingHorizontal: 11, paddingVertical: 8, alignItems: 'center', justifyContent: 'center' },
-  text: { fontSize: theme.base.text.sm, fontWeight: '500', textAlign: 'center' },
+  rail: { flexDirection: 'row', alignSelf: 'stretch', borderWidth: 1, borderRadius: theme.base.radius.sm, overflow: 'hidden' },
+  option: { flex: 1, minHeight: 36, paddingHorizontal: theme.base.space[3], paddingVertical: theme.base.space[2], alignItems: 'center', justifyContent: 'center' },
+  text: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.medium, textAlign: 'center' },
 }));

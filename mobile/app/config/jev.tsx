@@ -228,14 +228,14 @@ function ModelField({ cfg, models, onOpen, notice, failed }: {
 }
 
 const styles = StyleSheet.create((theme) => ({
-  trigger: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  trigger: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
   triggerText: { flex: 1, fontSize: theme.base.text.sm },
-  panel: { gap: 8, padding: 4 },
+  panel: { gap: theme.base.space[2], padding: theme.base.space[1] },
   models: { maxHeight: 360 },
-  block: { gap: 8 },
+  block: { gap: theme.base.space[2] },
   row: { flexDirection: 'row' },
-  note: { fontSize: theme.base.text.xs, lineHeight: 18, paddingHorizontal: 4 },
+  note: { fontSize: theme.base.text.xs, lineHeight: 18, paddingHorizontal: theme.base.space[1] },
   // 44 pt: alvo de toque mínimo.
-  model: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, borderTopWidth: StyleSheet.hairlineWidth },
+  model: { minHeight: 44, justifyContent: 'center', paddingHorizontal: theme.base.space[3], borderTopWidth: StyleSheet.hairlineWidth },
   modelText: { fontSize: theme.base.text.xs },
 }));

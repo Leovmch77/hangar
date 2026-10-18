@@ -165,6 +165,6 @@ const styles = StyleSheet.create(theme => ({
   root: { gap: theme.base.space[2] },
   text: { color: theme.tokens.text.primary },
   error: { color: theme.tokens.status.error },
-  button: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 12, borderWidth: 1, borderColor: theme.tokens.border.default, borderRadius: theme.base.radius.md },
-  input: { minHeight: 44, color: theme.tokens.text.primary, borderWidth: 1, borderColor: theme.tokens.border.default, borderRadius: theme.base.radius.md, paddingHorizontal: 12 },
+  button: { minHeight: 44, justifyContent: 'center', paddingHorizontal: theme.base.space[3], borderWidth: 1, borderColor: theme.tokens.border.default, borderRadius: theme.base.radius.md },
+  input: { minHeight: 44, color: theme.tokens.text.primary, borderWidth: 1, borderColor: theme.tokens.border.default, borderRadius: theme.base.radius.md, paddingHorizontal: theme.base.space[3] },
 }));

@@ -144,11 +144,11 @@ function Env({ cfg }: { cfg: ServerConfig }) {
 
 const styles = StyleSheet.create((theme) => ({
   flex: { flex: 1, minWidth: 0 },
-  chips: { flexDirection: 'row', gap: 6 },
-  line: { borderTopWidth: 1, paddingHorizontal: 16, paddingVertical: 12 },
-  rootRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  pair: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 },
-  envRow: { gap: 4 },
+  chips: { flexDirection: 'row', gap: theme.base.space[1.5] },
+  line: { borderTopWidth: 1, paddingHorizontal: theme.base.space[4], paddingVertical: theme.base.space[3] },
+  rootRow: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
+  pair: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: theme.base.space[4] },
+  envRow: { gap: theme.base.space[1] },
   help: { fontSize: theme.base.text.sm },
   mono: { fontSize: theme.base.text.xs },
   value: { flexShrink: 1, maxWidth: '60%', textAlign: 'right' },

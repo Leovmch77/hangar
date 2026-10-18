@@ -15,6 +15,7 @@ import { putWorktreeStatus } from '../../src/features/worktrees/worktreeStatus';
 import { displayTitle, SessionChips, sizeLabel, sizeSumLabel, STATE_TONE, stateLabel, useStateColor } from '../../src/features/worktrees/worktreeUi';
 import { Chip } from '../../src/ui/Chip';
 import { Icon } from '../../src/ui/Icon';
+import { RADIUS } from '../../src/theme/scale';
 import { useServers } from '../../src/stores/servers';
 import { useSessions } from '../../src/stores/sessions';
 import * as m from '../../src/paraglide/messages';
@@ -336,7 +337,7 @@ function Disco({ todas, onPick, demorando, onRetry }: { todas: WorktreeStatus[];
                 <Text style={[styles.meta, { color: c.muted }]}>{sizeLabel(w)}</Text>
               </View>
               <View style={[styles.trilho, { backgroundColor: c.inset }]}>
-                <View style={{ width: `${Math.max(1, Math.round(((w.size ?? 0) / maior) * 100))}%` as const, height: '100%', borderRadius: 3, backgroundColor: cor(k) }} />
+                <View style={{ width: `${Math.max(1, Math.round(((w.size ?? 0) / maior) * 100))}%` as const, height: '100%', borderRadius: RADIUS.full, backgroundColor: cor(k) }} />
               </View>
             </Pressable>
           );
@@ -361,37 +362,37 @@ function Disco({ todas, onPick, demorando, onRetry }: { todas: WorktreeStatus[];
 }
 
 const styles = StyleSheet.create((theme) => ({
-  muted: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted, paddingHorizontal: 4 },
-  erro: { fontSize: theme.base.text.sm, color: theme.tokens.status.error, paddingHorizontal: 4 },
-  erroBloco: { gap: 8, alignItems: 'flex-start' },
-  lendo: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  aviso: { fontSize: theme.base.text.xs, color: theme.tokens.status.warning, paddingHorizontal: 4 },
+  muted: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted, paddingHorizontal: theme.base.space[1] },
+  erro: { fontSize: theme.base.text.sm, color: theme.tokens.status.error, paddingHorizontal: theme.base.space[1] },
+  erroBloco: { gap: theme.base.space[2], alignItems: 'flex-start' },
+  lendo: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
+  aviso: { fontSize: theme.base.text.xs, color: theme.tokens.status.warning, paddingHorizontal: theme.base.space[1] },
   flex: { flex: 1, minWidth: 0 },
-  grade: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  contador: { flexBasis: '45%', flexGrow: 1, borderWidth: 1, borderRadius: 12, padding: 12, gap: 4 },
-  contadorTopo: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  grade: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[2] },
+  contador: { flexBasis: '45%', flexGrow: 1, borderWidth: 1, borderRadius: theme.base.radius.md, padding: theme.base.space[3], gap: theme.base.space[1] },
+  contadorTopo: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5] },
   contadorLabel: { flex: 1, fontSize: theme.base.text.xxs },
-  contadorN: { fontSize: theme.base.text.xl, fontWeight: '600', fontVariant: ['tabular-nums'] },
+  contadorN: { fontSize: theme.base.text.xl, fontWeight: theme.base.weight.semibold, fontVariant: ['tabular-nums'] },
   contadorHint: { fontSize: theme.base.text.xxxs },
-  ponto: { width: 8, height: 8, borderRadius: 4 },
-  filtros: { gap: 8, paddingHorizontal: 2 },
-  filtro: { flexDirection: 'row', alignItems: 'center', gap: 6, height: 34, paddingHorizontal: 12, borderWidth: 1, borderRadius: 9999 },
-  filtroTxt: { fontSize: theme.base.text.xs, fontWeight: '500' },
+  ponto: { width: 8, height: 8, borderRadius: theme.base.radius.full },
+  filtros: { gap: theme.base.space[2], paddingHorizontal: theme.base.space[0.5] },
+  filtro: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5], height: 34, paddingHorizontal: theme.base.space[3], borderWidth: 1, borderRadius: theme.base.radius.full },
+  filtroTxt: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.medium },
   filtroN: { fontSize: theme.base.text.xxs, fontVariant: ['tabular-nums'] },
-  limpar: { borderTopWidth: 1, paddingVertical: 10, paddingHorizontal: 16, flexDirection: 'row' },
-  linha: { borderTopWidth: 1, paddingVertical: 12, paddingHorizontal: 16, gap: 8 },
-  linhaCorpo: { gap: 4 },
-  linhaTopo: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  linhaEstado: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
-  titulo: { fontSize: theme.base.text.sm, fontWeight: '500' },
+  limpar: { borderTopWidth: 1, paddingVertical: theme.base.space[2], paddingHorizontal: theme.base.space[4], flexDirection: 'row' },
+  linha: { borderTopWidth: 1, paddingVertical: theme.base.space[3], paddingHorizontal: theme.base.space[4], gap: theme.base.space[2] },
+  linhaCorpo: { gap: theme.base.space[1] },
+  linhaTopo: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
+  linhaEstado: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], flexWrap: 'wrap' },
+  titulo: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.medium },
   meta: { fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
   mono: { fontSize: theme.base.text.xxs, fontFamily: theme.base.fontMono },
-  grupo: { borderTopWidth: 1, paddingVertical: 12, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', gap: 10 },
-  disco: { borderTopWidth: 1, paddingVertical: 12, paddingHorizontal: 16, gap: 10 },
-  barra: { flexDirection: 'row', height: 10, borderRadius: 5, overflow: 'hidden', gap: 1 },
-  discoLinha: { gap: 4, minHeight: 44, justifyContent: 'center' },
-  trilho: { height: 6, borderRadius: 3, overflow: 'hidden' },
-  legendaLinha: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, paddingTop: 2 },
-  legendaItem: { flexDirection: 'row', alignItems: 'center', gap: 5 },
-  legenda: { fontSize: theme.base.text.xxs, paddingHorizontal: 4 },
+  grupo: { borderTopWidth: 1, paddingVertical: theme.base.space[3], paddingHorizontal: theme.base.space[4], flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
+  disco: { borderTopWidth: 1, paddingVertical: theme.base.space[3], paddingHorizontal: theme.base.space[4], gap: theme.base.space[2] },
+  barra: { flexDirection: 'row', height: 10, borderRadius: theme.base.radius.full, overflow: 'hidden', gap: 1 },
+  discoLinha: { gap: theme.base.space[1], minHeight: 44, justifyContent: 'center' },
+  trilho: { height: 6, borderRadius: theme.base.radius.full, overflow: 'hidden' },
+  legendaLinha: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[2], paddingTop: theme.base.space[0.5] },
+  legendaItem: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1] },
+  legenda: { fontSize: theme.base.text.xxs, paddingHorizontal: theme.base.space[1] },
 }));

@@ -4,6 +4,9 @@ import { StyleSheet } from 'react-native-unistyles';
 import { Icon, type IconName } from '../../ui/Icon';
 import { useSettingsColors } from './colors';
 
+// O controle de baixo recua até o texto: caixa do ícone + o vão da linha.
+const ICON_BOX = 36;
+
 type Props = {
   title: string;
   description?: string;
@@ -63,14 +66,14 @@ export function SettingsRow({ title, description, icon, onPress, onLongPress, ch
 }
 
 const styles = StyleSheet.create((theme) => ({
-  row: { borderTopWidth: 1, paddingVertical: 14, paddingHorizontal: 16, gap: 10 },
-  headLine: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  head: { flex: 1, minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: 14 },
-  iconBox: { width: 36, height: 36, borderRadius: 10, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
-  texts: { flex: 1, minWidth: 0, gap: 2 },
-  title: { fontSize: theme.base.text.sm, fontWeight: '500' },
+  row: { borderTopWidth: 1, paddingVertical: theme.base.space[3], paddingHorizontal: theme.base.space[4], gap: theme.base.space[2] },
+  headLine: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[3] },
+  head: { flex: 1, minHeight: 36, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[3] },
+  iconBox: { width: ICON_BOX, height: ICON_BOX, borderRadius: theme.base.radius.sm, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
+  texts: { flex: 1, minWidth: 0, gap: theme.base.space[0.5] },
+  title: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.medium },
   desc: { fontSize: theme.base.text.xs },
-  titleSmall: { fontSize: theme.base.text.sm, fontWeight: '500' },
+  titleSmall: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.medium },
   descSmall: { fontSize: theme.base.text.xs },
-  controlIndented: { paddingLeft: 50 },
+  controlIndented: { paddingLeft: ICON_BOX + theme.base.space[3] },
 }));

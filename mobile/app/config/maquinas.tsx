@@ -89,6 +89,6 @@ function TestConnection({ server }: { server: Server }) {
   </View>;
 }
 
-const styles = StyleSheet.create({
-  pills: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-});
+const styles = StyleSheet.create((theme) => ({
+  pills: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[2] },
+}));
