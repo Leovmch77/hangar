@@ -11,6 +11,7 @@ const appLifecycle = vi.hoisted(() => ({
   listeners: new Set<(state: import('react-native').AppStateStatus) => void>(),
 }));
 const layouts = vi.hoisted(() => new Map<string, (event: import('react-native').LayoutChangeEvent) => void>());
+const keyboardDismiss = vi.hoisted(() => vi.fn());
 vi.mock('react-native', async (original) => {
   const native = await original<typeof import('react-native')>();
   return {
@@ -27,6 +28,7 @@ vi.mock('react-native', async (original) => {
     },
   },
   AccessibilityInfo: { sendAccessibilityEvent: vi.fn() },
+  Keyboard: { ...native.Keyboard, dismiss: keyboardDismiss, isVisible: () => false },
   Pressable: ({ accessibilityState, accessibilityRole, accessibilityLabel, accessibilityHint, onPress, children, disabled, ref, style }: {
     accessibilityState?: { disabled?: boolean; busy?: boolean; expanded?: boolean; selected?: boolean }; accessibilityRole?: string;
     accessibilityLabel?: string; onPress?: () => void; children: ReactNode; disabled?: boolean;
@@ -934,6 +936,15 @@ describe('Parar no Composer', () => {
     expect(send.getAttribute('aria-busy')).toBe('true');
     await act(async () => finish());
     expect(send.getAttribute('aria-busy')).toBe('false');
+    act(() => root.unmount());
+  });
+
+  it('enviar fecha o teclado', async () => {
+    keyboardDismiss.mockClear();
+    const { container, root } = await render(createElement(Composer, { ...props, draft: 'texto' }));
+    expect(keyboardDismiss).not.toHaveBeenCalled();
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!.click());
+    expect(keyboardDismiss).toHaveBeenCalledTimes(1);
     act(() => root.unmount());
   });
 
