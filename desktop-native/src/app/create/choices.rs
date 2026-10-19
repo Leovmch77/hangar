@@ -318,7 +318,6 @@ impl NewSession {
         self.sync_customizations(window, cx);
         let seq = self.models.start();
         self.defaults_ready = false;
-        self.default_saving = false;
         if self.proxy_accounts().is_none() { self.model.clear(); self.effort.clear(); }
         self.subagent.clear();
         self.service_tier = None;
@@ -385,13 +384,14 @@ impl NewSession {
                 if this.default_saving { return; }
                 let value = on.then(|| this.current_choice());
                 this.default_saving = true;
-                let (seq, scope) = (this.models.seq, this.default_scope());
+                this.default_save_seq += 1;
+                let (save_seq, scope_seq, scope) = (this.default_save_seq, this.models.seq, this.default_scope());
                 let mirror = this.provider == "claude" && this.engine.is_empty() && this.proxy_accounts().is_none();
                 this.request(cx, move |api, send| Box::pin(async move {
                     let scope: Vec<_> = scope.iter().map(|(k, v)| (*k, v.as_str())).collect();
                     let result = api.save_session_default(&scope, value.clone(), false).await;
                     let saved = result.is_ok();
-                    send(CreateReply::HarnessDefaultSaved(seq, result)).await;
+                    send(CreateReply::HarnessDefaultSaved(save_seq, scope_seq, result)).await;
                     if let Some((model, effort, permission)) = value.filter(|_| saved && mirror) {
                         send(CreateReply::ClaudeDefaultSaved(api.server_send(reqwest::Method::POST, &["claude", "defaults"],
                             Some(serde_json::json!({"model": model, "effort": effort, "permission": permission})), 10).await)).await;

@@ -273,7 +273,7 @@ pub(super) enum CreateReply {
     Config(u64, (bool, Result<Option<Value>, Failure>)),
     HeadlessSaved(u64, Result<Value, Failure>),
     ClaudeDefaultSaved(Result<Value, Failure>),
-    HarnessDefaultSaved(u64, Result<Option<(String, String, String)>, Failure>),
+    HarnessDefaultSaved(u64, u64, Result<Option<(String, String, String)>, Failure>),
     Quotas(u64, Result<Value, Failure>),
     Context(u64, Result<Value, Failure>),
     Account(u64, AccountDone),
@@ -522,6 +522,7 @@ pub(in crate::app) struct NewSession {
     saved_default: Option<(String, String, String)>,
     defaults_ready: bool,
     default_saving: bool,
+    default_save_seq: u64,
     /// Permissão escolhida à mão: o padrão do harness não a troca quando o catálogo é relido.
     permission_touched: bool,
     subagent: String,
@@ -641,7 +642,7 @@ impl NewSession {
             customizations_focus: cx.focus_handle().tab_stop(true), codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true, headless_owner: None, headless_touched: false, headless_saving: false,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
             step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, account_touched: false, account_suggested: false, effort: String::new(), service_tier: None,
-            permission: String::new(), saved_default: None, defaults_ready: false, default_saving: false, permission_touched: false, subagent: String::new(), engine: String::new(), engine_account: String::new(), engine_account_pick: None, model_pick: None, effort_pick: None,
+            permission: String::new(), saved_default: None, defaults_ready: false, default_saving: false, default_save_seq: 0, permission_touched: false, subagent: String::new(), engine: String::new(), engine_account: String::new(), engine_account_pick: None, model_pick: None, effort_pick: None,
             permission_pick: None, subagent_pick: None, engine_pick: None, engines: Remote::default(), jev: Remote::default(), jev_on: false,
             more: false, omp, quotas: Remote::default(), reopen_config: None, reopen_default: false, asking: false, confirming: false, keep_transcripts: true, account_busy: false, account_seq: 0, account_name,
             notice: None, created_path: None, context_seq: 0, context_busy: false, context_on: None, context_want: None, context_error: None,
@@ -830,6 +831,7 @@ impl NewSession {
         self.models.reset();
         self.defaults_ready = false;
         self.default_saving = false;
+        self.default_save_seq += 1;
         self.sync_customizations(window, cx);
         self.service_tier = None;
         self.before = None;
@@ -1289,9 +1291,10 @@ impl NewSession {
             CreateReply::ClaudeDefaultSaved(result) => {
                 if let Err(error) = result { self.error = Some(tr("create_default_failed").replace("{erro}", &Hangar::fetch_failure(&error))); }
             }
-            CreateReply::HarnessDefaultSaved(seq, result) => {
-                if seq != self.models.seq { return None; }
+            CreateReply::HarnessDefaultSaved(save_seq, scope_seq, result) => {
+                if save_seq != self.default_save_seq { return None; }
                 self.default_saving = false;
+                if scope_seq != self.models.seq { cx.notify(); return None; }
                 match result {
                     Ok(saved) => self.saved_default = saved,
                     Err(error) => self.error = Some(tr("create_default_failed").replace("{erro}", &Hangar::fetch_failure(&error))),

@@ -20,15 +20,22 @@ impl Api {
         let server = self.identity();
         let entries = tokio::task::spawn_blocking(move || crate::appearance::legacy_harness_defaults(&server)).await
             .map_err(|_| Failure::local("invalid_response"))?;
+        self.import_session_default_entries(entries).await
+    }
+
+    async fn import_session_default_entries(&self, entries: Vec<(String, Choice)>) -> Result<(), Failure> {
+        let mut first_error = None;
         for (scope, choice) in entries {
             let Some((provider, engine)) = scope.split_once(':') else { continue; };
             let (engine, account) = engine.split_once(":account:").unwrap_or((engine, ""));
             let mut query = vec![("provider", provider)];
             if !engine.is_empty() { query.push(("engine", engine)); }
             if !account.is_empty() { query.push(("engine_account", account)); }
-            self.save_session_default(&query, Some(choice), true).await?;
+            if let Err(error) = self.save_session_default(&query, Some(choice), true).await {
+                first_error.get_or_insert(error);
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     pub async fn read_session_default(&self, query: &[(&str, &str)], legacy: Option<Choice>) -> Result<Option<Choice>, Failure> {
@@ -51,6 +58,46 @@ impl Api {
 mod tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    #[tokio::test]
+    async fn invalid_legacy_entry_does_not_block_other_defaults_or_hide_the_first_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let received = calls.clone();
+        let server = tokio::spawn(async move {
+            for (status, reply) in [
+                ("400 Bad Request", json!({"detail":"session_defaults_invalid"})),
+                ("200 OK", json!({"configured":true, "defaults":{"model":"opus", "effort":"high", "permission":"bypassPermissions"}})),
+                ("503 Service Unavailable", json!({"detail":"session_defaults_unavailable"})),
+            ] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(stream.read_line(&mut line).await.unwrap() > 0);
+                    if line == "\r\n" { break; }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).await.unwrap();
+                received.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let reply = reply.to_string();
+                stream.get_mut().write_all(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let api = Api::new(&format!("http://{address}"), "fixture-owner").unwrap();
+        let entries = ["obsolete:", "claude:", "codex:"].into_iter()
+            .map(|scope| (scope.into(), ("opus".into(), "high".into(), "bypassPermissions".into()))).collect();
+        let error = api.import_session_default_entries(entries).await.unwrap_err();
+        let count = calls.load(std::sync::atomic::Ordering::SeqCst);
+        server.abort();
+        assert_eq!(error.status, Some(400));
+        assert_eq!(count, 3);
+    }
 
     #[tokio::test]
     async fn desktop_imports_once_and_keeps_a_newer_default_or_an_explicit_removal() {
