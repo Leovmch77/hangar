@@ -55,6 +55,25 @@ describe('operações da máquina explícita', () => {
     expect(el.textContent).toContain('fixture-warning');
   });
 
+  it('atualização parcial mostra commit e pendência sem anunciar conclusão', async () => {
+    mocks.fetch.mockImplementation(async (_url, init) => init?.method === 'POST' ? json({ ok: true, pid: 77 }) : json({ estado: {
+      pid: 77, fase: 'pronto', ok: true, waiting_for_server_build: true, commit_para: '991bb4f123456789',
+    } }));
+    await render(); await click(m.mobile_machines_update()); await act(async () => confirm()()); await tick();
+    expect(el.textContent).toContain('991bb4f1');
+    expect(el.textContent).not.toContain(m.mobile_machines_operation_ready());
+  });
+
+  it('reinício Windows confirma pela tentativa mesmo com pid diferente do lançador', async () => {
+    let reads = 0;
+    mocks.fetch.mockImplementation(async (_url, init) => init?.method === 'POST'
+      ? json({ ok: true, pid: 77, request_id: 'fixture-restart' })
+      : json({ estado: { pid: 88, fase: 'pronto', ok: true, request_id: reads++ ? 'fixture-restart' : 'fixture-old' } }));
+    await render(); await click(m.mobile_machines_restart()); await act(async () => confirm()());
+    await tick(); expect(el.textContent).not.toContain(m.mobile_machines_operation_ready());
+    await tick(); expect(el.textContent).toContain(m.mobile_machines_operation_ready());
+  });
+
   it('não envia após confirmação atrasada de uma tela desmontada', async () => {
     await render(); await click(m.mobile_machines_restart());
     const accept = confirm();

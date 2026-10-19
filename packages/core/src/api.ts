@@ -21,6 +21,7 @@ import { isMissingRoute, type PluginControl } from './pluginUi';
 import type { ConfigSyncItem, ConfigSyncManifest, ConfigSyncProgress, ConfigSyncReport } from './configSync';
 import type {
   Atualizacao,
+  AtualizacaoEstado,
   MigrationStatus,
   SessionInfo,
   Provider,
@@ -2122,14 +2123,27 @@ export function getMigrationStatus(s: Server | null = null): Promise<MigrationSt
            : apiFetch('/api/migration/status', { signal: AbortSignal.timeout(10000) });
 }
 
+function confirmUpdateStarted(value: unknown): { ok: boolean; pid: number; request_id?: string } {
+  const response = value as { ok?: unknown; pid?: unknown; request_id?: unknown } | null;
+  if (response?.ok !== true || typeof response.pid !== 'number' || !Number.isSafeInteger(response.pid) || response.pid <= 0) {
+    throw new Error(m.atualizar_resposta_invalida());
+  }
+  return { ok: true, pid: response.pid,
+    ...(typeof response.request_id === 'string' && response.request_id ? { request_id: response.request_id } : {}) };
+}
+
+export function matchesRestartResult(state: AtualizacaoEstado, started: { pid: number; request_id?: string }): boolean {
+  return started.request_id ? state.request_id === started.request_id : state.pid === started.pid;
+}
+
 /** Lança a atualização. Devolve na hora — ela roda fora do processo do backend, que vai reiniciar. */
 export function iniciarAtualizacao(): Promise<{ ok: boolean; pid: number }> {
-  return apiFetch('/api/atualizacao/iniciar', { method: 'POST' });
+  return apiFetch('/api/atualizacao/iniciar', { method: 'POST' }).then(confirmUpdateStarted);
 }
 
 /** Reinicia o servidor sem atualizar nada (disco já à frente do processo). 409 fora do systemd. */
-export function reiniciarServidor(): Promise<{ ok: boolean; pid: number }> {
-  return apiFetch('/api/atualizacao/reiniciar', { method: 'POST' });
+export function reiniciarServidor(): Promise<{ ok: boolean; pid: number; request_id?: string }> {
+  return apiFetch('/api/atualizacao/reiniciar', { method: 'POST' }).then(confirmUpdateStarted);
 }
 
 /** Estado da atualização/reinício no servidor que a tela está editando. */
@@ -2138,13 +2152,13 @@ export function getAtualizacaoEm(s: Server | null): Promise<Atualizacao> {
 }
 
 /** O mesmo reinício, no servidor que a tela está editando (que pode não ser o ativo). */
-export function reiniciarServidorEm(s: Server | null): Promise<{ ok: boolean; pid: number }> {
-  return s ? apiFetchForServer(s, '/api/atualizacao/reiniciar', { method: 'POST' }) : reiniciarServidor();
+export function reiniciarServidorEm(s: Server | null): Promise<{ ok: boolean; pid: number; request_id?: string }> {
+  return s ? apiFetchForServer(s, '/api/atualizacao/reiniciar', { method: 'POST' }).then(confirmUpdateStarted) : reiniciarServidor();
 }
 
 /** A mesma atualização, no servidor que a tela está editando (que pode não ser o ativo). */
 export function iniciarAtualizacaoEm(s: Server | null): Promise<{ ok: boolean; pid: number }> {
-  return s ? apiFetchForServer(s, '/api/atualizacao/iniciar', { method: 'POST' }) : iniciarAtualizacao();
+  return s ? apiFetchForServer(s, '/api/atualizacao/iniciar', { method: 'POST' }).then(confirmUpdateStarted) : iniciarAtualizacao();
 }
 
 /**

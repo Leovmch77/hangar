@@ -1,3 +1,4 @@
+import { reiniciarServidor, reiniciarServidorEm, iniciarAtualizacao, iniciarAtualizacaoEm, matchesRestartResult } from './api';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { configureDiag, _resetDiagForTests } from './diag';
 import { estaDesligado, registrarFalha, _limparEsfriamentoParaTestes } from './esfriamento';
@@ -1443,4 +1444,29 @@ it('criação de convite que o iOS matou em segundo plano não esfria o servidor
   expect(estaDesligado('b')).toBe(false);
   fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'i', link: 'https://x.ts.net:8443/convite/c', expires_at: 1 })));
   await expect(createShare('s', false, other)).resolves.toMatchObject({ id: 'i' });
+});
+
+
+describe('pedido de atualização e reinício', () => {
+  const requests = [reiniciarServidor, iniciarAtualizacao, () => reiniciarServidorEm(server), () => iniciarAtualizacaoEm(server)];
+  it('correlaciona reinício pelo request_id novo e pelo pid em servidor antigo', () => {
+    expect(matchesRestartResult({ pid: 88, request_id: 'restart-a' }, { pid: 77, request_id: 'restart-a' })).toBe(true);
+    expect(matchesRestartResult({ pid: 77, request_id: 'restart-old' }, { pid: 77, request_id: 'restart-a' })).toBe(false);
+    expect(matchesRestartResult({ pid: 77 }, { pid: 77 })).toBe(true);
+    expect(matchesRestartResult({ pid: 88 }, { pid: 77 })).toBe(false);
+  });
+  it('preserva request_id da confirmação para reconhecer motor Windows com pid diferente', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ ok: true, pid: 42, request_id: 'fixture-restart' }), { status: 200 }));
+    await expect(reiniciarServidorEm(server)).resolves.toMatchObject({ request_id: 'fixture-restart' });
+  });
+  it.each(requests)('recusa HTTP 200 sem confirmação válida do processo: %s', async (request) => {
+    for (const body of [{}, { ok: false, pid: 42 }, { ok: true }, { ok: true, pid: 0 }, { ok: true, pid: 1.5 }]) {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
+      await expect(request()).rejects.toThrow();
+    }
+  });
+  it.each(requests)('preserva confirmação válida do processo: %s', async (request) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ ok: true, pid: 42 }), { status: 200 }));
+    await expect(request()).resolves.toEqual({ ok: true, pid: 42 });
+  });
 });

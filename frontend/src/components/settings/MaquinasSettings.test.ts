@@ -1198,6 +1198,31 @@ describe('MaquinasSettings — atualizar o servidor escolhido', () => {
     return comp as never;
   }
 
+  it('reinício Windows confirma a tentativa quando o pid do motor difere', async () => {
+    vi.useFakeTimers();
+    let reads = 0;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url === 'http://b/api/atualizacao/reiniciar') return json({ ok: true, pid: 42, request_id: 'restart-a' });
+      if (url === 'http://b/api/atualizacao') return json({ estado: {
+        fase: 'pronto', pid: 88, request_id: reads++ ? 'restart-a' : 'restart-old', ok: true,
+      } });
+      return json({}, 404);
+    }));
+    authMock.listServers.mockReturnValue([SRV, OUTRO]);
+    const el = document.createElement('div'); document.body.appendChild(el);
+    const comp = mount(MaquinasSettings, { target: el, props: { resolvedServer: OUTRO, apiTarget: OUTRO, onLogout: vi.fn() } });
+    try {
+      await andar(0); el.querySelector<HTMLElement>('.sv-este')!.click(); await andar(0);
+      [...document.querySelectorAll<HTMLButtonElement>('.sd-dialogo button')]
+        .find((b) => b.textContent?.trim() === m.maquinas_servico_reiniciar())!.click();
+      await andar(0); await andar(2000);
+      expect(document.body.textContent).toContain(m.maquinas_servico_aguardando());
+      await andar(2000);
+      expect(document.body.textContent).not.toContain(m.maquinas_servico_aguardando());
+      expect(document.body.textContent).toContain(m.maquinas_servico_reiniciado({ hora: new Date().toLocaleTimeString() }));
+    } finally { unmount(comp as never); el.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); }
+  });
+
   it('confirma, chama o iniciar do servidor escolhido com o token dele, mostra a etapa e o resultado', async () => {
     vi.useFakeTimers();
     const ts = '2026-09-28T10:00:00-03:00';
@@ -1221,6 +1246,24 @@ describe('MaquinasSettings — atualizar o servidor escolhido', () => {
       expect(document.querySelector('.sv-atualizacao')!.textContent)
         .toContain(m.maquinas_atualizar_feito({ hora: new Date(ts).toLocaleTimeString() }));
       expect(document.querySelector<HTMLButtonElement>('.sd-dialogo .sv-atualizar')!.disabled).toBe(false);
+    } finally {
+      unmount(comp);
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('atualização parcial mostra commit e pendência sem resultado verde', async () => {
+    vi.useFakeTimers();
+    rede(() => json({ ok: true, pid: 42 }), [{ fase: 'pronto', pid: 42, ok: true,
+      waiting_for_server_build: true, commit_para: '991bb4f123456789', reiniciar_manual: true }]);
+    const comp = await montarEClicar();
+    try {
+      await andar(2000);
+      const result = document.querySelector('.sv-atualizacao')!;
+      expect(result.textContent).toContain('991bb4f1');
+      expect(result.classList.contains('id-aviso')).toBe(true);
+      expect(result.classList.contains('id-ok')).toBe(false);
     } finally {
       unmount(comp);
       vi.useRealTimers();
