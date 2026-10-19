@@ -45,9 +45,10 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/crates/target
       CARGO_INCREMENTAL: "0"
     # So roda teste/build — nao escreve nada no repo. Declarado explicito pra nao herdar
-    # o padrao do repositorio, que pode ser write.
+    # o padrao do repositorio, que pode ser write. `actions: write` so apaga as copias antigas do cache dele.
     permissions:
       contents: read
+      actions: write
     defaults:
       run:
         working-directory: backend
@@ -111,6 +112,19 @@ jobs:
         with:
           path: *cache-backend
           key: ${{ steps.cache-rust.outputs.cache-primary-key }}
+      # Chave nova não substitui a velha: sem apagar, cada mudança no Cargo.lock deixava outra cópia até o teto
+      # de 10 GB do repositório, e o GitHub despejava o cache que a main estava usando.
+      - name: Apagar cópias antigas do cache
+        if: *grava-backend
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFIXO: backend-rust-v3-${{ runner.os }}-
+          CHAVE: ${{ steps.cache-rust.outputs.cache-primary-key }}
+        run: |
+          gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$PREFIXO" --limit 100 --json key --jq '.[].key' |
+            while IFS= read -r k; do
+              [ -z "$k" ] || [ "$k" = "$CHAVE" ] || gh cache delete "$k" --repo "$GITHUB_REPOSITORY"
+            done
 
   frontend:
     runs-on: ubuntu-latest

@@ -53,6 +53,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   na tela (checkout sem contrato vai ao topo), e o auto-update espera; ele só avança com o topo
   inteiro publicado.
   Evidência em [Atualizar para no binário publicado](#atualizar-para-no-binário-publicado-06102026).
+- **Build do CI: testes ao lado do build, e o push novo cancela o run substituído.** No `server.yml`
+  os testes de cada sistema são um job próprio, em paralelo ao build de release, e o `publish` daquele
+  sistema só sobe com os dois artefatos dele (`server-<sistema>` e `testes-ok-<sistema>`). Na main e no
+  canal, o push novo cancela os jobs de teste e de build do run anterior; o `publish` (Server e Native)
+  tem grupo próprio sem cancelamento e nunca é cortado no meio do upload. Cache só a main grava, e quem
+  grava apaga as cópias antigas do mesmo prefixo. O LTO completo do `dist` fica. Evidência em
+  [CI paralelo e cancelamento](#ci-testes-em-paralelo-e-cancelamento-do-run-substituído-19102026).
 - **O app nativo segue o canal do servidor desta máquina.** `pre_voo.alvo` fora da main → release
   `native-<branch>`, que o `native.yml` publica a cada push no canal `beta` (mesma limpeza de nome no
   workflow e no `update.rs`); a `native-latest` continua só da main. Branch sem release, ou sem o
@@ -899,3 +906,24 @@ publicava `native-<branch>`/`server-<branch>`:
   `native-<branch>`/`server-<branch>` segue servindo a última versão a quem estiver nela, porque o
   `rust_release.py` só recua para a main quando recebe 404.
 
+
+## CI: testes em paralelo e cancelamento do run substituído (19/10/2026)
+
+Medido nos runs de 19/10 (GitHub Actions, runners comuns de 4 vCPU; macOS de 3): Server levava
+25–63 min e Native 5–52 min por push na main. O tempo ia em três lugares. O passo `dist` (LTO
+completo, uma unidade de código) leva 11–36 min por sistema mesmo com o cache restaurado, porque só o
+crate do app recompila e o link otimizado é sequencial. No `server.yml` os testes (`cargo test
+--workspace`, 8–20 min) rodavam antes do build no mesmo job, então o job durava a soma. E o grupo de
+concorrência da main não cancelava: cada push esperava o run anterior inteiro, com 20–28 min de fila
+medidos. O cache do repositório estava em 9,8–10,6 GB do teto de 10 GB, com duas cópias do
+`native-check-Linux` (chave nova não substitui a velha).
+
+Mudou: testes num job paralelo ao build no `server.yml` (o `publish` por sistema exige o artefato dos
+testes, então teste vermelho ainda segura a publicação daquele sistema); concorrência por job na main
+e no canal, com o `publish` num grupo sem cancelamento; quem grava cache apaga as cópias antigas do
+mesmo prefixo; o `check` do Native ganhou o mesmo `touch` do vendor que o `build` já fazia com a chave
+exata (a chave inclui o hash do vendor, então a data antiga só é usada com o vendor igual ao
+compilado; a data do commit não serve, porque um commit pode ser mais velho que o cache e ainda assim
+trazer mudança). O LTO completo ficou: o Jefferson preferiu manter o binário como está.
+Consequência: o publish do Linux no Server passa a esperar os builds e testes dos três sistemas
+(`needs` de matriz), em vez de sair assim que o Linux terminava.

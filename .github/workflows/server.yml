@@ -34,21 +34,22 @@ on:
       - ".github/workflows/server.yml"
   workflow_dispatch:
 
-# Dois pushes seguidos não publicam ao mesmo tempo: o segundo espera, e a release termina no commit mais novo.
-# Onde não publica, o push novo cancela a conferência do anterior.
+# Na main e no canal cada run tem o próprio grupo: quem cancela o run que um push novo substituiu são os jobs de
+# teste e de build (concorrência por job, abaixo); o `publish` nunca é cancelado no meio do upload. Onde não
+# publica, o push novo cancela o run anterior inteiro.
 concurrency:
-  group: ${{ github.ref_name == 'main' && 'server-latest' || format('server-{0}', github.ref_name) }}
+  group: ${{ (github.ref_name == 'main' || github.ref_name == 'beta') && format('server-run-{0}', github.run_id) || format('server-{0}', github.ref_name) }}
   cancel-in-progress: ${{ github.ref_name != 'main' && github.ref_name != 'beta' }}
 
 jobs:
-  build:
-    # Nas branches este job só testa (sem COMPILA): o nome diz isso, para ninguém procurar o build de release
-    # que não roda ali. O `name` não enxerga o `env`, por isso repete a condição do COMPILA.
-    name: ${{ (github.ref_name == 'main' || github.ref_name == 'beta' || github.event_name == 'workflow_dispatch') && 'build' || 'testes' }} (${{ matrix.os }}, ${{ matrix.platform }})
+  # Os testes rodam ao lado do build de release, não antes dele: o job dura o maior dos dois, não a soma. Teste
+  # vermelho continua segurando a publicação daquele sistema (o `publish` exige o `testes-ok-<sistema>`).
+  testes:
+    name: testes (${{ matrix.os }}, ${{ matrix.platform }})
     strategy:
       fail-fast: false
       matrix:
-        include:
+        include: &sistemas
           # glibc 2.28 via cargo-zigbuild: o gnu comum do ubuntu-latest exige a glibc do runner e não abre em
           # sistema mais antigo (Debian 10/11, RHEL 8). O zigbuild linka contra a 2.28 e mantém o alocador do gnu.
           - os: ubuntu-latest
@@ -73,19 +74,16 @@ jobs:
             experimental: true
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental }}
+    concurrency:
+      group: server-testes-${{ github.ref_name }}-${{ matrix.platform }}
+      cancel-in-progress: true
     # O incremental não serve entre runs; a depuração reduzida vem do perfil dev do crates/Cargo.toml.
-    # PERFIL: a main publica com o `dist` (LTO completo, uma unidade de código); a pré-release de branch, com o
-    # `release` comum, que lê o cache do job `cache-release`.
-    # PUBLICA: main e canal. COMPILA: eles e o workflow_dispatch; nas outras branches só os testes rodam.
     env:
       CARGO_INCREMENTAL: "0"
-      PERFIL: ${{ github.ref == 'refs/heads/main' && 'dist' || 'release' }}
-      PUBLICA: ${{ github.ref_name == 'main' || github.ref_name == 'beta' }}
-      COMPILA: ${{ github.ref_name == 'main' || github.ref_name == 'beta' || github.event_name == 'workflow_dispatch' }}
-    # Escreve porque cada sistema publica no fim do próprio build; sem o token do git no checkout, o cargo
-    # test e os build scripts não alcançam essa escrita.
+    # `actions: write` apaga as cópias antigas do cache que este job grava.
     permissions:
-      contents: write
+      contents: read
+      actions: write
     defaults:
       run:
         working-directory: crates
@@ -115,8 +113,9 @@ jobs:
         run: tmux -V
       # O rustup do runner lê o crates/rust-toolchain.toml (1.98.1) no primeiro cargo.
       # Só a main grava; as outras branches leem o dela. Cada branch gravando a própria cópia estourava o limite
-      # de cache do repositório e o GitHub despejava a da main. Dois caches: o dos testes (debug) e o do release,
-      # com o perfil na chave, porque com LTO as dependências saem em bitcode e não servem ao release sem LTO.
+      # de cache do repositório e o GitHub despejava a da main. Dois caches: o dos testes (debug, deste job) e o
+      # do release (do job `build`), com o perfil na chave, porque com LTO as dependências saem em bitcode e não
+      # servem ao release sem LTO.
       - uses: actions/cache/restore@v4
         id: cache-dev
         with:
@@ -126,15 +125,6 @@ jobs:
             crates/target/debug
           key: server-v3-${{ runner.os }}-dev-${{ hashFiles('crates/Cargo.lock', 'crates/rust-toolchain.toml') }}
           restore-keys: server-v3-${{ runner.os }}-dev-
-      - uses: actions/cache/restore@v4
-        id: cache-perfil
-        if: env.COMPILA == 'true'
-        with:
-          path: &cache-perfil |
-            crates/target/${{ env.PERFIL }}
-            crates/target/x86_64-unknown-linux-gnu/${{ env.PERFIL }}
-          key: &chave-perfil server-v3-${{ runner.os }}-${{ env.PERFIL }}-${{ hashFiles('crates/Cargo.lock', 'crates/rust-toolchain.toml') }}
-          restore-keys: &chave-perfil-parcial server-v3-${{ runner.os }}-${{ env.PERFIL }}-
       # Os testes do hangar-api leem as amostras de backend/tests/fixtures/, que vêm no mesmo checkout.
       # --no-fail-fast: sem ele o cargo para no primeiro executável que falha e esconde os outros.
       - run: cargo test --locked --workspace --no-fail-fast
@@ -146,31 +136,20 @@ jobs:
         with:
           path: *cache-dev
           key: ${{ steps.cache-dev.outputs.cache-primary-key }}
-      - if: matrix.target != '' && env.COMPILA == 'true'
-        run: rustup target add ${{ matrix.target }}
-      # Zig baixado direto (sha256 do index.json do ziglang.org): o repositório só libera actions da GitHub,
-      # de criador verificado e o setup-uv, e uma action fora da lista derruba o workflow antes de começar.
-      - if: matrix.zigbuild && env.COMPILA == 'true'
-        run: &zig |
-          curl -fsSL -o /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
-          echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz" | sha256sum -c -
-          tar -xJf /tmp/zig.tar.xz -C /tmp
-          echo /tmp/zig-x86_64-linux-0.16.0 >> "$GITHUB_PATH"
-          cargo install cargo-zigbuild --locked --version =0.23.4
-      # O sufixo .2.28 fixa a glibc mínima; o diretório de saída continua sem ele (target/<triplo>/<perfil>).
-      - if: env.COMPILA == 'true'
-        run: &build-perfil cargo ${{ matrix.zigbuild && 'zigbuild' || 'build' }} --locked --profile "$PERFIL" --workspace ${{ matrix.target && format('--target {0}{1}', matrix.target, matrix.zigbuild && '.2.28' || '') || '' }}
-      # Guarda: se o zigbuild deixar de fixar a glibc, o binário passa a exigir mais que o prometido.
-      - name: glibc máxima exigida
-        if: matrix.zigbuild && env.COMPILA == 'true'
-        run: |
-          for bin in hangar-server hangar-cano; do
-            top=$(objdump -T "${{ matrix.dir }}/${{ env.PERFIL }}/$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
-            echo "$bin exige $top"
-            test "$(printf '%s\n' "$top" GLIBC_2.28 | sort -V | tail -1)" = GLIBC_2.28
-          done
-      # A suíte de contrato do cano contra o binário que vai ser publicado. Só no Linux: é o único
-      # lugar em que ela roda contra o hangar-cano (o ci.yml não compila Rust). Setup igual ao do ci.yml.
+      # Chave nova não substitui a velha: sem apagar, cada mudança no Cargo.lock deixava outra cópia até o teto
+      # de 10 GB do repositório, e o GitHub despejava o cache que a main estava usando.
+      - name: Apagar cópias antigas do cache
+        if: *grava-dev
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFIXO: server-v3-${{ runner.os }}-dev-
+          CHAVE: ${{ steps.cache-dev.outputs.cache-primary-key }}
+        run: &apagar-antigos |
+          gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$PREFIXO" --limit 100 --json key --jq '.[].key' |
+            while IFS= read -r k; do
+              [ -z "$k" ] || [ "$k" = "$CHAVE" ] || gh cache delete "$k" --repo "$GITHUB_REPOSITORY"
+            done
+      # A suíte das regressões da entrega terminal não depende do binário de release.
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.14"
@@ -179,15 +158,89 @@ jobs:
       - name: Contenção e regressões da entrega terminal
         working-directory: backend
         run: uv run pytest tests/test_runtime_process.py tests/test_runtime_queue_terminal_v2.py tests/test_runtime_terminal_fix.py tests/test_runtime_terminal_fix2.py tests/test_runtime_terminal_failure_policy.py tests/test_runtime_final_fixes.py tests/test_sidecar_coordination.py -q
+      # Só chega aqui com todos os passos acima verdes: é a marca que o `publish` deste sistema exige.
+      - if: github.ref_name == 'main' || github.ref_name == 'beta'
+        run: echo ok > "$RUNNER_TEMP/testes-ok"
+      - if: github.ref_name == 'main' || github.ref_name == 'beta'
+        uses: actions/upload-artifact@v4
+        with:
+          name: testes-ok-${{ matrix.platform }}
+          path: ${{ runner.temp }}/testes-ok
+          retention-days: 1
+
+  # PERFIL: a main publica com o `dist` (LTO completo, uma unidade de código); a pré-release de branch, com o
+  # `release` comum, que lê o cache do job `cache-release`. Só na main, no canal e no workflow_dispatch.
+  build:
+    if: github.ref_name == 'main' || github.ref_name == 'beta' || github.event_name == 'workflow_dispatch'
+    name: build (${{ matrix.os }}, ${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include: *sistemas
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental }}
+    concurrency:
+      group: server-build-${{ github.ref_name }}-${{ matrix.platform }}
+      cancel-in-progress: true
+    env:
+      CARGO_INCREMENTAL: "0"
+      PERFIL: ${{ github.ref == 'refs/heads/main' && 'dist' || 'release' }}
+    permissions:
+      contents: read
+      actions: write
+    defaults:
+      run:
+        working-directory: crates
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/cache/restore@v4
+        id: cache-perfil
+        with:
+          path: &cache-perfil |
+            crates/target/${{ env.PERFIL }}
+            crates/target/x86_64-unknown-linux-gnu/${{ env.PERFIL }}
+          key: &chave-perfil server-v3-${{ runner.os }}-${{ env.PERFIL }}-${{ hashFiles('crates/Cargo.lock', 'crates/rust-toolchain.toml') }}
+          restore-keys: &chave-perfil-parcial server-v3-${{ runner.os }}-${{ env.PERFIL }}-
+      - if: matrix.target != ''
+        run: rustup target add ${{ matrix.target }}
+      # Zig baixado direto (sha256 do index.json do ziglang.org): o repositório só libera actions da GitHub,
+      # de criador verificado e o setup-uv, e uma action fora da lista derruba o workflow antes de começar.
+      - if: matrix.zigbuild
+        run: &zig |
+          curl -fsSL -o /tmp/zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+          echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/zig.tar.xz -C /tmp
+          echo /tmp/zig-x86_64-linux-0.16.0 >> "$GITHUB_PATH"
+          cargo install cargo-zigbuild --locked --version =0.23.4
+      # O sufixo .2.28 fixa a glibc mínima; o diretório de saída continua sem ele (target/<triplo>/<perfil>).
+      - run: &build-perfil cargo ${{ matrix.zigbuild && 'zigbuild' || 'build' }} --locked --profile "$PERFIL" --workspace ${{ matrix.target && format('--target {0}{1}', matrix.target, matrix.zigbuild && '.2.28' || '') || '' }}
+      # Guarda: se o zigbuild deixar de fixar a glibc, o binário passa a exigir mais que o prometido.
+      - name: glibc máxima exigida
+        if: matrix.zigbuild
+        run: |
+          for bin in hangar-server hangar-cano; do
+            top=$(objdump -T "${{ matrix.dir }}/${{ env.PERFIL }}/$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+            echo "$bin exige $top"
+            test "$(printf '%s\n' "$top" GLIBC_2.28 | sort -V | tail -1)" = GLIBC_2.28
+          done
+      # A suíte de contrato do cano contra o binário que vai ser publicado. Só no Linux: é o único
+      # lugar em que ela roda contra o hangar-cano (o ci.yml não compila Rust). Setup igual ao do ci.yml.
+      - if: matrix.platform == 'linux-x86_64'
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
       - name: Contrato do cano contra o hangar-cano
-        if: matrix.platform == 'linux-x86_64' && env.COMPILA == 'true'
+        if: matrix.platform == 'linux-x86_64'
         working-directory: backend
         run: |
+          uv sync
           # Sem o binário a suíte pula os casos Rust e sairia verde: aqui a falta é erro.
           test -x "$GITHUB_WORKSPACE/crates/${{ matrix.dir }}/${{ env.PERFIL }}/hangar-cano"
           CP_RUST_CANO_BIN=$GITHUB_WORKSPACE/crates/${{ matrix.dir }}/${{ env.PERFIL }}/hangar-cano uv run pytest tests/test_claude_headless_cano.py
       - name: Empacotar
-        if: env.COMPILA == 'true'
         run: |
           mkdir -p out
           for bin in hangar-server hangar-cano; do
@@ -201,11 +254,58 @@ jobs:
         with:
           path: *cache-perfil
           key: ${{ steps.cache-perfil.outputs.cache-primary-key }}
-      # Cada sistema publica assim que o PRÓPRIO build passa: o Linux não espera Windows e macOS. Build que falha não
-      # publica nada, e a release segue com o binário e a entrada anteriores daquele sistema.
+      - name: Apagar cópias antigas do cache
+        if: *grava-perfil
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFIXO: server-v3-${{ runner.os }}-${{ env.PERFIL }}-
+          CHAVE: ${{ steps.cache-perfil.outputs.cache-primary-key }}
+        run: *apagar-antigos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.platform }}
+          path: crates/out/*
+          retention-days: 1
+
+  # Cada sistema publica assim que o PRÓPRIO build e os PRÓPRIOS testes passam (os dois artefatos dele): sistema
+  # que falhou ou foi cancelado não publica nada, e a release segue com o binário e a entrada anteriores dele.
+  # Grupo próprio sem cancelamento: um push novo nunca corta este job no meio do upload.
+  publish:
+    needs: [testes, build]
+    if: ${{ !cancelled() && (github.ref_name == 'main' || github.ref_name == 'beta') }}
+    name: publicar (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux-x86_64, windows-x86_64, macos-aarch64]
+    runs-on: ubuntu-latest
+    concurrency:
+      group: server-publish-${{ github.ref_name }}-${{ matrix.platform }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        id: binarios
+        continue-on-error: true
+        with:
+          name: server-${{ matrix.platform }}
+          path: crates/out
+      - uses: actions/download-artifact@v4
+        id: testes
+        continue-on-error: true
+        with:
+          name: testes-ok-${{ matrix.platform }}
+          path: ${{ runner.temp }}/testes-ok
+      - if: steps.binarios.outcome != 'success' || steps.testes.outcome != 'success'
+        run: echo "::notice::${{ matrix.platform }} sem build ou sem testes aprovados neste run; a release segue com a entrada anterior."
       - name: Publicar na release
-        if: startsWith(github.ref, 'refs/heads/') && env.PUBLICA == 'true'
+        if: steps.binarios.outcome == 'success' && steps.testes.outcome == 'success'
         working-directory: crates/out
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           PLATFORM: ${{ matrix.platform }}
@@ -231,7 +331,7 @@ jobs:
           protocol=$(sed -n 's/^pub const INTERNAL_PROTOCOL: u32 = \([0-9][0-9]*\);.*/\1/p' ../hangar-server/src/lib.rs)
           test -n "$protocol" || { echo "::error::INTERNAL_PROTOCOL não encontrado em crates/hangar-server/src/lib.rs"; exit 1; }
           gh release upload "$tag" hangar-server-* hangar-cano-* --repo "$GITHUB_REPOSITORY" --clobber
-          python - "$tag" "$PLATFORM" "$protocol" <<'EOF'
+          python3 - "$tag" "$PLATFORM" "$protocol" <<'EOF'
           import hashlib, json, os, pathlib, random, shutil, subprocess, sys, time
 
           tag, plat, protocol = sys.argv[1:]
@@ -328,11 +428,15 @@ jobs:
             target: ""
     runs-on: ${{ matrix.os }}
     continue-on-error: true
+    concurrency:
+      group: server-cache-release-${{ github.ref_name }}-${{ matrix.os }}
+      cancel-in-progress: true
     env:
       CARGO_INCREMENTAL: "0"
       PERFIL: release
     permissions:
       contents: read
+      actions: write
     defaults:
       run:
         working-directory: crates
@@ -367,11 +471,18 @@ jobs:
         with:
           path: *cache-perfil
           key: ${{ steps.consulta.outputs.cache-primary-key }}
+      - name: Apagar cópias antigas do cache
+        if: *falta-perfil
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFIXO: server-v3-${{ runner.os }}-${{ env.PERFIL }}-
+          CHAVE: ${{ steps.consulta.outputs.cache-primary-key }}
+        run: *apagar-antigos
 
   # Windows e macOS têm continue-on-error para a falha de build deles não segurar o Linux; publicação que falhou
   # depois de começar (binário novo com manifesto velho) não pode passar calada por isso.
   publish-check:
-    needs: build
+    needs: publish
     if: always() && startsWith(github.ref, 'refs/heads/')
     runs-on: ubuntu-latest
     permissions:

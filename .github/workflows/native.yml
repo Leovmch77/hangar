@@ -21,18 +21,25 @@ on:
       - ".github/workflows/native.yml"
   workflow_dispatch:
 
-# Dois pushes seguidos não publicam ao mesmo tempo: o segundo espera, e a release termina no commit mais novo.
-# Onde não publica, o push novo cancela a conferência do anterior.
+# Na main e no canal cada run tem o próprio grupo: quem cancela o run que um push novo substituiu são os jobs
+# `check`, `build` e `cache-release` (concorrência por job); o `publish` tem grupo próprio sem cancelamento, então
+# nunca é cortado no meio do upload, e run com build cancelado não publica (o `publish` exige `check` e `build`).
+# Onde não publica, o push novo cancela o run anterior inteiro.
 concurrency:
-  group: ${{ github.ref_name == 'main' && 'native-latest' || format('native-{0}', github.ref_name) }}
+  group: ${{ (github.ref_name == 'main' || github.ref_name == 'beta') && format('native-run-{0}', github.run_id) || format('native-{0}', github.ref_name) }}
   cancel-in-progress: ${{ github.ref_name != 'main' && github.ref_name != 'beta' }}
 
 jobs:
   # `build` e não `check` do cargo: confere o mesmo binário e deixa as dependências no perfil que o `test` reaproveita.
   check:
     runs-on: ubuntu-latest
+    concurrency:
+      group: native-check-${{ github.ref_name }}
+      cancel-in-progress: true
+    # `actions: write` apaga as cópias antigas do cache que este job grava.
     permissions:
       contents: read
+      actions: write
     env:
       CARGO_INCREMENTAL: "0"
     defaults:
@@ -54,6 +61,10 @@ jobs:
             desktop-native/target
           key: native-check-${{ runner.os }}-${{ hashFiles('desktop-native/Cargo.lock', 'desktop-native/rust-toolchain.toml') }}-${{ hashFiles('desktop-native/vendor/**') }}
           restore-keys: native-check-${{ runner.os }}-
+      # Mesmo motivo do passo de igual nome no `build`: sem isto o GPUI vendorizado recompilava a cada push.
+      - name: Reaproveitar o vendor do cache
+        if: steps.cache-check.outputs.cache-hit == 'true'
+        run: &vendor-antigo git ls-files -z vendor | xargs -0 touch -t 200001010000
       - run: cargo build --locked
       - run: cargo test --locked
       - if: &grava-check github.ref == 'refs/heads/main' && steps.cache-check.outputs.cache-hit != 'true'
@@ -63,6 +74,19 @@ jobs:
         with:
           path: *cache-check
           key: ${{ steps.cache-check.outputs.cache-primary-key }}
+      # Chave nova não substitui a velha: sem apagar, cada mudança no vendor ou no Cargo.lock deixava outra cópia
+      # até o teto de 10 GB do repositório, e o GitHub despejava o cache que a main estava usando.
+      - name: Apagar cópias antigas do cache
+        if: *grava-check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFIXO: native-check-${{ runner.os }}-
+          CHAVE: ${{ steps.cache-check.outputs.cache-primary-key }}
+        run: &apagar-antigos |
+          gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$PREFIXO" --limit 100 --json key --jq '.[].key' |
+            while IFS= read -r k; do
+              [ -z "$k" ] || [ "$k" = "$CHAVE" ] || gh cache delete "$k" --repo "$GITHUB_REPOSITORY"
+            done
 
   build:
     if: github.ref_name == 'main' || github.ref_name == 'beta' || github.event_name == 'workflow_dispatch'
@@ -85,8 +109,12 @@ jobs:
             experimental: true
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental }}
+    concurrency:
+      group: native-build-${{ github.ref_name }}-${{ matrix.platform }}
+      cancel-in-progress: true
     permissions:
       contents: read
+      actions: write
     # Perfil do cargo: a main publica o binário do usuário com o `dist` (LTO completo, uma unidade de código);
     # a pré-release de branch, com o `release` comum, que sai em minutos.
     env:
@@ -124,7 +152,7 @@ jobs:
       # compilado no cache) a data antiga é verdade.
       - name: Reaproveitar o vendor do cache
         if: steps.cache-rust.outputs.cache-hit == 'true'
-        run: git ls-files -z vendor | xargs -0 touch -t 200001010000
+        run: *vendor-antigo
       - run: cargo build --locked --profile "$PERFIL"
         env:
           # A branch embutida faz o app trocar de canal mesmo para uma versão de contagem menor (update.rs).
@@ -162,6 +190,13 @@ jobs:
         with:
           path: *cache-native
           key: ${{ steps.cache-rust.outputs.cache-primary-key }}
+      - name: Apagar cópias antigas do cache
+        if: *grava-native
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFIXO: native-${{ runner.os }}-${{ env.PERFIL }}-
+          CHAVE: ${{ steps.cache-rust.outputs.cache-primary-key }}
+        run: *apagar-antigos
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.platform }}
@@ -178,8 +213,12 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     continue-on-error: true
+    concurrency:
+      group: native-cache-release-${{ github.ref_name }}-${{ matrix.os }}
+      cancel-in-progress: true
     permissions:
       contents: read
+      actions: write
     env:
       PERFIL: release
     defaults:
@@ -212,12 +251,22 @@ jobs:
         with:
           path: *cache-native
           key: ${{ steps.consulta.outputs.cache-primary-key }}
+      - name: Apagar cópias antigas do cache
+        if: *falta-native
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFIXO: native-${{ runner.os }}-${{ env.PERFIL }}-
+          CHAVE: ${{ steps.consulta.outputs.cache-primary-key }}
+        run: *apagar-antigos
 
   # Só este job escreve, como o `publica-dist` do ci.yml. Teste vermelho no `check` segura a publicação.
   publish:
     needs: [check, build]
     if: startsWith(github.ref, 'refs/heads/') && (github.ref_name == 'main' || github.ref_name == 'beta')
     runs-on: ubuntu-latest
+    concurrency:
+      group: native-publish-${{ github.ref_name }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
