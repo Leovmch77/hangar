@@ -77,6 +77,8 @@ pub const THINKING_FOCUS_WIDTH: f32 = 72.;
 const FOCUS_STOPS: [(f32, f32); 7] = [(0., 0.), (10.8, 0.12), (25.2, 0.55), (36., 1.), (46.8, 0.55), (61.2, 0.12), (72., 0.)];
 /// Largura de cada recorte da faixa: 24 recortes cobrem os 72 px sem degrau visível no texto.
 const FOCUS_STRIP: f32 = 3.;
+/// Linha trocando de lugar na lista (FLIP): desliza da posição antiga para a nova, e a que muda de seção acende.
+pub const REORDER: Spec = Spec::new(320, EASE_OUT_QUINT);
 /// `zeron-pulse`: período dos esqueletos de carregando.
 pub const PULSE: Duration = Duration::from_millis(2400);
 
@@ -97,9 +99,11 @@ impl Spec {
     }
 
     /// Quanto do tempo passou desde `start`, de 0 a 1, sem curva; 0 durante a espera.
-    pub fn raw(self, start: Instant) -> f32 {
+    pub fn raw(self, start: Instant) -> f32 { self.raw_at(start, Instant::now()) }
+
+    pub fn raw_at(self, start: Instant, now: Instant) -> f32 {
         let (delay, span) = (self.delay as f32 / 1000. * scale(), self.duration().as_secs_f32() * scale());
-        ((start.elapsed().as_secs_f32() - delay) / span).clamp(0., 1.)
+        ((now.saturating_duration_since(start).as_secs_f32() - delay) / span).clamp(0., 1.)
     }
 }
 
@@ -243,6 +247,180 @@ pub fn request_frame(window: &Window, cx: &App) {
     }
 }
 
+/// Quem anda numa lista que se reordena. Cada desenho da lista abre uma passada (`begin`) com as chaves em ordem e a
+/// seção de cada uma; cada linha, ao ganhar lugar (`place`), compara com onde foi pintada na passada anterior. Só uma
+/// ordem nova anima: rolar ou redimensionar muda a posição sem mexer na ordem e não desliza nada.
+#[derive(Default)]
+pub struct FlipBook { pass: u64, epoch: u64, order: Vec<String>, rows: std::collections::HashMap<String, FlipRow> }
+
+struct FlipRow { section: String, y: f32, placed: Option<u64>, epoch: u64, fade: Option<Instant>, slide: Option<Slide> }
+
+impl FlipRow {
+    fn new(section: String, epoch: u64) -> Self { Self { section, y: 0., placed: None, epoch, fade: None, slide: None } }
+}
+
+#[derive(Clone, Copy)]
+struct Slide { start: Instant, from: f32, lift: bool }
+
+/// Onde pintar a linha nesta passada: `dy` somado à posição do layout; `lift` pinta por cima das vizinhas.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement { pub dy: f32, pub lift: bool, pub moving: bool }
+
+impl FlipBook {
+    /// Abre a passada, antes de desenhar as linhas, com a seção de cada uma que pode mudar de seção: quem mudou acende e
+    /// passa por cima (`lifting`), o que o desenho dela precisa saber já.
+    pub fn sections(&mut self, entries: &[(String, String)], now: Instant, reduce: bool) {
+        self.pass += 1;
+        let (pass, epoch) = (self.pass, self.epoch);
+        for (key, section) in entries {
+            let row = self.rows.entry(key.clone()).or_insert_with(|| FlipRow::new(section.clone(), epoch));
+            // Só quem foi pintado na passada anterior acende: sumida e voltando, entra parada.
+            if row.section != *section && row.placed.is_some_and(|p| p + 1 == pass) && !reduce { row.fade = Some(now); }
+            row.section.clone_from(section);
+        }
+    }
+
+    /// Fecha a passada com a ordem de tudo o que a lista vai pintar: ordem nova anima; quem saiu é esquecido.
+    pub fn order(&mut self, keys: &[String]) {
+        if keys != self.order.as_slice() {
+            self.epoch += 1;
+            self.order = keys.to_vec();
+        }
+        let keep: std::collections::HashSet<&str> = keys.iter().map(String::as_str).collect();
+        self.rows.retain(|key, _| keep.contains(key.as_str()));
+        let epoch = self.epoch;
+        for key in keys { self.rows.entry(key.clone()).or_insert_with(|| FlipRow::new(String::new(), epoch)); }
+    }
+
+    /// Esquece o que foi pintado: a lista saiu da tela.
+    pub fn clear(&mut self) {
+        if !self.rows.is_empty() || !self.order.is_empty() { *self = Self::default(); }
+    }
+
+    /// A linha está trocando de seção agora.
+    pub fn lifting(&self, key: &str, now: Instant) -> bool {
+        self.rows.get(key).and_then(|row| row.fade).is_some_and(|start| start + REORDER.total() > now)
+    }
+
+    pub fn place(&mut self, key: &str, y: f32, now: Instant, reduce: bool) -> Placement {
+        let (pass, epoch) = (self.pass, self.epoch);
+        let still = Placement { dy: 0., lift: false, moving: false };
+        let Some(row) = self.rows.get_mut(key) else { return still };
+        if reduce || !row.placed.is_some_and(|p| p + 1 == pass) { row.slide = None; }
+        else if row.epoch != epoch && (row.y - y).abs() > 0.5 {
+            // Do lugar em que estava pintada agora: interromper continua do meio, sem pular para a ponta antiga.
+            row.slide = Some(Slide { start: now, from: row.y - y, lift: row.fade.is_some() || row.slide.is_some_and(|s| s.lift) });
+        }
+        row.epoch = epoch;
+        row.placed = Some(pass);
+        let placement = match row.slide {
+            Some(slide) if slide.start + REORDER.total() > now => {
+                let t = REORDER.ease(REORDER.raw_at(slide.start, now));
+                Placement { dy: slide.from * (1. - t), lift: slide.lift, moving: true }
+            }
+            _ => { row.slide = None; still }
+        };
+        row.y = y + placement.dy;
+        placement
+    }
+
+    /// Quanto a linha que trocou de seção já chegou, de 0 a 1 com curva, contado da troca; `None` parada.
+    pub fn arrival(&mut self, key: &str, now: Instant) -> Option<f32> {
+        let row = self.rows.get_mut(key)?;
+        let start = row.fade?;
+        if start + REORDER.total() <= now { row.fade = None; return None; }
+        Some(REORDER.ease(REORDER.raw_at(start, now)))
+    }
+}
+
+/// O elemento da linha: no prepaint lê a posição real do layout e desloca o filho; a que troca de seção é pintada depois
+/// das vizinhas, dentro do mesmo recorte da lista, para passar por cima delas.
+pub struct Flip {
+    key: String,
+    child: Option<AnyElement>,
+    mask: std::rc::Rc<std::cell::Cell<Option<ContentMask<Pixels>>>>,
+    book: std::rc::Rc<std::cell::RefCell<FlipBook>>,
+}
+
+impl Flip {
+    pub fn new(key: String, child: AnyElement, book: std::rc::Rc<std::cell::RefCell<FlipBook>>) -> Self {
+        let mask = std::rc::Rc::new(std::cell::Cell::new(None));
+        Self { key, child: Some(Masked { child, mask: mask.clone() }.into_any_element()), mask, book }
+    }
+}
+
+impl IntoElement for Flip {
+    type Element = Self;
+    fn into_element(self) -> Self { self }
+}
+
+impl Element for Flip {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> { None }
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> { None }
+
+    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App)
+        -> (LayoutId, ()) {
+        (self.child.as_mut().expect("filho antes do prepaint").request_layout(window, cx), ())
+    }
+
+    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (),
+        window: &mut Window, cx: &mut App) {
+        let place = self.book.borrow_mut().place(&self.key, f32::from(bounds.origin.y), Instant::now(), cx.reduce_motion());
+        if place.moving { request_frame(window, cx); }
+        let offset = point(px(0.), px(place.dy));
+        if place.lift {
+            let child = self.child.take().expect("prepaint uma vez só");
+            let (at, mask) = (window.element_offset() + offset, window.content_mask());
+            // O adiado só recorta a pintura: a área clicável também precisa do recorte da lista.
+            self.mask.set(Some(mask));
+            window.defer_draw(child, at, 1, Some(mask));
+        } else if let Some(child) = self.child.as_mut() {
+            window.with_element_offset(offset, |window| child.prepaint(window, cx));
+        }
+    }
+
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), _: &mut (),
+        window: &mut Window, cx: &mut App) {
+        if let Some(child) = self.child.as_mut() { child.paint(window, cx); }
+    }
+}
+
+/// Prepaint e pintura do filho dentro do recorte guardado, quando há um.
+struct Masked { child: AnyElement, mask: std::rc::Rc<std::cell::Cell<Option<ContentMask<Pixels>>>> }
+
+impl IntoElement for Masked {
+    type Element = Self;
+    fn into_element(self) -> Self { self }
+}
+
+impl Element for Masked {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> { None }
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> { None }
+
+    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App)
+        -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (),
+        window: &mut Window, cx: &mut App) {
+        let child = &mut self.child;
+        window.with_content_mask(self.mask.get(), |window| child.prepaint(window, cx));
+    }
+
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), _: &mut (),
+        window: &mut Window, cx: &mut App) {
+        let child = &mut self.child;
+        window.with_content_mask(self.mask.get(), |window| child.paint(window, cx));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,6 +451,82 @@ mod tests {
         assert_eq!(connector_parts(0.4, true), (0., 0.));
         assert_eq!((connector_continuation(Some(0.)), connector_continuation(Some(0.45)), connector_continuation(None)), (0., 1., 1.));
         assert!(shimmer_amount(0.5, 0.5) > 0.99 && shimmer_amount(0.5, 0.25) < 0.01);
+    }
+
+    fn entries(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter().map(|(k, s)| (k.to_string(), s.to_string())).collect()
+    }
+
+    /// A passada inteira de uma lista só de linhas de sessão.
+    trait Begin { fn begin(&mut self, entries: &[(String, String)], now: Instant, reduce: bool); }
+
+    impl Begin for FlipBook {
+        fn begin(&mut self, entries: &[(String, String)], now: Instant, reduce: bool) {
+            self.sections(entries, now, reduce);
+            self.order(&entries.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn reorder_slides_from_where_the_row_was_painted() {
+        let (mut book, t0) = (FlipBook::default(), Instant::now());
+        book.begin(&entries(&[("a", "m"), ("b", "m")]), t0, false);
+        assert_eq!(book.place("a", 0., t0, false).dy, 0., "primeira pintura não anima");
+        book.place("b", 40., t0, false);
+        // "b" passou a trabalhar: sobe para o topo, troca de seção e é pintada por cima.
+        book.begin(&entries(&[("b", "w"), ("a", "m")]), t0, false);
+        let b = book.place("b", 0., t0, false);
+        assert_eq!((b.dy, b.lift, b.moving), (40., true, true));
+        assert!(book.lifting("b", t0) && !book.lifting("a", t0));
+        assert_eq!(book.place("a", 40., t0, false).dy, -40.);
+        assert!(book.arrival("b", t0) == Some(0.) && book.arrival("a", t0).is_none());
+        let end = t0 + REORDER.total();
+        book.begin(&entries(&[("b", "w"), ("a", "m")]), end, false);
+        assert_eq!(book.place("b", 0., end, false), Placement { dy: 0., lift: false, moving: false });
+        assert_eq!(book.arrival("b", end), None);
+    }
+
+    #[test]
+    fn scrolling_without_a_new_order_does_not_slide() {
+        let (mut book, t0) = (FlipBook::default(), Instant::now());
+        book.begin(&entries(&[("a", "m")]), t0, false);
+        book.place("a", 100., t0, false);
+        book.begin(&entries(&[("a", "m")]), t0, false);
+        assert_eq!(book.place("a", 60., t0, false).dy, 0.);
+    }
+
+    #[test]
+    fn interrupted_slide_continues_from_the_painted_spot() {
+        let (mut book, t0) = (FlipBook::default(), Instant::now());
+        book.begin(&entries(&[("a", "m"), ("b", "m")]), t0, false);
+        book.place("a", 0., t0, false);
+        book.place("b", 40., t0, false);
+        book.begin(&entries(&[("b", "w"), ("a", "m")]), t0, false);
+        book.place("b", 0., t0, false);
+        let mid = t0 + REORDER.total() / 4;
+        book.begin(&entries(&[("b", "w"), ("a", "m")]), mid, false);
+        let painted = book.place("b", 0., mid, false).dy;
+        assert!(painted > 0. && painted < 40.);
+        // Parou de trabalhar no meio do caminho: volta de onde está agora, não de 0 nem de 40.
+        book.begin(&entries(&[("a", "m"), ("b", "m")]), mid, false);
+        assert!((book.place("b", 40., mid, false).dy - (painted - 40.)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn reduced_motion_and_returning_rows_stay_still() {
+        let (mut book, t0) = (FlipBook::default(), Instant::now());
+        book.begin(&entries(&[("a", "m"), ("b", "m")]), t0, true);
+        book.place("a", 0., t0, true);
+        book.place("b", 40., t0, true);
+        book.begin(&entries(&[("b", "w"), ("a", "m")]), t0, true);
+        assert_eq!(book.place("b", 0., t0, true).dy, 0.);
+        assert_eq!(book.arrival("b", t0), None);
+        // Sumida numa passada (grupo recolhido) e de volta noutra seção: entra parada.
+        book.begin(&entries(&[("a", "m")]), t0, false);
+        book.place("a", 0., t0, false);
+        book.begin(&entries(&[("a", "m"), ("b", "w")]), t0, false);
+        assert_eq!(book.place("b", 40., t0, false).dy, 0.);
+        assert_eq!(book.arrival("b", t0), None);
     }
 
     #[test]

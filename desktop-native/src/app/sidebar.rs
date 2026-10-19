@@ -268,6 +268,10 @@ pub(super) struct Sidebar {
     resize: Option<(f32, f32)>,
     /// Arrastar sessão sobre sessão e o diálogo de agrupar/sair que ele abre.
     pub(super) grouping: super::grouping::Grouping,
+    /// Onde cada linha foi pintada, para deslizar quando a ordem muda no agrupar por máquina.
+    pub(super) flip: Rc<RefCell<motion::FlipBook>>,
+    /// A linha desenhada agora está trocando de seção: o avatar dela fica parado (`nav_avatar`).
+    pub(super) still_avatar: std::cell::Cell<bool>,
 }
 
 impl Sidebar {
@@ -276,7 +280,7 @@ impl Sidebar {
         cx.subscribe(&filter, |_, _, _: &InputEvent, cx| cx.notify()).detach();
         Self { filter, collapsed: load_collapsed(), deleting: HashSet::new(), editing: None, renaming: HashSet::new(), follow: None, lost: None, moving: HashMap::new(),
             menu: None, menu_seq: 0, rename_seq: 0, chain: None, chain_seq: 0, focus_tab: None, remote_focus: HashMap::new(), collapse_gen: 0, button_menu: None, hover: None, hover_seq: 0, pointer_y: 0., preview: None, cache: HashMap::new(), last_sub: Default::default(), press_seq: 0,
-            long_pressed: false, rail_anim: None, resize: None, grouping: Default::default() }
+            long_pressed: false, rail_anim: None, resize: None, grouping: Default::default(), flip: Default::default(), still_avatar: Default::default() }
     }
 
     /// Troca de servidor: o que é da conexão anterior sai; filtro e grupos recolhidos são deste computador e ficam.
@@ -393,6 +397,38 @@ pub(super) fn layout<'a>(sessions: &'a [SessionInfo], query: &str, by_project: b
     Layout { waiting, groups, by_project, total, filtering: !q.is_empty() }
 }
 
+/// Uma máquina da barra no agrupar por máquina: a entrada da conexão (ausente num servidor só sem lista salva), a chave, a
+/// chave da lista de fora (`None` na ativa) e a lista dela já filtrada.
+pub(super) struct MachineList<'a> {
+    pub(super) entry: Option<&'a servers::ServerEntry>,
+    pub(super) key: String,
+    pub(super) remote: Option<String>,
+    pub(super) layout: Layout<'a>,
+}
+
+/// A lista de uma máquina repartida como no app do celular: "Aguardando você", "Trabalhando" e o resto, que fica no bloco
+/// da máquina. Trabalhando é o mesmo da linha: no limite de uso a sessão não está trabalhando.
+pub(super) struct MachineSplit<'a> {
+    pub(super) waiting: Vec<&'a SessionInfo>,
+    pub(super) working: Vec<&'a SessionInfo>,
+    pub(super) rest: Vec<&'a SessionInfo>,
+}
+
+impl<'a> MachineSplit<'a> {
+    /// Um pedaço como `Layout` de um grupo só, para reaproveitar quem anda e desenha as linhas.
+    pub(super) fn only(&self, list: &[&'a SessionInfo]) -> Layout<'a> {
+        let groups = if list.is_empty() { Vec::new() } else { vec![Group { key: "*".into(), label: String::new(), sessions: list.to_vec() }] };
+        Layout { waiting: Vec::new(), groups, by_project: false, total: list.len(), filtering: false }
+    }
+}
+
+pub(super) fn working(s: &SessionInfo) -> bool { s.state == "working" && s.limited != Some(true) }
+
+pub(super) fn machine_split<'a>(layout: &Layout<'a>) -> MachineSplit<'a> {
+    let (working, rest) = layout.groups.iter().flat_map(|g| g.sessions.iter().copied()).partition(|s| working(s));
+    MachineSplit { waiting: layout.waiting.clone(), working, rest }
+}
+
 fn collapsed_path() -> Option<PathBuf> {
     Some(crate::appearance::dir()?.join("sidebar-collapsed.json"))
 }
@@ -426,6 +462,24 @@ impl Hangar {
     pub(super) fn sidebar_tell(&self) -> Tell { Tell(self.tx.clone(), self.connection) }
 
     pub(super) fn by_project() -> bool { appearance::get().sidebar_group == appearance::SidebarGroup::Project }
+
+    pub(super) fn by_machine() -> bool { appearance::get().sidebar_group == appearance::SidebarGroup::Machine }
+
+    /// Cada máquina com uma seção na barra e a lista dela como a barra a mostra, na ordem das conexões; com um servidor só,
+    /// a ativa.
+    pub(super) fn machine_lists(&self, cx: &App) -> Vec<MachineList<'_>> {
+        let active = self.active_key();
+        let entry_of = |key: &str| self.servers.iter().find(|s| servers::norm(&s.address) == key);
+        if !self.multi_server() {
+            return vec![MachineList { entry: entry_of(&active), key: active, remote: None, layout: self.sidebar_layout(cx) }];
+        }
+        self.servers.iter().filter(|s| servers::has_section(s)).filter_map(|entry| {
+            let key = servers::norm(&entry.address);
+            if key == active { return Some(MachineList { entry: Some(entry), key, remote: None, layout: self.sidebar_layout(cx) }); }
+            let list = self.remote.get(&key)?;
+            Some(MachineList { entry: Some(entry), layout: self.remote_layout(&key, &list.sessions, cx), remote: Some(key.clone()), key })
+        }).collect()
+    }
 
     pub(super) fn sidebar_layout(&self, cx: &App) -> Layout<'_> {
         layout(&self.sessions, &self.sidebar.filter.read(cx).value(), Self::by_project(), &self.sidebar.hidden_on(&self.active_key()))
@@ -491,6 +545,18 @@ impl Hangar {
                 .chain(l.groups.iter().filter(|g| !(l.by_project && self.sidebar.collapsed.contains(&g.key))).flat_map(|g| rows(&g.sessions)))
                 .collect()
         };
+        if Self::by_machine() {
+            let machines = self.machine_lists(cx);
+            let split: Vec<MachineSplit> = machines.iter().map(|m| machine_split(&m.layout)).collect();
+            let mut order = Vec::new();
+            // Na ordem da barra: "Aguardando você" e "Trabalhando" de todas as máquinas, depois o bloco de cada uma.
+            for (m, p) in machines.iter().zip(&split) { order.extend(shown(&m.key, m.remote.as_deref(), &p.only(&p.waiting))); }
+            for (m, p) in machines.iter().zip(&split) { order.extend(shown(&m.key, m.remote.as_deref(), &p.only(&p.working))); }
+            for (m, p) in machines.iter().zip(&split) {
+                if !self.sidebar.collapsed.contains(&format!("server:{}", m.key)) { order.extend(shown(&m.key, m.remote.as_deref(), &p.only(&p.rest))); }
+            }
+            return order;
+        }
         if !self.multi_server() { return shown(&active, None, &self.sidebar_layout(cx)); }
         let mut order = Vec::new();
         for entry in self.servers.iter().filter(|s| servers::has_section(s)) {
@@ -539,8 +605,7 @@ impl Hangar {
         self.start_session_rename(target, window, cx);
     }
 
-    pub(super) fn set_group(&mut self, project: bool, cx: &mut Context<Self>) {
-        let group = if project { appearance::SidebarGroup::Project } else { appearance::SidebarGroup::None };
+    pub(super) fn set_group(&mut self, group: appearance::SidebarGroup, cx: &mut Context<Self>) {
         self.apply_appearance(appearance::Appearance { sidebar_group: group, ..appearance::get() }, true, cx);
     }
 
@@ -1229,18 +1294,20 @@ impl Hangar {
 
     /// Escopo "Todas as sessões" com o seletor Agrupar (no web mora no popover do ⋯ do topo, que o nativo não tem).
     pub(super) fn render_group_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let project = Self::by_project();
+        let current = appearance::get().sidebar_group;
         let weak = cx.entity().downgrade();
         Button::new("sidebar-group").ghost().xsmall().icon(IconName::Layers)
             .tooltip(tr("sidebar_group_by")).accessibility_label(tr("sidebar_group_by"))
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                let pick = |label: &str, value: bool| {
+                let pick = |label: &str, value: appearance::SidebarGroup| {
                     let weak = weak.clone();
-                    PopupMenuItem::new(tr(label)).checked(project == value).on_click(move |_, _, cx| {
+                    PopupMenuItem::new(tr(label)).checked(current == value).on_click(move |_, _, cx| {
                         let _ = weak.update(cx, |this, cx| this.set_group(value, cx));
                     })
                 };
-                menu_style(menu).label(tr("sidebar_group_by")).item(pick("sidebar_group_none", false)).item(pick("sidebar_group_project", true))
+                menu_style(menu).label(tr("sidebar_group_by")).item(pick("sidebar_group_none", appearance::SidebarGroup::None))
+                    .item(pick("sidebar_group_project", appearance::SidebarGroup::Project))
+                    .item(pick("sidebar_group_machine", appearance::SidebarGroup::Machine))
             })
     }
 
@@ -1646,7 +1713,7 @@ impl Hangar {
 
     /// O avatar de uma linha da barra; durante a troca com o trilho fica parado, a animada é pintada fora da lista e não acompanharia a camada que some.
     pub(super) fn nav_avatar(&self, key: String, look: chrome::AvatarLook, size: f32) -> AnyElement {
-        if self.rail_progress().is_some() { return chrome::session_avatar(&look, size, None).into_any_element(); }
+        if self.rail_progress().is_some() || self.sidebar.still_avatar.get() { return chrome::session_avatar(&look, size, None).into_any_element(); }
         self.avatar_slot(panes::Area::Nav, key, look, size)
     }
 
@@ -1698,7 +1765,16 @@ impl Hangar {
                 rows.push(self.render_rail_row((*session).clone(), selected, remote.map(str::to_owned), cx));
             }
         };
-        if self.multi_server() {
+        if Self::by_machine() {
+            let machines = self.machine_lists(cx);
+            let split: Vec<MachineSplit> = machines.iter().map(|m| machine_split(&m.layout)).collect();
+            for pick in [0, 1, 2] {
+                for (m, p) in machines.iter().zip(&split) {
+                    let part = match pick { 0 => &p.waiting, 1 => &p.working, _ => &p.rest };
+                    place(&p.only(part), m.remote.as_deref(), &mut rows, cx);
+                }
+            }
+        } else if self.multi_server() {
             let active = self.active_key();
             for entry in self.servers.iter().filter(|s| !s.disabled) {
                 let key = servers::norm(&entry.address);
@@ -1781,7 +1857,7 @@ impl Hangar {
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` do gpui_kit, que o `super::*` traz, esconderia o `#[test]` da linguagem.
-    use super::{BranchList, HashSet, SessionInfo, first_line, has_git, layout, rail_label, save_collapsed};
+    use super::{BranchList, HashSet, SessionInfo, first_line, has_git, layout, machine_split, rail_label, save_collapsed};
 
     #[test]
     fn outside_session_menu_leaves_the_pair_and_never_closes() {
@@ -1947,6 +2023,19 @@ mod tests {
     }
 
     fn names(list: &[&SessionInfo]) -> Vec<String> { list.iter().map(|s| s.name.clone()).collect() }
+
+    #[test]
+    fn machine_split_lifts_working_and_leaves_the_rest_on_the_machine() {
+        let mut limited = s("cota", "working", None);
+        limited.limited = Some(true);
+        let all = [s("zeta", "idle", None), s("beta", "awaiting_input", None), s("alfa", "working", None), limited, s("gama", "working", None)];
+        let l = layout(&all, "", false, &HashSet::new());
+        let split = machine_split(&l);
+        assert_eq!((names(&split.waiting), names(&split.working), names(&split.rest)),
+            (vec!["beta".to_owned()], vec!["alfa".to_owned(), "gama".to_owned()], vec!["cota".to_owned(), "zeta".to_owned()]),
+            "no limite de uso não está trabalhando; cada uma aparece uma vez, por nome");
+        assert!(split.only(&split.rest).groups[0].sessions.len() == 2 && split.only(&[]).groups.is_empty());
+    }
 
     #[test]
     fn waiting_on_top_then_by_name_and_never_twice() {

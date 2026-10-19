@@ -600,6 +600,7 @@ impl Hangar {
                     }, cx),
                 false));
 
+        const GROUPING: [appearance::SidebarGroup; 3] = [appearance::SidebarGroup::None, appearance::SidebarGroup::Project, appearance::SidebarGroup::Machine];
         const NAVIGATION: [Navigation; 4] = [Navigation::Sidebar, Navigation::Tabs, Navigation::BottomTabs, Navigation::Conversations];
         let navigation = tiles("collapsed-nav", &[tr("settings_collapsed_sidebar"), tr("settings_collapsed_tabs"), tr("settings_collapsed_bottom_tabs"),
             tr("settings_nav_conversations")],
@@ -616,7 +617,12 @@ impl Hangar {
                 segmented("sidebar-density", &[tr("settings_sidebar_normal"), tr("settings_sidebar_compact")], a.sidebar_compact as usize, conversations_nav,
                     |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.sidebar_compact = index == 1; this.apply_appearance(next, true, cx); }, cx),
                 true))
-            .child(self.line("settings_sidebar_height", Some(tr("settings_only_floating")), floating, height, false));
+            .child(self.line("settings_sidebar_height", Some(tr("settings_only_floating")), floating, height, false))
+            .child(self.line("settings_sidebar_grouping", Some(tr("settings_sidebar_grouping_desc")), !a.navigation.tabs(),
+                segmented("sidebar-grouping", &[tr("sidebar_group_none"), tr("sidebar_group_project"), tr("sidebar_group_machine_short")],
+                    GROUPING.iter().position(|g| *g == a.sidebar_group).unwrap_or(0), !a.navigation.tabs(),
+                    |this: &mut Hangar, index, _: &mut Window, cx| this.set_group(GROUPING[index], cx), cx),
+                false));
 
         // Os botões do topo com a borda forte do mock.
         let top_button = |id: &'static str, key: &'static str, icon: IconName| Button::new(id).outline().small().border_color(theme::border_strong())
