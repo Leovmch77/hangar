@@ -500,12 +500,14 @@ pub struct AvatarLook { glyph: SharedString, state: AvatarState, limited: bool, 
 pub enum AvatarState { Working, Waiting, Ready, Other }
 
 impl AvatarLook {
-    pub fn new(provider: &str, engine: Option<&str>, state: &str, limited: bool) -> Self {
+    pub fn new(provider: &str, engine: Option<&str>, state_name: &str, limited: bool) -> Self {
         // Motor GPT pelo Claude Code roda o modelo da OpenAI: o logo é o dele.
         let gpt = engine.is_some_and(|e| { let e = e.to_ascii_lowercase(); ["gpt", "openai", "codex"].iter().any(|k| e.contains(k)) });
         let glyph = if provider == "claude" && gpt { "codex" } else { provider };
-        let state = match state { "working" => AvatarState::Working, "awaiting_input" => AvatarState::Waiting, "idle" => AvatarState::Ready, _ => AvatarState::Other };
-        Self { glyph: glyph.to_owned().into(), state, limited, ring: None }
+        let state = match state_name { "working" => AvatarState::Working, "awaiting_input" => AvatarState::Waiting, "idle" => AvatarState::Ready, _ => AvatarState::Other };
+        // Sessão morta fica com o anel vermelho: sem ele pareceria só parada.
+        let ring = (state_name == "dead").then(theme::danger);
+        Self { glyph: glyph.to_owned().into(), state, limited, ring }
     }
 
     /// Anel numa cor própria, para um estado que o app não tem (envio recusado, problema da sessão).
@@ -816,7 +818,8 @@ mod tests {
         assert_eq!((look.glyph.as_ref(), look.state), ("codex", AvatarState::Working));
         assert_eq!(AvatarLook::new("claude", Some("kimi-k3"), "idle", false).glyph.as_ref(), "claude");
         assert_eq!(AvatarLook::new("codex", None, "awaiting_input", false).state, AvatarState::Waiting);
-        assert_eq!(AvatarLook::new("pi", None, "dead", false).state, AvatarState::Other);
+        assert_eq!(AvatarLook::new("pi", None, "dead", false).ring, Some(theme::danger()));
+        assert_eq!(AvatarLook::new("pi", None, "reconnecting", false).ring, None);
         // Limitada trabalhando continua animando, como no app.
         assert!(AvatarLook::new("claude", None, "working", true).working());
     }
