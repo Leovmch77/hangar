@@ -410,8 +410,10 @@ jobs:
               shutil.rmtree(d, ignore_errors=True)
               try:
                   gh("release", "download", tag, "--pattern", "server-*.json", "--dir", str(d))
-              except subprocess.CalledProcessError:
-                  return None   # outro sistema no meio do --clobber: o arquivo listado já foi trocado
+              except subprocess.CalledProcessError as e:
+                  # Outro sistema no meio do --clobber: o arquivo listado já foi trocado.
+                  print(f"::warning::leitura das fontes falhou (rc {e.returncode}); tentando de novo")
+                  return None
               latest = d / LATEST
               old = json.loads(latest.read_bytes()) if latest.exists() else {}
               return old, {p.name: p.read_bytes() for p in sorted(d.glob("server-*.json")) if p.name != LATEST}
