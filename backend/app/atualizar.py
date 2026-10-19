@@ -1536,11 +1536,16 @@ def _trocar_pelo_tar(fileobj, modo: str) -> str | None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _baixar_tela_da_chave(chave: str) -> str | None:
-    """Troca o `dist` pelo `dist-commits/frontend-dist-<chave>.tar.gz` conferido. Devolve o problema."""
+def _baixar_tela_da_chave(chave: str) -> tuple[str, str] | None:
+    """Troca o `dist` pelo `dist-commits/frontend-dist-<chave>.tar.gz` conferido.
+
+    Devolve `(codigo, detalhe)` quando não trocou; `sem_chave` é o 404 (chave nunca publicada).
+    """
+    import http.client
     import io
     import tarfile
     import urllib.request
+    import zlib
     url = f"{_DIST_COMMITS_URL}/frontend-dist-{chave}.tar.gz"
     try:
         with urllib.request.urlopen(f"{url}.sha256", timeout=15) as r:
@@ -1548,10 +1553,14 @@ def _baixar_tela_da_chave(chave: str) -> str | None:
         with urllib.request.urlopen(url, timeout=180) as r:
             corpo = r.read()
         if [hashlib.sha256(corpo).hexdigest()] != esperado:
-            return "sha256 não confere"
-        return _trocar_pelo_tar(io.BytesIO(corpo), "r:gz")
-    except (OSError, tarfile.TarError) as e:
-        return str(e)
+            return "sha256_divergente", ""
+        problema = _trocar_pelo_tar(io.BytesIO(corpo), "r:gz")
+        return ("tar_incompleto", problema) if problema else None
+    except urllib.error.HTTPError as e:
+        return ("sem_chave" if e.code == 404 else "download_falhou"), str(e)
+    # Conexão que cai no meio do corpo (`IncompleteRead`) e gzip truncado não são `OSError`.
+    except (OSError, tarfile.TarError, http.client.HTTPException, EOFError, zlib.error) as e:
+        return "download_falhou", repr(e)
 
 
 def _DIST_VELHO() -> Path:
@@ -1600,10 +1609,16 @@ def _atualizar_dist() -> str | None:
     compilar = p.returncode != 0 or bool(p.stdout.strip()) or fora_da_main
     if not compilar and _behind_top():
         chave = _chave_da_tela("HEAD")
-        problema = _baixar_tela_da_chave(chave) if chave else "fontes da tela ilegíveis no git"
-        if problema is None:
+        falha = _baixar_tela_da_chave(chave) if chave else ("chave_ilegivel", "")
+        if falha is None:
             return None
-        _log.info("tela da chave %s não veio do CI (%s); compilando aqui", chave, problema)
+        codigo, detalhe = falha
+        # Só o diário: artefato do CI que falta ou falha não é aviso para quem atualiza.
+        if codigo == "sem_chave":
+            _log.info("tela da chave %s não publicada; compilando aqui", chave)
+        else:
+            _log.warning("tela da chave %s não veio do CI (%s: %s); compilando aqui", chave, codigo, detalhe)
+            diag.registrar("atualizacao.tela_da_chave", "aviso", codigo=codigo, detalhe=detalhe)
         compilar = True
     if compilar:
         npm = shutil.which("npm")

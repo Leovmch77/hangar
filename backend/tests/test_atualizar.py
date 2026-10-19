@@ -1480,9 +1480,11 @@ def release_dist_commits(repo, monkeypatch):
                 self.send_error(404)
                 return
             self.send_response(200)
-            self.send_header("Content-Length", str(len(corpo)))
+            # `_Cortado`: promete mais do que manda e fecha, como uma conexão que cai no meio.
+            self.send_header("Content-Length", str(len(corpo) + (1000 if isinstance(corpo, _Cortado) else 0)))
             self.end_headers()
             self.wfile.write(corpo)
+            self.close_connection = True
 
         def log_message(self, *a):
             pass
@@ -1501,11 +1503,22 @@ def release_dist_commits(repo, monkeypatch):
     t.join(timeout=5)
 
 
+class _Cortado(bytes):
+    pass
+
+
 def _publicar(arquivos, chave, tar, sha=None):
     import hashlib
     arquivos[f"frontend-dist-{chave}.tar.gz"] = tar
     arquivos[f"frontend-dist-{chave}.tar.gz.sha256"] = \
         f"{sha or hashlib.sha256(tar).hexdigest()}  frontend-dist-{chave}.tar.gz\n".encode()
+
+
+def _diario(monkeypatch):
+    eventos = []
+    monkeypatch.setattr(atualizar.diag, "registrar",
+                        lambda evento, nivel="ok", **campos: eventos.append((evento, nivel, campos)))
+    return eventos
 
 
 def test_dist_atras_do_topo_baixa_a_tela_da_chave_sem_npm(repo, release_dist_commits, monkeypatch):
@@ -1520,18 +1533,48 @@ def test_dist_atras_do_topo_baixa_a_tela_da_chave_sem_npm(repo, release_dist_com
 
 
 def test_dist_atras_do_topo_sem_a_chave_publicada_compila_aqui(repo, release_dist_commits, monkeypatch):
+    """Chave não publicada é o caso normal (CI cancelado): nem aviso na tela nem no diário."""
+    eventos = _diario(monkeypatch)
     chamadas = _npm_dublado(repo, monkeypatch)
     assert atualizar._atualizar_dist() is None
     assert chamadas == [["/usr/bin/npm", "--prefix", "frontend", "run", "build"]]
     assert (repo / "frontend" / "dist" / "index.html").read_text() == "local"
+    assert eventos == []
+
+
+def _falha_da_tela_da_chave(repo, monkeypatch, arquivos, tar, sha=None):
+    """Falha que não é 404: compila aqui, registra no diário e não vira aviso da tela."""
+    eventos = _diario(monkeypatch)
+    chamadas = _npm_dublado(repo, monkeypatch)
+    _publicar(arquivos, atualizar._chave_da_tela("HEAD"), tar, sha=sha)
+    try:
+        resultado = atualizar._atualizar_dist()
+    except Exception as e:
+        pytest.fail(f"a falha do download derrubou a atualização: {e!r}")
+    assert resultado is None
+    assert len(chamadas) == 1
+    assert (repo / "frontend" / "dist" / "index.html").read_text() == "local"
+    assert not atualizar.estado().get("avisos")
+    assert [(e, n) for e, n, _ in eventos] == [("atualizacao.tela_da_chave", "aviso")]
+    return eventos[0][2]["codigo"]
 
 
 def test_dist_com_sha256_divergente_e_descartado_e_compila_aqui(repo, release_dist_commits, monkeypatch):
-    chamadas = _npm_dublado(repo, monkeypatch)
-    _publicar(release_dist_commits, atualizar._chave_da_tela("HEAD"), _tar_da_tela(), sha="0" * 64)
-    assert atualizar._atualizar_dist() is None
-    assert len(chamadas) == 1
-    assert (repo / "frontend" / "dist" / "index.html").read_text() == "local"
+    codigo = _falha_da_tela_da_chave(repo, monkeypatch, release_dist_commits, _tar_da_tela(), sha="0" * 64)
+    assert codigo == "sha256_divergente"
+
+
+def test_dist_com_a_conexao_cortada_no_meio_compila_aqui(repo, release_dist_commits, monkeypatch):
+    tar = _tar_da_tela()
+    codigo = _falha_da_tela_da_chave(repo, monkeypatch, release_dist_commits, _Cortado(tar),
+                                     sha=__import__("hashlib").sha256(tar).hexdigest())
+    assert codigo == "download_falhou"
+
+
+def test_dist_com_o_tar_truncado_compila_aqui(repo, release_dist_commits, monkeypatch):
+    tar = _tar_da_tela(b"x" * 50000)[:-30]
+    codigo = _falha_da_tela_da_chave(repo, monkeypatch, release_dist_commits, tar)
+    assert codigo == "download_falhou"
 
 
 def test_chave_do_dist_so_muda_com_as_fontes_da_tela(repo):

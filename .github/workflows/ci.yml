@@ -246,7 +246,8 @@ jobs:
                  --notes 'frontend-dist-<chave>.tar.gz: chave = sha256 das arvores frontend, packages, messages, project.inlang e de package.json e package-lock.json da raiz no commit. O atualizador baixa daqui quando para antes do topo.'
           id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/dist-commits" --jq .id)
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/$id/assets" > assets.json
-          if jq -e --arg n "$nome" 'add | any(.name == $n)' assets.json >/dev/null; then
+          # Só pula com os DOIS: sem o `.sha256` o motor nunca aceita a chave, então reenvia o par.
+          if jq -e --arg n "$nome" 'add | (any(.name == $n) and any(.name == ($n + ".sha256")))' assets.json >/dev/null; then
             echo "chave $chave já publicada"
           else
             cp frontend-dist.tar.gz "$nome"
