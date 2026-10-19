@@ -40,13 +40,14 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **O Atualizar só avança até o commit cujo binário do Rust foi publicado para este sistema.**
   O binário é o de `platforms.<sistema>` no `server-latest.json` da release da branch (sem a
   chave, o `commit` do topo); o contrato é o `protocol` dele ou o `RUST_SERVER_PROTOCOL` do commit. O checkout vai
-  do commit desse binário até o último antes do primeiro (primeiro pai) que muda um dos `paths` do
-  push no `.github/workflows/server.yml` de lá, nunca recua, e o download usa o manifesto lido na
+  do commit desse binário até o mais novo do primeiro pai com conteúdo idêntico ao publicado nos
+  `paths` do push no `.github/workflows/server.yml` de lá, nunca recua, e o download usa o manifesto lido na
   escolha; sem ler a lista, para no commit do binário. Só binário de commit fora de `origin/<branch>`
   cai no commit mais novo com o mesmo número. A tela conta as mudanças até esse commit e também oferece atualizar quando o binário
   instalado não é o publicado (código em dia, binário que saiu depois). Atrás do topo, a tela avisa que aguarda o build do servidor Rust e é
   compilada aqui (também no Reiniciar); checkout já à frente com binário de outro contrato também
-  avisa. Sem Rust (`CP_RUST_SERVER=0`) ou sem release própria de branch fora da main (404): topo,
+  avisa. O resultado abaixo do topo leva `waiting_for_server_build` e o commit alcançado aos clientes,
+  que mostram a pendência, sem anunciar atualização completa. Sem Rust (`CP_RUST_SERVER=0`) ou sem release própria de branch fora da main (404): topo,
   como antes, calado. Sem como conferir (rede, git, 404 na release da main, sem build deste
   sistema no manifesto, commit ilegível): o checkout só avança no contrato que já tem, com aviso
   na tela (checkout sem contrato vai ao topo), e o auto-update espera; ele só avança com o topo
@@ -76,6 +77,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   arquivo da raiz, build calculado — nunca tag de release nem commit do CI.
 - **Reiniciar o backend**: sem `--reload`; mate `-9` o pid da porta e suba destacado. No Linux é
   `systemctl --user restart`.
+- **Reinício pedido pelo app tem estado próprio antes do lançamento.** Se o lançador morrer antes
+  do motor escrever, o pid da trava permite publicar a falha para quem pediu; a saída do lançamento
+  fica em `logs/privado/atualizacao-launch.log`. HTTP sozinho não confirma reinício: o pid do serviço
+  também precisa mudar quando puder ser lido. A tentativa usa `request_id` no POST e no estado:
+  o lançador do venv no Windows pode ter pid diferente do motor. Cliente antigo conserva a comparação
+  por pid; cliente novo só usa pid quando o servidor não informou o ID. Resposta sem `ok: true` e
+  pid válido não inicia a espera.
 - **Criar sessão embrulha o tmux em escopo transiente do systemd, sob sonda** — um gerenciador que
   recusa escopo transiente derrubava toda criação de sessão.
 - **Atualização cujo motor morreu no próprio reinício é concluída pelo backend novo.** Sem escopo
@@ -627,6 +635,28 @@ tela respondia "Não há versão nova" porque contava só commits. Agora o check
 primeiro commit que muda o que o `server.yml` compila (commit só de Python chega, porque nele o
 workflow nem roda), e a tela compara o sha256 dos binários instalados com o manifesto (resposta
 guardada 5 min; "Procurar" relê), oferecendo a troca do binário mesmo com o código em dia.
+
+**Conteúdo do build, não mudanças no histórico (19/10/2026).** A main recebeu uma branch que
+havia mesclado a main como segundo pai. O merge trazia o mesmo Rust do binário publicado, mas
+o diff contra o primeiro pai parecia um build novo: a atualização parava em `991bb4f1`.
+A escolha agora percorre candidatos do primeiro pai do mais novo para o mais antigo e usa
+`git diff --quiet <publicado> <candidato> -- <paths>`. Teste com Git real cobre a branch
+divergente, o merge da main dentro dela, o push como main, uma mudança Rust pendente e sua
+reversão. A pendência também vai em campo explícito do estado, para os clientes não anunciarem
+atualização completa quando o checkout ficou abaixo do topo.
+
+**Reinício sem motor não deixa resultado antigo (19/10/2026).** Em reprodução isolada, o
+lançador saiu antes de `app.atualizar` escrever: `reiniciar_agora()` devolvia o pid novo com
+`ok: true`, mas `estado_para_tela()` conservava `pronto/ok: true` de outro pid. Os clientes
+esperavam o pid novo até os dois minutos. O pedido agora publica `rodando` antes de lançar,
+e o leitor usa o pid da trava para declarar a falha mesmo sem a primeira escrita do motor.
+Um filho real que lança exceção antes do motor prova o desfecho e a preservação do traceback
+no log privado. Outro teste prova que HTTP do mesmo pid não confirma um reinício.
+O Windows usa o lançador do venv, que cria outro interpretador (`PC/venvlauncher.c` do CPython):
+o pid do POST pode diferir do motor mesmo com o serviço reiniciado. A correlação por `request_id`
+independe desses processos; teste com pid de lançador diferente comprova o campo compartilhado.
+As tentativas relatadas às 07:49–07:57 não têm POST no journal desta máquina; a reprodução
+comprova o defeito do lançamento, sem atribuir a ele aqueles cliques sem a resposta capturada.
 
 ## Verificação local antes do push (06/10/2026)
 
