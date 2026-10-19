@@ -20,6 +20,11 @@ pub(super) const PREVIEW_W: f32 = 380.;
 pub(super) const PREVIEW_H: f32 = 220.;
 const NO_CWD: &str = "no-cwd";
 
+/// O cabeçalho da própria máquina já identifica a linha; Conversas sempre mostra a origem.
+pub(super) fn row_server_visible(conversations: bool, by_machine: bool, under_own_machine: bool) -> bool {
+    conversations || !by_machine || !under_own_machine
+}
+
 /// Sessão de uma linha: a máquina (endereço normalizado, `servers::norm`) e o nome, que sozinho se repete entre máquinas.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Target { pub(super) server: String, pub(super) name: String }
@@ -1857,7 +1862,7 @@ impl Hangar {
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` do gpui_kit, que o `super::*` traz, esconderia o `#[test]` da linguagem.
-    use super::{BranchList, HashSet, SessionInfo, first_line, has_git, layout, machine_split, rail_label, save_collapsed};
+    use super::{BranchList, HashSet, SessionInfo, first_line, has_git, layout, machine_split, rail_label, row_server_visible, save_collapsed};
 
     #[test]
     fn outside_session_menu_leaves_the_pair_and_never_closes() {
@@ -2077,4 +2082,17 @@ mod tests {
         assert!(!path.with_extension("tmp").exists());
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn row_server_is_hidden_only_under_its_own_machine_header() {
+        assert!(!row_server_visible(false, true, true));
+        assert!(row_server_visible(false, true, false), "trabalhando, aguardando e membro de outra máquina");
+        for under_machine in [false, true] {
+            assert!(row_server_visible(false, false, under_machine), "sem agrupamento ou por projeto");
+            for by_machine in [false, true] {
+                assert!(row_server_visible(true, by_machine, under_machine), "Conversas conserva a origem");
+            }
+        }
+    }
+
 }

@@ -1,5 +1,6 @@
 //! Só para provas: com HANGAR_NATIVE_UI_MAP=<arquivo>, grava a cada quadro que mudar a lista de
-//! elementos com id (caminho, bounds lógicos da janela, visível). Sem a variável nada é instalado.
+//! elementos com id (caminho, bounds lógicos da janela, visível). HANGAR_NATIVE_FRAME_TIMES=1
+//! registra o instante de cada quadro no stderr. Sem as variáveis nada é instalado.
 //! O mapa não leva texto da tela: só ids, que já são rótulos da interface.
 
 use gpui_kit::{ElementId, ElementRecord, Window};
@@ -7,10 +8,17 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 
 pub fn install(window: &mut Window) {
-    let Some(path) = std::env::var_os("HANGAR_NATIVE_UI_MAP").map(PathBuf::from) else { return };
-    let tmp = { let mut name = path.clone().into_os_string(); name.push(".tmp"); PathBuf::from(name) };
+    let paths = std::env::var_os("HANGAR_NATIVE_UI_MAP").map(PathBuf::from).map(|path| {
+        let tmp = { let mut name = path.clone().into_os_string(); name.push(".tmp"); PathBuf::from(name) };
+        (path, tmp)
+    });
+    let frames = std::env::var_os("HANGAR_NATIVE_FRAME_TIMES").is_some();
+    if paths.is_none() && !frames { return; }
+    let epoch = std::time::Instant::now();
     let (mut last, mut seq) = (Value::Null, 0u64);
     window.set_element_map_sink(move |records| {
+        if frames { eprintln!("frame {}", epoch.elapsed().as_micros()); }
+        let Some((path, tmp)) = &paths else { return };
         let elements = snapshot(records);
         if elements == last { return; }
         seq += 1;
