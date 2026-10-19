@@ -3,7 +3,7 @@ import { act, createElement, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { create } from 'zustand';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { MotivoFim, Server } from '@hangar/core';
+import { composeWithContextRefs, configureApi, type MotivoFim, type Server } from '@hangar/core';
 import type { DictationDraft } from '../stores/drafts';
 import { useDeliveryMode } from './useQueueDelivery';
 
@@ -30,7 +30,9 @@ vi.mock('react-native', async (original) => {
   } } };
 });
 vi.mock('expo-router', () => ({ useNavigation: () => h.navigation, useRouter: () => ({ push: vi.fn() }) }));
-vi.mock('../stores/chat', () => ({ chatStore: () => h.chat, filaCount: () => 0, isSubmitting: () => false, submitConversationDraft: vi.fn() }));
+vi.mock('../stores/chat', async (original) => ({
+  ...await original<typeof import('../stores/chat')>(), chatStore: () => h.chat, filaCount: () => 0,
+}));
 vi.mock('../stores/sessions', () => {
   const value = { rows: [{ serverId: 'srv', name: 'sess', provider: 'claude', jsonl: '/sessions/current' }], byServerRecord: {} };
   return { useSessions: Object.assign((select: (state: typeof value) => unknown) => select(value), { getState: () => value }) };
@@ -41,9 +43,6 @@ vi.mock('../stores/servers', () => {
 });
 vi.mock('../stores/newConversation', () => ({ readFirstInput: () => null, useNewConversation: { getState: () => ({ issues: {} }) },
   attachInsert: (_attach: unknown, path: string) => path, withAttach: (body: string, inserts: string) => `${inserts} ${body}` }));
-vi.mock('../stores/contextRefs', () => ({
-  contextRefsKey: () => 'srv::sess', useContextRefsFor: () => [], contextRefsSnapshot: () => [], removeSentContextRefs: vi.fn(),
-}));
 vi.mock('../features/ditado/EstiloPill', () => ({ DictationStyleMenu: () => null, useDictationStyleLabel: () => 'raw' }));
 vi.mock('../features/ditado/dictationOrganization', () => ({ useDictationOrganization: () => 'off' }));
 vi.mock('../features/ditado/ditadoEstiloStore', () => ({ dictationStyleStore: () => ({ getState: () => ({ pronto: true, valor: 'cru' }) }) }));
@@ -87,6 +86,7 @@ import { finishDictation, readDictation, readDraft, writeDictation, writeDraft }
 import { overwriteGetLocale } from '../paraglide/runtime';
 import * as m from '../paraglide/messages';
 import { Composer } from './Composer';
+import { addContextRef, contextRefsSnapshot, useContextRefs } from '../stores/contextRefs';
 
 const roots: Root[] = [];
 const props = { serverId: 'srv', name: 'sess', queuePanel: { entries: [], revision: 0 } as any };
@@ -110,6 +110,7 @@ beforeEach(() => {
   overwriteGetLocale(() => 'pt');
   useDeliveryMode.setState({ mode: 'queued' });
   h.disk.clear(); h.listeners = []; vi.clearAllMocks();
+  useContextRefs.setState({ drafts: {} });
   Object.assign(AppState, { currentState: 'active' });
   h.chat = { use: create(() => ({ pending: [], events: [], draftUpdate: 0, queueEdit: null, queueEditExit: null })), dropQueueEdit: vi.fn() };
   h.transcribe.mockImplementation(async (_server: Server, serverId: string, name: string, voice: DictationDraft,
@@ -121,7 +122,36 @@ beforeEach(() => {
       raw: result.raw, aviso: '', path, applied: 'cru' };
   });
 });
-afterEach(() => { act(() => roots.splice(0).forEach((root) => root.unmount())); vi.unstubAllGlobals(); });
+afterEach(async () => {
+  act(() => roots.splice(0).forEach((root) => root.unmount()));
+  (await vi.importActual<typeof import('../stores/chat')>('../stores/chat'))._resetChatsForTests();
+  vi.unstubAllGlobals();
+});
+
+it.each(['', 'Confira este trecho'])('limpa o campo após enviar citação com comentário e texto %j', async (typed) => {
+  const real = await vi.importActual<typeof import('../stores/chat')>('../stores/chat');
+  real._resetChatsForTests();
+  h.chat = real.chatStore('srv', 'sess');
+  configureApi({ getBaseUrl: () => h.server.baseUrl, getToken: () => h.server.token, onUnauthorized: () => {}, origin: null,
+    createEventSource: () => ({ addEventListener() {}, removeEventListener() {}, close() {},
+      onerror: null, onopen: null, readyState: 1 }) });
+  let acknowledge!: () => void;
+  const input = vi.fn((_url: string, _options?: RequestInit) => new Promise<Response>((resolve) => { acknowledge = () => resolve(new Response('{}')); }));
+  vi.stubGlobal('fetch', (url: string, options?: RequestInit) => String(url).endsWith('/input')
+    ? input(url, options) : Promise.resolve(new Response('{"available":false}')));
+  const quote = { kind: 'quote' as const, source: 'reply-1', before: '', after: '', text: 'Trecho citado', comment: 'Corrija a anotação' };
+  addContextRef('srv::sess', quote);
+  writeDraft('srv', 'sess', { version: 1, text: typed, revision: 7, transcript: '/sessions/current', attachments: [], submission: null });
+  const { container } = await mount();
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="send-fixture"]')!.click());
+  expect(input).toHaveBeenCalledTimes(1);
+  expect(JSON.parse(input.mock.calls[0]![1]!.body as string).text).toBe(composeWithContextRefs([quote], typed));
+  expect(container.querySelector('textarea')!.value).toBe(typed);
+  await act(async () => acknowledge());
+  expect(container.querySelector('textarea')!.value).toBe('');
+  expect(readDraft('srv', 'sess')?.text ?? '').toBe('');
+  expect(contextRefsSnapshot('srv::sess')).toEqual([]);
+});
 
 it('Enviar respeita Mandar direto sem ignorar a revisão do rascunho', async () => {
   vi.stubGlobal('fetch', vi.fn(async () => new Response('{"available":true}')));

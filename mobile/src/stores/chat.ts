@@ -988,7 +988,10 @@ export async function submitConversationDraft(serverId: string, name: string, te
   const notify = () => chatStore(serverId, name).use.setState((s) => ({ draftUpdate: s.draftUpdate + 1 }));
   try {
     const current: ConversationDraft = readDraft(serverId, name) ?? {
-      version: 1, text, revision: 1, transcript: null, attachments: [], submission: null,
+      // O Composer descarta rascunho vazio: citação sem texto conserva a revisão enviada,
+      // sem devolver ao campo o bloco montado só para o transporte.
+      version: 1, text: draftRevision === undefined ? text : '', revision: draftRevision ?? 1,
+      transcript: null, attachments: [], submission: null,
     };
     if (current.submission && current.submission.text.trim() !== text.trim()) throw new Error(m.composer_submission_recover_first());
     const submission = { text, draftRevision: draftRevision ?? current.revision, status: 'sending' as const };

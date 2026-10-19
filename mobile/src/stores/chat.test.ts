@@ -1440,6 +1440,20 @@ test('ACK retira os chips de áudio enviados e conserva os ditados depois', asyn
   expect(readDraft('srv1', 'sess')?.recordings).toEqual([{ id: 'voice-2', serverPath: '/uploaded/new.m4a' }]);
 });
 
+test.each([null, 400, 503])('citação sem rascunho conserva edição nova durante envio com status %s', async (status) => {
+  const text = 'Mensagem com citação';
+  const requests = fetchManual();
+  const sending = chatStore('srv1', 'sess').send(text, 8);
+  expect(readDraft('srv1', 'sess')).toMatchObject({ text: '', revision: 8,
+    submission: { text, draftRevision: 8 } });
+  writeDraft('srv1', 'sess', { ...readDraft('srv1', 'sess')!, text: 'Próxima mensagem', revision: 9 });
+  const result = status === null ? sending : expect(sending).rejects.toMatchObject({ status });
+  requests[0].responder(null, status === null ? undefined : { status });
+  await result;
+  expect(readDraft('srv1', 'sess')).toMatchObject({ text: 'Próxima mensagem', revision: 9,
+    submission: status === null ? null : { text, draftRevision: 8, status: status === 400 ? 'rejected' : 'unknown' } });
+});
+
 test('ACK limpa campo da mesma revisão e conserva demais metadados do rascunho', async () => {
   writeDraft('srv1', 'sess', { version: 1, text: 'legenda', revision: 7, transcript: '/first',
     attachments: [{ uri: 'file:///own/image', name: 'image.jpg', mime: 'image/jpeg', kind: 'image' }], submission: null });
