@@ -582,7 +582,7 @@ mod tests {
             std::env::var("PATH").unwrap()
         );
         let home = root.path().to_string_lossy().into_owned();
-        let service = AccountService::new(AccountEnvironment::from_map(
+        let mut service = AccountService::new(AccountEnvironment::from_map(
             [
                 ("HOME".into(), home.clone()),
                 ("USERPROFILE".into(), home),
@@ -595,6 +595,9 @@ mod tests {
             )
             .collect(),
         ));
+        // A CLI falsa é um `node`: no Windows do CI a subida dele passa dos 10 s de produção, e o que este teste
+        // mede é a janela de 300 s.
+        service.claude_auth.cli_timeout = Some(Duration::from_secs(3600));
         let account = service
             .create(Provider::Claude, "work", |_| Ok(()))
             .unwrap();
@@ -722,7 +725,7 @@ mod tests {
             std::env::var("PATH").unwrap()
         );
         let home = root.path().to_string_lossy().into_owned();
-        let service = AccountService::new(AccountEnvironment::from_map(
+        let mut service = AccountService::new(AccountEnvironment::from_map(
             [
                 ("HOME".into(), home.clone()),
                 ("USERPROFILE".into(), home),
@@ -735,6 +738,9 @@ mod tests {
             )
             .collect(),
         ));
+        // A CLI falsa é um `node`: no Windows do CI a subida dele passa dos 10 s de produção, e o que este teste
+        // mede é o cancelar entre duas leituras.
+        service.claude_auth.cli_timeout = Some(Duration::from_secs(3600));
         let account = service
             .create(Provider::Claude, "work", |_| Ok(()))
             .unwrap();

@@ -19,6 +19,9 @@ type CacheEntry = (tokio::time::Instant, Option<Vec<u8>>, u64, Value);
 pub struct AuthCache {
     entries: Arc<Mutex<HashMap<AccountKey, CacheEntry>>>,
     generations: Arc<Mutex<HashMap<AccountKey, u64>>>,
+    /// Prazo da CLI do Claude; `None` = o de produção (10 s, 20 s no `mcp list`). Teste que mede outro prazo
+    /// injeta um que a subida da CLI falsa nunca alcança.
+    pub(super) cli_timeout: Option<Duration>,
 }
 impl AuthCache {
     pub fn invalidate(&self, key: &AccountKey) {
@@ -178,8 +181,9 @@ impl AccountService {
             return Err("cli_failed");
         }
         let mut stdout = child.stdout.take().unwrap().take(65537);
-        let timeout = if args == ["mcp", "list"] {20} else {10};
-        let result = tokio::time::timeout(Duration::from_secs(timeout), async {
+        let timeout = self.claude_auth.cli_timeout
+            .unwrap_or(Duration::from_secs(if args == ["mcp", "list"] {20} else {10}));
+        let result = tokio::time::timeout(timeout, async {
             let mut bytes = vec![];
             stdout
                 .read_to_end(&mut bytes)
