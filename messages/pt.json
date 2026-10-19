@@ -3913,8 +3913,6 @@
   "versao_reiniciar": "Hangar {versao} · código novo no disco, falta reiniciar",
   "atualizar_procurar_falhou": "Não consegui falar com a máquina.",
   "atualizar_com_mudancas_locais": "com alterações locais não salvas no repositório",
-  "atualizar_parcial_titulo": "Atualização incompleta",
-  "atualizar_parcial_build": "Atualização incompleta: chegou até {commit}. Aguardando o build do servidor Rust para avançar até a versão mais nova.",
   "atualizar_resposta_invalida": "O servidor não confirmou o início da operação: resposta inválida.",
   "atualizar_com_avisos": "Atualizado, mas algo ficou pendente:",
   "atualizar_shell_mudou": "A janela do app também mudou nesta versão: feche e abra o Hangar para ela valer (o servidor já está no código novo).",

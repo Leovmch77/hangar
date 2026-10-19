@@ -44,10 +44,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `paths` do push no `.github/workflows/server.yml` de lá, nunca recua, e o download usa o manifesto lido na
   escolha; sem ler a lista, para no commit do binário. Só binário de commit fora de `origin/<branch>`
   cai no commit mais novo com o mesmo número. A tela conta as mudanças até esse commit e também oferece atualizar quando o binário
-  instalado não é o publicado (código em dia, binário que saiu depois). Atrás do topo, a tela avisa que aguarda o build do servidor Rust e é
-  compilada aqui (também no Reiniciar); checkout já à frente com binário de outro contrato também
-  avisa. O resultado abaixo do topo leva `waiting_for_server_build` e o commit alcançado aos clientes,
-  que mostram a pendência, sem anunciar atualização completa. Sem Rust (`CP_RUST_SERVER=0`) ou sem release própria de branch fora da main (404): topo,
+  instalado não é o publicado (código em dia, binário que saiu depois). Atrás do topo, a tela é
+  compilada aqui (também no Reiniciar) e a atualização até o último binário publicado é completa e
+  normal: build pendente no CI não vira aviso nem "incompleta" em nenhum cliente, só o registro
+  `atualizacao.limitada_ao_binario` no diário; o servidor ainda zera `waiting_for_server_build` para
+  cliente antigo. O botão de cima do nativo segura o app novo enquanto o servidor desta máquina espera
+  o build, para um clique levar os dois. Checkout já à frente com binário de outro contrato continua
+  avisando. Evidência em [Build pendente não é aviso](#build-pendente-no-ci-não-é-aviso-19102026). Sem Rust (`CP_RUST_SERVER=0`) ou sem release própria de branch fora da main (404): topo,
   como antes, calado. Sem como conferir (rede, git, 404 na release da main, sem build deste
   sistema no manifesto, commit ilegível): o checkout só avança no contrato que já tem, com aviso
   na tela (checkout sem contrato vai ao topo), e o auto-update espera; ele só avança com o topo
@@ -927,3 +930,18 @@ compilado; a data do commit não serve, porque um commit pode ser mais velho que
 trazer mudança). O LTO completo ficou: o Jefferson preferiu manter o binário como está.
 Consequência: o publish do Linux no Server passa a esperar os builds e testes dos três sistemas
 (`needs` de matriz), em vez de sair assim que o Linux terminava.
+
+## Build pendente no CI não é aviso (19/10/2026)
+
+Decisão do Jefferson: quando o commit mais novo ainda não tem o binário do servidor Rust publicado
+para o sistema, a atualização vai até o último commit que tem e isso é uma atualização completa. A
+pessoa que atualiza não tem como consertar um build pendente ou vermelho no CI; mostrar "Atualização
+incompleta: … aguardando o build do servidor Rust" a cada clique era um erro sem saída. Medido no
+mesmo dia: a DELPHI-02 ficou em `f086898f` enquanto dois pushes seguidos tiveram testes instáveis de
+Windows (`artifacts_truncation…`, `claude_login`) segurando a publicação, e o aviso aparecia nas três
+telas. Ao mesmo tempo, o botão de cima do nativo atualizava só o app: a release do `Native` sai antes
+do binário do `Server`, o servidor "atualizava" até o commit que já tinha e o app novo instalava
+sozinho. Agora o app novo espera o build do servidor desta máquina (`plan()` em
+`desktop-native/src/update.rs`), e o aviso, o título "incompleta" e o estado `Pending`/`partial`
+saíram do nativo, do PWA e do app; o diário guarda `atualizacao.limitada_ao_binario` como registro
+normal.

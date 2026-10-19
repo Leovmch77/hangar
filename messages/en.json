@@ -3913,8 +3913,6 @@
   "versao_reiniciar": "Hangar {versao} · new code on disk, restart pending",
   "atualizar_procurar_falhou": "Could not reach the machine.",
   "atualizar_com_mudancas_locais": "with local changes not committed to the repository",
-  "atualizar_parcial_titulo": "Update incomplete",
-  "atualizar_parcial_build": "Update incomplete: reached {commit}. Waiting for the Rust server build before advancing to the latest version.",
   "atualizar_resposta_invalida": "The server did not confirm that the operation started: invalid response.",
   "atualizar_com_avisos": "Updated, but something was left pending:",
   "atualizar_shell_mudou": "The app window also changed in this version: close and reopen Hangar for it to take effect (the server is already on the new code).",

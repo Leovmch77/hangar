@@ -232,7 +232,7 @@
     reiniciando = false; reinicioErro = ''; reinicioFeito = false; reinicioRecusado = false; idSalvo = false;
     reinicioAguardando = false; reinicioHora = '';
     confirmarAtualizacao = false; atualizando = false; atualizacaoAguardando = false;
-    atualizacaoEtapa = null; atualizacaoErro = ''; atualizacaoHora = ''; partialUpdate = ''; atualizacaoManual = false;
+    atualizacaoEtapa = null; atualizacaoErro = ''; atualizacaoHora = ''; atualizacaoManual = false;
     // Gravação em voo pertence ao alvo que saiu da tela: sem isto o campo fica `readonly`
     // e o Confirmar do diálogo nasce desabilitado, para sempre, no alvo novo.
     idSalvando = false;
@@ -514,7 +514,6 @@
   let atualizacaoEtapa = $state<{ passo: number; total: number; texto: string } | null>(null);
   let atualizacaoErro = $state('');
   let atualizacaoHora = $state('');
-  let partialUpdate = $state('');
   let atualizacaoManual = $state(false);   // código novo no disco, reinício ainda por fazer
   const servicoOcupado = $derived(reiniciando || reinicioAguardando || atualizando || atualizacaoAguardando);
 
@@ -523,7 +522,7 @@
     if (servicoOcupado) return;
     const meu = geracao;
     atualizando = true;
-    atualizacaoErro = ''; atualizacaoHora = ''; partialUpdate = ''; atualizacaoManual = false; atualizacaoEtapa = null;
+    atualizacaoErro = ''; atualizacaoHora = ''; atualizacaoManual = false; atualizacaoEtapa = null;
     try {
       const { pid } = await iniciarAtualizacaoEm(apiTarget);
       if (meu !== geracao) return;
@@ -559,7 +558,6 @@
         }
         if (estado.pid !== pid || estado.fase !== 'pronto') continue;
         if (!estado.ok) atualizacaoErro = estado.erro || m.atualizar_falhou_titulo();
-        else if (estado.waiting_for_server_build) partialUpdate = m.atualizar_parcial_build({ commit: estado.commit_para?.slice(0, 8) || '—' });
         else if (estado.reiniciar_manual) atualizacaoManual = true;
         else atualizacaoHora = new Date(estado.ts ?? Date.now()).toLocaleTimeString();
         return;
@@ -877,7 +875,6 @@
         <p class="id-ok sv-atualizacao" role="status">{atualizacaoEtapa && atualizacaoEtapa.total
           ? m.maquinas_atualizar_etapa({ passo: atualizacaoEtapa.passo, total: atualizacaoEtapa.total, texto: atualizacaoEtapa.texto })
           : m.atualizar_rodando_titulo()}</p>
-      {:else if partialUpdate}<p class="id-aviso sv-atualizacao" role="status">{partialUpdate}</p>
       {:else if atualizacaoHora}<p class="id-ok sv-atualizacao" role="status">{m.maquinas_atualizar_feito({ hora: atualizacaoHora })}</p>
       {:else if atualizacaoManual}<p class="id-aviso sv-atualizacao" role="status">{m.atualizar_pronto_reiniciar()}</p>{/if}
       {#if atualizacaoErro}<p class="id-erro sv-atualizacao" role="alert">{atualizacaoErro}</p>{/if}

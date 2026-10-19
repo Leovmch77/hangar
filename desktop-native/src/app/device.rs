@@ -102,7 +102,7 @@ pub(super) struct ServerVersion { version: String, local: bool, ts: Option<Strin
 
 /// Onde está a atualização que este app mandou (ou achou rodando).
 #[derive(Clone, PartialEq)]
-enum Run { Starting, Uncertain, Running { step: u64, total: u64, text: String }, Restarting, Done { ok: bool, text: String }, Pending(String) }
+enum Run { Starting, Uncertain, Running { step: u64, total: u64, text: String }, Restarting, Done { ok: bool, text: String } }
 
 #[derive(Default)]
 pub(super) struct Device {
@@ -154,7 +154,7 @@ impl Device {
         device
     }
     fn rate_value(&self) -> Option<f64> { self.rate.ok().copied().flatten() }
-    fn run_active(&self) -> bool { self.run.as_ref().is_some_and(|run| !matches!(run, Run::Done { .. } | Run::Pending(_))) }
+    fn run_active(&self) -> bool { self.run.as_ref().is_some_and(|run| !matches!(run, Run::Done { .. })) }
 }
 
 pub(super) enum DeviceReply {
@@ -488,21 +488,12 @@ impl Hangar {
             }
             DeviceReply::About(seq, search, result) => {
                 let pending_count = result.as_ref().ok().map(pending);
-                let partial = result.as_ref().ok().and_then(|value| {
-                    let state = &value["estado"];
-                    (state["fase"].as_str() == Some("pronto") && state["ok"].as_bool() == Some(true))
-                        .then(|| crate::update::partial_update_message(state)).flatten()
-                });
                 let running = result.as_ref().ok().and_then(|v| v.pointer("/estado/fase")).and_then(Value::as_str) == Some("rodando");
                 let failure = result.as_ref().err().map(Self::failure);
                 if !self.device.about.finish(seq, result.map(|v| parse_version(&v)).map_err(|e| Self::failure(&e))) { return; }
                 if search {
                     self.device.searching = false;
                     self.device.search = Some(pending_count.ok_or_else(|| failure.unwrap_or_default()));
-                }
-                if !self.device.run_active() {
-                    if let Some(message) = partial { self.device.run = Some(Run::Pending(message)); }
-                    else if matches!(self.device.run, Some(Run::Pending(_))) { self.device.run = None; }
                 }
                 // Atualização em curso, mandada daqui antes ou por outra tela: acompanha.
                 if running && !self.device.run_active() {
@@ -545,8 +536,7 @@ impl Hangar {
                                 self.finish_update(false, tr("update_not_started"), cx),
                             "pronto" => {
                                 let ok = state.get("ok").and_then(Value::as_bool) == Some(true);
-                                let pending = ok.then(|| crate::update::partial_update_message(&state)).flatten();
-                                let message = if let Some(message) = &pending { message.clone() } else if !ok {
+                                let message = if !ok {
                                     // O modelo da frase já fecha com ponto.
                                     let reason = Some(text("erro").trim_end_matches('.').to_owned()).filter(|e| !e.is_empty()).unwrap_or_else(|| "?".into());
                                     let back = state.get("voltou").and_then(Value::as_bool) == Some(true);
@@ -557,7 +547,6 @@ impl Hangar {
                                     tr("update_done").replace("{version}", &parse_version(&value).version)
                                 };
                                 self.finish_update(ok, message, cx);
-                                if let Some(message) = pending { self.device.run = Some(Run::Pending(message)); }
                             }
                             _ => {}
                         }
@@ -814,9 +803,8 @@ impl Hangar {
                 Run::Running { .. } => (tr("update_running"), None, theme::muted()),
                 Run::Done { ok: true, text } => (text.clone(), Some(100.), theme::success()),
                 Run::Done { ok: false, text } => (text.clone(), None, theme::danger()),
-                Run::Pending(text) => (text.clone(), None, theme::warning()),
             };
-            let done = matches!(run, Run::Done { .. } | Run::Pending(_));
+            let done = matches!(run, Run::Done { .. });
             div().mt(px(-1.)).border_t_1().border_color(theme::border()).px_4().py(px(14.)).flex().flex_col().gap(px(10.))
                 .when(!done, |el| el.child(Progress::new("update-progress").accessibility_label(tr("settings_about_update"))
                     .map(|bar| match value { Some(v) => bar.value(v), None => bar.loading(true) })))

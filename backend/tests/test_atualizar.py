@@ -1502,8 +1502,8 @@ def test_topo_sem_binario_para_no_commit_do_binario_publicado(repo, rust):
     final = atualizar.executar()
     assert final["ok"] is True
     assert _rev(repo, "HEAD") == rust["binario_35"] != rust["ultimo_35"]
-    assert final["avisos"] == ["aguardando o build do servidor Rust para este sistema (compilando, ou o build "
-                               f"falhou): a versão mais nova muda o contrato com ele; atualizado até {rust['binario_35'][:8]}"]
+    # Build pendente no CI não é aviso: quem atualiza não tem o que fazer com ele.
+    assert final["avisos"] == [] and final["waiting_for_server_build"] is False
     assert rust["pedidos"] == [f"{atualizar.rust_release.RELEASES_URL}/server-latest"]
     # O download usa o manifesto da escolha, e a tela (também no Reiniciar) é compilada aqui.
     assert rust["preparo"]["release"][2] is rust["manifesto"]
@@ -1559,7 +1559,7 @@ def test_main_recebe_branch_que_mesclou_o_build_publicado(repo, rust, build_chan
 
     assert final["ok"] is True
     assert _rev(repo, "HEAD") == expected
-    assert final["waiting_for_server_build"] is (build_change == "pending")
+    assert final["waiting_for_server_build"] is False and final["avisos"] == []
 
 
 def test_build_deste_sistema_atrasado_no_manifesto_por_sistema(repo, rust):
@@ -1699,7 +1699,7 @@ def test_merge_que_muda_o_contrato_conta_pelo_primeiro_pai(repo, rust):
     _git(obra, "push", "-q", "origin", "main")
     rust["manifesto"]["commit"] = rust["topo"]       # o 36, antes do merge
     final = atualizar.executar()
-    assert _rev(repo, "HEAD") == rust["topo"] and final["avisos"]
+    assert _rev(repo, "HEAD") == rust["topo"] and final["avisos"] == []
 
 
 

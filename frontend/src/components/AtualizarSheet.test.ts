@@ -64,18 +64,16 @@ describe('em dia', () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it('atualização parcial mostra até onde foi e a espera pelo build, sem dizer tudo em dia', async () => {
+  it('build pendente no CI não vira atualização incompleta: o campo de servidor antigo é ignorado', async () => {
     vi.spyOn(api, 'getAtualizacao').mockResolvedValue(base({ estado: {
       fase: 'pronto', ok: true, waiting_for_server_build: true, commit_para: '991bb4f123456789',
-      avisos: ['fixture-build-pending'],
+      avisos: ['fixture-warning'],
     } }));
     montar();
     await tick();
     await tick();
-    expect(document.body.textContent).toContain('991bb4f1');
-    expect(document.body.textContent).toContain('fixture-build-pending');
-    expect(document.body.textContent).not.toContain(m.atualizar_em_dia_titulo());
-    expect(document.body.textContent).not.toContain(m.atualizar_com_avisos());
+    expect(document.body.textContent).toContain(m.atualizar_em_dia_titulo());
+    expect(document.body.textContent).not.toContain('991bb4f1');
   });
 
   it('mostra uma versão só quando disco e servidor batem', async () => {

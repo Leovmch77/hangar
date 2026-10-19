@@ -1253,7 +1253,7 @@ describe('MaquinasSettings — atualizar o servidor escolhido', () => {
     }
   });
 
-  it('atualização parcial mostra commit e pendência sem resultado verde', async () => {
+  it('build pendente no CI não vira atualização incompleta: vale o resultado normal', async () => {
     vi.useFakeTimers();
     rede(() => json({ ok: true, pid: 42 }), [{ fase: 'pronto', pid: 42, ok: true,
       waiting_for_server_build: true, commit_para: '991bb4f123456789', reiniciar_manual: true }]);
@@ -1261,9 +1261,8 @@ describe('MaquinasSettings — atualizar o servidor escolhido', () => {
     try {
       await andar(2000);
       const result = document.querySelector('.sv-atualizacao')!;
-      expect(result.textContent).toContain('991bb4f1');
-      expect(result.classList.contains('id-aviso')).toBe(true);
-      expect(result.classList.contains('id-ok')).toBe(false);
+      expect(result.textContent).toContain(m.atualizar_pronto_reiniciar());
+      expect(result.textContent).not.toContain('991bb4f1');
     } finally {
       unmount(comp);
       vi.useRealTimers();

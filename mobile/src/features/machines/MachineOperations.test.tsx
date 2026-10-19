@@ -55,13 +55,13 @@ describe('operações da máquina explícita', () => {
     expect(el.textContent).toContain('fixture-warning');
   });
 
-  it('atualização parcial mostra commit e pendência sem anunciar conclusão', async () => {
+  it('build pendente no CI não vira atualização incompleta: anuncia a conclusão', async () => {
     mocks.fetch.mockImplementation(async (_url, init) => init?.method === 'POST' ? json({ ok: true, pid: 77 }) : json({ estado: {
       pid: 77, fase: 'pronto', ok: true, waiting_for_server_build: true, commit_para: '991bb4f123456789',
     } }));
     await render(); await click(m.mobile_machines_update()); await act(async () => confirm()()); await tick();
-    expect(el.textContent).toContain('991bb4f1');
-    expect(el.textContent).not.toContain(m.mobile_machines_operation_ready());
+    expect(el.textContent).toContain(m.mobile_machines_operation_ready());
+    expect(el.textContent).not.toContain('991bb4f1');
   });
 
   it('reinício Windows confirma pela tentativa mesmo com pid diferente do lançador', async () => {

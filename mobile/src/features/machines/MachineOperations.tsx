@@ -114,9 +114,7 @@ function OperationControls({ server }: { server: Server }) {
       {busy ? <Notice text={m.mobile_machines_busy()} /> : null}
       {result?.fase === 'rodando' ? <Notice text={m.mobile_machines_progress({ step: String(result.passo ?? 0), total: String(result.total ?? 0), text: result.texto ?? '' })} /> : null}
       <Notice text={action.error} error />
-      {result?.fase === 'pronto' && result.ok === true && result.waiting_for_server_build
-        ? <Notice text={m.atualizar_parcial_build({ commit: result.commit_para?.slice(0, 8) || '—' })} />
-        : <Notice text={action.message} />}
+      <Notice text={action.message} />
       {result?.reiniciar_manual ? <Notice text={m.mobile_machines_restart_manual()} /> : null}
       {Array.isArray(result?.avisos) ? result.avisos.filter((warning): warning is string => typeof warning === 'string').map((warning, index) => <Notice key={index} text={m.mobile_machines_warning({ reason: warning })} />) : null}
       {Array.isArray(result?.passos_invalidos) && result.passos_invalidos.length ? <Notice text={m.mobile_machines_warning({ reason: result.passos_invalidos.join(', ') })} /> : null}

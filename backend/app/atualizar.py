@@ -1083,6 +1083,7 @@ def _executar(porta: int) -> dict:
     # `systemctl list-unit-files` — todos passam pelo `_log_do_estado`, que lê, mescla e regrava o
     # estado. Zerando depois, todo esse trabalho ia pro lixo e a etapa de checagem nunca aparecia
     # no terminalzinho, mesmo tendo sido registrada.
+    # `waiting_for_server_build` só é zerado: cliente antigo ainda lê o campo e mostraria um `True` velho.
     _escrever(fase="rodando", ok=None, erro=None, resgate=None, voltou=None, no_ar=None,
               commit_de="", commit_para=None, pid=os.getpid(), backend_pid=_launching_backend(),
               reiniciar_manual=False, shell_mudou=False, waiting_for_server_build=False,
@@ -1127,9 +1128,9 @@ def _executar(porta: int) -> dict:
                 _avisar(f"o binário do Rust publicado para este sistema (commit {binary[0][:8]}) fala outro "
                         "contrato que este código; o Python atende sozinho até sair o binário novo")
             elif _behind_top():
-                _escrever(waiting_for_server_build=True)
-                _avisar(f"aguardando o build do servidor Rust para este sistema (compilando, ou o build "
-                        f"falhou): a versão mais nova muda o contrato com ele; atualizado até {para[:8]}")
+                # Topo ainda sem binário para este sistema: a atualização vai até o último publicado e está
+                # completa; quem usa não tem o que fazer com um build pendente no CI.
+                diag.registrar("atualizacao.limitada_ao_binario", detalhe=para[:8])
 
         _etapa("passos")
         _aplicar_passos()

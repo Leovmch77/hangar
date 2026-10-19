@@ -1039,7 +1039,7 @@ export interface AtualizacaoEstado {
   shell_mudou?: boolean;
   commit_de?: string;
   commit_para?: string;
-  /** O código parou no último commit compatível com o servidor Rust publicado. */
+  /** Só servidor antigo manda: build pendente no CI não é estado de atualização, e os clientes ignoram. */
   waiting_for_server_build?: boolean;
   ts?: string;
 }

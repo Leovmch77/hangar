@@ -371,15 +371,8 @@ pub(crate) fn restart_result_matches(state: &Value, pid: i64, request_id: Option
     }
 }
 
-pub(crate) fn partial_update_message(state: &Value) -> Option<String> {
-    if state["waiting_for_server_build"].as_bool() != Some(true) { return None; }
-    let commit = state["commit_para"].as_str().filter(|s| !s.is_empty()).unwrap_or("—");
-    let short: String = commit.chars().take(8).collect();
-    Some(crate::i18n::tr_shared("atualizar_parcial_build", &[("commit", &short)]))
-}
-
 #[derive(Debug, PartialEq)]
-enum Outcome { Updated, UpdatedManual, Partial(String), Failed(String) }
+enum Outcome { Updated, UpdatedManual, Failed(String) }
 
 #[derive(Debug, PartialEq)]
 enum Follow { Running { step: u64, total: u64, text: String }, Waiting, NotStarted, Done(Outcome) }
@@ -395,7 +388,6 @@ fn follow(state: &Value, saw_running: bool, baseline: Option<&str>) -> Follow {
             let reason = Some(text("erro").trim_end_matches('.').to_owned()).filter(|e| !e.is_empty()).unwrap_or_else(|| "?".into());
             Follow::Done(Outcome::Failed(reason))
         }
-        Some("pronto") if partial_update_message(state).is_some() => Follow::Done(Outcome::Partial(partial_update_message(state).unwrap())),
         Some("pronto") if state["reiniciar_manual"].as_bool() == Some(true) => Follow::Done(Outcome::UpdatedManual),
         Some("pronto") => Follow::Done(Outcome::Updated),
         _ => Follow::Waiting,
@@ -792,14 +784,6 @@ impl Updater {
         let manual = matches!(outcome, Outcome::UpdatedManual);
         match outcome {
             Outcome::Failed(reason) => return self.fail(tr("update_failed").replace("{reason}", &reason), cx),
-            Outcome::Partial(message) => {
-                self.run = Run::Idle;
-                window.push_notification(Notification::warning(message).autohide(false).id::<Updater>(), cx);
-                if self.offer.is_some() { return self.install_app(window, cx); }
-                self.refresh_server(cx);
-                self.refresh_active(cx);
-                return;
-            }
             Outcome::Updated | Outcome::UpdatedManual => {}
         }
         self.run = Run::Idle;
@@ -1151,13 +1135,12 @@ mod tests {
     }
 
     #[test]
-    fn partial_update_is_not_complete_even_when_restart_is_manual() {
-        let state = serde_json::json!({"fase": "pronto", "ok": true, "ts": "t1", "reiniciar_manual": true,
-            "waiting_for_server_build": true, "commit_para": "991bb4f123456789"});
-        assert!(!matches!(follow(&state, true, Some("t0")), Follow::Done(Outcome::Updated | Outcome::UpdatedManual)));
-        let Follow::Done(Outcome::Partial(message)) = follow(&state, true, Some("t0")) else { panic!("missing partial result") };
-        assert!(message.contains("991bb4f1"));
-        assert!(plan(APP, Some("0.1.0.140"), None).app);
+    fn an_update_capped_at_the_last_published_build_is_a_normal_update() {
+        // Servidor antigo ainda manda o campo: build pendente no CI não é falha nem aviso para quem atualiza.
+        let state = serde_json::json!({"fase": "pronto", "ok": true, "ts": "t1", "waiting_for_server_build": true, "commit_para": "991bb4f123456789"});
+        assert_eq!(follow(&state, true, Some("t0")), Follow::Done(Outcome::Updated));
+        let manual = serde_json::json!({"fase": "pronto", "ok": true, "ts": "t1", "reiniciar_manual": true, "waiting_for_server_build": true});
+        assert_eq!(follow(&manual, true, Some("t0")), Follow::Done(Outcome::UpdatedManual));
     }
 
     #[test]

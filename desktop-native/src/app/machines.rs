@@ -372,7 +372,7 @@ pub(super) enum PeerWrite { Enabled(bool), Removed }
 
 /// Como o reinício terminou, lido do estado que o motor grava (`fase: pronto`, casado pelo pid do pedido).
 pub(super) enum RestartEnd { Done(Option<String>), Failed(Option<String>), Unconfirmed }
-pub(super) enum UpgradeEnd { Done { ts: Option<String>, manual: bool, partial: Option<String>, warnings: Vec<String> }, Failed(Option<String>), Unconfirmed }
+pub(super) enum UpgradeEnd { Done { ts: Option<String>, manual: bool, warnings: Vec<String> }, Failed(Option<String>), Unconfirmed }
 
 /// O que a atualização terminou deixando pendente (`avisos` do estado), como o web lista em "algo ficou pendente".
 fn update_warnings(state: &Value) -> Vec<String> {
@@ -427,7 +427,6 @@ struct Upgrade {
     step: Option<(u64, u64, String)>,
     at: Option<String>,
     manual: bool,
-    partial: Option<String>,
     warnings: Vec<String>,
     error: Option<String>,
     task: Option<JoinHandle<()>>,
@@ -827,7 +826,6 @@ impl Hangar {
         let u = &mut self.machines.upgrade;
         u.seq += 1;
         (u.asking, u.step, u.at, u.manual, u.error) = (true, None, None, false, None);
-        u.partial = None;
         u.warnings.clear();
         let (seq, done) = (u.seq, self.machines_send_later());
         self.runtime.spawn(async move { done(MachinesReply::Upgrade(seq, api.server_post(&["atualizacao", "iniciar"], 30).await)).await });
@@ -859,7 +857,6 @@ impl Hangar {
                 if state["pid"].as_i64() != pid || state["fase"].as_str() != Some("pronto") { continue; }
                 break if state["ok"].as_bool() == Some(true) {
                     UpgradeEnd::Done { ts: text("ts"), manual: state["reiniciar_manual"].as_bool() == Some(true),
-                        partial: crate::update::partial_update_message(state),
                         warnings: update_warnings(state) }
                 } else { UpgradeEnd::Failed(text("erro")) };
             };
@@ -989,7 +986,6 @@ impl Hangar {
                 (u.waiting, u.task, u.step) = (false, None, None);
                 if let UpgradeEnd::Done { warnings, .. } = &end { u.warnings.clone_from(warnings); }
                 match end {
-                    UpgradeEnd::Done { partial: Some(message), .. } => u.partial = Some(message),
                     UpgradeEnd::Done { manual: true, .. } => u.manual = true,
                     UpgradeEnd::Done { ts, .. } => {
                         let local = ts.and_then(|ts| chrono::DateTime::parse_from_rfc3339(&ts).ok()).map(|t| t.with_timezone(&chrono::Local))
@@ -1789,8 +1785,7 @@ impl Hangar {
             Some((u.step.as_ref().filter(|(_, total, _)| *total > 0).map(|(step, total, text)| tr("update_step")
                 .replace("{step}", &step.to_string()).replace("{total}", &total.to_string()).replace("{text}", text))
                 .unwrap_or_else(|| tr("update_running")), theme::muted()))
-        } else if let Some(message) = &u.partial { Some((message.clone(), theme::warning())) }
-        else if let Some(at) = &u.at { Some((tr("machines_updated").replace("{hora}", at), theme::success())) }
+        } else if let Some(at) = &u.at { Some((tr("machines_updated").replace("{hora}", at), theme::success())) }
         else if u.manual { Some((tr("update_done_manual"), theme::warning())) } else { None };
         let upgrade_error = u.error.clone();
         let upgrade_warnings = (!u.busy() && !u.warnings.is_empty()).then(|| u.warnings.clone());

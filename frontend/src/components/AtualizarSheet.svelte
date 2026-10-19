@@ -47,7 +47,6 @@
 
   const estado = $derived(dados?.estado ?? {});
   const rodando = $derived(estado.fase === 'rodando');
-  const partialUpdate = $derived(estado.fase === 'pronto' && estado.ok === true && estado.waiting_for_server_build === true);
   const falhou = $derived(estado.fase === 'pronto' && estado.ok === false);
   const temNovidade = $derived(!!dados?.atualizacao_disponivel);
   const mudancas = $derived(dados?.mudancas ?? []);
@@ -114,7 +113,7 @@
         // Com pendência, NÃO recarrega sozinho: o reload some com a caixa, e com ela o único lugar
         // onde o aviso aparece — a pessoa nunca saberia que a janela nativa ficou quebrada. Aqui
         // ela lê e fecha quando quiser.
-        if (estado.ok === true && !faltaReiniciar && !avisos.length && !shellMudou && !partialUpdate) concluir();
+        if (estado.ok === true && !faltaReiniciar && !avisos.length && !shellMudou) concluir();
       } catch (e) {
         // REGISTRA, não engole. O `catch {}` vazio que estava aqui escondia exatamente a classe de
         // erro que esta instrumentação existe pra pegar — e não protegia nada: no navegador, uma
@@ -248,7 +247,7 @@
     });
   }
   const terminouComAvisos = $derived(estado.fase === 'pronto' && estado.ok === true
-                                     && (avisos.length > 0 || shellMudou || partialUpdate));
+                                     && (avisos.length > 0 || shellMudou));
   const decorrido = $derived.by(() => {
     if (!rodando || !estado.etapa_inicio) return '';
     const s = Math.max(0, Math.round((agoraMs - new Date(estado.etapa_inicio).getTime()) / 1000));
@@ -386,8 +385,8 @@
       {/if}
 
     {:else if terminouComAvisos}
-      <h2 class="titulo">{partialUpdate ? m.atualizar_parcial_titulo() : m.atualizar_em_dia_titulo()}</h2>
-      <p class="sub">{partialUpdate ? m.atualizar_parcial_build({ commit: estado.commit_para?.slice(0, 8) || '—' }) : m.atualizar_com_avisos()}</p>
+      <h2 class="titulo">{m.atualizar_em_dia_titulo()}</h2>
+      <p class="sub">{m.atualizar_com_avisos()}</p>
       <ul class="avisos">
         {#if shellMudou}<li>{m.atualizar_shell_mudou()}</li>{/if}
         {#if reabrirFalhou}<li>{m.atualizar_reabrir_falhou()}</li>{/if}
