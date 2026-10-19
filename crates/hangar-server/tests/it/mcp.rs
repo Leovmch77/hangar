@@ -21,7 +21,10 @@ struct Scene { addr: SocketAddr, python: Arc<fake::Fake>, home: PathBuf, _dir: t
 
 /// Sessões `s0` (pane `%0`) e `s1` (`%1`) com conversa; `beta` com os panes `%1` (repetido, como no
 /// psmux) e `%7`; `sem-term` sem terminal, de chave `k123`; o Python falso atrás.
-async fn scene() -> Scene {
+async fn scene() -> Scene { scene_with(false).await }
+
+/// `groups`: o serviço de grupo do Rust sobre `home/.claude/.hangar-pair` (sem ele, grupo segue ao Python).
+async fn scene_with(groups: bool) -> Scene {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     list_support::sessions(root, 2);
@@ -44,6 +47,11 @@ async fn scene() -> Scene {
     state.side.locate = Arc::new(hangar_server::locate::ListLocate { list });
     state.pages = Arc::new(hangar_server::pages::store::Store::new(root.join("paginas")));
     state.chromium = || None;
+    if groups {
+        use hangar_server::groups::{orq::PythonOrq, service::GroupService, store::PairDir};
+        let pair = PairDir::new(home.join(".claude/.hangar-pair"), root.join("arquivo"));
+        state.groups = Some(Arc::new(GroupService::new(pair, Arc::new(PythonOrq::from_state(&state)), "casa".into())));
+    }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = router(Arc::new(state)).into_make_service_with_connect_info::<SocketAddr>();
@@ -64,7 +72,9 @@ impl Mcp {
         let mut mcp = Mcp { addr, headers: headers.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect(), session: None, next: 0 };
         let init = mcp.request("initialize", json!({"protocolVersion": "2025-06-18", "capabilities": {},
             "clientInfo": {"name": "teste", "version": "0"}})).await;
-        assert_eq!(init["result"]["instructions"], PYTHON_INSTRUCTIONS, "{init}");
+        // Tools que nasceram depois do Python entram no fim do texto dele.
+        let instructions = init["result"]["instructions"].as_str().unwrap_or_default();
+        assert!(instructions.starts_with(PYTHON_INSTRUCTIONS.trim_end_matches('.')), "{init}");
         let accepted = mcp.post(json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).send().await.unwrap();
         assert_eq!(accepted.status(), 202);
         mcp
@@ -121,10 +131,12 @@ async fn catalog_is_the_python_one_with_the_whole_open_request() {
     let s = scene().await;
     let mut mcp = Mcp::open(s.addr, &[]).await;
     let listed = mcp.request("tools/list", json!({})).await["result"]["tools"].clone();
+    // Tools que nasceram depois do Python (ele não tem mais MCP) ficam fora da comparação.
+    let listed: Vec<Value> = listed.as_array().unwrap().iter().filter(|t| t["name"] != "interrupt").cloned().collect();
     let python: Vec<Value> = serde_json::from_str(PYTHON_CATALOG).unwrap();
     let names = |tools: &[Value]| tools.iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
-    assert_eq!(names(listed.as_array().unwrap()), names(&python), "mesmas 14 tools, na mesma ordem");
-    for (rust, python) in listed.as_array().unwrap().iter().zip(&python) {
+    assert_eq!(names(&listed), names(&python), "as 14 tools do Python, na mesma ordem");
+    for (rust, python) in listed.iter().zip(&python) {
         if python["name"] != "new_session" {
             assert_eq!(rust, python, "{} igual ao Python", python["name"]);
             continue;
@@ -270,6 +282,25 @@ async fn close_session_refuses_itself_remote_and_unknown() {
     let voice = hangar_server::voice::machines::voice_signature(SECRET).unwrap();
     let refused = Mcp::open(s.addr, &[("x-hangar-voice", &voice)]).await.call("close_session", json!({"alvo": "outra"})).await;
     assert!(failed(&refused) && first_text(&refused).contains("sim"), "fechar pela voz só com o sim falado");
+}
+
+/// `interrupt` só passa para o pai ligado ainda no grupo da filha; passando, é a rota `/interrupt` de sempre.
+#[tokio::test(flavor = "multi_thread")]
+async fn interrupt_only_reaches_a_linked_child() {
+    let s = scene_with(true).await;
+    write_json(&s.home.join(".hangar/codex-sessions/outra.json"), json!({"name": "outra"}));
+    let mut mcp = Mcp::open(s.addr, &[("x-hangar-pane", "%7")]).await;
+    let refused = mcp.call("interrupt", json!({"alvo": "outra"})).await;
+    assert!(failed(&refused) && first_text(&refused).starts_with("erro_interromper_nao_ligada"), "sem grupo: {refused}");
+    let sidecar = s.home.join(".claude/.hangar-pair/outra.json");
+    write_json(&sidecar, json!({"peers": ["s0"], "task": "", "gid": "g1", "harness": {}, "linked_by": "s0"}));
+    let other = mcp.call("interrupt", json!({"alvo": "outra"})).await;
+    assert!(failed(&other) && first_text(&other).starts_with("erro_interromper_nao_ligada"), "filha de outro pai: {other}");
+    assert_eq!(s.python.hits_to("/api/sessions/outra/interrupt"), 0);
+    write_json(&sidecar, json!({"peers": ["beta"], "task": "", "gid": "g1", "harness": {}, "linked_by": "beta"}));
+    let done = mcp.call("interrupt", json!({"alvo": "outra"})).await;
+    assert!(!failed(&done), "{done}");
+    assert_eq!(s.python.hits_to("/api/sessions/outra/interrupt"), 1);
 }
 
 /// O servidor do app desktop (`POST /cmd`): anota cada pedido e responde por verbo.

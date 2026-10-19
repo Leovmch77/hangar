@@ -191,6 +191,8 @@ struct PairBody {
     // Sem efeito, como no Python: o corpo estrito ainda o aceita.
     #[serde(default, rename = "notify_members")] _notify_members: bool,
     #[serde(default)] orq: bool,
+    /// Os `peers` são filhas que esta sessão acabou de criar (só a abertura manda).
+    #[serde(default)] link: bool,
 }
 
 pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
@@ -215,6 +217,9 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
     let everyone: Vec<String> = std::iter::once(name.clone()).chain(others.iter().cloned()).collect();
     if let Some(refused) = asked.orchestrator(&everyone).await { return refused; }
     if others.iter().any(|o| is_remote(o)) {
+        if body.link {
+            return asked.refuse(StatusCode::BAD_REQUEST, "erro_link_remoto", "a ligação só vale entre sessões desta máquina", json!({}));
+        }
         return super::legacy::pair_cross(asked, held, others, body.task, body.replace_task).await;
     }
     let harness = match providers(&asked.st, &everyone).await {
@@ -226,22 +231,28 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
         return asked.refuse(StatusCode::NOT_FOUND, "erro_sessao_nao_encontrada_detalhe", &format!("sessão não encontrada: {missing}"), json!({"detalhe": missing}));
     }
     let outside = outside_addresses(&asked.st);
+    let children = if body.link { others.clone() } else { Vec::new() };
     let joined = asked.groups.join(JoinOwned { name, others, task: body.task, replace_task: body.replace_task, harness: harness.clone(),
-        orq: body.orq, outside }).await;
+        orq: body.orq, outside, linked: body.link }).await;
     let JoinOutcome { members, gid, task, orq, newcomers, before } = match joined {
         Ok(outcome) => outcome,
         Err(GroupError::Refused(JoinRefusal::Mix)) => return asked.refuse(StatusCode::BAD_REQUEST, "erro_pareamento_mistura_cross", MIX_MSG, json!({})),
         Err(GroupError::Refused(JoinRefusal::OrqOutside)) => return asked.refuse(StatusCode::CONFLICT, ORQ_OUTSIDE_CODE, ORQ_OUTSIDE_MSG, json!({})),
         Err(GroupError::Refused(JoinRefusal::TaskConflict { existing })) => return asked.refuse(StatusCode::CONFLICT, "erro_pareamento_tarefa_existente",
             &format!("o grupo já tem tarefa: {} — repita com --substituir-tarefa pra trocar", py_repr(&json!(existing))), json!({"existente": existing})),
+        // Só a ligação chega aqui: o `join` local não recusa `orq` de outro jeito.
+        Err(GroupError::Refused(JoinRefusal::Orq)) => return asked.refuse(StatusCode::CONFLICT, "erro_link_orq",
+            "grupo de orquestração não recebe sessão ligada", json!({})),
         Err(GroupError::Orq(PromoteError::Conflict(text))) => return asked.refuse(StatusCode::CONFLICT, "erro_orq_arquivo_mudou", &text, json!({})),
         Err(GroupError::Orq(PromoteError::Unavailable(code))) => return asked.refuse(StatusCode::SERVICE_UNAVAILABLE,
             "erro_grupo_indisponivel", UNAVAILABLE_MSG, json!({"detalhe": code})),
         Err(error) => return asked.store_failed(&error),
     };
     drop(held);
-    // Só quem estava solto recebe o protocolo; grupo de orquestração não recebe nada.
-    let notices = if orq { Vec::new() } else { newcomers };
+    if !children.is_empty() { record_linked(&asked.st, children).await; }
+    // Só quem estava solto recebe o protocolo; grupo de orquestração não recebe nada. A ligação também
+    // não: o protocolo viraria um turno a mais da filha, pago pelo pai.
+    let notices = if orq || body.link { Vec::new() } else { newcomers };
     let contract = asked.groups.contract_path(&gid).to_string_lossy().into_owned();
     let inside: BTreeMap<String, String> = harness.into_iter().filter(|(n, _)| members.contains(n)).collect();
     let mut errs = Vec::new();
@@ -270,6 +281,19 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
         envelope("erro_pareamento_aviso_parcial", format!("aviso falhou em: {}", failures_text(&errs)), json!({"avisos": errs}))
     };
     asked.reply(StatusCode::OK, json!({"ok": true, "members": members, "gid": gid, "warning": warning}))
+}
+
+/// `linked_at` das filhas em `link-returns.json`. Falhar não desfaz a ligação, que já está no grupo.
+async fn record_linked(st: &AppState, children: Vec<String>) {
+    let dir = st.hangar_dir.clone();
+    let now = crate::state::monitor::wall_now();
+    let first = children.first().cloned().unwrap_or_default();
+    let written = super::link_state::blocking(move || super::link_state::record_linked(&dir, &children, now)).await;
+    if let Err(error) = written {
+        tracing::warn!(code = "erro_link_registro", %error, "groups: linked_at da filha não gravado");
+        // Sem `linked_at` o retorno da filha não acha o começo: a falha vai ao diário, visível.
+        st.diag.report("rust.groups_link_record_failed", &first, "erro_link_registro", "linked_at da filha não gravado; a ligação vale");
+    }
 }
 
 pub(super) async fn unpair(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {

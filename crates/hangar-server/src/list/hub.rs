@@ -74,7 +74,8 @@ struct Published {
     nav: Arc<Vec<(String, f64, Bytes)>>,
 }
 
-/// `clients`: listas do dono (o que o Python conta como app aberto); `guests`, as da 8766.
+/// `clients`: listas do dono (o que o Python conta como app aberto); `guests`, as da 8766 e a
+/// assinatura interna do retorno da filha ligada: mantêm o produtor ligado sem contar como app aberto.
 #[derive(Default)]
 struct Refs { clients: u32, guests: u32, running: bool }
 
@@ -109,6 +110,24 @@ impl ListHub {
             tokio::spawn(supervise(self.clone(), list.clone(), diag.clone()));
         }
         Subscription { hub: self.clone(), rx: self.tx.subscribe(), owner }
+    }
+
+    /// Para tarefa de dentro do servidor: conta como convidado, fora de `set_owner_clients`, senão o
+    /// push do celular acharia o app aberto.
+    pub(crate) fn subscribe_internal(self: &Arc<Self>, list: &Arc<ListBridge>, diag: &DiagClient) -> InternalSubscription {
+        InternalSubscription(self.subscribe(list, diag, false))
+    }
+}
+
+/// Assinatura interna; solta a contagem ao cair.
+pub(crate) struct InternalSubscription(Subscription);
+
+impl InternalSubscription {
+    /// Linhas da última produção boa; `None` antes dela ou com a lista em erro.
+    pub(crate) fn rows(&self) -> Option<Arc<Vec<SessionRow>>> {
+        let p = self.0.rx.borrow();
+        if p.error.is_some() { return None; }
+        p.rows.as_ref().map(|r| r.rows.clone())
     }
 }
 
@@ -492,6 +511,7 @@ fn guest_rows<'a>(rows: impl IntoIterator<Item = &'a SessionRow>, guest: &Guest)
     rows.into_iter().filter(|r| guest.sees(&r.name)).map(|r| {
         let mut r = r.clone();
         if let Some(peers) = r.pair_peers.as_mut() { peers.retain(|p| guest.sees(p)); }
+        r.linked_by = r.linked_by.filter(|p| guest.sees(p));
         if guest.invite { r.pair_task = None; }
         (r.pair_external, r.pair_externals, r.then_target) = (None, None, None);
         r.guest_kind = guest.kind_of(&r.name).map(|k| match k { Kind::Share => "share", Kind::Pair => "pair" }.to_owned());

@@ -77,6 +77,13 @@
 #                                  --jev / --sem-jev liga ou desliga o Jev naquela sessão: com ele,
 #                                  `hangar-preview objetivo` navega e preenche tela sozinho. Sem
 #                                  nenhum dos dois vale o padrão do servidor (tela de Configurações).
+#                                  --link liga a sessão nova a esta: entra no grupo desta sem aviso,
+#                                  aparece na linha de subagentes, pode ser interrompida por esta e
+#                                  a resposta final da tarefa volta sozinha como [de: <filha>] (só
+#                                  filhas Claude e Codex; Pi/omp/Kimi não devolvem). A filha não
+#                                  manda a resposta final por recado. Só nesta máquina (servidor::nome
+#                                  recusa) e não combina com --resume. Com o backend em modo python,
+#                                  volta 422. Sessão aberta sem a ligação = linha "erro:" e saída 1.
 #   hangar-send --whoami               imprime o nome desta sessão (a identidade que assina os recados)
 #   hangar-send --help                esta ajuda (o cabeçalho deste arquivo).
 #
@@ -412,7 +419,7 @@ fi
 
 if [[ "$1" == "--new" ]]; then
     shift
-    name="${1:?uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--conta <nome>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--subagente <modelo>] [--service-tier <default|priority>] [--profile <nome>] [--headless|--terminal] [--jev|--sem-jev] [--read-only] [--no-inherit] [--engine-account <id>] [--branch <nome> [--new-branch [--base <ref>]]] [--customizations <json>] [--prompt <texto>] [--remember-provider] [--resume <id da conversa>]}"
+    name="${1:?uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--conta <nome>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--subagente <modelo>] [--service-tier <default|priority>] [--profile <nome>] [--headless|--terminal] [--jev|--sem-jev] [--read-only] [--no-inherit] [--engine-account <id>] [--branch <nome> [--new-branch [--base <ref>]]] [--customizations <json>] [--prompt <texto>] [--remember-provider] [--link] [--resume <id da conversa>]}"
     shift
     # servidor::nome cria a sessão NOUTRA máquina, pela API dela (peers.json), igual ao recado.
     remoto=""
@@ -428,7 +435,7 @@ if [[ "$1" == "--new" ]]; then
     # DESCARTADO calado — na conta Anthropic, parecendo que atendeu o pedido.
     if [[ "$name" == -* ]]; then
         echo "erro: nome de sessão não pode começar com '-' (esqueceu o nome?)" >&2
-        echo "uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--conta <nome>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--subagente <modelo>] [--service-tier <default|priority>] [--profile <nome>] [--headless|--terminal] [--jev|--sem-jev] [--read-only] [--no-inherit] [--engine-account <id>] [--branch <nome> [--new-branch [--base <ref>]]] [--customizations <json>] [--prompt <texto>] [--remember-provider] [--resume <id da conversa>]" >&2
+        echo "uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--conta <nome>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--subagente <modelo>] [--service-tier <default|priority>] [--profile <nome>] [--headless|--terminal] [--jev|--sem-jev] [--read-only] [--no-inherit] [--engine-account <id>] [--branch <nome> [--new-branch [--base <ref>]]] [--customizations <json>] [--prompt <texto>] [--remember-provider] [--link] [--resume <id da conversa>]" >&2
         exit 2
     fi
     # --engine: a sessão nova nasce num MOTOR de modelo (~/.claude/engines.json) em vez da conta
@@ -452,7 +459,7 @@ if [[ "$1" == "--new" ]]; then
     # --subagente: modelo dos subagentes (CLAUDE_CODE_SUBAGENT_MODEL); só Claude sem motor.
     # --conta com --provider codex: conta Codex (~/.codex-<nome>); `openai-codex` é a padrão.
     cwd=""; engine=""; provider=""; conta=""; config_dir=""; model=""; effort=""; permissao=""; perfil=""; read_only=""; headless=""; jev=""; subagente=""; codex_conta=""; service_tier=""
-    remember_provider="false"; no_inherit=""; engine_account=""; branch=""; new_branch=""; base=""; customizations=""; prompt=""; resume=""
+    remember_provider="false"; no_inherit=""; engine_account=""; branch=""; new_branch=""; base=""; customizations=""; prompt=""; resume=""; link_child=""
     # Uma flag que só aceita valor uma vez: `once <variável> <flag> <valor>`.
     once() {
         [[ -n "${!1}" ]] && { echo "erro: $2 informado duas vezes" >&2; exit 2; }
@@ -471,6 +478,7 @@ if [[ "$1" == "--new" ]]; then
             --prompt) once prompt "$1" "${2:?uso: --prompt <texto>}"; shift 2 ;;
             # --resume: a sessão nova retoma uma conversa que já existe no disco (a pasta vem dela).
             --resume) once resume "$1" "${2:?uso: --resume <id da conversa>}"; shift 2 ;;
+            --link) once link_child "$1" true; shift ;;
             --service-tier)
                 [[ -n "$service_tier" ]] && { echo "erro: --service-tier informado duas vezes" >&2; exit 2; }
                 service_tier="${2:?uso: --service-tier <default|priority>}"; shift 2 ;;
@@ -522,6 +530,8 @@ if [[ "$1" == "--new" ]]; then
                else echo "erro: argumento inesperado '$1'" >&2; exit 2; fi ;;
         esac
     done
+    # A ligação é entre sessões desta máquina: o servidor também recusa, mas aqui nem chega lá.
+    [[ -n "$remoto" && -n "$link_child" ]] && { echo "erro: --link só vale nesta máquina (sem servidor::)" >&2; exit 2; }
     if [[ -n "$remoto" ]]; then
         cfg=$(peer_cfg "$remoto") || exit 1
         IFS=$'\t' read -r BASE rtok <<< "$cfg"
@@ -640,7 +650,7 @@ s = json.load(sys.stdin); print(s["path"] + "\t" + s["label"])' <<<"$sugestao")
         for pair in "--effort:$effort" "--permissao:$permissao" "--profile:$perfil" "--read-only:$read_only" "--jev/--sem-jev:$jev" \
                     "--subagente:$subagente" "--service-tier:$service_tier" "--no-inherit:$no_inherit" "--branch:$branch" \
                     "--new-branch:$new_branch" "--base:$base" "--customizations:$customizations" "--prompt:$prompt" \
-                    "--remember-provider:${remember_provider#false}"; do
+                    "--remember-provider:${remember_provider#false}" "--link:$link_child"; do
             [[ -n "${pair#*:}" ]] && { echo "erro: ${pair%%:*} não combina com --resume" >&2; exit 2; }
         done
         body=$(python3 -c 'import json,sys
@@ -707,9 +717,11 @@ if sys.argv[23]:
     d["claude_customizations"] = json.loads(sys.argv[23])
 if sys.argv[24]:
     d["initial_prompt"] = sys.argv[24]
+if sys.argv[25]:
+    d["link"] = True
 print(json.dumps(d))' \
            "$name" "$cwd" "$engine" "$provider" "$config_dir" "$model" "$effort" "$permissao" "$perfil" "$read_only" "$headless" "$jev" "$subagente" "$codex_conta" "$remember_provider" "$criadora" "$service_tier" \
-           "$no_inherit" "$engine_account" "$branch" "$new_branch" "$base" "$customizations" "$prompt")
+           "$no_inherit" "$engine_account" "$branch" "$new_branch" "$base" "$customizations" "$prompt" "$link_child")
     # O prazo das telas: preparar conta e worktree passa dos 30 s, e desistir antes dizia "inacessível"
     # com a sessão ainda nascendo.
     creation_result=$(API_TIMEOUT=120 api POST /api/sessions "$body") || exit 1
@@ -735,7 +747,14 @@ print("".join(" [%s]" % p for p in partes))' "$headless" <<<"$creation_result");
     fi
     [[ -n "$remoto" ]] && name="$remoto::$name"
     [[ "$headless" == "false" ]] && headless=""
+    link_failed=$(python3 -c 'import json,sys
+e = json.load(sys.stdin).get("link_error")
+e and print("%s: %s" % (e.get("code") or "?", e.get("detail") or ""))' <<<"$creation_result" 2>/dev/null) || true
     echo "sessão criada: $name ($cwd)${headless:+ [sem terminal]}$herdado${provider:+ [$provider]}${engine:+ [motor: $engine]}${conta:+ [conta: $conta]}${codex_conta:+ [conta codex: $codex_conta]}${model:+ [modelo: $model]}${effort:+ [esforço: $effort]}${permissao:+ [permissão: $permissao]}${subagente:+ [subagentes: $subagente]}${service_tier:+ [service tier: $service_tier]}${perfil:+ [perfil: $perfil]}${jev:+ [jev: $jev]} — fala com ela via: hangar-send $name \"msg\""
+    if [[ -n "$link_failed" ]]; then
+        echo "erro: a sessão $name abriu SEM a ligação — $link_failed" >&2
+        exit 1
+    fi
     exit 0
 fi
 

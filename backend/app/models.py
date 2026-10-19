@@ -222,6 +222,9 @@ class CreatedSessionInfo(SessionInfo):
     folga); None = conta pedida ou a padrão."""
     config_dir: Optional[str] = None
     account_source: Optional[str] = None
+    # A sessão abriu e a ligação com a criadora não (`{code, detail}` do Rust). Ausente quando não
+    # houve erro, para a resposta sem `link` continuar igual byte a byte.
+    link_error: Optional[dict] = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class ChatEvent(BaseModel):

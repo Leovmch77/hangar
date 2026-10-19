@@ -110,6 +110,9 @@ def main() -> None:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
                                                  "additionalContext": texto}}))
         return
+    # Filha ligada não recebe o protocolo: ele cobraria tokens do pai a cada /clear e retomada.
+    if d.get("linked_by") in peers:
+        return
     gid = d.get("gid") or ""
     cross = any("::" in p for p in peers)
     contrato = None if (cross or not gid) else os.path.join(pair_dir, f"grupo-{gid}.md")

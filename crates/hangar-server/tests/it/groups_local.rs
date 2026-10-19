@@ -20,7 +20,7 @@ impl Disk {
 fn none() -> BTreeMap<String, String> { BTreeMap::new() }
 fn gid(s: &'static str) -> impl Fn() -> String { move || s.to_owned() }
 fn input<'a>(name: &'a str, others: &'a [String], task: &'a str, h: &'a BTreeMap<String, String>) -> JoinInput<'a> {
-    JoinInput { name, others, task, replace_task: false, harness: h, orq: false, outside: &mine }
+    JoinInput { name, others, task, replace_task: false, harness: h, orq: false, outside: &mine, linked: false }
 }
 fn mine(_: &str) -> bool { false }
 /// `fulano::*` e `bia::*` são pares de fora; qualquer outro `x::y` é máquina própria.
@@ -174,7 +174,7 @@ fn leave_keeps_remaining_group() {
 #[test]
 fn live_orq_group_keeps_last_member() {
     let (d, h) = (Disk::new(), none());
-    let p = plan_join(&d.read(), &JoinInput { name: "arb", others: &["exec".into()], task: "", replace_task: false, harness: &h, orq: true, outside: &mine }, &gid("o1")).ok().unwrap();
+    let p = plan_join(&d.read(), &JoinInput { name: "arb", others: &["exec".into()], task: "", replace_task: false, harness: &h, orq: true, outside: &mine, linked: false }, &gid("o1")).ok().unwrap();
     d.apply(&p.writes, &[]);
     let l = plan_leave(&d.read(), "exec", true).unwrap();
     d.apply(&l.writes, &l.clears);
@@ -193,6 +193,50 @@ fn rename_rewrites_own_and_peers() {
     assert!(d.read()("a").is_none());
     assert_eq!(d.read()("a2").unwrap().peers, ["b"]);
     assert_eq!(d.read()("b").unwrap().peers, ["a2"]);
+}
+
+#[test]
+fn link_marks_only_the_child_and_survives_merge_join_and_rename() {
+    let (d, h) = (Disk::new(), none());
+    let p = plan_join(&d.read(), &JoinInput { linked: true, ..input("pai", &["filha".into()], "", &h) }, &gid("g1")).ok().unwrap();
+    d.apply(&p.writes, &[]);
+    assert_eq!(d.read()("filha").unwrap().linked_by.as_deref(), Some("pai"));
+    assert_eq!(d.read()("pai").unwrap().linked_by, None);
+    // Fusão com outro grupo e join comum depois: quem já era ligada continua.
+    let p = plan_join(&d.read(), &input("x", &["y".into()], "", &h), &gid("g2")).ok().unwrap();
+    d.apply(&p.writes, &[]);
+    let p = plan_join(&d.read(), &input("x", &["pai".into()], "", &h), &gid("g3")).ok().unwrap();
+    d.apply(&p.writes, &[]);
+    assert_eq!(d.read()("filha").unwrap().linked_by.as_deref(), Some("pai"));
+    assert!(["x", "y", "pai"].iter().all(|m| d.read()(m).unwrap().linked_by.is_none()));
+    // Pai renomeado leva o vínculo da filha junto.
+    let (clears, writes) = plan_rename(&d.read(), "pai", "pai2");
+    d.apply(&writes, &clears);
+    assert_eq!(d.read()("filha").unwrap().linked_by.as_deref(), Some("pai2"));
+}
+
+#[test]
+fn parent_leaving_clears_the_link_so_rejoin_does_not_revive_it() {
+    let (d, h) = (Disk::new(), none());
+    let kids = ["f1".to_owned(), "f2".to_owned()];
+    let p = plan_join(&d.read(), &JoinInput { linked: true, ..input("pai", &kids, "", &h) }, &gid("g1")).ok().unwrap();
+    d.apply(&p.writes, &[]);
+    let l = plan_leave(&d.read(), "pai", false).unwrap();
+    d.apply(&l.writes, &l.clears);
+    assert!(kids.iter().all(|k| d.read()(k).unwrap().linked_by.is_none()));
+    let p = plan_join(&d.read(), &input("pai", &["f1".into()], "", &h), &gid("g2")).ok().unwrap();
+    d.apply(&p.writes, &[]);
+    assert_eq!(d.read()("f1").unwrap().linked_by, None, "join comum depois da saída não religa");
+}
+
+#[test]
+fn link_into_an_orq_group_is_refused() {
+    let (d, h) = (Disk::new(), none());
+    let p = plan_join(&d.read(), &JoinInput { orq: true, ..input("arb", &["exec".to_owned()], "", &h) }, &gid("o1")).ok().unwrap();
+    d.apply(&p.writes, &[]);
+    let child = ["filha".to_owned()];
+    let linked = JoinInput { linked: true, ..input("arb", &child, "", &h) };
+    assert!(matches!(plan_join(&d.read(), &linked, &gid("g")), Err(JoinRefusal::Orq)));
 }
 
 #[test]
@@ -236,7 +280,7 @@ fn external_link_refuses_orq_and_own_machine_groups() {
 #[test]
 fn lone_orq_arbiter_refuses_an_external_pair() {
     let d = Disk::new();
-    let arbiter = Sidecar { peers: vec![], task: Some("t".into()), gid: "o1".into(), harness: none(), orq: true, fed: None };
+    let arbiter = Sidecar { peers: vec![], task: Some("t".into()), gid: "o1".into(), harness: none(), orq: true, fed: None, linked_by: None };
     d.apply(&[("arb".to_owned(), arbiter.clone())], &[]);
     assert!(matches!(plan_external_link(&d.read(), "arb", "fulano::x", &none(), &outside, &gid("e1")), Err(JoinRefusal::Orq)));
     assert_eq!(d.read()("arb"), Some(arbiter));
@@ -265,7 +309,7 @@ fn service(tmp: &tempfile::TempDir, orq: Arc<FakeOrq>) -> (GroupService, PairDir
     (GroupService::new(make(), orq, "srv".into()), make())
 }
 fn owned(name: &str, others: &[&str], orq: bool) -> JoinOwned {
-    JoinOwned { name: name.into(), others: others.iter().map(|s| (*s).into()).collect(), task: String::new(), replace_task: false, harness: none(), orq, outside: HashSet::new() }
+    JoinOwned { name: name.into(), others: others.iter().map(|s| (*s).into()).collect(), task: String::new(), replace_task: false, harness: none(), orq, outside: HashSet::new(), linked: false }
 }
 fn far(addresses: &[&str]) -> HashSet<String> { addresses.iter().map(|a| (*a).to_owned()).collect() }
 

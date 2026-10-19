@@ -75,6 +75,7 @@ pub fn list_sig<'a>(rows: impl IntoIterator<Item = &'a SessionRow>) -> String {
             if let (Value::Array(items), Some(id)) = (&mut sig, i.ask_form.as_ref().and_then(|form| form.get("interaction_id"))) { items.push(id.clone()); }
             // Só no Rust: vazio deixa a assinatura byte a byte com a do Python.
             if let (Value::Array(items), false) = (&mut sig, i.plugin_tool_servers.is_empty()) { items.push(json!(i.plugin_tool_servers)); }
+            if let (Value::Array(items), Some(parent)) = (&mut sig, i.linked_by.as_ref()) { items.push(json!({"linked_by": parent})); }
             sig
         })
         .collect();

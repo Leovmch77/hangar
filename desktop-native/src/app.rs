@@ -51,6 +51,7 @@ mod panes;
 mod page_card;
 mod page_fullscreen;
 mod queue;
+mod linked_children;
 mod popup;
 mod rail;
 mod rows;
@@ -612,6 +613,8 @@ pub struct Hangar {
     plugin_local_tab: Option<String>,
     /// Escolhas locais por sessão, sem alterar o estado do mod no terminal.
     plugin_presentations: HashMap<SessionKey, crate::plugin_ui::presentation::Presentation>,
+    /// Conversas com a linha "N subagentes" aberta; fora daqui ela fica fechada.
+    linked_children_open: HashSet<sidebar::Target>,
     plugin_body_scrolls: HashMap<SessionKey, HashMap<String, ScrollHandle>>,
     plugin_question_focus: FocusHandle,
     plugin_question_seen: Option<(Option<SessionKey>, String)>,
@@ -990,7 +993,7 @@ impl Hangar {
             plugin_question_seen: None,
             suggest_pick: 0, slash_open: false, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
-            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_caps: Vec::new(), plugin_local_tab: None, plugin_presentations: HashMap::new(), plugin_body_scrolls: HashMap::new(), plugin_question_focus: cx.focus_handle(), plugin_tabs_scroll: ScrollHandle::new(), plugin_tabs_seen: None, plugin_tabs_waits: 0, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), pages: page_card::Pages::new(window.window_handle()), full_images: viewer::full_images(), stats: None,
+            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_caps: Vec::new(), plugin_local_tab: None, plugin_presentations: HashMap::new(), linked_children_open: HashSet::new(), plugin_body_scrolls: HashMap::new(), plugin_question_focus: cx.focus_handle(), plugin_tabs_scroll: ScrollHandle::new(), plugin_tabs_seen: None, plugin_tabs_waits: 0, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), pages: page_card::Pages::new(window.window_handle()), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(), pending_tab_reveal: None, tab_reveal_scheduled: false,
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
@@ -6733,7 +6736,8 @@ impl Hangar {
                     })))).into_any_element()),
             Display::None => None,
         };
-        space.into_iter().chain(readable.then(|| crate::plugin_ui::band(&self.plugin_band, &self.plugin_view(cx)).map(|band| in_column(band).into_any_element())).flatten()).collect()
+        let children = self.render_linked_children(window, cx).map(|el| in_column(el).into_any_element());
+        space.into_iter().chain(children).chain(readable.then(|| crate::plugin_ui::band(&self.plugin_band, &self.plugin_view(cx)).map(|band| in_column(band).into_any_element())).flatten()).collect()
     }
 
     /// O painel direito abrindo ou fechando na mesma conversa: a largura dele e quanto está à vista (0 a 1), pedindo

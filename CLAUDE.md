@@ -674,6 +674,14 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   `pair.py` recusam nesses modos (`GroupsOwnedByRust`) e o modo `python` segue com o código antigo.
   Pedido que chegou pela ponte nunca volta ao Python. Motivo em
   [plataforma.md](docs/decisoes/plataforma.md#grupos-o-rust-grava).
+- **Sessão filha ligada: `link` na abertura, vínculo no arquivo de grupo da filha.** Só o dono liga
+  (`erro_link_convidado`), só local (`erro_link_remoto`), nunca em grupo `orq`. O vínculo é
+  `linked_by` no sidecar da filha e vale só com o pai entre os `peers`; o pai sair o apaga. Ligar
+  não injeta protocolo de grupo, nem no `SessionStart`. `interrupt` (MCP) só alcança filha ligada a
+  quem chama. A resposta final de turno pedido pelo pai volta sozinha como `[de: <filha>]` (só
+  Claude e Codex), por uma assinatura interna da lista que não conta como app aberto; sem esperar
+  bloqueante. Os clientes calculam a linha "N subagentes" da lista. Motivo em
+  [plataforma.md](docs/decisoes/plataforma.md#sessão-filha-ligada-a-quem-a-abriu).
 - **A porta privada de loopback do Rust mora no mesmo filho**, anunciada na saúde somente como
   endereço; o segredo vem do Supervisor em memória após conferir o protocolo. Uma captura canônica
   por rodada, sem grade auxiliar: com o Rust de pé, quem captura o pane de Claude com terminal para o

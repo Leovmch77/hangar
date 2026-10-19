@@ -9,6 +9,7 @@
   import PluginPane from '../components/PluginPane.svelte';
   import PluginHide from '../components/PluginHide.svelte';
   import PluginToasts from '../components/PluginToasts.svelte';
+  import LinkedChildrenBand from '../components/LinkedChildrenBand.svelte';
   import { copyText } from '../lib/clipboard';
   import { openInNewTab } from '../lib/openTab';
   import { desktop as janela } from '../lib/desktop.svelte';
@@ -3813,6 +3814,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
         <PluginBand tree={pluginBand} columns={pluginColumns} onPress={pressPlugin}
                     onInput={pluginSource === 'surface' ? inputPlugin : undefined} notice={pluginNotice} />
       {/if}
+      <!-- Fora do `modsVisiveis`: as filhas ligadas não são mod, esconder os mods não as esconde. -->
+      <LinkedChildrenBand serverId={chatServerId} {sessionName} sessions={allSessions} />
       <!-- Composer SEMPRE visivel (exceto sessao morta). Antes ele sumia em awaiting_input e,
            se as opcoes nao fossem parseadas, o usuario ficava sem input E sem botoes = preso.
            Os OptionButtons continuam aparecendo na lista; o composer fica como saida garantida. -->

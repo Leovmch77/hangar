@@ -35,7 +35,7 @@ enum Operation {
     OrqAssociate { name: String, gid: String, mtime: f64 },
 }
 
-struct Failed { code: String, detail: String }
+pub(crate) struct Failed { pub(crate) code: String, detail: String }
 
 fn fail(code: &str, detail: impl Into<String>) -> Failed { Failed { code: code.to_owned(), detail: detail.into() } }
 
@@ -53,7 +53,7 @@ fn group_failed(e: GroupError) -> Failed {
 }
 
 /// `{status, body}` da rota de grupo, chamada como se viesse do dono.
-async fn route(st: Arc<AppState>, method: &str, name: &str, route: &str, body: Value) -> Result<Value, Failed> {
+pub(crate) async fn route(st: Arc<AppState>, method: &str, name: &str, route: &str, body: Value) -> Result<Value, Failed> {
     type Handler = fn(State<Arc<AppState>>, ConnectInfo<SocketAddr>, Request) -> futures_util::future::BoxFuture<'static, Response>;
     let (path, handler): (&str, Handler) = match (method, route) {
         ("POST", "pair") => ("pair", |s, c, r| Box::pin(super::routes::pair(s, c, r))),
@@ -84,7 +84,11 @@ async fn execute(st: Arc<AppState>, groups: Arc<GroupService>, op: Operation) ->
             let (ex, warnings) = leave_and_notify(&st, &groups, &name).await.map_err(group_failed)?;
             Ok(json!({"ex_peers": ex, "warnings": warnings}))
         }
-        Operation::Rename { old, new } => groups.rename(&old, &new).await.map(|()| json!({})).map_err(group_failed),
+        Operation::Rename { old, new } => {
+            groups.rename(&old, &new).await.map_err(group_failed)?;
+            super::link_return::renamed(&st, &old, &new).await;
+            Ok(json!({}))
+        }
         Operation::OrqAssociate { name, gid, mtime } => {
             // Sob o lock: um join ou uma saída concorrente não vê o time meio associado.
             let python = PythonOrq::from_state(&st);

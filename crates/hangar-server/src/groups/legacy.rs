@@ -61,7 +61,7 @@ pub(super) async fn pair_cross(asked: Asked, held: Option<IngressPass>, others: 
     }
     let peer = others[0].clone();
     let outside = outside_addresses(&asked.st);
-    let result = asked.groups.join(JoinOwned { name: name.clone(), others, task, replace_task, harness: harness.clone(), orq: false, outside }).await;
+    let result = asked.groups.join(JoinOwned { name: name.clone(), others, task, replace_task, harness: harness.clone(), orq: false, outside, linked: false }).await;
     let JoinOutcome { members, task, before, .. } = match joined(&asked, result, StatusCode::BAD_REQUEST) { Ok(o) => o, Err(r) => return r };
     drop(held);
     let (srv, sess) = peer.split_once("::").unwrap_or((&peer, ""));
@@ -115,7 +115,7 @@ pub(super) async fn pair_remote(State(st): State<Arc<AppState>>, ConnectInfo(pee
     }
     // A tarefa que chega é a combinada do iniciador: sempre vence.
     let result = asked.groups.join(JoinOwned { name: name.clone(), others: vec![body.initiator.clone()], task: body.task.clone(),
-        replace_task: true, harness: harness.clone(), orq: false, outside: outside_addresses(&asked.st) }).await;
+        replace_task: true, harness: harness.clone(), orq: false, outside: outside_addresses(&asked.st), linked: false }).await;
     let JoinOutcome { members, before, .. } = match joined(&asked, result, StatusCode::CONFLICT) { Ok(o) => o, Err(r) => return r };
     drop(held);
     if let Err(e) = notify(&asked, &body.initiator, &body.task, &harness).await {

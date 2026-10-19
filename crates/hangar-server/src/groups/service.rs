@@ -54,6 +54,8 @@ pub struct JoinOwned {
     pub orq: bool,
     /// Endereços (`alias::sessao`) dos pares externos: os remotos que não são máquina própria.
     pub outside: HashSet<String>,
+    /// `others` são filhas de `name` (`JoinInput::linked`).
+    pub linked: bool,
 }
 
 pub struct JoinOutcome {
@@ -119,7 +121,7 @@ impl GroupService {
             let read = reader(&dir);
             let outside = |p: &str| input.outside.contains(p);
             let join = JoinInput { name: &input.name, others: &input.others, task: &input.task, replace_task: input.replace_task,
-                harness: &input.harness, orq: input.orq, outside: &outside };
+                harness: &input.harness, orq: input.orq, outside: &outside, linked: input.linked };
             let plan = local::plan_join(&read, &join, &fresh_gid).map_err(GroupError::Refused)?;
             for loser in &plan.merged { dir.merge_contract(loser, &plan.gid); }
             if let Err(e) = apply(&dir, &[], &plan.writes) {
