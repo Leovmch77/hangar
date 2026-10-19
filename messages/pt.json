@@ -4777,6 +4777,8 @@
   "mobile_queue_mode_jev": "Jev",
   "mobile_queue_jev_short": "O Jev decide se entra agora ou espera a vez",
   "mobile_queue_jev_fallback": "{reason}. Vai pela fila.",
+  "mobile_queue_direct_queued": "Não entrou no turno atual; confira a fila antes de repetir.",
+  "mobile_queue_mode_save_failed": "Não deu para guardar o modo de envio; ele vale só até fechar o app.",
   "native_delivering": "Entregue ao agente; aguardando confirmação",
   "native_delivery_failed": "A mensagem não chegou ao agente.",
   "native_delivery_unproved": "Não deu para confirmar se esta chegou; ela segura a fila.",

@@ -30,8 +30,8 @@ export default function AskSheet() {
   const payload = chat.use((s) => s.askPayload);
   const askOpen = chat.use((s) => s.askOpen);
   const deliveryMode = useDeliveryMode((s) => s.mode);
-  const delivery = useQueueDelivery(useServers.getState().servers.find((s) => s.id === serverId),
-    deliveryMode === 'jev' && !!payload?.is_async && payload.provider === 'codex');
+  const askServer = useServers((s) => s.servers.find((x) => x.id === serverId));
+  const delivery = useQueueDelivery(askServer, deliveryMode === 'jev' && !!payload?.is_async && payload.provider === 'codex');
   const [routeError, setRouteError] = useState('');
   const navegando = useRef(false);
   const scope = useRef({ chat, key: payload ? askKey(payload) : null, generation: 0 });
@@ -141,12 +141,16 @@ export default function AskSheet() {
     setRouteError('');
     const requestId = displayed.request_id;
     try {
-      const steer = displayed.is_async && displayed.provider === 'codex'
-        && (delivery.mode === 'direct' || (delivery.mode === 'jev' && delivery.status === 'ready'));
+      const routed = displayed.is_async && displayed.provider === 'codex';
+      const steer = routed && (delivery.mode === 'direct' || (delivery.mode === 'jev' && delivery.status === 'ready'));
+      // Como no composer: Jev escolhido e indisponível responde pela fila, e quem escolheu precisa saber.
+      const fallbackNotice = routed && delivery.mode === 'jev' && !steer && delivery.status !== 'loading'
+        ? { text: m.mobile_queue_jev_fallback({ reason: delivery.help.replace(/[\s.…]+$/, '') }), warning: true } : null;
       const result = steer ? await answerWithDelivery(target, sessionName, answers, displayed)
-        : await answerQuestions(sessionName, answers, requestId, displayed.interaction_id, target);
+        : { ...await answerQuestions(sessionName, answers, requestId, displayed.interaction_id, target), feedback: fallbackNotice };
       if (!sameRequest()) return;
       if (!result.ok) { setRouteError(m.native_action_uncertain()); return; }
+      if (result.feedback) chat.showDeliveryFeedback(result.feedback);
       if (result.fallback) navegando.current = true;
       chat.markAskDismissed();
       if (result.fallback) router.dismissTo(`/s/${serverId}/${sessionName}?askFallback=${Date.now()}` as never);

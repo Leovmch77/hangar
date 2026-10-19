@@ -10,9 +10,10 @@ import { useDeliveryMode } from '../../chat/useQueueDelivery';
 vi.mock('../../stores/prefs', () => ({
   prefs: { getString: () => undefined, set: vi.fn(), remove: vi.fn() },
 }));
-vi.mock('../../stores/servers', () => ({ useServers: { getState: () => ({
-  servers: [{ id: 'srv', baseUrl: 'http://teste' }, { id: 'other', baseUrl: 'http://other' }],
-}) } }));
+vi.mock('../../stores/servers', () => {
+  const state = { servers: [{ id: 'srv', baseUrl: 'http://teste' }, { id: 'other', baseUrl: 'http://other' }] };
+  return { useServers: Object.assign((select: (value: typeof state) => unknown) => select(state), { getState: () => state }) };
+});
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const mocks = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), dismissTo: vi.fn(), params: { server: 'srv', name: 'sess' } }));
@@ -48,6 +49,7 @@ vi.mock('react-native', async (original) => ({
 
 const haptic = vi.hoisted(() => ({ selection: vi.fn(), success: vi.fn(), error: vi.fn() }));
 vi.mock('../../ui/haptics', () => ({ haptic }));
+vi.mock('../../ui/Toast', () => ({ toast: { ok: vi.fn(), erro: vi.fn() } }));
 
 import AskSheet from '../../../app/s/[server]/[name]/ask';
 import { AskStepper } from './AskStepper';
@@ -105,7 +107,7 @@ test('Direto orienta a resposta assíncrona pelo cartão em que a pessoa tocou',
 test.each([true, false])('Jev só orienta resposta assíncrona quando o servidor o oferece: %s', async (available) => {
   useDeliveryMode.setState({ mode: 'jev' });
   vi.mocked(fetch).mockImplementation(async (url) => new Response(JSON.stringify(
-    String(url).endsWith('/api/jev/delivery') ? { available } : { ok: true })));
+    String(url).endsWith('/api/jev/delivery') ? { available } : { ok: true, fallback: false })));
   await open({ ...payload, is_async: true, request_id: 'async-1', interaction_id: 'card-1' });
   await click('Primeira');
   await click(m.lista_enviar());
@@ -113,6 +115,17 @@ test.each([true, false])('Jev só orienta resposta assíncrona quando o servidor
   const body = JSON.parse(post[1]!.body as string);
   expect(body.interaction_id).toBe('card-1');
   expect(body.steer).toBe(available ? true : undefined);
+  expect(chatStore('srv', 'sess').use.getState().deliveryFeedback).toEqual(available ? null
+    : { text: m.mobile_queue_jev_fallback({ reason: m.native_queue_jev_setup() }), warning: true });
+});
+
+test('resposta orientada que ficou na fila avisa no chat', async () => {
+  useDeliveryMode.setState({ mode: 'direct' });
+  vi.mocked(fetch).mockImplementation(async () => new Response('{"ok":true,"fallback":false,"queued":true}'));
+  await open({ ...payload, is_async: true, request_id: 'async-1', interaction_id: 'card-1' });
+  await click('Primeira');
+  await click(m.lista_enviar());
+  expect(chatStore('srv', 'sess').use.getState().deliveryFeedback).toEqual({ text: m.mobile_queue_direct_queued(), warning: true });
 });
 
 test('envia identidades nativas e mantém a pergunta quando RPC falha', async () => {

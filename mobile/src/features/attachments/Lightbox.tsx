@@ -49,9 +49,9 @@ export function Lightbox({ visible, uri, headers, filename, onClose, kind = 'ima
     savedX.value = 0;
     savedY.value = 0;
   };
-  // Trocar de mídia na galeria não herda o zoom da anterior.
+  // Trocar de mídia na galeria não herda o zoom da anterior; abrir ou fechar por qualquer caminho também não.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(reset, [uri]);
+  useEffect(reset, [uri, visible]);
 
   const handleClose = () => {
     reset();

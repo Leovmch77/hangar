@@ -148,6 +148,7 @@ export interface ChatApi {
   discardQueued: (id: string) => Promise<string | null>;
   steerQueued: (id: string) => Promise<void>;
   moveQueued: (id: string, delta: -1 | 1) => Promise<void>;
+  showDeliveryFeedback: (feedback: DeliveryFeedback | null) => void;
 }
 
 // Estado do app visto pelos stores que ainda vão nascer: o layout liga antes da primeira tela.
@@ -221,6 +222,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   let pensamentoTimer: ReturnType<typeof setTimeout> | undefined;
   let ferramentaTimer: ReturnType<typeof setTimeout> | undefined;
   let queueErrorTimer: ReturnType<typeof setTimeout> | undefined;
+  let deliveryFeedbackTimer: ReturnType<typeof setTimeout> | undefined;
   const pluginToastsSeen = new Set<string>();
   // Um setState por token re-renderizava a conversa a cada caractere: o primeiro sai na hora, o resto
   // junta num quadro.
@@ -762,6 +764,13 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     queueErrorTimer = setTimeout(() => useChatStore.setState({ queueError: null }), 6000);
   }
 
+  // Descreve só o último envio: some sozinho para não ficar sobre uma conversa que já seguiu.
+  function showDeliveryFeedback(feedback: DeliveryFeedback | null): void {
+    clearTimeout(deliveryFeedbackTimer);
+    useChatStore.setState({ deliveryFeedback: feedback });
+    if (feedback) deliveryFeedbackTimer = setTimeout(() => useChatStore.setState({ deliveryFeedback: null }), 12_000);
+  }
+
   // Devolve se a ação foi aceita: a edição só sai quando o servidor gravou o texto novo.
   async function queueAction(run: (target: Server) => Promise<unknown>, onError?: (message: string) => void): Promise<boolean> {
     if (useChatStore.getState().queueBusy) return false;
@@ -879,6 +888,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       es = null;
       clearTimeout(retryTimer);
       clearTimeout(queueAbsentTimer);
+      showDeliveryFeedback(null);
       if (previewQueued) useChatStore.setState(previewQueued);
       dropQueuedPreview();
       // Soltar a tela fecha leituras; POST, ecos e identidade continuam na origem.
@@ -924,6 +934,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       const { askPiId } = useChatStore.getState();
       useChatStore.setState({ askOpen: false, askPayload: null, ...(askPiId ? { askPiDismissed: askPiId, askPiId: null } : {}) });
     },
+    showDeliveryFeedback,
     // O user_msg real só chega no fim do turno: sem tirar as "queued-" aqui, o chip seguia aceso
     // sobre uma fila que já foi.
     applySteer(result) {
@@ -942,14 +953,14 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       const wasUnknown = readDraft(serverId, name)?.submission?.status === 'unknown';
       return submitConversationDraft(serverId, name, trimmed, async () => {
         if (wasUnknown) useChatStore.setState((s) => ({ pending: s.pending.filter((p) => p.text !== trimmed) }));
-        useChatStore.setState({ deliveryFeedback: null });
+        showDeliveryFeedback(null);
         const id = `pending-${pendingSeq++}`;
         // Em idle a mensagem é digitada na hora: o eco atenuado parecia mensagem entrando na fila.
         const solid = useChatStore.getState().stateEvent?.state === 'idle';
         useChatStore.setState((s) => ({ pending: [...s.pending, { id, text: trimmed, solid }] }));
         try {
           if (mode === 'steer') await steerSession(name, trimmed, target);
-          else if (mode) useChatStore.setState({ deliveryFeedback: await sendWithDelivery(target, name, trimmed, mode) });
+          else if (mode) showDeliveryFeedback(await sendWithDelivery(target, name, trimmed, mode));
           else await sendInputForServer(target, name, trimmed);
         } catch (err) {
           // O /steer também usa 409 quando escreveu sem confirmar: não presumir recusa.

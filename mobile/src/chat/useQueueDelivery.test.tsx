@@ -3,14 +3,20 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { configureApi, type Server } from '@hangar/core';
-import { useDeliveryMode, useQueueDelivery } from './useQueueDelivery';
+import { setQueueDeliveryForeground, useDeliveryMode, useQueueDelivery } from './useQueueDelivery';
 import { QueuePanel } from './QueuePanel';
 import * as m from '../paraglide/messages';
 
 const disk = vi.hoisted(() => new Map<string, string>());
-vi.mock('../stores/prefs', () => ({ prefs: { getString: (key: string) => disk.get(key), set: (key: string, value: string) => disk.set(key, value) } }));
+const diskFull = vi.hoisted(() => ({ on: false }));
+vi.mock('../stores/prefs', () => ({ prefs: { getString: (key: string) => disk.get(key), set: (key: string, value: string) => {
+  if (diskFull.on) throw new Error('disk full');
+  disk.set(key, value);
+} } }));
 vi.mock('@react-native-menu/menu', () => ({ MenuView: () => null }));
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
+const toastErro = vi.hoisted(() => vi.fn());
+vi.mock('../ui/Toast', () => ({ toast: { erro: toastErro } }));
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const first: Server = { id: 'one', label: 'one', baseUrl: 'https://one.test', token: 'one-token' };
@@ -24,7 +30,7 @@ let root: Root;
 let container: HTMLDivElement;
 const button = (name: string) => container.querySelector<HTMLButtonElement>(`[aria-label="${name}"]`)!;
 beforeEach(() => {
-  useDeliveryMode.setState({ mode: 'queued' }); disk.clear();
+  useDeliveryMode.setState({ mode: 'queued' }); disk.clear(); diskFull.on = false; toastErro.mockClear();
   configureApi({ getBaseUrl: () => 'https://wrong.test', getToken: () => 'wrong', onUnauthorized: vi.fn(), origin: null, createEventSource: vi.fn() });
   vi.stubGlobal('fetch', vi.fn());
   container = document.createElement('div'); root = createRoot(container);
@@ -84,4 +90,69 @@ it('reconfere configuração depois de trinta segundos e limpa o timer ao sair',
   act(() => root.render(null));
   await act(async () => vi.advanceTimersByTimeAsync(30_000));
   expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+function Status({ server = first }: { server?: Server }) {
+  return createElement('span', { 'data-status': useQueueDelivery(server, true).status });
+}
+const statuses = () => [...container.querySelectorAll('[data-status]')].map((el) => el.getAttribute('data-status'));
+
+it('composer e pergunta da mesma conversa dividem uma leitura só', async () => {
+  vi.mocked(fetch).mockImplementation(async () => new Response('{"available":true}'));
+  await act(async () => root.render(createElement('div', null, createElement(Status), createElement(Status))));
+  expect(statuses()).toEqual(['ready', 'ready']);
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it('para de conferir com o app em segundo plano e confere na volta', async () => {
+  vi.useFakeTimers();
+  vi.mocked(fetch).mockImplementation(async () => new Response('{"available":true}'));
+  await act(async () => root.render(createElement(Status)));
+  expect(fetch).toHaveBeenCalledTimes(1);
+  act(() => setQueueDeliveryForeground(false));
+  await act(async () => vi.advanceTimersByTimeAsync(90_000));
+  expect(fetch).toHaveBeenCalledTimes(1);
+  await act(async () => setQueueDeliveryForeground(true));
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+it('uma falha passageira não desliga o Jev; a segunda seguida, sim', async () => {
+  vi.useFakeTimers();
+  vi.mocked(fetch).mockImplementationOnce(async () => new Response('{"available":true}'))
+    .mockImplementation(async () => new Response('{"detail":"fixture-error"}', { status: 503 }));
+  await act(async () => root.render(createElement(Status)));
+  expect(statuses()).toEqual(['ready']);
+  await act(async () => vi.advanceTimersByTimeAsync(30_000));
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(statuses()).toEqual(['ready']);
+  await act(async () => vi.advanceTimersByTimeAsync(30_000));
+  expect(statuses()).toEqual(['error']);
+});
+
+it('modo que não grava no aparelho vale na hora e avisa', () => {
+  diskFull.on = true;
+  act(() => useDeliveryMode.getState().setMode('direct'));
+  expect(useDeliveryMode.getState().mode).toBe('direct');
+  expect(toastErro).toHaveBeenCalledWith(m.mobile_queue_mode_save_failed());
+  diskFull.on = false;
+  act(() => useDeliveryMode.getState().setMode('queued'));
+  expect(useDeliveryMode.getState().mode).toBe('queued');
+  expect(toastErro).toHaveBeenCalledTimes(1);
+});
+
+it('404 depois de pronto vira sem suporte na hora; a falha de antes da pausa não conta na volta', async () => {
+  vi.useFakeTimers();
+  vi.mocked(fetch).mockImplementationOnce(async () => new Response('{"available":true}'))
+    .mockImplementationOnce(async () => new Response('{}', { status: 503 }))
+    .mockImplementationOnce(async () => new Response('{}', { status: 503 }))
+    .mockImplementation(async () => new Response('{}', { status: 404 }));
+  await act(async () => root.render(createElement(Status)));
+  await act(async () => vi.advanceTimersByTimeAsync(30_000));
+  expect(statuses()).toEqual(['ready']);
+  act(() => setQueueDeliveryForeground(false));
+  await act(async () => setQueueDeliveryForeground(true));
+  expect(fetch).toHaveBeenCalledTimes(3);
+  expect(statuses()).toEqual(['ready']);
+  await act(async () => vi.advanceTimersByTimeAsync(5_000));
+  expect(statuses()).toEqual(['unsupported']);
 });

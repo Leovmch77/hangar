@@ -61,7 +61,7 @@ export function modeMenuHandlers(menu: ModeMenu | undefined) {
     title: o.checked ? m.mobile_queue_mode_selected({ mode: deliveryModeLabel(o.mode) }) : deliveryModeLabel(o.mode) }));
   // O toque longo não chega pelo leitor de tela no Android: cada modo vira uma ação do botão.
   const a11yActions = options.filter((o) => !o.disabled).map((o) => ({ name: o.mode, label: deliveryModeLabel(o.mode) }));
-  return { pick, openIOS, actions, a11yActions };
+  return { pick, openIOS, actions, a11yActions, current: options.find((o) => o.checked)!.mode };
 }
 
 export function ComposerActions({ attach, mic, send, settings, beforeMic, afterMic, afterSettings, modeMenu }: {
@@ -97,7 +97,7 @@ export function ComposerActions({ attach, mic, send, settings, beforeMic, afterM
     <View style={styles.spacer} />
     {settings}
     {afterSettings}
-    {send.visible === false ? null : withModeMenu(menu, ios, <Pressable
+    {send.visible === false ? null : withModeMenu(menu, ios, send.disabled, <Pressable
       onPress={() => { void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); send.onPress(); }}
       disabled={send.disabled} hitSlop={5} accessibilityState={{ disabled: send.disabled, busy: send.busy }}
       // No Android o toque longo é do MenuView; o no-op impede que soltar o dedo vire envio.
@@ -115,12 +115,19 @@ export function ComposerActions({ attach, mic, send, settings, beforeMic, afterM
   </View>;
 }
 
-function withModeMenu(menu: ReturnType<typeof modeMenuHandlers>, ios: boolean, button: ReactNode) {
+const SEND_SLOP = 5;
+function withModeMenu(menu: ReturnType<typeof modeMenuHandlers>, ios: boolean, sendDisabled: boolean, button: ReactNode) {
   if (!menu) return button;
   // Enviar desativado (campo vazio) não pega o toque; o de fora recebe o toque longo e o menu abre igual.
-  if (ios) return <Pressable onLongPress={menu.openIOS} delayLongPress={350} hitSlop={5} accessible={false}>{button}</Pressable>;
-  return <MenuView shouldOpenOnLongPress title={m.mobile_queue_mode_label()} actions={menu.actions}
-    onPressAction={({ nativeEvent }: NativeActionEvent) => menu.pick(nativeEvent.event)}>{button}</MenuView>;
+  // O invólucro tem o tamanho do alvo (34 + 5 de cada lado): no Android o filho não recebe toque fora dele.
+  const touch = ios ? <Pressable onLongPress={menu.openIOS} delayLongPress={350} accessible={false} style={styles.sendTouch}>{button}</Pressable>
+    : <MenuView shouldOpenOnLongPress title={m.mobile_queue_mode_label()} actions={menu.actions} style={styles.sendTouch}
+      onPressAction={({ nativeEvent }: NativeActionEvent) => menu.pick(nativeEvent.event)}>{button}</MenuView>;
+  // Botão desativado não executa ação do leitor de tela: com ele assim, o modo vira o elemento, com as mesmas ações.
+  return <View style={styles.sendTarget} accessible={sendDisabled} accessibilityLabel={sendDisabled ? m.mobile_queue_mode_label() : undefined}
+    accessibilityValue={sendDisabled ? { text: deliveryModeLabel(menu.current) } : undefined}
+    accessibilityActions={sendDisabled ? menu.a11yActions : undefined}
+    onAccessibilityAction={sendDisabled ? (e) => menu.pick(e.nativeEvent.actionName) : undefined}>{touch}</View>;
 }
 
 const styles = StyleSheet.create((theme) => ({
@@ -140,4 +147,7 @@ const styles = StyleSheet.create((theme) => ({
   queueBadge: { position: 'absolute', top: 0, right: 0, minWidth: 15, height: 15, paddingHorizontal: theme.base.space[0.5], borderRadius: theme.base.radius.sm, alignItems: 'center', justifyContent: 'center' },
   queueBadgeText: { fontSize: theme.base.text.xxxs, fontWeight: theme.base.weight.bold, lineHeight: 13 },
   sendPressed: { opacity: 0.8 },
+  sendTouch: { padding: SEND_SLOP },
+  // Recua o alvo para o botão ocupar os 34 de sempre; à esquerda o vão até o vizinho passa a 10, 5 para cada alvo.
+  sendTarget: { marginVertical: -SEND_SLOP, marginRight: -SEND_SLOP, marginLeft: SEND_SLOP - theme.base.space[1.5] },
 }));

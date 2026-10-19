@@ -83,17 +83,25 @@ export async function sendWithDelivery(server: Server, name: string, text: strin
   const result = await request(server, `/api/sessions/${encodeURIComponent(name)}/${steer ? 'steer' : 'input'}`,
     { method: 'POST', signal: undefined, body: JSON.stringify(body) });
   if (!result || typeof result !== 'object' || (result as { ok?: unknown }).ok !== true) throw new Error(m.native_action_uncertain());
-  if (mode.kind === 'direct') return steer || (result as { steered?: unknown }).steered === true
-    ? { text: m.native_queue_panel_steered(), warning: false } : null;
+  if (mode.kind === 'direct') {
+    const reply = result as { steered?: unknown; delivered?: unknown };
+    if (steer || reply.steered === true) return { text: m.native_queue_panel_steered(), warning: false };
+    // Sem orientação e sem entrega, a mensagem ficou esperando a vez: quem escolheu Direto precisa saber.
+    return reply.delivered === true ? null : { text: m.mobile_queue_direct_queued(), warning: true };
+  }
   const note = (result as { timing_note?: unknown }).timing_note;
   return typeof note === 'string' ? timingFeedback(note) : { text: m.native_action_uncertain(), warning: true };
 }
 
-export async function answerWithDelivery(server: Server, name: string, answers: AnswerItem[], displayed: AskQuestionPayload): Promise<{ ok: boolean; fallback?: boolean }> {
+export async function answerWithDelivery(server: Server, name: string, answers: AnswerItem[], displayed: AskQuestionPayload): Promise<{ ok: boolean; fallback?: boolean; feedback: DeliveryFeedback | null }> {
   const result = await request(server, `/api/sessions/${encodeURIComponent(name)}/answer`, {
     method: 'POST', signal: undefined,
     body: JSON.stringify({ answers, request_id: displayed.request_id, interaction_id: displayed.interaction_id, steer: true }),
   });
   if (!result || typeof result !== 'object' || typeof (result as { ok?: unknown }).ok !== 'boolean') throw new Error(m.native_action_uncertain());
-  return result as { ok: boolean; fallback?: boolean };
+  const reply = result as { ok: boolean; fallback?: unknown; queued?: unknown; timing_note?: unknown };
+  const feedback = typeof reply.timing_note === 'string' ? timingFeedback(reply.timing_note)
+    : reply.queued === true ? { text: m.mobile_queue_direct_queued(), warning: true }
+      : typeof reply.fallback !== 'boolean' ? { text: m.native_action_uncertain(), warning: true } : null;
+  return { ok: reply.ok, fallback: reply.fallback === true, feedback };
 }

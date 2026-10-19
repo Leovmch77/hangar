@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { configureApi, type ChatEvent } from '@hangar/core';
-import { deliveryOptions, queueSendMode, readQueueJev, sendWithDelivery, timingFeedback } from './queueDelivery';
+import { answerWithDelivery, deliveryOptions, queueSendMode, readQueueJev, sendWithDelivery, timingFeedback } from './queueDelivery';
 import * as m from '../paraglide/messages';
 
 const server = { id: 'owner', label: 'fixture', baseUrl: 'https://owner.test', token: 'owner-token' };
@@ -80,6 +80,24 @@ it('Direto no Codex usa steer sem prazo local ou outro envio', async () => {
   expect(JSON.parse(init!.body as string)).toEqual({ text: 'oi' });
   expect(init!.signal).toBeUndefined();
   expect(fetch).toHaveBeenCalledTimes(1);
+});
+it.each([
+  [{ steered: true, delivered: true }, { text: m.native_queue_panel_steered(), warning: false }],
+  [{ steered: false, delivered: false }, { text: m.mobile_queue_direct_queued(), warning: true }],
+  [{ steered: false, delivered: true }, null],
+])('Direto no Claude com terminal diz se a mensagem ficou na fila: %j', async (reply, feedback) => {
+  vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ ok: true, native: false, ...reply })));
+  await expect(sendWithDelivery(server, 'sess', 'oi', { kind: 'direct', terminalClaude: true })).resolves.toEqual(feedback);
+});
+const ask = { is_async: true, provider: 'codex' as const, request_id: 'r1', interaction_id: 'i1', questions: [] };
+it.each([
+  [{ ok: true, fallback: false }, null],
+  [{ ok: true, fallback: false, queued: true }, { text: m.mobile_queue_direct_queued(), warning: true }],
+  [{ ok: true, fallback: false, timing_note: 'queue' }, { text: m.native_queue_jev_queued(), warning: false }],
+  [{ ok: true }, { text: m.native_action_uncertain(), warning: true }],
+])('resposta orientada devolve o aviso da entrega: %j', async (reply, feedback) => {
+  vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify(reply)));
+  await expect(answerWithDelivery(server, 'sess', [], ask)).resolves.toMatchObject({ ok: true, feedback });
 });
 
 it('opções do modo: a salva vem marcada; Jev indisponível fica desativado e marca a Fila', () => {

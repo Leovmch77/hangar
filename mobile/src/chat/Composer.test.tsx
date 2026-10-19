@@ -39,7 +39,8 @@ vi.mock('../stores/servers', () => {
   const state = () => ({ servers: [h.server] });
   return { useServers: Object.assign((select: (value: ReturnType<typeof state>) => unknown) => select(state()), { getState: state }) };
 });
-vi.mock('../stores/newConversation', () => ({ readFirstInput: () => null, useNewConversation: { getState: () => ({ issues: {} }) } }));
+vi.mock('../stores/newConversation', () => ({ readFirstInput: () => null, useNewConversation: { getState: () => ({ issues: {} }) },
+  attachInsert: (_attach: unknown, path: string) => path, withAttach: (body: string, inserts: string) => `${inserts} ${body}` }));
 vi.mock('../stores/contextRefs', () => ({
   contextRefsKey: () => 'srv::sess', useContextRefsFor: () => [], contextRefsSnapshot: () => [], removeSentContextRefs: vi.fn(),
 }));
@@ -73,6 +74,7 @@ vi.mock('./SessionSettings', () => ({ SessionSettingsButton: () => null }));
 vi.mock('./SideQuestionSheet', () => ({ SideQuestionSheet: () => null }));
 vi.mock('./SlashSuggest', () => ({ SlashSuggest: () => null }));
 vi.mock('./QueuePanel', () => ({ QueuePanel: () => null }));
+vi.mock('../ui/Toast', () => ({ toast: { ok: vi.fn(), erro: vi.fn() } }));
 vi.mock('../ui/attachmentPicker', () => ({ readClipboard: vi.fn() }));
 vi.mock('../ui/AttachSheet', () => ({ AttachSheet: () => null }));
 vi.mock('../ui/AttachmentPreview', () => ({ AttachmentPreview: () => null }));
@@ -83,6 +85,7 @@ vi.mock('../ui/Icon', () => ({ Icon: () => null }));
 import { AppState } from 'react-native';
 import { finishDictation, readDictation, readDraft, writeDictation, writeDraft } from '../stores/drafts';
 import { overwriteGetLocale } from '../paraglide/runtime';
+import * as m from '../paraglide/messages';
 import { Composer } from './Composer';
 
 const roots: Root[] = [];
@@ -129,6 +132,36 @@ it('Enviar respeita Mandar direto sem ignorar a revisão do rascunho', async () 
   const { container } = await mount();
   await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="send-fixture"]')!.click());
   expect(h.chat.send).toHaveBeenCalledWith('usar azul', expect.any(Number), { kind: 'direct', terminalClaude: true });
+});
+
+it('Jev salvo e sem configuração avisa no envio que foi pela fila', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{"available":false}')));
+  useDeliveryMode.setState({ mode: 'jev' });
+  writeDraft('srv', 'sess', { version: 1, text: 'usar azul', revision: 7, transcript: '/sessions/current', attachments: [], submission: null });
+  h.chat.use.setState({ stateEvent: { state: 'working' }, events: [] });
+  h.chat.send = vi.fn(async () => {});
+  h.chat.showDeliveryFeedback = vi.fn();
+  const { container } = await mount();
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="send-fixture"]')!.click());
+  expect(h.chat.send).toHaveBeenCalledWith('usar azul', expect.any(Number));
+  expect(h.chat.showDeliveryFeedback).toHaveBeenCalledWith({ text: m.mobile_queue_jev_fallback({ reason: m.native_queue_jev_setup() }), warning: true });
+});
+
+it('turno que acaba durante o upload do anexo não manda direto para uma sessão parada', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+    if (url === 'file:///a.png') { act(() => h.chat.use.setState({ stateEvent: { state: 'idle' } })); return new Response('png'); }
+    if (String(url).includes('/upload')) return new Response('{"path":"/up/a.png"}');
+    return new Response('{"available":true}');
+  }));
+  useDeliveryMode.setState({ mode: 'direct' });
+  writeDraft('srv', 'sess', { version: 1, text: 'usar azul', revision: 7, transcript: '/sessions/current', submission: null,
+    attachments: [{ uri: 'file:///a.png', name: 'a.png', mime: 'image/png', kind: 'image' }] });
+  h.chat.use.setState({ stateEvent: { state: 'working' }, events: [] });
+  h.chat.send = vi.fn();
+  const { container } = await mount();
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="send-fixture"]')!.click());
+  expect(h.chat.send).toHaveBeenCalledTimes(1);
+  expect(h.chat.send.mock.calls[0]).toHaveLength(2);
 });
 
 describe('Composer — ditado', () => {

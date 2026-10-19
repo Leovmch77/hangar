@@ -4777,6 +4777,8 @@
   "mobile_queue_mode_jev": "Jev",
   "mobile_queue_jev_short": "Jev decides whether it goes in now or waits",
   "mobile_queue_jev_fallback": "{reason}. Sending through the queue.",
+  "mobile_queue_direct_queued": "Didn't reach the current turn; check the queue before repeating.",
+  "mobile_queue_mode_save_failed": "Couldn't save the delivery mode; it only lasts until the app closes.",
   "native_delivering": "Delivered to the agent; awaiting confirmation",
   "native_delivery_failed": "The message did not reach the agent.",
   "native_delivery_unproved": "Could not confirm this one arrived; it is holding the queue.",

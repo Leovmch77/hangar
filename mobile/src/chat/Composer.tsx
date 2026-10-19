@@ -26,7 +26,7 @@ import { SessionSettingsButton } from './SessionSettings';
 import { SideQuestionSheet } from './SideQuestionSheet';
 import { SlashSuggest } from './SlashSuggest';
 import { QueuePanel } from './QueuePanel';
-import { queueSendMode, type QueueSendMode } from './queueDelivery';
+import { queueSendMode, type DeliveryFeedback, type QueueSendMode } from './queueDelivery';
 import { useDeliveryMode, useQueueDelivery } from './useQueueDelivery';
 import { readClipboard, type PickedAttachment } from '../ui/attachmentPicker';
 import { AttachSheet } from '../ui/AttachSheet';
@@ -471,13 +471,25 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
   const supportsDelivery = provider === 'claude' || provider === 'codex';
   // Lê o Jev mesmo parado e sem fila: o toque longo no Enviar escolhe o modo a qualquer momento.
   const delivery = useQueueDelivery(styleServer ?? undefined, supportsDelivery);
+  // O envio decide o modo depois do upload: lê o modo e o Jev desta hora, não os do render que começou o envio.
+  const deliveryRef = useRef(delivery);
+  deliveryRef.current = delivery;
   const modeMenu = useMemo(() => supportsDelivery && !editing ? { delivery: { mode: delivery.mode, status: delivery.status, help: delivery.help },
     onPick: useDeliveryMode.getState().setMode } : undefined, [supportsDelivery, editing, delivery.mode, delivery.status, delivery.help]);
   const deliveryTiming = useCallback((message: string) => {
     const live = chat.use.getState();
-    return queueSendMode(delivery.mode, delivery.status === 'ready', live.stateEvent?.state ?? 'idle', provider,
+    const { mode, status } = deliveryRef.current;
+    return queueSendMode(mode, status === 'ready', live.stateEvent?.state ?? 'idle', provider,
       headless, message, live.events, live.askOpen ? live.askPayload : null);
-  }, [chat, delivery.mode, delivery.status, provider, headless]);
+  }, [chat, provider, headless]);
+  // Jev salvo e indisponível vai pela fila; o aviso do painel só aparece com fila, então o envio avisa.
+  const jevFallback = useCallback((message: string): DeliveryFeedback | null => {
+    const { mode, status, help } = deliveryRef.current;
+    if (mode !== 'jev' || status === 'ready' || status === 'loading') return null;
+    const live = chat.use.getState();
+    return queueSendMode('jev', true, live.stateEvent?.state ?? 'idle', provider, headless, message, live.events, null)
+      ? { text: m.mobile_queue_jev_fallback({ reason: help.replace(/[\s.…]+$/, '') }), warning: true } : null;
+  }, [chat, provider, headless]);
   const dictationStyle = useDictationStyleLabel(styleServer);
   // Organização desligada na máquina da sessão: todo estilo volta cru, então a barra não oferece versões.
   const organizationOff = useDictationOrganization(styleServer) === 'off';
@@ -576,9 +588,15 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
   const hasContent = text.trim().length > 0 || pendingAttachments.length > 0 || refs.length > 0;
 
   // A primeira mensagem já pode ter chegado antes de esta tela montar: nunca criar outro eco.
-  const sendText = useCallback(async (value: string, revision?: number, explicit = false, timing: QueueSendMode | null = deliveryTiming(value) ?? null): Promise<void> => {
-    const mode = sendToPair && pairPeers?.length ? undefined : timing ?? undefined;
-    const send = () => mode ? chat.send(value, revision, mode) : chat.send(value, revision);
+  const sendText = useCallback(async (value: string, revision?: number, explicit = false, timing: QueueSendMode | null = deliveryTiming(value) ?? null,
+    notice: DeliveryFeedback | null = null): Promise<void> => {
+    const pair = !!(sendToPair && pairPeers?.length);
+    const mode = pair ? undefined : timing ?? undefined;
+    // O aviso descreve um envio que aconteceu: os caminhos que não chamam o send não o mostram.
+    const send = async () => {
+      await (mode ? chat.send(value, revision, mode) : chat.send(value, revision));
+      if (notice && !pair) chat.showDeliveryFeedback(notice);
+    };
     if (!firstInputId) return send();
     const snapshot = readFirstInput(serverId, name);
     // Tentativa já confirmada e apagada enquanto o campo ainda mostrava o texto do handoff: não reenviar.
@@ -657,11 +675,9 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
       sendingRef.current = false;
     };
     const body = composeWithContextRefs(sentRefs, trimmed);
-    let timing: QueueSendMode | undefined = deliveryTiming(trimmed);
     let finalText = body;
     // Remover anexo fica desligado durante o envio; colar no meio dele acrescenta um que espera a próxima vez.
     const sentAttachments = attachmentsRef.current;
-    if (sentAttachments.length && typeof timing === 'object' && timing.kind === 'jev') timing = { ...timing, task: '' };
     if (sentAttachments.length) {
       const target = { serverId: origin.serverId, name: origin.name, transcript: transcriptRef.current };
       const inserts: string[] = [];
@@ -705,6 +721,10 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
       stop();
       return;
     }
+    // Depois do upload: o turno pode ter acabado nele, e Direto ou Jev numa sessão parada não fazem sentido.
+    let timing: QueueSendMode | undefined = deliveryTiming(trimmed);
+    if (sentAttachments.length && typeof timing === 'object' && timing.kind === 'jev') timing = { ...timing, task: '' };
+    const fallbackNotice = timing ? null : jevFallback(trimmed);
     let groupPendingId: string | null = null;
     try {
       const snapshot = firstInputId ? readFirstInput(serverId, name) : null;
@@ -728,7 +748,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
           }
         }, sentRevision);
       } else {
-        await sendText(finalText, sentRevision, true, timing ?? null);
+        await sendText(finalText, sentRevision, true, timing ?? null, fallbackNotice);
       }
       removeSentContextRefs(refsKey, sentRefs);
       setBar(null);
@@ -750,7 +770,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
       setSending(false);
       sendingRef.current = false;
     }
-  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttachments, setPendingAttachments, serverId, name, firstInputId, pairPeers, sendToPair, persistText, persistDraft, origin, submissionBlocksSend, isClaude, setBar, queueEdit, navigation, refs, refsKey, deliveryTiming]);
+  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttachments, setPendingAttachments, serverId, name, firstInputId, pairPeers, sendToPair, persistText, persistDraft, origin, submissionBlocksSend, isClaude, setBar, queueEdit, navigation, refs, refsKey, deliveryTiming, jevFallback]);
 
   // auto-envio: contagem de 3s
   const iniciarAuto = useCallback(

@@ -1640,6 +1640,24 @@ describe('envio Direto e Jev pelo mesmo rascunho', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  test('aviso da entrega some sozinho e não apaga o aviso mais novo', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const chat = chatStore('srv1', 'sess');
+      vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ ok: true, timing_note: 'queue' })));
+      await chat.send('usar azul', undefined, { kind: 'jev', task: 'criar tela', message: 'usar azul' });
+      expect(chat.use.getState().deliveryFeedback).toEqual({ text: m.native_queue_jev_queued(), warning: false });
+      vi.advanceTimersByTime(8_000);
+      chat.showDeliveryFeedback({ text: 'mais novo', warning: true });
+      vi.advanceTimersByTime(8_000);
+      expect(chat.use.getState().deliveryFeedback).toEqual({ text: 'mais novo', warning: true });
+      vi.advanceTimersByTime(4_000);
+      expect(chat.use.getState().deliveryFeedback).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   test('queda no envio Jev conserva rascunho e eco incertos sem segundo POST', async () => {
     const chat = chatStore('srv1', 'sess');
     vi.mocked(fetch).mockRejectedValue(new TypeError('network'));

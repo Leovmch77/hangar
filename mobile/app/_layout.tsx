@@ -10,6 +10,7 @@ import { configureCore } from '../src/net/configureCore';
 import { useServers } from '../src/stores/servers';
 import { discoverSavedMachines } from '../src/features/machines/importMachines';
 import { setChatsForeground } from '../src/stores/chat';
+import { setQueueDeliveryForeground } from '../src/chat/useQueueDelivery';
 import { setMachineDiscovery, useSessions } from '../src/stores/sessions';
 import { aplicarTemaSalvo, useAparencia } from '../src/stores/aparencia';
 import { aplicarMaterial } from '../src/theme/aplicarMaterial';
@@ -49,6 +50,7 @@ export default function Layout() {
     const apply = (state: AppStateStatus) => {
       const active = state === 'active';
       setChatsForeground(active);
+      setQueueDeliveryForeground(active);
       useSessions.getState().setForeground(active);
     };
     apply(initial);

@@ -187,3 +187,15 @@ it('conversa navega nas duas direções, respeita extremos e mantém as setas', 
   await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="anterior"]')!.click());
   expect(container.textContent).toContain('1/2 · 1.png');
 });
+
+it('fechar por fora (voltar do Android) e reabrir a mesma imagem volta sem zoom', async () => {
+  const { root, onClose, onStep } = await render();
+  deliver('PinchGestureHandler', 'onStart', event(0, 0, 1, 2));
+  deliver('PinchGestureHandler', 'onUpdate', event(0, 0, 2, 2));
+  deliver('PinchGestureHandler', 'onEnd');
+  drag(100, 20);
+  const props = { uri: 'https://example.test/1.png', filename: '1.png', onClose, onStep };
+  await act(async () => root.render(createElement(Lightbox, { ...props, visible: false })));
+  await act(async () => root.render(createElement(Lightbox, { ...props, visible: true })));
+  expect(native.style().transform).toEqual([{ translateX: 0 }, { translateY: 0 }, { scale: 1 }]);
+});

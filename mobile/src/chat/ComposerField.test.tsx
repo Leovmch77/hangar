@@ -14,7 +14,15 @@ const menu = vi.hoisted(() => ({ last: null as null | MenuProps }));
 vi.mock('@react-native-menu/menu', () => ({ MenuView: (props: MenuProps) => { menu.last = props; return createElement('div', null, props.children); } }));
 const native = vi.hoisted(() => ({ platform: { OS: 'android', select: (x: Record<string, unknown>) => x.android ?? x.default },
   sheet: { showActionSheetWithOptions: (() => {}) as (o: unknown, cb: (i: number) => void) => void } }));
-vi.mock('react-native', async (original) => ({ ...await original<object>(), Platform: native.platform, ActionSheetIOS: native.sheet }));
+type A11yProps = { accessible?: boolean; accessibilityLabel?: string; accessibilityValue?: { text?: string };
+  accessibilityActions?: { name: string; label: string }[]; onAccessibilityAction?: (e: { nativeEvent: { actionName: string } }) => void };
+const a11y = vi.hoisted(() => ({ groups: [] as A11yProps[] }));
+vi.mock('react-native', async (original) => {
+  const actual = await original<typeof import('react-native')>();
+  // O leitor de tela só alcança elemento acessível: guarda os que se declaram assim.
+  const View = (props: A11yProps & { children?: ReactNode }) => { if (props.accessible) a11y.groups.push(props); return createElement(actual.View, props); };
+  return { ...actual, View, Platform: native.platform, ActionSheetIOS: native.sheet };
+});
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 vi.mock('../ui/MultilineInput', () => ({ MultilineInput: () => null }));
@@ -84,4 +92,26 @@ it('leitor de tela: uma ação por modo possível, nas duas plataformas', () => 
   expect(handlers.a11yActions).toEqual([{ name: 'queued', label: m.mobile_queue_mode_queued() }, { name: 'direct', label: m.mobile_queue_mode_direct() }]);
   handlers.pick('direct');
   expect(onPick).toHaveBeenCalledWith('direct');
+});
+
+it.each([['android'], ['ios']])('%s: Enviar desativado deixa os modos num elemento que o leitor de tela alcança', (os) => {
+  native.platform.OS = os;
+  try {
+    a11y.groups = [];
+    const { root, onPick } = render('setup', true);
+    const group = a11y.groups.at(-1)!;
+    expect(group.accessibilityLabel).toBe(m.mobile_queue_mode_label());
+    expect(group.accessibilityValue?.text).toBe(m.mobile_queue_mode_direct());
+    expect(group.accessibilityActions).toEqual([{ name: 'queued', label: m.mobile_queue_mode_queued() }, { name: 'direct', label: m.mobile_queue_mode_direct() }]);
+    act(() => group.onAccessibilityAction!({ nativeEvent: { actionName: 'queued' } }));
+    expect(onPick).toHaveBeenCalledWith('queued');
+    act(() => root.unmount());
+    a11y.groups = [];
+    const enabled = render('setup', false);
+    // Enviar ativo carrega as ações ele mesmo; o grupo não esconde o botão.
+    expect(a11y.groups).toEqual([]);
+    act(() => enabled.root.unmount());
+  } finally {
+    native.platform.OS = 'android';
+  }
 });
