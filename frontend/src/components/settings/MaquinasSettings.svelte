@@ -12,7 +12,7 @@
   import { alcanceDoServidor, type AlcanceDoServidor, type TipoEndereco } from '../../lib/alcance';
   import { cachedSyncStatus } from '../../lib/sync';
   import { onDestroy } from 'svelte';
-  import { createMachineImportLink, getAtualizacaoEm, iniciarAtualizacaoEm, reiniciarServidorEm, registrarSucesso, SERVIDOR_CANDIDATO } from '@hangar/core';
+  import { createMachineImportLink, getAtualizacaoEm, iniciarAtualizacaoEm, reiniciarServidorEm, matchesRestartResult, registrarSucesso, SERVIDOR_CANDIDATO } from '@hangar/core';
   import AdicionarMaquina from './AdicionarMaquina.svelte';
   import ColarConvite from './ColarConvite.svelte';
   import PairAcceptSheet from '../PairAcceptSheet.svelte';
@@ -232,7 +232,7 @@
     reiniciando = false; reinicioErro = ''; reinicioFeito = false; reinicioRecusado = false; idSalvo = false;
     reinicioAguardando = false; reinicioHora = '';
     confirmarAtualizacao = false; atualizando = false; atualizacaoAguardando = false;
-    atualizacaoEtapa = null; atualizacaoErro = ''; atualizacaoHora = ''; atualizacaoManual = false;
+    atualizacaoEtapa = null; atualizacaoErro = ''; atualizacaoHora = ''; partialUpdate = ''; atualizacaoManual = false;
     // Gravação em voo pertence ao alvo que saiu da tela: sem isto o campo fica `readonly`
     // e o Confirmar do diálogo nasce desabilitado, para sempre, no alvo novo.
     idSalvando = false;
@@ -463,11 +463,11 @@
     reinicioRecusado = false;
     reinicioHora = '';
     try {
-      const { pid } = await reiniciarServidorEm(apiTarget);
+      const started = await reiniciarServidorEm(apiTarget);
       if (meu !== geracao) return;
       reinicioAguardando = true;
       reiniciando = false;
-      void confirmarReinicio(pid, meu);
+      void confirmarReinicio(started, meu);
     } catch (e) {
       if (meu !== geracao) return;
       // 409 é o servidor RECUSANDO com motivo (topologia que não reinicia sozinha, atualização já
@@ -482,7 +482,7 @@
     }
   }
 
-  async function confirmarReinicio(pid: number, meu: number) {
+  async function confirmarReinicio(started: { pid: number; request_id?: string }, meu: number) {
     const limite = Date.now() + 120_000;
     try {
       while (Date.now() < limite) {
@@ -495,7 +495,7 @@
           continue;   // servidor caído no meio do reinício: é o esperado, pergunta de novo
         }
         if (meu !== geracao) return;
-        if (estado.pid !== pid || estado.fase !== 'pronto') continue;
+        if (!matchesRestartResult(estado, started) || estado.fase !== 'pronto') continue;
         if (estado.ok) reinicioHora = new Date(estado.ts ?? Date.now()).toLocaleTimeString();
         else reinicioErro = estado.reinicio_erro || estado.erro || m.maquinas_servico_falhou();
         return;
@@ -514,6 +514,7 @@
   let atualizacaoEtapa = $state<{ passo: number; total: number; texto: string } | null>(null);
   let atualizacaoErro = $state('');
   let atualizacaoHora = $state('');
+  let partialUpdate = $state('');
   let atualizacaoManual = $state(false);   // código novo no disco, reinício ainda por fazer
   const servicoOcupado = $derived(reiniciando || reinicioAguardando || atualizando || atualizacaoAguardando);
 
@@ -522,7 +523,7 @@
     if (servicoOcupado) return;
     const meu = geracao;
     atualizando = true;
-    atualizacaoErro = ''; atualizacaoHora = ''; atualizacaoManual = false; atualizacaoEtapa = null;
+    atualizacaoErro = ''; atualizacaoHora = ''; partialUpdate = ''; atualizacaoManual = false; atualizacaoEtapa = null;
     try {
       const { pid } = await iniciarAtualizacaoEm(apiTarget);
       if (meu !== geracao) return;
@@ -558,6 +559,7 @@
         }
         if (estado.pid !== pid || estado.fase !== 'pronto') continue;
         if (!estado.ok) atualizacaoErro = estado.erro || m.atualizar_falhou_titulo();
+        else if (estado.waiting_for_server_build) partialUpdate = m.atualizar_parcial_build({ commit: estado.commit_para?.slice(0, 8) || '—' });
         else if (estado.reiniciar_manual) atualizacaoManual = true;
         else atualizacaoHora = new Date(estado.ts ?? Date.now()).toLocaleTimeString();
         return;
@@ -875,6 +877,7 @@
         <p class="id-ok sv-atualizacao" role="status">{atualizacaoEtapa && atualizacaoEtapa.total
           ? m.maquinas_atualizar_etapa({ passo: atualizacaoEtapa.passo, total: atualizacaoEtapa.total, texto: atualizacaoEtapa.texto })
           : m.atualizar_rodando_titulo()}</p>
+      {:else if partialUpdate}<p class="id-aviso sv-atualizacao" role="status">{partialUpdate}</p>
       {:else if atualizacaoHora}<p class="id-ok sv-atualizacao" role="status">{m.maquinas_atualizar_feito({ hora: atualizacaoHora })}</p>
       {:else if atualizacaoManual}<p class="id-aviso sv-atualizacao" role="status">{m.atualizar_pronto_reiniciar()}</p>{/if}
       {#if atualizacaoErro}<p class="id-erro sv-atualizacao" role="alert">{atualizacaoErro}</p>{/if}

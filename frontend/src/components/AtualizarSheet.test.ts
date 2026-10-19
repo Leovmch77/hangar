@@ -42,6 +42,42 @@ afterEach(() => {
 });
 
 describe('em dia', () => {
+  it('reinício só recarrega após confirmar a tentativa pedida, mesmo com pid diferente', async () => {
+    vi.useFakeTimers();
+    const reload = vi.spyOn(window.location, 'reload').mockImplementation(() => {});
+    const spy = vi.spyOn(api, 'getAtualizacao').mockResolvedValue(base({
+      versoes: { repo: 'v2', backend: 'v1' }, pre_voo: { pode: true, faltando: [], topologia: 'systemd' },
+    }));
+    vi.spyOn(api, 'reiniciarServidor').mockResolvedValue({ ok: true, pid: 42, request_id: 'restart-a' });
+    try {
+      montar(); await vi.advanceTimersByTimeAsync(0);
+      [...document.querySelectorAll('button')].find((b) => b.textContent?.includes(m.atualizar_reiniciar_botao()))!.click();
+      await vi.advanceTimersByTimeAsync(0);
+      spy.mockResolvedValue(base({ estado: { fase: 'rodando', pid: 88, request_id: 'restart-a' } }));
+      await vi.advanceTimersByTimeAsync(2000);
+      spy.mockResolvedValue(base({ estado: { fase: 'pronto', ok: true, pid: 88, request_id: 'restart-old' } }));
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(reload).not.toHaveBeenCalled();
+      spy.mockResolvedValue(base({ estado: { fase: 'pronto', ok: true, pid: 88, request_id: 'restart-a' } }));
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(reload).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('atualização parcial mostra até onde foi e a espera pelo build, sem dizer tudo em dia', async () => {
+    vi.spyOn(api, 'getAtualizacao').mockResolvedValue(base({ estado: {
+      fase: 'pronto', ok: true, waiting_for_server_build: true, commit_para: '991bb4f123456789',
+      avisos: ['fixture-build-pending'],
+    } }));
+    montar();
+    await tick();
+    await tick();
+    expect(document.body.textContent).toContain('991bb4f1');
+    expect(document.body.textContent).toContain('fixture-build-pending');
+    expect(document.body.textContent).not.toContain(m.atualizar_em_dia_titulo());
+    expect(document.body.textContent).not.toContain(m.atualizar_com_avisos());
+  });
+
   it('mostra uma versão só quando disco e servidor batem', async () => {
     vi.spyOn(api, 'getAtualizacao').mockResolvedValue(base());
     montar();

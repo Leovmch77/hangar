@@ -46,6 +46,7 @@ def repo(tmp_path, monkeypatch):
     _git(d, "commit", "-m", "primeiro")
     monkeypatch.setattr(atualizar, "REPO", d)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr(atualizar.log_paths, "base", lambda: tmp_path / "logs")
     # Sem escopo systemd nos testes: `_scope_prefix` sonda o systemd com um `subprocess.run` de
     # verdade, e quem troca o `Popen` por um dublê acaba interceptando a sonda em vez do
     # lançamento. O que o prefixo faz está coberto por `test_lancamento_usa_escopo_systemd`.
@@ -925,10 +926,70 @@ def test_reiniciar_agora_lanca_destacado_e_no_escopo(repo, monkeypatch):
     monkeypatch.setattr(atualizar.subprocess, "Popen",
                         lambda a, **kw: (args_vistos.extend(a), capturado.update(kw), P())[2])
     r = atualizar.reiniciar_agora()
-    assert r == {"ok": True, "pid": 3}
+    assert r["ok"] is True and r["pid"] == 3
+    assert capturado["env"][atualizar._RESTART_REQUEST_ENV] == r["request_id"]
     assert args_vistos[:3] == ["systemd-run", "--user", "--scope"]
     assert args_vistos[-2:] == ["--reiniciar", "8765"]
     assert capturado.get("start_new_session") is True
+
+
+def test_reinicio_que_morre_antes_do_motor_publica_a_falha(repo, tmp_path, monkeypatch):
+    from app import log_paths
+
+    monkeypatch.setattr(atualizar, "_topologia", lambda: "systemd")
+    monkeypatch.setattr(log_paths, "base", lambda: tmp_path / "logs")
+    atualizar._escrever(fase="pronto", ok=True, pid=1, texto="Atualizado")
+    real_popen = subprocess.Popen
+    children = []
+
+    def early_failure(args, **kwargs):
+        child = real_popen([sys.executable, "-c", "raise RuntimeError('restart launch failed')"],
+                           **{**kwargs, "cwd": str(tmp_path)})
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(atualizar.subprocess, "Popen", early_failure)
+    try:
+        requested = atualizar.reiniciar_agora()
+        children[0].wait(timeout=10)
+        final = atualizar.estado_para_tela()
+
+        assert final["pid"] == requested["pid"]
+        assert final["fase"] == "pronto" and final["ok"] is False
+        assert final["erro"]
+        assert "restart launch failed" in (tmp_path / "logs" / "privado" / "atualizacao-launch.log").read_text()
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=10)
+
+
+def test_reinicio_correlaciona_pedido_quando_pid_do_motor_difere_do_lancador(repo, monkeypatch):
+    launch = {}
+    class Launcher:
+        pid = 43
+
+    def popen(args, **kwargs):
+        launch.update(kwargs)
+        return Launcher()
+
+    monkeypatch.setattr(atualizar, "_topologia", lambda: "systemd")
+    monkeypatch.setattr(atualizar.subprocess, "Popen", popen)
+    monkeypatch.setattr(atualizar, "_atualizar_dist", lambda: None)
+    monkeypatch.setattr(atualizar, "_reiniciar", lambda topo, porta: None)
+    monkeypatch.setattr(atualizar, "_subiu", lambda porta, teto=0: True)
+
+    requested = atualizar.reiniciar_agora()
+    assert requested["request_id"]
+    for key, value in launch["env"].items():
+        monkeypatch.setenv(key, value)
+    atualizar.executar_reinicio()
+
+    final = atualizar.estado_para_tela()
+    assert final["request_id"] == requested["request_id"]
+    assert final["pid"] != requested["pid"]
+    assert final["ok"] is True
 
 
 def test_reinicio_avulso_mostra_progresso_e_termina_pronto(repo, monkeypatch):
@@ -956,6 +1017,20 @@ def test_reinicio_avulso_sem_servidor_de_volta_nao_diz_ok(repo, monkeypatch):
     atualizar.executar_reinicio()
     final = atualizar.estado()
     assert final["ok"] is False and "nao respondeu" in final["erro"]
+
+
+def test_reinicio_avulso_com_o_mesmo_processo_nao_diz_ok(repo, monkeypatch):
+    monkeypatch.setattr(atualizar, "_atualizar_dist", lambda: None)
+    monkeypatch.setattr(atualizar, "_topologia", lambda: "systemd")
+    monkeypatch.setattr(atualizar, "_reiniciar", lambda topo, *a: None)
+    monkeypatch.setattr(atualizar, "_subiu", lambda porta, teto=0: True)
+    monkeypatch.setattr(atualizar, "_pid_do_servidor", lambda topo, porta: 43)
+
+    atualizar.executar_reinicio()
+
+    final = atualizar.estado_para_tela()
+    assert final["ok"] is False
+    assert "mesmo" in final["reinicio_erro"]
 
 
 def test_reiniciar_agora_recusa_com_atualizacao_rodando(repo, monkeypatch):
@@ -1084,7 +1159,9 @@ def test_reiniciar_agora_no_windows_lanca_sem_janela(repo, monkeypatch):
     monkeypatch.setattr(atualizar.tmux, "_scope_prefix", lambda: [])
     monkeypatch.setattr(atualizar.subprocess, "Popen",
                         lambda a, **kw: (capturado.update(kw), P())[1])
-    assert atualizar.reiniciar_agora() == {"ok": True, "pid": 3}
+    requested = atualizar.reiniciar_agora()
+    assert requested["ok"] is True and requested["pid"] == 3
+    assert capturado["env"][atualizar._RESTART_REQUEST_ENV] == requested["request_id"]
     assert capturado.get("creationflags") == atualizar._FLAGS_MOTOR_WINDOWS
     assert "start_new_session" not in capturado
 
@@ -1455,6 +1532,34 @@ def test_commit_so_de_python_depois_do_binario_chega(repo, rust):
     _git(rust["obra"], "push", "-q", "origin", "main")
     final = atualizar.executar()
     assert final["ok"] is True and _rev(repo, "HEAD") == _rev(rust["obra"], "HEAD") != rust["topo"]
+
+
+@pytest.mark.parametrize("build_change", ["none", "pending", "reverted"])
+def test_main_recebe_branch_que_mesclou_o_build_publicado(repo, rust, build_change):
+    obra = rust["obra"]
+    _workflow_do_server(obra)
+    assert _git(obra, "branch", "mobile-lote").returncode == 0
+    (obra / "crates").mkdir()
+    _commit(obra, "crates/server.rs", "published\n")
+    rust["manifesto"]["commit"] = _rev(obra, "HEAD")
+    assert _git(obra, "checkout", "mobile-lote").returncode == 0
+    _commit(obra, "mobile.txt", "mobile\n")
+    assert _git(obra, "merge", "--no-ff", "main", "-m", "Merge main into mobile-lote").returncode == 0
+    _commit(obra, "py.txt", "Python depois do merge\n")
+    expected = _rev(obra, "HEAD")
+    if build_change != "none":
+        _commit(obra, "crates/server.rs", "unpublished\n")
+        _commit(obra, "py.txt", "Python depois do Rust\n")
+        if build_change == "reverted":
+            _commit(obra, "crates/server.rs", "published\n")
+            expected = _rev(obra, "HEAD")
+    assert _git(obra, "push", "-q", "origin", "HEAD:main").returncode == 0
+
+    final = atualizar.executar()
+
+    assert final["ok"] is True
+    assert _rev(repo, "HEAD") == expected
+    assert final["waiting_for_server_build"] is (build_change == "pending")
 
 
 def test_build_deste_sistema_atrasado_no_manifesto_por_sistema(repo, rust):

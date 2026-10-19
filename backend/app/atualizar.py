@@ -38,11 +38,12 @@ import sys
 import threading
 import time
 import urllib.error
+import uuid
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from app import atomico, config, procinfo, rust_release, tmux
+from app import atomico, config, diag, log_paths, procinfo, rust_release, tmux
 
 _log = logging.getLogger("hangar.atualizar")
 
@@ -176,6 +177,12 @@ def estado_para_tela() -> dict:
     if atual.get("fase") != "rodando":
         return atual
     dono = atual.get("pid")
+    if not dono:
+        # O lançador pode morrer antes da primeira escrita do motor; a trava já guarda o pid devolvido ao cliente.
+        try:
+            dono = int((_base() / "rodando.lock").read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            dono = None
     if _vivo(dono):
         return atual
     if not dono and _recente(atual.get("ts")):
@@ -191,13 +198,14 @@ def estado_para_tela() -> dict:
         _soltar_a_vez()
         return estado()
     _log.warning("atualizacao abandonada: o processo %s nao existe mais", dono)
-    _escrever(fase="pronto", ok=False, voltou=False, no_ar=True,
+    _escrever(fase="pronto", ok=False, voltou=False, no_ar=True, pid=dono,
               erro="a atualizacao foi interrompida — o processo que a executava nao existe mais")
     _soltar_a_vez()
     return estado()
 
 
 _BACKEND_PID_ENV = "HANGAR_UPDATE_BACKEND_PID"
+_RESTART_REQUEST_ENV = "HANGAR_RESTART_REQUEST_ID"
 
 
 def _launching_backend() -> int | None:
@@ -706,24 +714,27 @@ def _caminhos_do_build(rev: str) -> list[str] | None:
 
 
 def _ultimo_com_o_binario(publicado: str, topo: str) -> str:
-    """O commit mais novo que ainda roda com o binário publicado: o pai do primeiro, depois dele, que muda o
-    que o build do Rust lê. Sem ler a lista, para no próprio commit do binário."""
+    """O commit mais novo do primeiro pai com o conteúdo do build publicado.
+
+    Merge pode trazer o build por outro pai; o histórico de mudanças não prova que a árvore difere.
+    Sem conferir a lista ou a comparação, para no próprio commit do binário.
+    """
     caminhos = _caminhos_do_build(topo)
     if caminhos is None:
         _log.warning("paths do %s ilegiveis em %s: o codigo para no commit do binario %s", _SERVER_WORKFLOW, topo, publicado[:8])
         return publicado
-    p = _git_quiet("log", "--first-parent", "--reverse", "--format=%H", f"{publicado}..{topo}", "--",
-                   *(f":(glob){c}" for c in caminhos))
+    p = _git_quiet("rev-list", "--first-parent", f"{publicado}..{topo}")
     if p.returncode != 0:
         _log.warning("git log dos commits depois do binario falhou (%s): %s", p.returncode, p.stderr.strip()[-300:])
         return publicado
-    primeiro = p.stdout.split()[:1]
-    if not primeiro:
-        return topo
-    anterior = _git_quiet("rev-parse", "--verify", "--quiet", f"{primeiro[0]}^1").stdout.strip()
-    if not anterior:
-        _log.warning("pai de %s ilegivel: o codigo para no commit do binario %s", primeiro[0][:8], publicado[:8])
-    return anterior or publicado
+    for candidato in p.stdout.split():
+        diff = _git_quiet("diff", "--quiet", publicado, candidato, "--", *(f":(glob){c}" for c in caminhos))
+        if diff.returncode == 0:
+            return candidato
+        if diff.returncode != 1:
+            _log.warning("git diff do build falhou (%s): %s", diff.returncode, diff.stderr.strip()[-300:])
+            return publicado
+    return publicado
 
 
 def pinned_target(destino: str) -> tuple[str | None, tuple | None]:
@@ -764,7 +775,7 @@ def pinned_target(destino: str) -> tuple[str | None, tuple | None]:
         _log.warning("binario %s sem contrato conferido (entrada %r, commit do topo %r)",
                      plat, entry, manifest.get("commit"))
         return None, release
-    # O código vai até o commit do binário publicado, nem um depois: o código seguinte rodaria com o binário de antes.
+    # Mesmo contrato não basta: o conteúdo que produziu o binário também precisa coincidir.
     publicado = binary[0]
     if publicado == _git_quiet("rev-parse", "--verify", "--quiet", topo).stdout.strip():
         return topo, release
@@ -1074,7 +1085,8 @@ def _executar(porta: int) -> dict:
     # no terminalzinho, mesmo tendo sido registrada.
     _escrever(fase="rodando", ok=None, erro=None, resgate=None, voltou=None, no_ar=None,
               commit_de="", commit_para=None, pid=os.getpid(), backend_pid=_launching_backend(),
-              reiniciar_manual=False, shell_mudou=False, log=[], avisos=[])
+              reiniciar_manual=False, shell_mudou=False, waiting_for_server_build=False,
+              request_id=None, log=[], avisos=[])
     pre = checar()
     de = pre.get("commit", "")
     _escrever(commit_de=de)
@@ -1115,6 +1127,7 @@ def _executar(porta: int) -> dict:
                 _avisar(f"o binário do Rust publicado para este sistema (commit {binary[0][:8]}) fala outro "
                         "contrato que este código; o Python atende sozinho até sair o binário novo")
             elif _behind_top():
+                _escrever(waiting_for_server_build=True)
                 _avisar(f"aguardando o build do servidor Rust para este sistema (compilando, ou o build "
                         f"falhou): a versão mais nova muda o contrato com ele; atualizado até {para[:8]}")
 
@@ -1415,15 +1428,27 @@ def reiniciar_agora(porta: int = 8765) -> dict:
         return {"ok": False, "erro": "ja_rodando"}
     # Limpa a falha e os avisos do reinício ANTERIOR: sem isso a tela mostraria pra sempre o erro
     # de uma tentativa que já passou, inclusive depois de um reinício que deu certo.
-    _escrever(reinicio_erro=None, avisos=[])
+    request_id = uuid.uuid4().hex
+    _escrever(fase="rodando", ok=None, erro=None, pid=None, etapa=None,
+              passo=0, total=len(ETAPAS_REINICIO), texto="Começando o reinício",
+              commit_de="", commit_para=None, backend_pid=None,
+              reinicio_erro=None, avisos=[], waiting_for_server_build=False, request_id=request_id)
+    diag.registrar("service.restart.requested", codigo=topologia)
     try:
-        proc = subprocess.Popen(
-            tmux._scope_prefix() + [sys.executable, "-m", "app.atualizar", "--reiniciar", str(porta)],
-            cwd=str(REPO / "backend"),
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            **_kw_destacado(),
-        )
-    except OSError:
+        folder = log_paths.base() / "privado"
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(folder / "atualizacao-launch.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8", errors="replace") as launch_log:
+            proc = subprocess.Popen(
+                tmux._scope_prefix() + [sys.executable, "-m", "app.atualizar", "--reiniciar", str(porta)],
+                cwd=str(REPO / "backend"),
+                stdin=subprocess.DEVNULL, stdout=launch_log, stderr=launch_log,
+                env={**os.environ, _RESTART_REQUEST_ENV: request_id},
+                **_kw_destacado(),
+            )
+    except OSError as exc:
+        _escrever(fase="pronto", ok=False, erro="não consegui lançar o processo do reinício")
+        diag.registrar("service.restart.launch_failed", "erro", **diag.erro_campos(exc))
         _soltar_a_vez()
         raise
     try:
@@ -1434,7 +1459,7 @@ def reiniciar_agora(porta: int = 8765) -> dict:
     except OSError as e:
         _log.warning("nao consegui marcar o dono do lock (%s); soltando pra nao travar a maquina", e)
         _soltar_a_vez()
-    return {"ok": True, "pid": proc.pid}
+    return {"ok": True, "pid": proc.pid, "request_id": request_id}
 
 
 _DIST_URL = "https://github.com/jeffer1312/hangar/releases/download/dist-latest"
@@ -1540,11 +1565,8 @@ def _atualizar_dist() -> str | None:
 def executar_reinicio(porta: int = 8765) -> None:
     """O reinício em si, já dentro do processo destacado.
 
-    O `except` NÃO é zelo: o `stderr` deste processo vai pro `/dev/null` (o `Popen` de
-    `reiniciar_agora` não pode escrever no log do serviço que está prestes a reiniciar), então uma
-    exceção aqui não deixaria rastro em lugar NENHUM — nem log, nem estado — e a tela ficaria
-    esperando um servidor que nunca cai, sem saber por quê. O estado é o único canal que sobrevive
-    a este processo, e é dele que a tela lê.
+    O estado leva o desfecho à tela mesmo depois de o serviço reiniciar. A saída do lançamento
+    fica no log privado; uma exceção do motor também precisa concluir o pedido no estado.
     """
     global _SOU_O_MOTOR
     _SOU_O_MOTOR = True
@@ -1552,17 +1574,22 @@ def executar_reinicio(porta: int = 8765) -> None:
     # e a pessoa não via nem o dist descendo nem o servidor caindo.
     _escrever(fase="rodando", ok=None, erro=None, voltou=None, no_ar=None, resgate=None,
               pid=os.getpid(), reinicio_erro=None, avisos=[], log=[],
-              commit_de="", commit_para=None, reiniciar_manual=False, shell_mudou=False)
+              commit_de="", commit_para=None, reiniciar_manual=False, shell_mudou=False,
+              waiting_for_server_build=False, request_id=os.environ.get(_RESTART_REQUEST_ENV))
     try:
         _etapa("tela", lista=ETAPAS_REINICIO)
         aviso = _atualizar_dist()
         _escrever(avisos=[aviso] if aviso else [])
         _etapa("reiniciar", lista=ETAPAS_REINICIO)
-        _reiniciar(_topologia(), porta)
+        topologia = _topologia()
+        pid_antes = _pid_do_servidor(topologia, porta)
+        _reiniciar(topologia, porta)
         # `ok=True` só com o servidor respondendo: a tela recarrega ao ver `ok`, e sem a prova
         # recarregava antes do novo subir.
         if not _subiu(porta):
             raise RuntimeError("o servidor nao respondeu depois de reiniciar")
+        if pid_antes and _pid_do_servidor(topologia, porta) == pid_antes:
+            raise RuntimeError(f"o servidor nao reiniciou: o processo na porta e o mesmo de antes (pid {pid_antes})")
         _dist_velho_apagar()
         _escrever(fase="pronto", ok=True, texto="Reiniciado")
     except Exception as e:                           # noqa: BLE001 — ver docstring
