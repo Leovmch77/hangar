@@ -102,6 +102,16 @@ pub fn process_absent(procs:&dyn ProcessView,pid:i64,birth:f64)->Result<bool,Run
         Err(_)=>Err(failure("lifecycle_process_read")),
     }
 }
+/// O agente desta vida morreu (pid com o mesmo nascimento ausente). Tabela de processos ilegível não prova
+/// morte: conta como vivo e vai ao log com o código.
+pub fn agent_gone(name:&str,pid:i64,birth:f64)->bool {
+    super::lifecycle::process_absent(&crate::list::procs::SystemProcs::default(),pid,birth).unwrap_or_else(|error| {
+        if crate::warn_limit::allow(Some(name),&error.code) {
+            tracing::warn!(session=%name,code=%error.code,"processos ilegíveis: a vida guardada segue como viva");
+        }
+        false
+    })
+}
 /// Não mata por pid solto: reconfere pane e identidade imediatamente antes da execução.
 pub async fn kill_terminal(io:&dyn TerminalIo,procs:&dyn ProcessView,binding:&TerminalBinding,agent_pid:i64,birth:f64)->Result<(),RuntimeError> {
     let before=pane(io,binding).await?;

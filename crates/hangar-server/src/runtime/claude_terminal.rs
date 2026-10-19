@@ -158,13 +158,21 @@ impl Watcher {
     /// nada, e o nome fica livre para qualquer agente. Multiplexador sem responder não decide nada.
     pub async fn retire_other_life(&self, registry: &RuntimeRegistry, name: &str) -> Result<(), RuntimeError> {
         let Some((key, created, agent, birth)) = registry.terminal_life(name).await else { return Ok(()) };
-        let Ok(panes) = self.cfg.mux.list_panes().await else { return Ok(()) };
+        let panes = match self.cfg.mux.list_panes().await {
+            Ok(panes) => panes,
+            Err(error) => {
+                if crate::warn_limit::allow(Some(name), error.code) {
+                    tracing::warn!(session = %name, code = error.code, "multiplexador sem resposta: a vida guardada segue sem conferência");
+                }
+                return Ok(());
+            }
+        };
         let other = match panes.iter().filter(|p| p.session == name).find_map(|p| p.session_created) {
             Some(now) => {
                 let shown = self.mux_text(&["show-environment", "-t", &session_target(name), "CP_SESSION_KEY"]).await.unwrap_or_default();
                 match session_key(&shown) { Some(current) => current != key, None => now != created }
             },
-            None => super::lifecycle::process_absent(&SystemProcs::default(), agent, birth).unwrap_or(false),
+            None => super::lifecycle::agent_gone(name, agent, birth),
         };
         if other { registry.retire_terminal(name, &key, created).await } else { Ok(()) }
     }

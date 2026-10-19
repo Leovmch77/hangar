@@ -495,6 +495,7 @@ impl Watcher {
             // Entrada com terminal de outra vida (o Claude que saiu deste nome) não reserva o nome para o Codex.
             if let Err(error) = self.retire_other_life(registry,&c.name).await && crate::warn_limit::allow(Some(&c.name),&error.code) {
                 tracing::warn!(session=%c.name,code=%error.code,"entrada de outra vida não saiu; o Codex espera");
+                registry.report("runtime.stale_life_failed",&c.name,&error.code,"a entrada de outra vida não saiu e o Codex não foi adotado");
             }
             if registry.has_entry(c.key.as_deref(),&c.name).await { continue; }
             match pane_of(&panes,&c.name) {

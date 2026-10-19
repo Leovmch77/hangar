@@ -400,8 +400,8 @@ impl RuntimeRegistry {
         let reopened = match handle {
             // Agente desta vida morto: reabrir o mesmo alvo ressuscitaria pane, pid e conversa mortos; a vida
             // que estiver no nome agora é adotada.
-            EntryHandle::Terminal {target,..} if super::lifecycle::process_absent(&crate::list::procs::SystemProcs::default(),
-                i64::from(target.metadata.agent_pid),target.metadata.agent_birth).unwrap_or(false)=>match watcher()?.adopt_claude(self,name).await {
+            EntryHandle::Terminal {target,..} if super::lifecycle::agent_gone(name,
+                i64::from(target.metadata.agent_pid),target.metadata.agent_birth)=>match watcher()?.adopt_claude(self,name).await {
                 None=>return Ok(false),
                 adopted=>adopted,
             },
@@ -516,9 +516,8 @@ impl RuntimeRegistry {
         });
         let (key,generation,transcript,terminal)=found?;
         // Agente desta vida já morto: nada a matar aqui; a entrada sai e o Python fecha pelo nome.
-        if let Some((_,pid,birth))=&terminal
-            && super::lifecycle::process_absent(&crate::list::procs::SystemProcs::default(),*pid,*birth).unwrap_or(false) {
-            return match self.close_claude_entry(&key,generation).await { Ok(_)=>None, Err(error)=>Some(Err(error)) };
+        if let Some((_,pid,birth))=&terminal && super::lifecycle::agent_gone(name,*pid,*birth) {
+            return self.release_unproven(name,&key,generation,"lifecycle_agent_gone").await;
         }
         let mux_argv=terminal.map(|(argv,_,_)|argv);
         let result=self.close_with_kill_as(&key,generation,true).await;
@@ -536,16 +535,30 @@ impl RuntimeRegistry {
                 if !transcript.as_os_str().is_empty() { value["transcript"]=json!(transcript.to_string_lossy()); }
                 Some(Ok(value))
             },
-            Ok(_)|Err(_) if gone=>{
-                tracing::warn!(session=%name,key=%key,"vida guardada do Claude não era a do nome; o fechamento segue pelo nome");
+            // O ator saiu, mas o processo não é comprovadamente desta vida: nada foi morto aqui.
+            Ok(_) if gone=>{
+                tracing::warn!(session=%name,key=%key,code="close_killed_false","processo do Claude não comprovado desta vida; o fechamento segue pelo nome");
                 None
             },
-            // A vida guardada não se comprova (pane, nascimento ou vínculo): o Python fecha pelo nome, como antes.
-            Err(error) if LIFE_UNPROVEN.contains(&error.code.as_str())=>{
-                tracing::warn!(session=%name,key=%key,code=%error.code,"vida guardada do Claude não se comprova; o fechamento segue pelo nome");
+            Err(error) if gone=>{
+                tracing::warn!(session=%name,key=%key,code=%error.code,"vida guardada do Claude saiu com erro; o fechamento segue pelo nome");
                 None
             },
+            // A vida guardada não se comprova (pane, nascimento ou vínculo): a entrada sai sem matar nada e o
+            // Python fecha pelo nome, como antes.
+            Err(error) if LIFE_UNPROVEN.contains(&error.code.as_str())=>self.release_unproven(name,&key,generation,&error.code).await,
             other=>Some(other),
+        }
+    }
+    /// A entrada de uma vida que não se comprova sai do registro sem matar nada e vai ao diário; `None`
+    /// devolve o fechamento ao Python, pelo nome. Se nem sair ela consegue, o erro volta a quem pediu.
+    async fn release_unproven(&self,name:&str,key:&str,generation:u64,code:&str) -> Option<Result<Value,RuntimeError>> {
+        tracing::warn!(session=%name,key,code,"vida guardada do Claude não se comprova; sai do registro e o fechamento segue pelo nome");
+        self.diag.report("runtime.stale_life",name,"runtime_stale_life","a vida guardada não se comprovou no fechamento");
+        match self.close_claude_entry(key,generation).await {
+            Ok(_)=>None,
+            Err(_) if !self.entries.lock().await.contains_key(key)=>None,
+            Err(error)=>Some(Err(error)),
         }
     }
     /// `DELETE` que entra pelo Python: `None` = não é Codex com terminal do Rust.
@@ -2216,7 +2229,7 @@ impl RuntimeRegistry {
 
     /// Callback do Monitor: a ausência só encerra o vínculo que ele estava observando.
     pub async fn dead(&self,name:&str,key:&str,conversation:&str,generation:u64)->Result<crate::state::facts::Dead,RuntimeError> {
-        use crate::{state::facts::Dead,list::procs::ProcessView};
+        use crate::state::facts::Dead;
         let barrier=self.barrier(key).await;let _guard=barrier.lock().await;
         let (terminal,headless,closed)={
             let entries=self.entries.lock().await;
