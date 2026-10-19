@@ -13,6 +13,8 @@ const calls = vi.hoisted(() => ({
   ok: vi.fn(),
   push: vi.fn(),
   realRow: false,
+  reduced: false,
+  layoutAnimation: vi.fn(),
   listHeight: 4000,
   listContentSize: null as ((height: number) => void) | null,
   listLayout: null as ((height: number) => void) | null,
@@ -53,6 +55,7 @@ vi.mock('../../stores/aparencia', async () => {
   };
 });
 vi.mock('expo-router', () => ({ useRouter: () => ({ push: calls.push }) }));
+vi.mock('react-native-reanimated', async (original) => ({ ...await original<object>(), useReducedMotion: () => calls.reduced }));
 vi.mock('@react-native-menu/menu', () => ({
   MenuView: ({ children, actions, onPressAction, shouldOpenOnLongPress }: { children: React.ReactNode; actions: { id: string; title: string; state?: string }[];
     onPressAction: (event: { nativeEvent: { event: string } }) => void; shouldOpenOnLongPress?: boolean }) =>
@@ -104,6 +107,7 @@ vi.mock('react-native', async (original) => {
   Pressable: ({ accessibilityState, accessibilityHint: _hint, ...props }: React.ComponentProps<typeof actual.Pressable>) =>
     React.createElement(actual.Pressable, { ...props, 'aria-expanded': accessibilityState?.expanded, 'aria-checked': accessibilityState?.checked }),
   Alert: { alert: calls.alert },
+  LayoutAnimation: { configureNext: calls.layoutAnimation, create: (duration: number) => ({ duration }), Types: {}, Properties: {} },
   RefreshControl: () => null,
   TextInput: ({ value, onChangeText, accessibilityLabel }: { value: string; onChangeText: (value: string) => void; accessibilityLabel: string }) =>
     React.createElement('input', { value, 'aria-label': accessibilityLabel, onInput: (event: React.FormEvent<HTMLInputElement>) => onChangeText(event.currentTarget.value) }),
@@ -186,6 +190,7 @@ beforeEach(() => {
   calls.deleteSession.mockReset();
   useAparencia.setState({ agrupar: 'server', organizar: 'sessions' });
   calls.realRow = false;
+  calls.reduced = false;
   calls.listHeight = 4000;
   calls.listContentSize = null;
   calls.listLayout = null;
@@ -318,6 +323,20 @@ describe('SessionList', () => {
     await act(async () => useSessions.setState({ rows: useSessions.getState().rows.map((r) => r.state === 'dead' ? r : { ...r, state: 'idle' }) }));
     expect([...container.querySelectorAll('[data-section]')].map((el) => el.getAttribute('data-section'))).toEqual(['srv2', 'srv1']);
     expect(names('srv1')).toEqual(['ready-z', 'waiting-z', 'outside-partner', 'working-z']);
+  });
+
+  it('anima só quando uma sessão muda de seção, e nunca com Reduzir movimento', async () => {
+    await mount({ variant: 'home' });
+    const row = useSessions.getState().rows[0];
+    await act(async () => useSessions.setState({ loading: false, rows: [{ ...row, name: 'a', state: 'working', label: 'lendo' }, { ...row, name: 'b', state: 'idle' }] }));
+    calls.layoutAnimation.mockClear();
+    await act(async () => useSessions.setState({ rows: [{ ...row, name: 'a', state: 'working', label: 'editando' }, { ...row, name: 'b', state: 'idle' }] }));
+    expect(calls.layoutAnimation, 'atualização sem troca de seção não anima').not.toHaveBeenCalled();
+    await act(async () => useSessions.setState({ rows: [{ ...row, name: 'a', state: 'idle' }, { ...row, name: 'b', state: 'idle' }] }));
+    expect(calls.layoutAnimation, 'terminou o turno: desce animando').toHaveBeenCalledTimes(1);
+    calls.reduced = true;
+    await act(async () => useSessions.setState({ rows: [{ ...row, name: 'a', state: 'awaiting_input' }, { ...row, name: 'b', state: 'idle' }] }));
+    expect(calls.layoutAnimation).toHaveBeenCalledTimes(1);
   });
 
   it.each(['home', 'drawer'] as const)('%s com uma máquina rotula as paradas só quando há sessão no topo', async (variant) => {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Alert, Pressable, RefreshControl, SectionList, Text, TextInput, View, ActivityIndicator } from 'react-native';
+import { Alert, LayoutAnimation, Pressable, RefreshControl, SectionList, Text, TextInput, View, ActivityIndicator } from 'react-native';
+import { useReducedMotion } from 'react-native-reanimated';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -40,6 +41,8 @@ const mensagemDe = (e: unknown): string => (e instanceof Error ? e.message : Str
 
 // O formulário remonta a home ao trocar de máquina; a memória pertence à vista, não à gaveta.
 const homeView = { collapsedGroups: new Set<string>() as ReadonlySet<string>, contentOffset: { x: 0, y: 0 } };
+
+const ANIMACAO_SECAO = LayoutAnimation.create(220, LayoutAnimation.Types.easeInEaseOut, LayoutAnimation.Properties.opacity);
 
 interface Props {
   onClose: () => void;
@@ -240,6 +243,18 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
   // material re-renderiza todo mundo que lê o tema — inclusive esta tela.
   const sections = useMemo(() => buildSessionSections(rows, modo, busca, recolhidos), [rows, busca, modo, recolhidos]);
   const variosServidores = servers.length > 1;
+
+  // Sessão que entra ou sai do topo desliza para o lugar novo em vez de pular. A chave ignora a
+  // busca e o recolhido: digitar ou recolher um grupo não anima.
+  const reduced = useReducedMotion();
+  const topoKey = useMemo(() => rows
+    .filter((r) => !r.outside && (r.state === 'awaiting_input' || r.state === 'working'))
+    .map((r) => `${r.state}:${r.serverId}::${r.name}`).sort().join('|'), [rows]);
+  const ultimoTopo = useRef(topoKey);
+  if (ultimoTopo.current !== topoKey) {
+    ultimoTopo.current = topoKey;
+    if (!reduced) LayoutAnimation.configureNext(ANIMACAO_SECAO);
+  }
 
   const alternarGrupo = useCallback(
     (id: string) =>
