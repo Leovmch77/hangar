@@ -22,7 +22,8 @@ const SLACK: f64 = 2.0;
 impl LimitWatch {
     /// O aviso novo da sessão parada, para o vigia. `agent_started`: quando o agente desta vida nasceu.
     pub fn seen(&mut self, row: &SessionRow, agent_started: Option<f64>, now: f64) -> Option<UsageLimit> {
-        if row.provider != "claude" || row.headless || row.state != "idle" { return None; }
+        // Aguardando também: o menu do limite deixa a sessão assim, e só a troca o fecha.
+        if row.provider != "claude" || row.headless || !matches!(row.state.as_str(), "idle" | "awaiting_input") { return None; }
         let jsonl = row.jsonl.as_deref().filter(|j| !j.is_empty())?;
         if self.0.get(&row.name).is_some_and(|s| s.jsonl == jsonl && s.mtime == row.last_activity) { return None; }
         let found = crate::session_write::limit_switch::file_limit_at(Path::new(jsonl), now);
@@ -83,5 +84,17 @@ mod tests {
         let mut headless = row(&jsonl, 3.0);
         headless.headless = true;
         assert_eq!(LimitWatch::default().seen(&headless, Some(LINE_AT - 600.0), NOW), None, "sem terminal o ator vê");
+    }
+
+    /// O Claude Code abre o menu do limite junto com o aviso: a sessão fica aguardando e o vigia é quem o fecha.
+    #[test]
+    fn the_limit_reaches_the_switcher_while_its_menu_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("c.jsonl");
+        std::fs::write(&jsonl, include_str!("../../tests/it/fixtures/usage_limit/claude_weekly_limit_tui_2026_10.jsonl")).unwrap();
+        let mut menu = row(&jsonl, 1.0);
+        menu.state = "awaiting_input".into();
+        assert_eq!(LimitWatch::default().seen(&menu, Some(LINE_AT - 600.0), NOW),
+            Some(UsageLimit { window: "seven_day".into(), resets_at: Some(1792270800.0) }));
     }
 }
