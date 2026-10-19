@@ -408,7 +408,10 @@ jobs:
           def read():
               d = pathlib.Path("lido")
               shutil.rmtree(d, ignore_errors=True)
-              gh("release", "download", tag, "--pattern", "server-*.json", "--dir", str(d))
+              try:
+                  gh("release", "download", tag, "--pattern", "server-*.json", "--dir", str(d))
+              except subprocess.CalledProcessError:
+                  return None   # outro sistema no meio do --clobber: o arquivo listado já foi trocado
               latest = d / LATEST
               old = json.loads(latest.read_bytes()) if latest.exists() else {}
               return old, {p.name: p.read_bytes() for p in sorted(d.glob("server-*.json")) if p.name != LATEST}
@@ -417,7 +420,10 @@ jobs:
           for attempt in range(12):
               if attempt:
                   time.sleep(random.uniform(2, 8))
-              old, raw = read()
+              got = read()
+              if got is None:
+                  continue
+              old, raw = got
               # Semente primeiro: a fonte do próprio sistema, quando existe, vale por cima dela.
               by_plat = {}
               for n, b in sorted(raw.items(), key=lambda kv: not kv[0].startswith("server-seed-")):
@@ -455,7 +461,8 @@ jobs:
                   continue   # outro sistema regravando o manifesto no mesmo instante
               # Se nenhuma fonte mudou entre a leitura e a gravação, quem chegar depois compõe por cima com a fonte
               # dele; se mudou, esta gravação pode ter deixado outro sistema de fora e é refeita.
-              if read()[1] == raw:
+              again = read()
+              if again is not None and again[1] == raw:
                   print(out.read_text())
                   break
           else:
