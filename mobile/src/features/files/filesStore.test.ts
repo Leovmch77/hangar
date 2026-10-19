@@ -419,6 +419,79 @@ describe('filesStore', () => {
   });
 
   describe('abrirCitado', () => {
+    it('salvamento citado em voo não usa o destino do arquivo aberto depois', async () => {
+      const path = '/tmp/emu/kick.md';
+      vi.mocked(core.resolverCitados).mockResolvedValue({ ok: { [path]: { relativo: null, real: path } }, faltam: [] });
+      vi.mocked(core.readCitedFile).mockResolvedValue({ path, text: 'old', size: 3, truncated: false, digest: 'd1' });
+      const write = Promise.withResolvers<{ path: string; size: number; digest: string }>();
+      vi.mocked(core.writeCitedFile).mockReturnValue(write.promise);
+      const api = apis();
+      await api.abrirCitado(path);
+      const pending = api.salvar(path, 'new');
+      vi.mocked(core.readFile).mockResolvedValue({ path: 'a.txt', text: 'a', size: 1, truncated: false, digest: 'a1' });
+      await api.abrir('a.txt');
+      write.resolve({ path, size: 3, digest: 'd2' });
+      expect(await pending).toBeNull();
+      expect(core.pathDiff).not.toHaveBeenCalledWith(sessao, path, 'branch', srv1);
+      expect(api.use.getState().conteudo?.path).toBe('a.txt');
+    });
+
+    it('caminho externo acompanha o conteúdo e zera no começo de outra abertura citada', async () => {
+      const path = '/tmp/emu/kick.md';
+      vi.mocked(core.resolverCitados).mockResolvedValue({ ok: { [path]: { relativo: null, real: path } }, faltam: [] });
+      vi.mocked(core.readCitedFile).mockResolvedValue({ path, text: 'a', size: 1, truncated: false, digest: 'd1' });
+      const api = apis();
+      await api.abrirCitado(path);
+      expect(api.use.getState().citedPath).toBe(path);
+      const resolve = Promise.withResolvers<Awaited<ReturnType<typeof core.resolverCitados>>>();
+      vi.mocked(core.resolverCitados).mockReturnValue(resolve.promise);
+      const pending = api.abrirCitado('/tmp/emu/next.md');
+      expect(api.use.getState().citedPath).toBeNull();
+      resolve.resolve({ ok: {}, faltam: ['/tmp/emu/next.md'] });
+      await pending;
+      expect(api.use.getState().citedPath).toBeNull();
+    });
+
+    it('não descarta pelo Git um arquivo citado fora da raiz', async () => {
+      const path = '/tmp/emu/kick.md';
+      vi.mocked(core.resolverCitados).mockResolvedValue({ ok: { [path]: { relativo: null, real: path } }, faltam: [] });
+      vi.mocked(core.readCitedFile).mockResolvedValue({ path, text: 'a', size: 1, truncated: false, digest: 'd1' });
+      const api = apis();
+      await api.abrirCitado(path);
+      await expect(api.descartar(path)).rejects.toThrow();
+      expect(core.discardFile).not.toHaveBeenCalled();
+      expect(api.use.getState().erro).toBeTruthy();
+    });
+
+    it.each(['/tmp/emu/image.png', '/tmp/emu/manual.pdf'])('citado binário %s fica selecionado para o visor de documento', async (path) => {
+      vi.mocked(core.resolverCitados).mockResolvedValue({ ok: { [path]: { relativo: null, real: path } }, faltam: [] });
+      vi.mocked(core.readCitedFile).mockRejectedValue(Object.assign(new Error('415: erro_arq_binario'), { status: 415 }));
+      const api = apis();
+      await api.abrirCitado(path);
+      expect(api.use.getState().selecionado).toBe(path);
+      expect(api.use.getState().conteudo).toBeNull();
+      expect(api.use.getState().loading).toBe(false);
+      expect(api.use.getState().erro).toBeNull();
+    });
+
+    it.each(['listar', 'buscar', 'recarregar'] as const)('erro da leitura citada permanece visível quando %s ocorre durante a leitura', async (operation) => {
+      const path = '/tmp/emu/kick.md';
+      vi.mocked(core.resolverCitados).mockResolvedValue({ ok: { [path]: { relativo: null, real: path } }, faltam: [] });
+      const read = Promise.withResolvers<core.FileContent>();
+      const started = Promise.withResolvers<void>();
+      vi.mocked(core.readCitedFile).mockImplementation(() => { started.resolve(); return read.promise; });
+      const api = apis();
+      const pending = api.abrirCitado(path);
+      await started.promise;
+      if (operation === 'listar') await api.listar('');
+      else if (operation === 'buscar') await api.buscar('', 'names');
+      else await api.recarregar();
+      read.reject(new Error('503: leitura-indisponivel'));
+      await pending;
+      expect(api.use.getState().loading).toBe(false);
+      expect(api.use.getState().erro).toBe('leitura-indisponivel');
+    });
+
     it('caminho citado fora da pasta da sessão é lido pela rota de arquivo citado', async () => {
       vi.mocked(core.resolverCitados).mockResolvedValue({
         ok: { '/tmp/emu/kick.md': { relativo: null, real: '/tmp/emu/kick.md' } },

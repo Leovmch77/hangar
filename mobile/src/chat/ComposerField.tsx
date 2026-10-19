@@ -1,5 +1,5 @@
 import { createContext, forwardRef, useCallback, useContext, useMemo, useState, type ComponentProps, type ReactNode } from 'react';
-import { ActionSheetIOS, ActivityIndicator, Platform, Pressable, ScrollView, Text, View, useWindowDimensions, type LayoutChangeEvent, type TextInput } from 'react-native';
+import { ActionSheetIOS, ActivityIndicator, Platform, Pressable, ScrollView, StyleSheet as NativeStyleSheet, Text, View, useWindowDimensions, type LayoutChangeEvent, type TextInput, type TextStyle, type ViewProps } from 'react-native';
 import { MenuView, type NativeActionEvent } from '@react-native-menu/menu';
 import * as Haptics from 'expo-haptics';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -23,6 +23,13 @@ export function ComposerViewport({ children }: { children: ReactNode }) {
   </View>;
 }
 
+export function ComposerDock({ style, ...props }: ViewProps) {
+  const availableHeight = useContext(ComposerSpace);
+  const { height } = useWindowDimensions();
+  // Fila e anexos também crescem: o teto do campo sozinho não preserva a conversa.
+  return <View {...props} testID="chat-dock" style={[style, { maxHeight: Math.max(96, (availableHeight ?? height) - 96), flexShrink: 1 }]} />;
+}
+
 export function ComposerBox({ focused, children }: { focused: boolean; children: ReactNode }) {
   const { theme } = useUnistyles();
   const accent = hexParaRgb(theme.tokens.accent.base);
@@ -36,14 +43,18 @@ export function ComposerBox({ focused, children }: { focused: boolean; children:
 export const ComposerInput = forwardRef<TextInput, ComponentProps<typeof MultilineInput> & {
   recording: boolean; rms: SharedValue<number>; onCancelRecording: () => void;
 }>(function ComposerInput({ recording, rms, onCancelRecording, ...props }, ref) {
+  const { theme } = useUnistyles();
   const { height } = useWindowDimensions();
   const availableHeight = useContext(ComposerSpace);
-  const maxHeight = Math.min(props.maxHeight ?? height * 0.4, availableHeight === null ? Infinity : availableHeight * 0.6);
+  const maxHeight = Math.max(40, Math.min(props.maxHeight ?? height * 0.4, availableHeight === null ? Infinity : availableHeight * 0.6));
+  const { fontFamily, fontSize, lineHeight, fontWeight, fontStyle, fontVariant, letterSpacing } = NativeStyleSheet.flatten<TextStyle>([
+    styles.inputText, props.mono && { fontFamily: theme.base.fontMono }, props.style,
+  ]);
   const [textHeight, setTextHeight] = useState(40);
   const measureText = useCallback((e: LayoutChangeEvent) => setTextHeight(Math.ceil(e.nativeEvent.layout.height)), []);
   return <View style={[styles.inputWrap, recording && styles.recordingWrap]}>
     {/* O tamanho do input pode não mudar ao receber ditado; a medida precisa independer dele. */}
-    <Text style={[styles.inputText, styles.measureText]} onLayout={measureText} pointerEvents="none"
+    <Text style={[styles.inputText, { fontFamily, fontSize, lineHeight, fontWeight, fontStyle, fontVariant, letterSpacing }, styles.measureText]} onLayout={measureText} pointerEvents="none"
       accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
       allowFontScaling={props.allowFontScaling} maxFontSizeMultiplier={props.maxFontSizeMultiplier}>
       {`${props.value ?? ''}\u200b`}

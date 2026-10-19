@@ -3,19 +3,21 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { TextInputProps, TextProps, ViewProps } from 'react-native';
-import { ComposerInput, ComposerViewport } from './ComposerField';
+import { ComposerDock, ComposerInput, ComposerViewport } from './ComposerField';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const native = vi.hoisted(() => ({
   input: null as TextInputProps | null,
   measure: null as TextProps | null,
   viewport: null as ViewProps | null,
+  dock: null as ViewProps | null,
   renders: 0,
   width: 390, height: 844,
 }));
 vi.mock('react-native', async (original) => {
   const actual = await original<typeof import('react-native')>();
   return { ...actual,
+    StyleSheet: { ...actual.StyleSheet, flatten: (style: unknown) => Object.assign({}, ...[style].flat(Infinity).filter(Boolean)) },
     useWindowDimensions: () => ({ width: native.width, height: native.height, scale: 3, fontScale: 1 }),
     TextInput: (props: TextInputProps) => {
       native.renders++;
@@ -26,6 +28,7 @@ vi.mock('react-native', async (original) => {
     Text: (props: TextProps) => { native.measure = props; return null; },
     View: (props: ViewProps) => {
       if (props.testID === 'composer-viewport') native.viewport = props;
+      if (props.testID === 'chat-dock') native.dock = props;
       return createElement('div', null, props.children);
     },
   };
@@ -102,4 +105,44 @@ it('o espaço real abaixo do cabeçalho reduz o campo com o teclado aberto', () 
   act(() => native.viewport!.onLayout!({ nativeEvent: { layout: { x: 0, y: 0, width: 390, height: 700 } } } as never));
   expect(input.style.height).toBe('337.6px');
   expect(input.parentElement?.querySelector('textarea')).toBe(input);
+});
+
+it.each([0, 24])('medida transitória de %s mantém o campo com pelo menos 40 pontos', (height) => {
+  const input = mount('linha\n'.repeat(30), true);
+  measure(736);
+  act(() => native.viewport!.onLayout!({ nativeEvent: { layout: { x: 0, y: 0, width: 390, height } } } as never));
+  expect(input.style.height).toBe('40px');
+});
+
+it('espelho mede com a mesma fonte, tamanho e entrelinha personalizados do campo', () => {
+  const input = mount('texto');
+  act(() => root.render(createElement(ComposerInput, {
+    value: 'texto', mono: true, style: { fontFamily: 'custom-font', fontSize: 22, lineHeight: 30 },
+    recording: false, rms: { value: 0 } as never, onCancelRecording: () => {},
+  })));
+  const style = Object.assign({}, ...([native.measure!.style] as unknown[]).flat(Infinity).filter(Boolean));
+  expect(style.fontFamily).toBe(input.style.fontFamily);
+  expect(style.fontSize).toBe(22);
+  expect(style.lineHeight).toBe(30);
+});
+
+it('dock reserva 96 pontos da área útil para a conversa, mesmo com fila e anexos', () => {
+  mount('texto');
+  act(() => root.render(createElement(ComposerViewport, null, createElement(ComposerDock, null, 'fila-anexos'))));
+  act(() => native.viewport!.onLayout!({ nativeEvent: { layout: { x: 0, y: 0, width: 390, height: 364 } } } as never));
+  const style = Object.assign({}, ...([native.dock!.style] as unknown[]).flat(Infinity).filter(Boolean));
+  expect(style.maxHeight).toBe(268);
+});
+
+it.each([0, 24])('dock e campo preservam altura visível durante medida transitória de %s', (height) => {
+  mount('texto');
+  act(() => root.render(createElement(ComposerViewport, null, createElement(ComposerDock, null,
+    createElement(ComposerInput, { value: 'linha\n'.repeat(30), recording: false,
+      rms: { value: 0 } as never, onCancelRecording: () => {} })))));
+  measure(736);
+  act(() => native.viewport!.onLayout!({ nativeEvent: { layout: { x: 0, y: 0, width: 390, height } } } as never));
+  const style = Object.assign({}, ...([native.dock!.style] as unknown[]).flat(Infinity).filter(Boolean));
+  expect(style.maxHeight).toBe(96);
+  const inputStyle = Object.assign({}, ...([native.input!.style] as unknown[]).flat(Infinity).filter(Boolean));
+  expect(inputStyle.height).toBe(40);
 });

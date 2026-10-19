@@ -45,6 +45,7 @@ const mocks = vi.hoisted(() => {
     cortePorPasta: new Map(),
     selecionado: 'README.md',
     conteudo: null,
+    citedPath: null,
     diff: null,
     escopo: 'branch' as const,
     resultados: [],

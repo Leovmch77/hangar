@@ -7,6 +7,14 @@ import { rotuloEstado } from '@hangar/core';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const nav = vi.hoisted(() => ({ push: vi.fn(), order: [] as string[] }));
+const recentRenders = vi.hoisted(() => ({ count: 0 }));
+vi.mock('react-native', async (original) => {
+  const actual = await original<typeof import('react-native')>();
+  return { ...actual, Pressable: (props: import('react-native').PressableProps) => {
+    if (props.accessibilityLabel?.startsWith('mobile-menu,')) recentRenders.count++;
+    return createElement(actual.Pressable, props);
+  } };
+});
 const state = vi.hoisted(() => ({
   rows: [
     { serverId: 'casa', serverLabel: 'Casa', name: 'antiga', provider: 'kimi', state: 'idle', last_activity: 1 },
@@ -17,7 +25,10 @@ const state = vi.hoisted(() => ({
   server: { id: 'casa', label: 'Casa', baseUrl: 'http://x', token: 't' },
   openVoice: vi.fn(),
 }));
-vi.mock('expo-router', () => ({ useRouter: () => ({ push: (p: string) => { nav.order.push(`push:${p}`); nav.push(p); } }) }));
+vi.mock('expo-router', () => {
+  const router = { push: (p: string) => { nav.order.push(`push:${p}`); nav.push(p); } };
+  return { useRouter: () => router };
+});
 vi.mock('../../stores/sessions', () => ({ useSessions: (pick: (s: { rows: unknown[] }) => unknown) => pick({ rows: state.rows }) }));
 vi.mock('../../stores/servers', () => ({
   useServers: (pick: (s: unknown) => unknown) => pick({ activeId: 'casa', servers: [state.server] }),
@@ -48,6 +59,17 @@ const byLabel = (label: string) => [...host.querySelectorAll('[role="button"], b
   .find((el) => el.getAttribute('aria-label') === label || el.textContent === label) as HTMLElement | undefined;
 const startsWith = (label: string) => [...host.querySelectorAll('[role="button"], button')]
   .find((el) => el.getAttribute('aria-label')?.startsWith(label)) as HTMLElement | undefined;
+
+it('callback inline novo não redesenha recente e o toque usa o fechamento atual', async () => {
+  const renders = recentRenders.count;
+  await act(async () => root.render(createElement(DrawerMenu, {
+    open: true, onClose: () => { nav.order.push('latest-close'); }, onOpenServers,
+  })));
+  expect(recentRenders.count).toBe(renders);
+  act(() => startsWith('mobile-menu,')!.click());
+  expect(nav.order).toEqual(['latest-close', 'push:/s/casa/mobile-menu']);
+  expect(onClose).not.toHaveBeenCalled();
+});
 
 it('Nova sessão fecha a gaveta e abre o formulário completo', () => {
   act(() => byLabel(m.sessao_nova())!.click());

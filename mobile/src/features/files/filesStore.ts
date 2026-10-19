@@ -33,6 +33,7 @@ export interface FilesState {
   abertos: Set<string>;
   selecionado: string | null;
   conteudo: FileContent | null;
+  citedPath: string | null;
   diff: PathDiff | null;
   escopo: 'branch' | 'nao_commitado';
   resultados: FileSearchHit[];
@@ -69,6 +70,7 @@ function criarFilesStore(serverId: string, sessao: string): FilesApi {
     abertos: new Set<string>(),
     selecionado: null,
     conteudo: null,
+    citedPath: null,
     diff: null,
     escopo: 'branch',
     resultados: [],
@@ -86,7 +88,6 @@ function criarFilesStore(serverId: string, sessao: string): FilesApi {
   let gErro = 0;
   let gResultados = -1;
   let refs = 0;
-  let externo = false;
 
   // Servidor da sessão, nunca o ativo: trocar de servidor com a folha aberta não desvia leitura nem gravação.
   function destino(): Server | undefined {
@@ -178,8 +179,7 @@ function criarFilesStore(serverId: string, sessao: string): FilesApi {
   }
 
   async function abrir(path: string) {
-    externo = false;
-    setS({ selecionado: path, erro: null, loading: true });
+    setS({ selecionado: path, conteudo: null, citedPath: null, erro: null, loading: true });
     const g = ++gArquivo;
     const ge = ++gErro;
     const gr = gResultados;
@@ -225,9 +225,9 @@ function criarFilesStore(serverId: string, sessao: string): FilesApi {
   // A citação chega como o modelo escreveu (absoluta, fora da pasta da sessão…); o /files/read só
   // aceita relativo à raiz. O servidor resolve e, fora da raiz, serve pelo /file/text.
   async function abrirCitado(cru: string) {
-    setS({ selecionado: cru, conteudo: null, diff: null, erro: null, loading: true });
+    setS({ selecionado: cru, conteudo: null, citedPath: null, diff: null, erro: null, loading: true });
     const g = ++gArquivo;
-    const ge = ++gErro;
+    ++gErro;
     const srv = destino();
     if (!srv) {
       setS({ loading: false, selecionado: null, erro: m.chat_servidor_removido() });
@@ -249,17 +249,18 @@ function criarFilesStore(serverId: string, sessao: string): FilesApi {
       await abrir(alvo.relativo);
       return;
     }
-    externo = true;
     try {
       const c = await readCitedFile(sessao, cru, srv);
-      if (g === gArquivo) setS({ loading: false, conteudo: c });
+      if (g === gArquivo) setS({ loading: false, conteudo: c, citedPath: cru });
     } catch (e) {
       if (g !== gArquivo) return;
-      setS({ loading: false, selecionado: null });
-      if (ge === gErro) {
-        const status = (e as Error & { status?: number }).status;
-        setS({ erro: status === 404 ? m.erro_arq_inexistente() : cleanErr(e) });
+      const status = (e as Error & { status?: number }).status;
+      const kind = fileKind(cru);
+      if (status === 415 && (kind === 'pdf' || kind === 'image')) {
+        setS({ loading: false, citedPath: cru });
+        return;
       }
+      setS({ loading: false, selecionado: null, erro: status === 404 ? m.erro_arq_inexistente() : cleanErr(e) });
     }
   }
 
@@ -288,18 +289,19 @@ function criarFilesStore(serverId: string, sessao: string): FilesApi {
   }
 
   async function salvar(path: string, texto: string): Promise<string | null> {
-    const atual = getS().conteudo;
+    const { conteudo: atual, citedPath } = getS();
+    const g = gArquivo;
     if (!atual || atual.path !== path) return m.erro_arq_inexistente();
     const srv = destino();
     if (!srv) return m.chat_servidor_removido();
     try {
-      const r = externo
-        ? await writeCitedFile(sessao, path, texto, atual.digest, srv)
+      const r = citedPath !== null
+        ? await writeCitedFile(sessao, citedPath, texto, atual.digest, srv)
         : await writeFile(sessao, path, texto, atual.digest, srv);
-      if (getS().conteudo?.path === path) {
+      if (g === gArquivo && getS().conteudo?.path === path) {
         setS({ conteudo: { ...getS().conteudo!, text: texto, size: r.size, digest: r.digest } });
+        if (citedPath === null) void recarregarDiff(path);
       }
-      if (!externo) void recarregarDiff(path);
       return null;
     } catch (e) {
       return (e instanceof Error && e.message ? cleanErr(e) : '') || m.erro_arq_salvar_falhou();
@@ -319,6 +321,11 @@ function criarFilesStore(serverId: string, sessao: string): FilesApi {
   }
 
   async function descartar(path: string) {
+    if (getS().citedPath === path) {
+      const erro = m.erro_arq_fora_da_raiz();
+      setS({ erro });
+      throw new Error(erro);
+    }
     const srv = destino();
     if (!srv) {
       setS({ erro: m.chat_servidor_removido() });
@@ -371,7 +378,7 @@ function criarFilesStore(serverId: string, sessao: string): FilesApi {
     if (escopo === getS().escopo) return;
     setS({ escopo });
     // Arquivo de fora da raiz não tem diff: reabrir pelo /files/read o recusaria.
-    if (getS().selecionado && !externo) await abrir(getS().selecionado!);
+    if (getS().selecionado && getS().citedPath === null) await abrir(getS().selecionado!);
   }
 
   async function recarregar() {
@@ -395,7 +402,7 @@ function criarFilesStore(serverId: string, sessao: string): FilesApi {
       gBusca++;
       gErro++;
       // O registro vive além da folha; só o estado das pastas precisa sobreviver.
-      setS({ conteudo: null, diff: null, selecionado: null, resultados: [], buscaCortada: false, loading: false, erro: null });
+      setS({ conteudo: null, citedPath: null, diff: null, selecionado: null, resultados: [], buscaCortada: false, loading: false, erro: null });
     },
     listar,
     abrir,

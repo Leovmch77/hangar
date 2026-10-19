@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
@@ -31,7 +31,9 @@ export function DrawerMenu({ open, onClose, onOpenServers }: { open: boolean; on
   const voiceOk = !!server && !server.invite && !server.inviteEnded && !server.removed;
   const quota = useAccountQuota(server?.invite ? undefined : server, open);
 
-  const go = useCallback((path: string) => { onClose(); router.push(path as never); }, [onClose, router]);
+  const closeRef = useRef(onClose);
+  useLayoutEffect(() => { closeRef.current = onClose; }, [onClose]);
+  const go = useCallback((path: string) => { closeRef.current(); router.push(path as never); }, [router]);
   const openSession = useCallback((session: AggSession) => go(`/s/${session.serverId}/${session.name}`), [go]);
   const ink = theme.tokens.text.primary;
   const item = (icon: IconName, label: string, onPress: () => void, hint?: string) => (
