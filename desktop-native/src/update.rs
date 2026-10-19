@@ -398,10 +398,17 @@ const SILENT_READS: u32 = 300;
 /// Motor travado com pid vivo não prende o app para sempre.
 const FOLLOW_CEILING: Duration = Duration::from_secs(30 * 60);
 
-/// Motor respondendo nunca encerra por tempo; só o silêncio seguido ou o teto total.
-fn follow_limit(silent: u32, elapsed: Duration) -> Option<&'static str> {
+/// Motor respondendo nunca encerra por tempo; só o silêncio seguido ou o teto total. `step` é a leitura desta volta.
+/// Desfecho lido junto com o teto vale: o servidor já terminou.
+fn follow_limit(step: Option<&Follow>, silent: u32, elapsed: Duration) -> Option<&'static str> {
+    if matches!(step, Some(Follow::Done(_) | Follow::NotStarted)) { return None; }
     if silent >= SILENT_READS { return Some("update_silent"); }
     (elapsed >= FOLLOW_CEILING).then_some("update_too_long")
+}
+
+/// Na retomada, servidor sem estado nenhum é o app que morreu antes do `iniciar`: não há rodada a esperar.
+fn resumed_step(step: Follow) -> Follow {
+    if step == Follow::Waiting { Follow::NotStarted } else { step }
 }
 
 /// O desfecho é desta rodada quando o `ts` dele vem depois do desfecho anterior ao clique. Nunca pelo pid: no Windows o
@@ -429,11 +436,15 @@ struct Intent {
 }
 
 /// Trava ao lado da intenção: duas instâncias do app nunca acompanham a mesma atualização.
-fn intent_lock(dir: &Path) -> Option<std::fs::File> {
-    std::fs::create_dir_all(dir).ok()?;
-    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(INTENT_LOCK)).ok()?;
-    file.try_lock().ok()?;
-    Some(file)
+/// `Ok(None)`: outra instância segura a trava.
+fn intent_lock(dir: &Path) -> std::io::Result<Option<std::fs::File>> {
+    std::fs::create_dir_all(dir)?;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(INTENT_LOCK))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
 }
 
 fn intent_write(dir: &Path, intent: &Intent) -> std::io::Result<()> {
@@ -623,7 +634,11 @@ impl Updater {
         if self.busy() || self.suspended || RESUME_TRIED.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
         let Some(dir) = crate::appearance::dir() else { return };
         // Outra instância segura a trava: ela decide.
-        let Some(lock) = intent_lock(&dir) else { return };
+        let lock = match intent_lock(&dir) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => return,
+            Err(error) => return crate::log_line(&format!("trava da intenção de atualização: {error}")),
+        };
         let Some(intent) = intent_read(&dir) else { return };
         if !intent_valid(&intent, &api.identity(), CURRENT) { return intent_delete(&dir); }
         self.intent_lock = Some(lock);
@@ -641,10 +656,14 @@ impl Updater {
     }
 
     /// Grava a intenção sob a trava antes do `iniciar`. Sem app a instalar depois não há o que retomar. `Err` = outra
-    /// instância acompanha uma atualização.
+    /// instância acompanha uma atualização; qualquer outra falha segue sem intenção, como a gravação que falha.
     fn begin_intent(&mut self, api: &Api, baseline: Option<String>) -> Result<(), ()> {
         let (Some(offer), Some(dir)) = (self.offer.as_ref(), crate::appearance::dir()) else { return Ok(()) };
-        let lock = intent_lock(&dir).ok_or(())?;
+        let lock = match intent_lock(&dir) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => return Err(()),
+            Err(error) => { crate::log_line(&format!("trava da intenção de atualização: {error}")); return Ok(()) }
+        };
         let intent = Intent { servidor: api.identity(), app_version: offer.version.clone(), baseline };
         match intent_write(&dir, &intent) {
             Ok(()) => self.intent_lock = Some(lock),
@@ -907,18 +926,21 @@ impl Updater {
         cx.spawn(async move |this, cx| {
             let (mut saw, mut silent, started) = (saw_running, 0, std::time::Instant::now());
             loop {
-                if let Some(key) = follow_limit(silent, started.elapsed()) {
-                    let _ = this.update(cx, |this, cx| this.fail(tr(key), cx));
-                    return;
-                }
                 let Ok(task) = this.update(cx, |this, _| read_state(&this.runtime, &api, &[], 10)) else { return };
                 let read = task.await.unwrap_or_else(|e| Err(Failure::local(e.to_string())));
                 silent = if read.is_ok() { 0 } else { silent + 1 };
                 let step = match &read {
-                    Ok(value) => Some(follow(&value["estado"], saw, baseline.as_deref())),
+                    Ok(value) => {
+                        let step = follow(&value["estado"], saw, baseline.as_deref());
+                        Some(if resumed { resumed_step(step) } else { step })
+                    }
                     Err(error) if matches!(error.status, Some(401 | 403)) => Some(Follow::Done(Outcome::Failed(tr("auth_error")))),
                     Err(_) => None,
                 };
+                if let Some(key) = follow_limit(step.as_ref(), silent, started.elapsed()) {
+                    let _ = this.update(cx, |this, cx| this.fail(tr(key), cx));
+                    return;
+                }
                 if matches!(step, Some(Follow::Running { .. })) { saw = true; }
                 let finished = handle.update(cx, |_, window, cx| this.update(cx, |this, cx| {
                     if let Ok(value) = &read { this.receive_server(Some(value.clone()), cx); }
@@ -1391,10 +1413,32 @@ mod tests {
     fn follow_never_gives_up_on_a_live_engine_but_keeps_two_ceilings() {
         let every = Duration::from_secs(2);
         // Leituras respondidas zeram o silêncio: 400 `rodando` seguidos (13 min) não encerram.
-        for read in 1..=400 { assert_eq!(follow_limit(0, every * read), None, "leitura {read}"); }
-        assert_eq!(follow_limit(299, every * 299), None);
-        assert_eq!(follow_limit(300, every * 300), Some("update_silent"), "300 leituras sem resposta seguidas");
-        assert_eq!(follow_limit(0, Duration::from_secs(30 * 60)), Some("update_too_long"), "motor travado com pid vivo");
+        let running = Follow::Running { step: 1, total: 5, text: String::new() };
+        for read in 1..=400 { assert_eq!(follow_limit(Some(&running), 0, every * read), None, "leitura {read}"); }
+        assert_eq!(follow_limit(None, 299, every * 299), None);
+        assert_eq!(follow_limit(None, 300, every * 300), Some("update_silent"), "300 leituras sem resposta seguidas");
+        let ceiling = Duration::from_secs(30 * 60);
+        assert_eq!(follow_limit(Some(&running), 0, ceiling), Some("update_too_long"), "motor travado com pid vivo");
+        // O desfecho lido junto com o teto vale: o servidor já atualizou.
+        assert_eq!(follow_limit(Some(&Follow::Done(Outcome::Updated)), 0, ceiling), None);
+        assert_eq!(follow_limit(Some(&Follow::NotStarted), 0, ceiling), None);
+    }
+
+    #[test]
+    fn a_resumed_follow_without_any_server_state_drops_the_intent() {
+        // O app morreu entre gravar a intenção e o `iniciar`, e o servidor nunca teve estado.
+        assert_eq!(resumed_step(follow(&Value::Null, false, Some("t0"))), Follow::NotStarted);
+        assert_eq!(resumed_step(Follow::Done(Outcome::Updated)), Follow::Done(Outcome::Updated));
+    }
+
+    #[test]
+    fn only_another_holder_of_the_intent_lock_blocks_the_update() {
+        let dir = intent_dir("lock-error");
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        // Um arquivo no lugar da pasta: criar a trava falha, e isso não é outra instância.
+        std::fs::write(&dir, b"").unwrap();
+        assert!(intent_lock(&dir).is_err());
+        let _ = std::fs::remove_file(&dir);
     }
 
     fn intent_dir(name: &str) -> PathBuf {
@@ -1410,8 +1454,8 @@ mod tests {
     #[test]
     fn intent_is_written_resumed_and_deleted_under_one_lock() {
         let dir = intent_dir("cycle");
-        let lock = intent_lock(&dir).expect("primeira trava");
-        assert!(intent_lock(&dir).is_none(), "segunda instância não retoma");
+        let lock = intent_lock(&dir).unwrap().expect("primeira trava");
+        assert!(intent_lock(&dir).unwrap().is_none(), "segunda instância não retoma");
         // Gravada antes do `iniciar`.
         intent_write(&dir, &sample_intent()).unwrap();
         let read = intent_read(&dir).expect("retomada lê a intenção");
@@ -1422,7 +1466,7 @@ mod tests {
         intent_delete(&dir);
         assert_eq!(intent_read(&dir), None);
         drop(lock);
-        assert!(intent_lock(&dir).is_some(), "a trava sai com quem a segurava");
+        assert!(intent_lock(&dir).unwrap().is_some(), "a trava sai com quem a segurava");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
