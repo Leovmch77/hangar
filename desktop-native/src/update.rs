@@ -370,7 +370,7 @@ fn plan(need: Option<u32>, server: Option<&Value>, run: Option<u32>) -> Plan {
     };
     let Some(need) = need else { return Plan { server: step, app: false } };
     // Todo servidor fala a API 1; desconhecido não promete mais que isso.
-    if need <= first_api() || install_after(need, run) {
+    if install_after(need, run) {
         let stops = matches!(&step, ServerStep::Held(h) if h.stops());
         return Plan { app: !stops, server: step };
     }
@@ -463,7 +463,7 @@ fn intent_valid(intent: &Intent, identity: &str, current: &str) -> bool {
 }
 
 /// Depois do desfecho do servidor, o app só entra com a API que exige no ar; desconhecida nunca.
-fn install_after(need: u32, api: Option<u32>) -> bool { api.is_some_and(|api| need <= api) }
+fn install_after(need: u32, api: Option<u32>) -> bool { need <= first_api() || api.is_some_and(|api| need <= api) }
 
 static RESUME_TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -1495,7 +1495,8 @@ mod tests {
         assert!(install_after(2, Some(2)));
         assert!(install_after(2, Some(3)));
         assert!(!install_after(3, Some(2)), "servidor parou num binário mais velho");
-        assert!(!install_after(1, None), "desconhecida nunca instala");
+        assert!(!install_after(2, None), "desconhecida não basta para quem exige mais que a 1");
+        assert!(install_after(1, None), "a API 1 todo servidor atende, mesmo com a leitura falhando");
     }
 
     #[test]
