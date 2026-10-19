@@ -5733,11 +5733,13 @@ impl Hangar {
     /// Mais, como o web: "? N" das perguntas, o ⋯ e o clique direito com o menu da sessão, pressionar 500 ms para renomear
     /// na própria linha e a prévia da última resposta ao parar o mouse. A linha entra no Tab (Enter abre) e o ⋯ vem depois dela.
     fn render_session_row(&self, session: SessionInfo, selected: bool, remote: Option<String>, show_server: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        // O orquestrador não roda agente: selo de provider nele seria mentira.
-        // Sessão de motor roda outro modelo pelo Claude Code: o selo diz o motor, como o chip ⚙ do web.
-        let engine = session.engine.clone().filter(|e| !e.is_empty() && session.provider == "claude");
-        let on_engine = engine.is_some();
-        let provider_label = (!session.orq()).then(|| engine.map_or_else(|| agent_name(&session.provider).to_owned(), |e| format!("⚙ {e}")));
+        // O logo já identifica o agente; o nome do motor ainda distingue a configuração usada.
+        let engine_label = session.engine.as_deref().filter(|e| !e.is_empty() && session.provider == "claude" && !session.orq())
+            .map(|e| format!("⚙ {e}"));
+        let agent_label = (!session.orq()).then(|| match &engine_label {
+            Some(engine) => format!("{} · {engine}", agent_name(&session.provider)),
+            None => agent_name(&session.provider).to_owned(),
+        });
         let target = sidebar::Target::new(&remote.clone().unwrap_or_else(|| self.active_key()), &session.name);
         // Ids com a máquina: a de mesmo nome em outra máquina não divide marca, menu nem selos.
         let row_key = if remote.is_some() { target.id() } else { session.name.clone() };
@@ -5810,7 +5812,7 @@ impl Hangar {
         let (hover_target, press_target, menu_target, key_open, click_target) = (target.clone(), target.clone(), target.clone(), target.clone(), target.clone());
         let row_id = row_key.clone();
         let mut spoken = vec![name.clone()];
-        if let Some(label) = &provider_label { spoken.push(label.clone()); }
+        if let Some(label) = &agent_label { spoken.push(label.clone()); }
         spoken.push(state_label);
         if session.headless { spoken.push(tr("create_mode_headless")); }
         div().id(SharedString::from(row_id)).relative().flex_shrink_0().flex().items_center().gap(px(10.)).px(px(8.)).py(px(7.)).rounded(px(10.))
@@ -5831,7 +5833,8 @@ impl Hangar {
             }))
             .role(Role::Button).aria_selected(selected)
             .aria_label(self.session_number_label(&target, spoken.join(" · ")))
-            .child(avatar)
+            .child(div().id(SharedString::from(format!("row-agent-{row_key}"))).flex().child(avatar)
+                .when_some(agent_label, |el, label| el.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx))))
             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.))
             // O ⋯ fica por cima do fim da linha do nome: ela cede o espaço dele.
             .child(div().flex().items_center().gap(px(8.)).when(show_menu, |el| el.pr(px(22.)))
@@ -5847,11 +5850,11 @@ impl Hangar {
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(4.)).text_xs().text_color(sub_color)
                     .when(kind == sidebar::Sub::Reply, |el| el.child(div().flex_shrink_0().text_size(px(8.)).text_color(theme::faint()).child("◆")))
                     .child(div().min_w_0().truncate().when(kind == sidebar::Sub::Working && working, |el| el.italic()).child(text)))))
-            .when(server.is_some() || provider_label.is_some() || folder.is_some() || branch.is_some() || added.is_some() || removed.is_some() || ahead.is_some() || behind.is_some(), |el| el.child(div().flex().items_center().gap(px(8.))
+            .when(server.is_some() || engine_label.is_some() || folder.is_some() || branch.is_some() || added.is_some() || removed.is_some() || ahead.is_some() || behind.is_some(), |el| el.child(div().flex().items_center().gap(px(8.))
                 .text_size(px(11.5)).text_color(theme::faint())
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(6.))
-                    .when_some(provider_label, |el, label| el.child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD)
-                        .text_color(if on_engine { theme::accent() } else { theme::muted() }).child(label)))
+                    .when_some(engine_label, |el, label| el.child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme::accent()).child(label)))
                     .when_some(server, |el, server| el.child(div().flex_shrink_0().max_w(px(112.)).flex().items_center().gap(px(4.))
                         .child(chrome::small_icon(IconName::Monitor, 12., theme::faint()))
                         .child(div().min_w_0().truncate().child(server))))
