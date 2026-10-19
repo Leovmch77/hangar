@@ -59,6 +59,10 @@ fn job() -> RuntimeError { RuntimeError::new("relaunch_job","etapa da troca de m
 /// O terminal recém-criado ainda abre a conversa: trocar de modo espera ele.
 pub const STARTING:&str = "codex_terminal_starting";
 fn starting() -> RuntimeError { RuntimeError::new(STARTING,"Espere o terminal abrir a conversa antes de trocar de modo.") }
+/// Sem sidecar, só o pane do Codex é a TUI abrindo; pane de outro agente com o nome é dele.
+fn codex_opening(panes:&[crate::list::mux::Pane],name:&str) -> bool {
+    terminal::pane_of(panes,name).is_some_and(|pane|pane.provider.as_deref() == Some("codex"))
+}
 
 /// Falha depois de mexer em processo, sem volta automática: a rota responde 500 com o código.
 pub fn kill_phase(error:&RuntimeError) -> bool { error.code.starts_with("relaunch_kill") || error.code == "relaunch_process_alive" }
@@ -414,7 +418,7 @@ impl Watcher {
     pub async fn switch_mode(&self,registry:&RuntimeRegistry,name:&str,to_terminal:bool,read:PermissionRead) -> Option<Result<Value,RuntimeError>> {
         // Sem sidecar ainda, o pane Codex é a TUI abrindo a conversa (o lançador grava depois): é do Rust.
         let Some(meta) = self.load(name).await else {
-            let opening = self.cfg.mux.list_panes().await.ok().is_some_and(|panes|terminal::pane_of(&panes,name).is_some());
+            let opening = self.cfg.mux.list_panes().await.ok().is_some_and(|panes|codex_opening(&panes,name));
             return opening.then(||Err(starting()));
         };
         let headless = meta.get("headless").is_some_and(truthy);
@@ -818,6 +822,17 @@ impl Watcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_codex_pane_without_sidecar_is_still_opening() {
+        let pane = |provider:Option<&str>| crate::list::mux::Pane { session:"s".into(), active:true, pid:Some(1), cwd:"/w".into(),
+            pane_id:"%1".into(), hidden:false, provider:provider.map(str::to_owned), session_created:Some(1), window_index:Some(0), pane_index:Some(0) };
+        assert!(codex_opening(&[pane(Some("codex"))],"s"));
+        for other in [Some("claude"),Some("pi"),None] {
+            assert!(!codex_opening(&[pane(other)],"s"),"{other:?}: não é a TUI do Codex abrindo");
+        }
+        assert!(!codex_opening(&[pane(Some("codex"))],"outra"));
+    }
 
     #[test]
     fn only_the_three_known_modes_go_headless() {

@@ -234,6 +234,17 @@ async fn switching_mode_while_the_terminal_is_still_opening_asks_to_wait() {
         (409,Some("erro_troca_modo"),Some("codex_terminal_starting")));
 }
 
+/// Pane de outro agente com o mesmo nome e sem sidecar Codex não é Codex abrindo: a troca segue ao Claude.
+#[tokio::test]
+async fn switching_mode_of_a_claude_terminal_is_not_the_codex_one() {
+    let fx = fixture();
+    let registry = registry().await;
+    let watcher = fx.watcher();
+    registry.bind_watcher(watcher.clone());
+    std::fs::write(&fx.panes,"cl\t1\t4242\t/w\t%7\t\tclaude\t1700000000\t0\t0\n").unwrap();
+    assert!(watcher.switch_mode(&registry,"cl",false,PermissionRead::Known("Full Access".into())).await.is_none());
+}
+
 #[tokio::test]
 async fn limits_of_a_rust_codex_that_cannot_open_answers_its_code() {
     let fx = fixture();
