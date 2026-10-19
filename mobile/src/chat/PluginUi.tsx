@@ -14,6 +14,7 @@ import {
 } from '@hangar/core';
 import { mkMarkdownStyle } from './AssistantBubble';
 import { PluginInput } from './PluginInput';
+import { LinkedChildren } from './LinkedChildren';
 import { Icon } from '../ui/Icon';
 import { chatStore } from '../stores/chat';
 import { useServers } from '../stores/servers';
@@ -230,6 +231,7 @@ export function PluginUi({ serverId, name, readOnly = false }: { serverId: strin
       {busy ? <ActivityIndicator size="small" /> : null}
       {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
     </View> : null}
+    <LinkedChildren serverId={serverId} name={name} />
     {streamError ? <Text accessibilityRole="alert" style={styles.error}>{streamError}</Text> : null}
   </>;
 }

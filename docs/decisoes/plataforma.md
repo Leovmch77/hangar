@@ -2843,3 +2843,47 @@ NaN em probabilidades continua nulo; valor não finito em campo devolvido cru e 
 continuam erro HTTP, como a serialização Python. Erros originais de tipo de evento não hashável e
 inteiro grande demais para probabilidade permanecem recusas visíveis, sem feed parcial. O
 watchdog e os auxiliares ainda compartilhados com a timeline ficaram no Python.
+
+## Sessão filha ligada a quem a abriu
+
+(18/10/2026.) Origem: o Orchestrator-V2 do T3 Code (`~/Projetos/t3code`,
+`apps/server/src/mcp/toolkits/orchestrator/`), em que o agente pai chama `delegate_task` noutro
+provedor e vê "N subagents · X working". O código dele não é aproveitável (orquestrador inteiro em
+Effect-TS, ~69 mil linhas); a ideia sim, e o Hangar já tinha quase tudo: `new_session` noutro
+provedor, grupos e recados. Faltavam quatro coisas, que entraram assim.
+
+- **Ligar é escolha, não padrão.** Sessão aberta por outra muitas vezes não é "filha": repasse de
+  trabalho noutro repositório, executor e revisor da `orquestrar` (grupo `orq` próprio), sessões da
+  voz. Entrar no grupo funde grupos e manda avisos `[grupo: …]` a quem entra, então só com `link`.
+- **O vínculo mora no arquivo de grupo da filha (`linked_by`), não no `SessionSpec`.** O spec não
+  é legível por nome para Claude com terminal, Pi, omp e Kimi, e não acompanha rename nem saída do
+  grupo. No sidecar, `linked_by` vale só com o pai entre os `peers`, o pai sair o apaga
+  (`plan_leave`) e o rename do pai o leva junto.
+- **Ligar não injeta protocolo de grupo.** A primeira versão o mandava a quem entrava: com o pai
+  sozinho, o pai também recebia, e na filha o texto entrava na fila como segundo turno, depois do
+  `initial_prompt`. Aí a última mensagem do usuário antes da resposta final era o protocolo, e o
+  retorno nunca disparava. O hook do `SessionStart` (`pair_hook.py`) também pula a filha ligada.
+- **Só o dono liga, só local, nunca em `orq`.** Convidado mandando `creator=<sessão do dono>`
+  viraria filha dela e receberia recados do dono: 403 antes de abrir. Grupo é local: 400 para
+  `servidor::nome`.
+- **`interrupt` em vez de controle livre.** Mapeia na rota `/interrupt` que já existe e só passa
+  com `linked_by == quem chama` e quem chama entre os `peers` da filha.
+- **Sem "esperar" bloqueante.** No T3 o `delegate_task` pode travar até a filha acabar. Aqui a
+  tarefa leva de minutos a horas, a chamada MCP estoura o tempo, e o pai preso em "trabalhando" não
+  atende ninguém. O recado já acorda o pai parado; faltava só ele chegar sem depender da filha
+  lembrar de mandar.
+- **Retorno automático, com freios medidos na revisão.** A resposta volta quando a filha está
+  parada há 20 s e a última mensagem do usuário é `[de: <pai>]` ou o pedido inicial (turno que você
+  deu na filha não volta). A identidade da resposta é gravada em `~/.hangar/link-returns.json`: o
+  `last_reply_at` da lista cai no mtime do transcript, e escritas depois da resposta (`pr-link`,
+  `turn_duration`, reabertura) faziam a mesma resposta parecer nova. O `storm` do grupo (5 em 60 s)
+  nunca segurava um vai e volta pai↔filha, porque cada volta leva ao menos 20 s; o limite é
+  próprio, por filha, numa janela de minutos. Turno interrompido ou terminado em ferramenta não
+  volta. Só Claude e Codex: de Pi, omp e Kimi o Rust só tem o `last_reply` cortado.
+- **A assinatura interna da lista não conta como app aberto.** `set_owner_clients` é o que o Python
+  lê para decidir push no celular: contar o vigia ali cortaria a notificação. Ela entra como
+  convidado no contador do `ListHub`, mantém o produtor girando e só existe enquanto houver filha
+  ligada que possa devolver.
+- **A linha "N subagentes" é calculada em cada cliente, não é mod.** Mod só existe em sessão Claude
+  (`AbovePrompt` do plugin); o pai pode ser Codex, Pi ou Kimi. A lista já traz estado, provedor,
+  modelo e `last_reply` de cada filha (`SessionRow.linked_by`).

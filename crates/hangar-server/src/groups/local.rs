@@ -18,6 +18,8 @@ pub struct JoinInput<'a> {
     pub orq: bool,
     /// Membro remoto que é par externo (`alias::sessao` de outra pessoa), não máquina própria.
     pub outside: &'a dyn Fn(&str) -> bool,
+    /// `others` são filhas que `name` criou: ganham `linked_by = name`.
+    pub linked: bool,
 }
 
 pub struct JoinPlan {
@@ -108,10 +110,14 @@ pub fn plan_join(read: &dyn Fn(&str) -> Option<Sidecar>, input: &JoinInput, fres
     harness.extend(input.harness.iter().map(|(k, v)| (k.clone(), v.clone())));
     // Grupo de orquestração continua sendo, mesmo quando o join seguinte não repete a marca.
     let orq = input.orq || before.values().flatten().any(|s| s.orq);
+    // Interromper e devolver resposta são do criador; dentro de `orq` isso disputaria com o árbitro.
+    if input.linked && orq { return Err(JoinRefusal::Orq); }
 
     let writes = members.iter().filter(|m| !is_remote(m)).map(|m| {
         let peers = members.iter().filter(|p| *p != m).cloned().collect();
-        (m.clone(), Sidecar { peers, task: Some(task.clone()), gid: gid.clone(), harness: harness.clone(), orq, fed: None })
+        let linked_by = if input.linked && input.others.contains(m) { Some(input.name.to_owned()) }
+            else { before.get(m).cloned().flatten().and_then(|s| s.linked_by) };
+        (m.clone(), Sidecar { peers, task: Some(task.clone()), gid: gid.clone(), harness: harness.clone(), orq, fed: None, linked_by })
     }).collect();
     Ok(JoinPlan { members, gid, new_gid, task, orq, merged, writes, before })
 }
@@ -130,6 +136,8 @@ pub fn plan_leave(read: &dyn Fn(&str) -> Option<Sidecar>, name: &str, orq_alive:
         for peer in peers.iter().filter(|p| !is_remote(p)) {
             if let Some(mut st) = read(peer) {
                 st.peers.retain(|x| x != name);
+                // Vínculo velho reviveria se o pai voltasse ao grupo ou outra sessão herdasse o nome.
+                if st.linked_by.as_deref() == Some(name) { st.linked_by = None; }
                 writes.push((peer.clone(), st));
             }
         }
@@ -152,6 +160,7 @@ pub fn plan_rename(read: &dyn Fn(&str) -> Option<Sidecar>, old: &str, new: &str)
         if let Some(mut st) = read(peer) {
             for x in st.peers.iter_mut().filter(|x| *x == old) { *x = new.to_owned(); }
             st.harness = renamed(&st.harness);
+            if st.linked_by.as_deref() == Some(old) { st.linked_by = Some(new.to_owned()); }
             writes.push((peer.clone(), st));
         }
     }
@@ -171,7 +180,7 @@ pub fn external_link_refusal(link: Option<&Sidecar>, outside: &dyn Fn(&str) -> b
 pub fn plan_external_link(read: &dyn Fn(&str) -> Option<Sidecar>, local: &str, address: &str,
     harness: &BTreeMap<String, String>, outside: &dyn Fn(&str) -> bool, fresh_gid: &dyn Fn() -> String) -> Result<Vec<(String, Sidecar)>, JoinRefusal> {
     let Some(link) = read(local) else {
-        let sidecar = Sidecar { peers: vec![address.to_owned()], task: Some(String::new()), gid: fresh_gid(), harness: harness.clone(), orq: false, fed: None };
+        let sidecar = Sidecar { peers: vec![address.to_owned()], task: Some(String::new()), gid: fresh_gid(), harness: harness.clone(), orq: false, fed: None, linked_by: None };
         return Ok(vec![(local.to_owned(), sidecar)]);
     };
     if let Some(refused) = external_link_refusal(Some(&link), outside) { return Err(refused); }

@@ -200,6 +200,9 @@ pub struct SessionOpenRequest {
     pub creator: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherit: Option<bool>,
+    /// Liga a sessão nova à criadora: entra no grupo dela.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub link: bool,
 }
 
 fn is_false(value: &bool) -> bool { !value }
@@ -224,7 +227,29 @@ impl SessionOpenRequest {
         }
         Ok(request)
     }
+
+    /// O vínculo pedido, decidido antes de abrir; `Err` recusa a abertura.
+    pub fn link_plan(&self, caller: &OpenCaller) -> Result<LinkPlan, OpenError> {
+        if !self.link { return Ok(LinkPlan::No); }
+        // O grupo é local: do outro lado, a criadora seria uma sessão homônima de lá.
+        if [self.name.as_deref(), self.creator.as_deref()].into_iter().flatten().any(crate::groups::local::is_remote) {
+            return Err(OpenError::new(400, "erro_link_remoto", "a ligação só vale entre sessões desta máquina"));
+        }
+        // O convidado nunca entra no grupo de uma sessão do dono.
+        if matches!(caller, OpenCaller::Guest { .. }) {
+            return Err(OpenError::new(403, "erro_link_convidado", "convidado não liga sessões"));
+        }
+        Ok(match self.creator.as_deref() {
+            Some(creator) => LinkPlan::Join(creator.to_owned()),
+            None => LinkPlan::Unlinked("erro_link_sem_criador", "sem sessão criadora, a sessão abriu sem ligação"),
+        })
+    }
 }
+
+/// O que fazer com o vínculo depois de abrir: nada, entrar no grupo da criadora, ou só avisar
+/// (código e detalhe do `link_error`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum LinkPlan { No, Join(String), Unlinked(&'static str, &'static str) }
 
 /// Recusa da abertura no envelope do Python: `{"detail": {code, params, msg}}`, ou `{"detail": msg}`
 /// nos 400 que o Python manda sem código (`model_args`).

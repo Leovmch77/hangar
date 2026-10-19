@@ -133,3 +133,13 @@ def test_par_externo_de_outro_membro_do_grupo_vira_protocolo_externo(tmp_path):
     out = _run(tmp_path, {"TMUX_PANE": "%3", "PATH": f"{bin_}:{os.environ['PATH']}"})
     ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
     assert "[de fora: pc-ana::Y]" in ctx and "OUTRA pessoa" in ctx
+
+
+def test_filha_ligada_nao_recebe_protocolo_mas_vinculo_desfeito_recebe(tmp_path):
+    bin_ = _fake_tmux(tmp_path, "%3\tfilha\n%4\tpai\n")
+    env = {"TMUX_PANE": "%3", "PATH": f"{bin_}:{os.environ['PATH']}"}
+    (tmp_path / "filha.json").write_text(json.dumps({"peers": ["pai"], "task": "PM-9", "gid": "g1", "linked_by": "pai"}))
+    assert _run(tmp_path, env) == ""
+    # linked_by fora dos peers (o pai saiu do grupo) não vale: volta o protocolo.
+    (tmp_path / "filha.json").write_text(json.dumps({"peers": ["outra"], "task": "PM-9", "gid": "g1", "linked_by": "pai"}))
+    assert "Você, 'filha', está num grupo" in json.loads(_run(tmp_path, env))["hookSpecificOutput"]["additionalContext"]

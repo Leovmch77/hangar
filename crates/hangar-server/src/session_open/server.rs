@@ -355,17 +355,50 @@ pub enum Decision { Opened(super::open::Opened), Refused(OpenError), NotOurs }
 /// criada sem o pane ficaria para trás) nem o registro do convidado (`claim`), como o
 /// `complete_on_cancel` do Python.
 async fn decide_detached(st: &Arc<AppState>, request: SessionOpenRequest, caller: OpenCaller, claim: Option<LoginGuest>) -> Decision {
+    let link = match request.link_plan(&caller) {
+        Ok(link) => link,
+        Err(error) => return Decision::Refused(error),
+    };
     let st = st.clone();
     tokio::spawn(async move {
         let host = ServerHost::new(st.clone()).await;
-        match (decide(&st, &host, request, caller).await, claim) {
+        let decision = match (decide(&st, &host, request, caller).await, claim) {
             (Decision::Opened(opened), Some(guest)) => match host.claim(opened, &guest).await {
                 Ok(opened) => Decision::Opened(opened),
                 Err(error) => Decision::Refused(error),
             },
             (decision, _) => decision,
+        };
+        match decision {
+            Decision::Opened(mut opened) => {
+                if let Some(error) = link_child(&st, link, &opened.body).await
+                    && let Some(body) = opened.body.as_object_mut() { body.insert("link_error".into(), error); }
+                Decision::Opened(opened)
+            }
+            decision => decision,
         }
     }).await.unwrap_or_else(|_| Decision::Refused(OpenError::new(500, "erro_criacao_sessao", "a abertura não terminou")))
+}
+
+/// Põe a sessão aberta no grupo da criadora pela rota de grupo. Falhar não fecha a sessão: devolve o
+/// `link_error` da resposta.
+async fn link_child(st: &Arc<AppState>, link: super::LinkPlan, opened: &Value) -> Option<Value> {
+    let parent = match link {
+        super::LinkPlan::No => return None,
+        super::LinkPlan::Unlinked(code, detail) => return Some(json!({"code": code, "detail": detail})),
+        super::LinkPlan::Join(parent) => parent,
+    };
+    let child = opened["name"].as_str().unwrap_or_default();
+    let code = match crate::groups::bridge::route(st.clone(), "POST", &parent, "pair", json!({"peer": child, "link": true})).await {
+        Ok(reply) if reply["status"] == 200 => return None,
+        Ok(reply) => {
+            let detail = &reply["body"]["detail"];
+            detail["code"].as_str().or(detail.as_str()).map_or_else(|| format!("http_{}", reply["status"]), str::to_owned)
+        }
+        Err(failed) => failed.code,
+    };
+    tracing::warn!(code = "erro_link_grupo", session = %child, parent = %parent, detail = %code, "a sessão abriu sem ligação");
+    Some(json!({"code": "erro_link_grupo", "detail": code}))
 }
 
 /// Resolve e abre o que é do Rust: com terminal de todo provedor, e o Claude e o Codex sem terminal.

@@ -1,4 +1,4 @@
-//! As 14 tools. Cada uma chama a rota pública que o `hangar-send`/`hangar-preview` chama, pelo
+//! As 15 tools. Cada uma chama a rota pública que o `hangar-send`/`hangar-preview` chama, pelo
 //! roteador deste processo e como o dono; o `html_render` publica direto na loja de páginas e os
 //! verbos do navegador vão ao app desktop, como no CLI.
 use std::collections::HashMap;
@@ -21,6 +21,7 @@ use tower_service::Service;
 use super::identity::{self, Local, Origin};
 use super::nav;
 use crate::groups::exit::segment;
+use crate::groups::model::Sidecar;
 use crate::routes::AppState;
 use crate::transcript::pyjson::dumps_unicode;
 
@@ -112,7 +113,7 @@ struct NewSession {
     service_tier: Option<String>, branch: Option<String>, #[serde(default)] new_branch: bool, base: Option<String>,
     codex_account: Option<String>, subagent_model: Option<String>, initial_prompt: Option<String>, engine_account: Option<String>,
     omp_profile: Option<String>, claude_customizations: Option<Value>, inherit: Option<bool>, #[serde(default)] remember_provider: bool,
-    resume: Option<String>,
+    resume: Option<String>, #[serde(default)] link: bool,
 }
 
 impl NewSession {
@@ -122,7 +123,7 @@ impl NewSession {
             ("jev", self.jev.is_some()), ("service_tier", self.service_tier.is_some()), ("branch", self.branch.as_deref().is_some_and(|b| !b.is_empty())),
             ("new_branch", self.new_branch), ("subagent_model", self.subagent_model.is_some()), ("initial_prompt", self.initial_prompt.is_some()),
             ("omp_profile", self.omp_profile.is_some()), ("claude_customizations", self.claude_customizations.is_some()),
-            ("inherit", self.inherit.is_some()), ("remember_provider", self.remember_provider)];
+            ("inherit", self.inherit.is_some()), ("remember_provider", self.remember_provider), ("link", self.link)];
         if let Some((key, _)) = unsupported.iter().find(|(_, set)| *set) { return Err(format!("{key} não combina com resume")); }
         let mut body = json!({"name": self.nome});
         for (key, value) in [("provider", &self.provider), ("engine", &self.engine), ("model", &self.model), ("config_dir", &self.conta),
@@ -165,6 +166,18 @@ fn verb_args(raw: Option<&[Value]>) -> Result<Vec<String>, String> {
     }).collect()
 }
 
+/// `interrupt`: a voz não abre filha ligada (nasce sem `creator`), e Esc na própria sessão mataria o turno de quem chama.
+fn interrupt_caller_refusal(me: &str, voice: bool, alvo: &str) -> Option<String> {
+    if voice { return Some("recusado: a voz não interrompe sessão; só quem abriu a filha com `link` interrompe".into()); }
+    if alvo.contains("::") { return Some("interrupt só alcança sessão desta máquina".into()); }
+    (alvo == me).then(|| format!("recusado: '{alvo}' é esta sessão"))
+}
+
+/// O vínculo só vale com o pai ainda no grupo da filha: sair do grupo desfaz o poder de interromper.
+fn link_refusal(me: &str, alvo: &str, sidecar: Option<&Sidecar>) -> Option<String> {
+    (sidecar.and_then(Sidecar::linked_parent) != Some(me)).then(|| format!("erro_interromper_nao_ligada: '{alvo}' não é filha ligada a você (aberta por você com new_session `link`)"))
+}
+
 impl Tools {
     pub fn new(st: Arc<AppState>, api: Router) -> Self {
         let http = reqwest::Client::builder().no_proxy().build().unwrap_or_default();
@@ -182,6 +195,7 @@ impl Tools {
             "unpair" => match args::<OnlySession>(name, raw) { Ok(a) => self.unpair(headers, &a.sessao).await, Err(e) => Err(e) },
             "new_session" => match args(name, raw) { Ok(a) => self.new_session(headers, a).await, Err(e) => Err(e) },
             "close_session" => match args::<Close>(name, raw) { Ok(a) => self.close_session(headers, &a.alvo).await, Err(e) => Err(e) },
+            "interrupt" => match args::<Close>(name, raw) { Ok(a) => self.interrupt(headers, &a.alvo).await, Err(e) => Err(e) },
             "browser_open" => match args(name, raw) { Ok(a) => self.browser_open(headers, a).await, Err(e) => Err(e) },
             "html_render" => match args(name, raw) { Ok(a) => self.html_render(headers, a).await, Err(e) => Err(e) },
             "browser" => match args(name, raw) { Ok(a) => self.browser(headers, a).await, Err(e) => Err(e) },
@@ -332,6 +346,7 @@ impl Tools {
             ("omp_profile", a.omp_profile.map(Value::from)), ("claude_customizations", a.claude_customizations),
             ("inherit", a.inherit.map(Value::from)), ("read_only", a.read_only.then_some(Value::Bool(true))),
             ("new_branch", a.new_branch.then_some(Value::Bool(true))), ("remember_provider", a.remember_provider.then_some(Value::Bool(true))),
+            ("link", a.link.then_some(Value::Bool(true))),
             // A voz não tem conta nem modo para herdar: o omitido fica com o padrão do servidor.
             ("creator", (!voice).then_some(Value::from(me)))];
         for (key, value) in optional {
@@ -342,6 +357,11 @@ impl Tools {
             // Volta na resposta para que herdar errado nunca passe despercebido.
             "config_dir": info["config_dir"], "account_source": info["account_source"]});
         if info["avisos"].as_array().is_some_and(|a| !a.is_empty()) { out["avisos"] = info["avisos"].clone(); }
+        // A sessão abriu: o erro diz isso e leva a resposta inteira, para nada se perder.
+        if let Some(e) = info.get("link_error").filter(|e| !e.is_null()) {
+            return Err(format!("sessão '{}' abriu SEM a ligação: {}: {} — {out}",
+                info["name"].as_str().unwrap_or_default(), e["code"].as_str().unwrap_or_default(), e["detail"].as_str().unwrap_or_default()));
+        }
         Ok(dict(out))
     }
 
@@ -363,6 +383,19 @@ impl Tools {
             return Err(format!("sessão '{alvo}' não existe (tool `sessions`)"));
         }
         self.ok(Method::DELETE, &format!("/api/sessions/{}", segment(alvo)), None).await.map(dict)
+    }
+
+    async fn interrupt(&self, headers: &HeaderMap, alvo: &str) -> Outcome {
+        let (me, voice) = self.caller(headers).await?;
+        if let Some(refusal) = interrupt_caller_refusal(&me, voice, alvo) { return Err(refusal); }
+        let home = self.home();
+        if !identity::exists(&Local { home: &home, mux: &self.st.list.env().mux }, alvo).await {
+            return Err(format!("sessão '{alvo}' não existe (tool `sessions`)"));
+        }
+        let groups = self.st.groups.as_ref().ok_or("grupos indisponíveis neste servidor: o vínculo da filha não pode ser conferido")?;
+        let sidecar = groups.link(alvo).await.map_err(|e| format!("arquivo de grupo de '{alvo}' ilegível: {e}"))?;
+        if let Some(refusal) = link_refusal(&me, alvo, sidecar.as_ref()) { return Err(refusal); }
+        self.ok(Method::POST, &format!("/api/sessions/{}/interrupt", segment(alvo)), None).await.map(dict)
     }
 
     async fn browser_open(&self, headers: &HeaderMap, a: BrowserOpen) -> Outcome {
@@ -525,5 +558,32 @@ impl Tools {
             Some(confidence) if code == 0 || code == 1 => Ok(dict(json!({"sim": code == 0, "confianca": confidence}))),
             _ => Err(output),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn child(linked_by: Option<&str>, peers: &[&str]) -> Sidecar {
+        Sidecar { peers: peers.iter().map(|p| (*p).to_owned()).collect(), linked_by: linked_by.map(str::to_owned), ..Sidecar::default() }
+    }
+
+    #[test]
+    fn only_the_linked_parent_still_in_the_group_interrupts() {
+        assert_eq!(link_refusal("pai", "filha", Some(&child(Some("pai"), &["pai", "outra"]))), None);
+        let refused = |s: Option<&Sidecar>| link_refusal("pai", "filha", s).is_some_and(|e| e.starts_with("erro_interromper_nao_ligada:"));
+        assert!(refused(Some(&child(Some("outra"), &["pai", "outra"]))), "filha de outra sessão");
+        assert!(refused(Some(&child(None, &["pai"]))), "par comum, sem vínculo");
+        assert!(refused(Some(&child(Some("pai"), &["outra"]))), "pai saiu do grupo");
+        assert!(refused(None), "sem arquivo de grupo");
+    }
+
+    #[test]
+    fn voice_self_and_remote_are_refused_before_the_link() {
+        assert!(interrupt_caller_refusal("voz", true, "filha").is_some());
+        assert!(interrupt_caller_refusal("pai", false, "pai").is_some());
+        assert!(interrupt_caller_refusal("pai", false, "srv::filha").is_some());
+        assert_eq!(interrupt_caller_refusal("pai", false, "filha"), None);
     }
 }

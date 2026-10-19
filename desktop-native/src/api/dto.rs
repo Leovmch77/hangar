@@ -116,6 +116,8 @@ pub struct SessionInfo {
     pub pair_gid: Option<String>,
     /// Tarefa do grupo (ex: ABC-1234 …), o rótulo do cabeçalho do bloco.
     pub pair_task: Option<String>,
+    /// Sessão que abriu esta como filha ligada; o servidor só manda se ela está em `pair_peers`.
+    #[serde(default)] pub linked_by: Option<String>,
     /// Há convite ativo desta sessão (pendente ou já usado): o 🔗 da linha.
     #[serde(default)] pub shared: bool,
     /// Nome do convidado que criou a sessão; `None` = dono do servidor.

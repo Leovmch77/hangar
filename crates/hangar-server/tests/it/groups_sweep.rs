@@ -61,7 +61,7 @@ fn rig() -> Rig {
 
 async fn join(groups: &GroupService, name: &str, others: &[&str], orq: bool) -> String {
     groups.join(JoinOwned { name: name.into(), others: others.iter().map(|o| o.to_string()).collect(), task: String::new(),
-        replace_task: false, harness: BTreeMap::new(), orq, outside: Default::default() }).await.unwrap().gid
+        replace_task: false, harness: BTreeMap::new(), orq, outside: Default::default(), linked: false }).await.unwrap().gid
 }
 
 fn live(env: &Env, names: &[&str]) { *env.live.lock().unwrap() = Ok(names.iter().map(|n| n.to_string()).collect()); }

@@ -20,6 +20,8 @@ pub struct Sidecar {
     pub harness: BTreeMap<String, String>,
     pub orq: bool,
     pub fed: Option<Fed>,
+    /// A sessão que criou esta e a ligou ao grupo. Só vale enquanto estiver em `peers`.
+    pub linked_by: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -57,7 +59,8 @@ impl Sidecar {
             .unwrap_or_default();
         // `fed` torto = ausente; quem lê pelo `PairDir` registra no diário.
         let fed = data.get("fed").and_then(|f| serde_json::from_value::<Fed>(f.clone()).ok());
-        Some(Sidecar { peers, task, gid, harness, orq, fed })
+        let linked_by = data.get("linked_by").and_then(Value::as_str).filter(|p| !p.is_empty()).map(str::to_owned);
+        Some(Sidecar { peers, task, gid, harness, orq, fed, linked_by })
     }
 
     /// Mesmo corpo que o `PairLink.set` grava (pair.py:96-108).
@@ -69,7 +72,13 @@ impl Sidecar {
         let mut body = json!({"peers": self.peers, "task": self.task, "gid": self.gid, "harness": harness});
         if self.orq { body["orq"] = json!(true); }
         if let Some(fed) = &self.fed { body["fed"] = serde_json::to_value(fed).expect("Fed serializa"); }
+        if let Some(parent) = &self.linked_by { body["linked_by"] = json!(parent); }
         body
+    }
+
+    /// O pai só vale enquanto estiver em `peers`: sair do grupo desfaz o vínculo sem apagar o campo.
+    pub fn linked_parent(&self) -> Option<&str> {
+        self.linked_by.as_deref().filter(|p| self.peers.iter().any(|m| m == p))
     }
 }
 

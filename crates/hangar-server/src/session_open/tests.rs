@@ -86,6 +86,28 @@ fn the_request_serializes_back_without_the_defaults() {
 }
 
 #[test]
+fn link_is_decided_before_opening() {
+    let parse = |body: &str| SessionOpenRequest::parse(body.as_bytes()).unwrap();
+    let owner = resolve::OpenCaller::Owner;
+    let plain = parse(r#"{"name":"f","cwd":"/x","creator":"pai"}"#);
+    assert!(!plain.link);
+    assert_eq!(plain.link_plan(&owner).unwrap(), LinkPlan::No);
+    assert!(serde_json::to_value(&plain).unwrap().get("link").is_none(), "sem link, o pedido segue igual");
+    assert!(SessionOpenRequest::parse(br#"{"name":"f","cwd":"/x","link":1}"#).is_err());
+    let linked = parse(r#"{"name":"f","cwd":"/x","creator":"pai","link":true}"#);
+    assert_eq!(linked.link_plan(&owner).unwrap(), LinkPlan::Join("pai".into()));
+    let guest = resolve::OpenCaller::Guest { root: "/x".into() };
+    let refused = linked.link_plan(&guest).unwrap_err();
+    assert_eq!((refused.status, refused.code), (403, Some("erro_link_convidado")));
+    for body in [r#"{"name":"srv::f","cwd":"/x","creator":"pai","link":true}"#, r#"{"name":"f","cwd":"/x","creator":"srv::pai","link":true}"#] {
+        let refused = parse(body).link_plan(&owner).unwrap_err();
+        assert_eq!((refused.status, refused.code), (400, Some("erro_link_remoto")), "{body}");
+    }
+    let orphan = parse(r#"{"name":"f","cwd":"/x","link":true}"#).link_plan(&owner).unwrap();
+    assert_eq!(orphan, LinkPlan::Unlinked("erro_link_sem_criador", "sem sessão criadora, a sessão abriu sem ligação"));
+}
+
+#[test]
 fn modes_and_providers_round_trip_by_name() {
     for provider in AgentProvider::ALL { assert_eq!(AgentProvider::parse(provider.name()), Some(provider)); }
     assert_eq!(AgentProvider::parse("gemini"), None);

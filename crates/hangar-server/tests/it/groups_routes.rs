@@ -48,6 +48,7 @@ async fn server(root: &Path, n: usize) -> Server {
     let runtime = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "s".into(), "i".into()));
     assert!(state.state.runtime.set(runtime.clone()).is_ok());
     state.write_gate_wait = Duration::from_secs(10);
+    state.hangar_dir = root.join("hangar");
     let state = Arc::new(state);
     let app = router(state)
         .into_make_service_with_connect_info::<SocketAddr>();
@@ -127,6 +128,26 @@ async fn pair_delivers_protocol_only_to_newcomers() {
     let (status, _) = call(srv.addr, "POST", "s2/pair", Some(&json!({"peer": "s0"})), OWNER).await;
     assert_eq!(status, 200);
     assert_eq!(input_hits(&srv.python, &["s0", "s1", "s2"]), [1, 1, 1], "veterano não é acordado");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn linked_pair_marks_the_child_records_linked_at_and_sends_no_protocol() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 3).await;
+    srv.python.set_internal("pair/text", StatusCode::OK, json!({"text": "protocolo do grupo"}));
+    let (status, body) = call(srv.addr, "POST", "s0/pair", Some(&json!({"peer": "s1", "link": true})), OWNER).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(input_hits(&srv.python, &["s0", "s1", "s2"]), [0, 0, 0], "ninguém recebe o protocolo");
+    assert!(srv.python.internal_bodies("pair/text").is_empty());
+    let child: Value = serde_json::from_str(&std::fs::read_to_string(srv.pair.join("s1.json")).unwrap()).unwrap();
+    assert_eq!(child["linked_by"], "s0");
+    let parent: Value = serde_json::from_str(&std::fs::read_to_string(srv.pair.join("s0.json")).unwrap()).unwrap();
+    assert!(parent.get("linked_by").is_none());
+    let returns = hangar_server::groups::link_state::read(&dir.path().join("hangar")).unwrap();
+    assert!(returns["s1"].linked_at > 0.0 && returns["s1"].returned_at.is_none() && !returns.contains_key("s0"));
+    // Remoto não liga.
+    let (status, body) = call(srv.addr, "POST", "s2/pair", Some(&json!({"peer": "lab::x", "link": true})), OWNER).await;
+    assert_eq!((status, body["detail"]["code"].clone()), (400, json!("erro_link_remoto")));
 }
 
 #[tokio::test(flavor = "multi_thread")]

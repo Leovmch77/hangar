@@ -196,11 +196,12 @@ pub fn fill_links(row: &mut SessionRow, dirs: &Dirs, problems: &mut Problems) {
             let outside = pair_externals(&pair.peers, &dirs.claude.join(".hangar-pair"));
             row.pair_external = outside.first().map(legacy_pair_external);
             row.pair_externals = (!outside.is_empty()).then_some(outside);
+            row.linked_by = pair.linked_parent().map(str::to_owned);
             row.pair_peers = Some(pair.peers);
             row.pair_gid = Some(pair.gid);
             row.pair_task = pair.task;
         }
-        None => (row.pair_external, row.pair_externals, row.pair_peers, row.pair_gid, row.pair_task) = (None, None, None, None, None),
+        None => (row.pair_external, row.pair_externals, row.pair_peers, row.pair_gid, row.pair_task, row.linked_by) = (None, None, None, None, None, None),
     }
 }
 
@@ -858,6 +859,28 @@ mod tests {
         let mut problems = Problems::default();
         fill_links(&mut blank_row("outra"), &dirs, &mut problems);
         assert!(problems.into_vec().is_empty());
+    }
+
+    #[test]
+    fn linked_by_only_while_parent_is_in_the_group() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_at(tmp.path());
+        let pair = dirs.claude.join(".hangar-pair");
+        std::fs::create_dir_all(&pair).unwrap();
+        let linked = |body: &str| {
+            std::fs::write(pair.join("filha.json"), body).unwrap();
+            let mut row = blank_row("filha");
+            fill_links(&mut row, &dirs, &mut Problems::default());
+            row.linked_by
+        };
+        assert_eq!(linked(r#"{"peers": ["pai"], "linked_by": "pai"}"#).as_deref(), Some("pai"));
+        assert_eq!(linked(r#"{"peers": ["outra"], "linked_by": "pai"}"#), None);
+        // Sem grupo, o campo de uma leitura anterior não sobra.
+        std::fs::remove_file(pair.join("filha.json")).unwrap();
+        let mut row = blank_row("filha");
+        row.linked_by = Some("pai".into());
+        fill_links(&mut row, &dirs, &mut Problems::default());
+        assert_eq!(row.linked_by, None);
     }
 
     #[test]
