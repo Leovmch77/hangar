@@ -682,7 +682,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   na fala. Ficam a espera de 1,5 s ("segura" cancela), a recusa de pedido curto e a da mesma sessão duas
   vezes no turno. O prompt manda enviar direto quando intenção e destino estão claros e perguntar só na
   dúvida. A fala que a voz repassa de novo não cancela o envio e recebe uma nota no turno. O GPT-Live (v3)
-  não aceita ajuste de fim de fala: interromper e esperar só se controlam pelo prompt. Medição em
+  não aceita ajuste de fim de fala (conferido de novo no Codex 0.163.0): a resposta do próprio modelo só se
+  controla pelo prompt; tudo o que o Hangar põe na voz espera no `SpeechHold`. Medição em
   "Voz: assistente que conversa" e "Voz: envio sem trava de palavras".
 - **Voz: a fala do turno é só a do usuário, agora.** Fora dela: a última linha `user:` igual ao `input`
   da delegação (paráfrase que o Codex acrescenta, inteira mesmo com várias linhas) e, no começo do trecho,
@@ -706,13 +707,23 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   seguraria para sempre), turno do organizador para a fala dele, ou nenhum aparelho ouvindo. Nela nenhum
   resumo abre. O que chegou nela, ou o resumo cortado por ela, sai depois como um aviso do Hangar
   ("Chegaram dois resultados, da X e da Y. Quer ouvir?", repetido só se a fila crescer), e cada resumo só
-  quando ele aceita (`quiet` com `on: false`); nada é descartado e o `quiet` pedido vence o aviso. O Codex
-  repassa à voz toda mensagem do organizador assim que ela fica pronta
-  (`maybe_mirror_event_text_to_realtime`), inclusive a do resumo que o Hangar abre: segurar a fala do lado
-  do Hangar não segura nada. Por isso a fala dele corta o turno do resumo ainda sem mensagem
-  (`turn/interrupt`) e o resumo não é repetido por `appendSpeech`. O resumo de outra sessão abre com
+  quando ele aceita (`quiet` com `on: false`); nada é descartado e o `quiet` pedido vence o aviso. A fala dele
+  corta o turno do resumo ainda sem mensagem (`turn/interrupt`); mensagem de resumo que fica pronta com a
+  conversa em curso também volta como aviso, sem ser falada. O resumo de outra sessão abre com
   "Chegou um resultado da X, não da Y". Sem `delegationAckFiller` ("um segundo" a cada delegação). Medição
   em "Voz: resultado de outra sessão tomando a vez (14/10/2026)".
+- **Voz: quem fala o organizador é o Hangar, nunca o repasse do Codex.** `clientManagedHandoffs: true`: o
+  Codex não repassa mais as mensagens do organizador à voz. Toda mensagem dele (as do meio do turno
+  também) entra no `SpeechHold`, como resumo, aviso e confirmação: sai em pedaços de até `SPEECH_CHUNK`
+  (3.200 bytes, porque o Codex corta em ~1.000 tokens o que entrega de uma vez), um por vez, só depois de a
+  voz fechar a fala anterior e com ele calado (microfone por `SILENCE`, transcrição por `TALK_SILENCE`,
+  2 s). O teto `MAX_HOLD` só vence ruído de microfone, nunca transcrição dele. Fala dele de três palavras
+  ou mais durante uma leitura em partes corta o resto, que vai ao organizador numa nota para continuar só
+  se ele pedir; "uhum" só segura. Medição em "Voz: o Hangar fala o organizador (19/10/2026)".
+- **Voz: a queda não apaga a conversa.** Na reabertura (`thread/realtime/start` de novo), a voz nova recebe
+  nos `initialItems` as últimas 16 falas dele e dela (`Transcript::recap`), e a fala dele que não chegou ao
+  organizador antes da queda vai a ele como nota no turno da próxima fala, com a pergunta da voz que ela
+  respondia. Fala delegada, ou a final dela até 1,5 s depois, conta como entregue. Medição no mesmo item.
 - **Voz: aceitar ouvir uma sessão vale para os próximos resultados dela.** O aceite (`quiet` com `on: false`)
   e o `follow_session` põem a sessão em `Results::listening`; o resultado seguinte dela, inclusive o que chega
   durante a leitura ou no "ok" dele, espera o fim da fala e sai sem novo aviso. Outra sessão continua
@@ -3856,6 +3867,31 @@ embrulham tudo em `except` e saem com 0). O aviso cobre script sumido, Python su
 - **Não verificado em chamada real:** se a voz agora mantém a abertura "Chegou um resultado da X" ao
   parafrasear, e se o `turn/interrupt` sempre chega antes de a mensagem ficar pronta (a mensagem pronta antes
   da fala dele já foi à voz e não é cortada).
+
+## Voz: o Hangar fala o organizador (19/10/2026)
+
+(`call.rs`, `organizer.rs` `SpeechHold`, `transcript.rs`.) Chamada de 19/10 16:56 pelo app mobile
+(`~/.hangar/voz/conversas/2026-10-19_16-56-07.md` e o `hangar-server.log`, UTC).
+
+- **Por cima da fala dele.** 16:58:31 e 17:04:05: o resultado de outra sessão chegou com a voz ainda falando a
+  resposta anterior e saiu emendado nela. 17:04:42 e 17:05:36: a resposta do organizador foi falada com ele
+  falando (`user still speaking after the delegation` no diário). Com `clientManagedHandoffs: false` o Codex
+  fala toda mensagem do organizador assim que ela fica pronta; a espera do Hangar só valia para o que ele
+  mesmo mandava por `appendSpeech`. Na fonte do Codex 0.163.0, `handoff_out` não faz nada com
+  `client_managed_handoffs`, e a TUI do próprio Codex usa esse modo, falando cada resposta por
+  `appendSpeech` e descartando a fala quando o usuário voltou a falar.
+- **Leitura cortada.** `REALTIME_ASSISTANT_OUTPUT_TOKEN_BUDGET = 1_000` (`core/src/realtime_conversation.rs`)
+  vale para o repasse e para o `appendSpeech`: texto maior vira começo + "…output truncated…" + fim. Na chamada
+  das 16:19: 12.199 caracteres escritos, 1.835 falados; 9.795 → 1.423. A voz inventou um "plano de nove
+  passos" para costurar o buraco. Abaixo de ~1 KB a fala ficou fiel.
+- **Fim de fala.** A sessão v3 (`methods_frameless_bidi.rs`, 0.163.0) leva só instruções, voz e delegação:
+  ainda não há como ajustar quanto silêncio o GPT-Live espera. A defesa possível é do lado do Hangar.
+- **Escolha esquecida.** 17:02:05 ele escolheu a opção A ("confere no Android"); 17:02:13 `transport_closed`,
+  sem nenhum `turn/started` entre as duas. Na volta a voz nova abriu só com o prompt e o resumo do Codex, que
+  só tem o que chegou ao organizador, e às 17:03:33 o organizador disse "você ainda não escolheu".
+- **Não verificado em chamada real:** se o GPT-Live fala cada pedaço inteiro e em sequência, se a delegação
+  sem resposta repassada deixa a voz esperando algo, e se a voz para o áudio quando ele fala por cima (o
+  Hangar não tem como cortar o áudio que já saiu).
 
 ## Voz: escuta contínua e retorno curto (15/10/2026)
 
