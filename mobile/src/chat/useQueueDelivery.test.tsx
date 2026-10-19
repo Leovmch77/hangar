@@ -65,7 +65,8 @@ it('mudança de servidor invalida disponibilidade e ignora a resposta antiga', a
   await act(async () => resolveSecond(new Response('{"available":false}')));
   expect(container.textContent).toContain(m.native_queue_jev_setup());
   await act(async () => resolveFirst(new Response('{"available":true}')));
-  expect(button(m.mobile_queue_mode_jev()).disabled).toBe(true);
+  // A resposta velha (disponível) não ressuscita o Jev, que sem configuração nem aparece.
+  expect(button(m.mobile_queue_mode_jev())).toBeNull();
   expect(container.textContent).toContain(m.native_queue_jev_setup());
 });
 

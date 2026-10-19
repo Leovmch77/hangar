@@ -28,7 +28,7 @@ vi.mock('../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) =
 vi.mock('../ui/MultilineInput', () => ({ MultilineInput: () => null }));
 vi.mock('../ui/RecordingWave', () => ({ RecordingWave: () => null }));
 
-function render(status: 'ready' | 'setup', sendDisabled: boolean) {
+function render(status: 'ready' | 'setup' | 'error', sendDisabled: boolean) {
   const onPick = vi.fn();
   const onSend = vi.fn();
   const container = document.createElement('div');
@@ -60,10 +60,16 @@ it('toque longo no Enviar troca o modo sem enviar; o Enviar continua desativado 
 });
 
 it('Jev indisponível vem desativado no menu e não é escolhido', () => {
-  const { root, onPick } = render('setup', false);
+  const { root, onPick } = render('error', false);
   expect(menu.last!.actions.find((a) => a.id === 'jev')?.attributes?.disabled).toBe(true);
   act(() => menu.last!.onPressAction({ nativeEvent: { event: 'jev' } }));
   expect(onPick).not.toHaveBeenCalled();
+  act(() => root.unmount());
+});
+
+it('servidor sem Jev configurado: o menu não oferece o Jev', () => {
+  const { root } = render('setup', false);
+  expect(menu.last!.actions.map((a) => a.id)).not.toContain('jev');
   act(() => root.unmount());
 });
 
@@ -71,7 +77,7 @@ it('iOS: folha de ações só com os modos possíveis, a atual e a causa do Jev 
   const sheet = vi.fn();
   native.sheet.showActionSheetWithOptions = sheet;
   const onPick = vi.fn();
-  modeMenuHandlers({ delivery: { mode: 'jev', status: 'setup', help: 'jev-help' }, onPick })!.openIOS();
+  modeMenuHandlers({ delivery: { mode: 'jev', status: 'error', help: 'jev-help' }, onPick })!.openIOS();
   const [options, done] = sheet.mock.calls[0] as [{ options: string[]; cancelButtonIndex: number; message: string }, (i: number) => void];
   expect(options.options).toEqual([m.mobile_queue_mode_queued(), m.mobile_queue_mode_direct(), m.comum_cancelar()]);
   expect(options.cancelButtonIndex).toBe(2);

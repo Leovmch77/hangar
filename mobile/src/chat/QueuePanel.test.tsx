@@ -135,7 +135,14 @@ describe('QueuePanel: modo de envio', () => {
     act(() => root.unmount());
   });
 
-  it.each(['loading', 'setup', 'unsupported', 'error'])('Jev indisponível (%s): segmento desativado, salvo Jev cai na fila com a causa', (status) => {
+  it('servidor sem Jev configurado: o segmento some e o salvo Jev aparece como Fila', () => {
+    const { container, root } = render({ delivery: { mode: 'jev', status: 'setup', help: 'jev-setup' }, onModeChange: vi.fn() });
+    expect(radios(container).map((r) => r.getAttribute('aria-label'))).not.toContain('mobile_queue_mode_jev');
+    expect(radio(container, 'mobile_queue_mode_queued').getAttribute('aria-checked')).toBe('true');
+    act(() => root.unmount());
+  });
+
+  it.each(['loading', 'unsupported', 'error'])('Jev indisponível (%s): segmento desativado, salvo Jev cai na fila com a causa', (status) => {
     const onModeChange = vi.fn();
     const { container, root } = render({ delivery: { mode: 'jev', status, help: `jev-${status}…` }, onModeChange });
     const jev = radio(container, 'mobile_queue_mode_jev');
