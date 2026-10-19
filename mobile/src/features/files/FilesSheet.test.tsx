@@ -62,6 +62,7 @@ const mocks = vi.hoisted(() => {
     retain: vi.fn(),
     release: vi.fn(),
     abrir: vi.fn().mockResolvedValue(undefined),
+    abrirCitado: vi.fn().mockResolvedValue(undefined),
     buscar: vi.fn().mockResolvedValue(undefined),
     salvar: vi.fn().mockResolvedValue(null),
     recarregar: vi.fn().mockResolvedValue(undefined),
@@ -75,7 +76,7 @@ const mocks = vi.hoisted(() => {
 });
 
 vi.mock('expo-router', () => ({
-  useLocalSearchParams: () => ({ server: 'server-1', name: 'fixture-files', path: 'README.md' }),
+  useLocalSearchParams: () => ({ server: 'server-1', name: 'fixture-files', path: '/tmp/emu/kick.md' }),
   useRouter: () => ({ back: vi.fn() }),
 }));
 vi.mock('react-native-safe-area-context', () => ({
@@ -116,6 +117,7 @@ describe('FilesSheet — deep-link', () => {
     mocks.api.retain.mockClear();
     mocks.api.release.mockClear();
     mocks.api.abrir.mockClear();
+    mocks.api.abrirCitado.mockClear();
     mocks.api.buscar.mockClear();
     mocks.api.setOnlyModified.mockClear();
     mocks.api.recarregar.mockClear();
@@ -135,14 +137,16 @@ describe('FilesSheet — deep-link', () => {
     await act(async () => {
       root.render(React.createElement(FilesSheet));
     });
-    expect(mocks.api.abrir).not.toHaveBeenCalled();
+    expect(mocks.api.abrirCitado).not.toHaveBeenCalled();
 
     await act(async () => {
       mocks.setReady(true);
       await Promise.resolve();
     });
     expect(mocks.api.retain).toHaveBeenCalledTimes(1);
-    expect(mocks.api.abrir).toHaveBeenCalledWith('README.md');
+    // O caminho vem da citação na conversa: o store resolve antes de ler.
+    expect(mocks.api.abrirCitado).toHaveBeenCalledWith('/tmp/emu/kick.md');
+    expect(mocks.api.abrir).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain('Nada mudou');
     // abrir arquivo de outra máquina não troca o servidor ativo
     expect(mocks.useServers.getState().ensureActive).not.toHaveBeenCalled();
@@ -231,7 +235,7 @@ describe('FilesSheet — deep-link', () => {
     });
     expect(container.textContent).toContain('Servidor removido');
     expect(mocks.api.retain).not.toHaveBeenCalled();
-    expect(mocks.api.abrir).not.toHaveBeenCalled();
+    expect(mocks.api.abrirCitado).not.toHaveBeenCalled();
     root.unmount();
   });
 
