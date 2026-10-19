@@ -713,7 +713,12 @@ impl RuntimeRegistry {
             },
         };
         let key = meta.get("key").and_then(Value::as_str).filter(|key|!key.is_empty())?.to_owned();
-        if self.entries.lock().await.get(&key).is_some_and(|entry|entry.name == name) { return Some(Ok(())); }
+        let open = self.entries.lock().await.get(&key).filter(|entry|entry.name == name).map(|entry|(entry.generation,entry.handle.clone()));
+        if let Some((generation,handle)) = open {
+            if handle.snapshot().await.is_ok() { return Some(Ok(())); }
+            // Ator morto não é sessão aberta: a entrada sai sem matar nada e a sessão abre de verdade.
+            if let Err(error) = self.close_claude_entry(&key,generation).await { return Some(Err(error)); }
+        }
         // Entrada com terminal de outra vida (o Claude que saiu deste nome) não barra a sem terminal.
         if let Err(error) = self.retire_other_life(name).await { return Some(Err(error)); }
         if self.has_entry(Some(&key),name).await {
@@ -1585,8 +1590,13 @@ impl RuntimeRegistry {
             EntryHandle::Terminal {target,..}=>Some(super::lifecycle::ClosedLife {name:name.clone(),binding:crate::terminal_facts::LocalTerminalFacts::binding(target),pid:i64::from(target.metadata.agent_pid),birth:target.metadata.agent_birth,state_path:target.state_path.clone(),lease_path:target.lease_path.clone(),projection:target.projection_dir.clone()}),
             EntryHandle::Headless(_) if runtime_target.as_ref().is_some_and(|target|target.provider=="claude")=> {
                 let target=runtime_target.as_ref().unwrap();
-                let binding=self.entries.lock().await.get(key).and_then(|entry|entry.live.borrow().as_ref().and_then(|live|live.binding.clone())).ok_or_else(||failure("lifecycle_binding_unavailable"))?;
-                Some(super::lifecycle::ClosedLife {name:name.clone(),binding,pid:i64::from(target.binding.pid),birth:cano_birth.ok_or_else(||failure("lifecycle_process_birth_missing"))?,state_path:target.state_path.clone(),lease_path:target.lease_path.clone(),projection:target.projection_dir.clone()})
+                let binding=self.entries.lock().await.get(key).and_then(|entry|entry.live.borrow().as_ref().and_then(|live|live.binding.clone()));
+                match binding {
+                    Some(binding)=>Some(super::lifecycle::ClosedLife {name:name.clone(),binding,pid:i64::from(target.binding.pid),birth:cano_birth.ok_or_else(||failure("lifecycle_process_birth_missing"))?,state_path:target.state_path.clone(),lease_path:target.lease_path.clone(),projection:target.projection_dir.clone()}),
+                    // Só soltar o ator (o que morreu antes de publicar a conversa) não precisa do vínculo.
+                    None if !kill=>None,
+                    None=>return Err(failure("lifecycle_binding_unavailable")),
+                }
             },
             _=>None,
         };
@@ -2825,6 +2835,30 @@ mod tests {
         registry.open_claude_headless("cl",false).await.expect("é dela").expect("abriu");
         assert!(registry.entries.lock().await.get(&key).unwrap().auto_respawn.is_some(),"o processo que cai é religado aqui");
         assert!(matches!(registry.open_claude_headless("cl",false).await,Some(Ok(()))),"aberta não abre de novo");
+        registry.close(&key,1).await.unwrap();server.abort();
+    }
+
+    /// Entrada com o ator morto não conta como aberta: abrir fecha ela sem matar nada e sobe um ator de verdade,
+    /// nunca responde `Ok` sem ator (a troca de conta no limite esperava a vista e caía em `relaunch_initialize`).
+    #[tokio::test]
+    async fn opening_over_a_dead_actor_really_opens() {
+        let home=tempfile::tempdir().unwrap();
+        let (escuta,server)=fake_cano().await;
+        let key="ab".repeat(16);
+        let meta=|escuta:&str|json!({"name":"cl","key":key,"cwd":home.path(),"session_id":"a","headless":true,
+            "permission_mode":"manual","cano":{"pid":42,"escuta":escuta,"token":"fixture","versao":2}});
+        let (registry,_hubs)=claude_registry(home.path(),&[meta(&escuta)]);
+        registry.open_claude_headless("cl",false).await.expect("é dela").expect("abriu");
+        let dead=registry.entries.lock().await.get(&key).unwrap().handle.clone();
+        dead.stop().await.unwrap();
+        // Ator que morreu antes de publicar a conversa: sem vínculo no canal.
+        registry.live_sender("cl").send_replace(None);
+        server.abort();
+        let (escuta,server)=fake_cano().await;
+        std::fs::write(home.path().join(".hangar/claude-headless/cl.json"),meta(&escuta).to_string()).unwrap();
+        registry.open_claude_headless("cl",false).await.expect("é dela").expect("abriu");
+        let handle=registry.entries.lock().await.get(&key).unwrap().handle.clone();
+        assert!(handle.snapshot().await.is_ok(),"a entrada tem ator vivo");
         registry.close(&key,1).await.unwrap();server.abort();
     }
 
