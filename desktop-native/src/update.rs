@@ -404,10 +404,14 @@ fn follow_limit(silent: u32, elapsed: Duration) -> Option<&'static str> {
     (elapsed >= FOLLOW_CEILING).then_some("update_too_long")
 }
 
-/// Estado gravado por outra rodada (celular, automática) que a lançada por este app. Pid vazio é o motor que morreu
-/// antes de gravá-lo: a falha ainda é desta rodada.
-fn other_round(state: &Value, pid: Option<i64>) -> bool {
-    pid.is_some_and(|pid| state["pid"].as_i64().is_some_and(|other| other != pid))
+/// O desfecho é desta rodada quando o `ts` dele vem depois do desfecho anterior ao clique. Nunca pelo pid: no Windows o
+/// lançador do venv abre um filho, e o pid do estado não é o devolvido pelo `iniciar`.
+fn after_baseline(ts: Option<&str>, baseline: Option<&str>) -> bool {
+    let (Some(ts), Some(baseline)) = (ts, baseline) else { return baseline.is_none() };
+    match (chrono::DateTime::parse_from_rfc3339(ts), chrono::DateTime::parse_from_rfc3339(baseline)) {
+        (Ok(ts), Ok(baseline)) => ts > baseline,
+        _ => ts != baseline,
+    }
 }
 
 const INTENT: &str = "update-intent.json";
@@ -419,10 +423,7 @@ struct Intent {
     /// `Api::identity` do servidor desta máquina.
     servidor: String,
     app_version: String,
-    /// Devolvido pelo `iniciar`; o motor grava o mesmo no estado.
-    #[serde(default)]
-    pid: Option<i64>,
-    /// `ts` do desfecho anterior: sem pid, é o que separa o desfecho velho do desta rodada.
+    /// `ts` do desfecho anterior ao clique: o desfecho desta rodada vem depois dele.
     #[serde(default)]
     baseline: Option<String>,
 }
@@ -462,13 +463,12 @@ enum Outcome { Updated, UpdatedManual, Failed(String) }
 enum Follow { Running { step: u64, total: u64, text: String }, Waiting, NotStarted, Done(Outcome) }
 
 /// Uma leitura do estado durante a atualização do servidor. `baseline` é o `ts` do desfecho anterior: "pronto" com ele, sem
-/// ter visto "rodando", é o desfecho velho, não o desta vez. `pid` é o do motor que este app lançou, quando conhecido.
-fn follow(state: &Value, saw_running: bool, baseline: Option<&str>, pid: Option<i64>) -> Follow {
+/// ter visto "rodando", é o desfecho velho, não o desta vez.
+fn follow(state: &Value, saw_running: bool, baseline: Option<&str>) -> Follow {
     let text = |key: &str| state[key].as_str().unwrap_or("").to_owned();
     match state["fase"].as_str() {
         Some("rodando") => Follow::Running { step: state["passo"].as_u64().unwrap_or(0), total: state["total"].as_u64().unwrap_or(0), text: text("texto") },
-        Some("pronto") if !saw_running && state["ts"].as_str() == baseline => Follow::NotStarted,
-        Some("pronto") if other_round(state, pid) => Follow::NotStarted,
+        Some("pronto") if !saw_running && !after_baseline(state["ts"].as_str(), baseline) => Follow::NotStarted,
         Some("pronto") if state["ok"].as_bool() != Some(true) => {
             let reason = Some(text("erro").trim_end_matches('.').to_owned()).filter(|e| !e.is_empty()).unwrap_or_else(|| "?".into());
             Follow::Done(Outcome::Failed(reason))
@@ -636,7 +636,7 @@ impl Updater {
                 return;
             };
             let _ = handle.update(cx, |_, window, cx| { let _ = this.update(cx, |this, cx|
-                this.follow_server(api, false, intent.baseline, intent.pid, true, window, cx)); });
+                this.follow_server(api, false, intent.baseline, true, window, cx)); });
         }).detach();
     }
 
@@ -645,20 +645,12 @@ impl Updater {
     fn begin_intent(&mut self, api: &Api, baseline: Option<String>) -> Result<(), ()> {
         let (Some(offer), Some(dir)) = (self.offer.as_ref(), crate::appearance::dir()) else { return Ok(()) };
         let lock = intent_lock(&dir).ok_or(())?;
-        let intent = Intent { servidor: api.identity(), app_version: offer.version.clone(), pid: None, baseline };
+        let intent = Intent { servidor: api.identity(), app_version: offer.version.clone(), baseline };
         match intent_write(&dir, &intent) {
             Ok(()) => self.intent_lock = Some(lock),
             Err(error) => crate::log_line(&format!("intenção de atualização não gravada: {error}")),
         }
         Ok(())
-    }
-
-    fn note_intent_pid(&self, pid: i64) {
-        let Some(dir) = crate::appearance::dir().filter(|_| self.intent_lock.is_some()) else { return };
-        let Some(intent) = intent_read(&dir) else { return };
-        if let Err(error) = intent_write(&dir, &Intent { pid: Some(pid), ..intent }) {
-            crate::log_line(&format!("pid da atualização não gravado na intenção: {error}"));
-        }
     }
 
     /// Desfecho de qualquer tipo: a intenção deste processo sai do disco e a trava é solta.
@@ -878,11 +870,9 @@ impl Updater {
             let result = task.await.unwrap_or_else(|e| Err(Failure::local(e.to_string())));
             let _ = handle.update(cx, |_, window, cx| { let _ = this.update(cx, |this, cx| match result {
                 // O servidor grava "rodando" antes de responder: o próximo "pronto" é o desfecho.
-                Ok(value) => match update_process_id(&value) {
-                    Some(pid) => { this.note_intent_pid(pid); this.follow_server(api, true, baseline, Some(pid), false, window, cx) }
-                    None => this.fail(tr("invalid_response"), cx),
-                },
-                Err(error) if error.uncertain => this.follow_server(api, false, baseline, None, false, window, cx),
+                Ok(value) if update_process_id(&value).is_some() => this.follow_server(api, true, baseline, false, window, cx),
+                Ok(_) => this.fail(tr("invalid_response"), cx),
+                Err(error) if error.uncertain => this.follow_server(api, false, baseline, false, window, cx),
                 // Recusa que o estado lido não previa: relê e decide pela mesma regra (branch → só o app).
                 Err(error) if error.status == Some(409) => this.recheck_after_refusal(api, error.detail, window, cx),
                 Err(error) => this.fail(tr("update_refused").replace("{reason}", &error.detail), cx),
@@ -909,11 +899,10 @@ impl Updater {
     }
 
     /// Lê o estado a cada 2 s até o desfecho, sem depender do servidor ativo nem da conexão da janela; a queda durante o
-    /// reinício é esperada. Encerra pelo `follow_limit`. `resumed`: retomada ao abrir, em que o desfecho de outra rodada só
-    /// descarta a intenção, sem aviso.
-    #[allow(clippy::too_many_arguments)]
-    fn follow_server(&mut self, api: Api, saw_running: bool, baseline: Option<String>, pid: Option<i64>, resumed: bool,
-        window: &mut Window, cx: &mut Context<Self>) {
+    /// reinício é esperada. Encerra pelo `follow_limit`. `resumed`: retomada ao abrir, em que o desfecho anterior à
+    /// intenção só a descarta, sem aviso.
+    fn follow_server(&mut self, api: Api, saw_running: bool, baseline: Option<String>, resumed: bool, window: &mut Window,
+        cx: &mut Context<Self>) {
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             let (mut saw, mut silent, started) = (saw_running, 0, std::time::Instant::now());
@@ -926,7 +915,7 @@ impl Updater {
                 let read = task.await.unwrap_or_else(|e| Err(Failure::local(e.to_string())));
                 silent = if read.is_ok() { 0 } else { silent + 1 };
                 let step = match &read {
-                    Ok(value) => Some(follow(&value["estado"], saw, baseline.as_deref(), pid)),
+                    Ok(value) => Some(follow(&value["estado"], saw, baseline.as_deref())),
                     Err(error) if matches!(error.status, Some(401 | 403)) => Some(Follow::Done(Outcome::Failed(tr("auth_error")))),
                     Err(_) => None,
                 };
@@ -1386,16 +1375,16 @@ mod tests {
     #[test]
     fn follow_reads_each_outcome() {
         let state = |v: Value| v;
-        assert_eq!(follow(&state(serde_json::json!({"fase": "rodando", "passo": 4, "total": 5, "texto": "deps"})), false, Some("t0"), None),
+        assert_eq!(follow(&state(serde_json::json!({"fase": "rodando", "passo": 4, "total": 5, "texto": "deps"})), false, Some("t0")),
             Follow::Running { step: 4, total: 5, text: "deps".into() });
-        assert_eq!(follow(&state(serde_json::json!({"fase": "pronto", "ok": true, "ts": "t0"})), false, Some("t0"), None), Follow::NotStarted,
+        assert_eq!(follow(&state(serde_json::json!({"fase": "pronto", "ok": true, "ts": "t0"})), false, Some("t0")), Follow::NotStarted,
             "o desfecho antigo não é o desta vez");
-        assert_eq!(follow(&state(serde_json::json!({"fase": "pronto", "ok": true, "ts": "t1"})), true, Some("t0"), None), Follow::Done(Outcome::Updated));
-        assert_eq!(follow(&state(serde_json::json!({"fase": "pronto", "ok": true, "reiniciar_manual": true, "ts": "t1"})), true, Some("t0"), None),
+        assert_eq!(follow(&state(serde_json::json!({"fase": "pronto", "ok": true, "ts": "t1"})), true, Some("t0")), Follow::Done(Outcome::Updated));
+        assert_eq!(follow(&state(serde_json::json!({"fase": "pronto", "ok": true, "reiniciar_manual": true, "ts": "t1"})), true, Some("t0")),
             Follow::Done(Outcome::UpdatedManual));
-        assert_eq!(follow(&state(serde_json::json!({"fase": "pronto", "ok": false, "erro": "npm ci falhou.", "ts": "t1"})), true, Some("t0"), None),
+        assert_eq!(follow(&state(serde_json::json!({"fase": "pronto", "ok": false, "erro": "npm ci falhou.", "ts": "t1"})), true, Some("t0")),
             Follow::Done(Outcome::Failed("npm ci falhou".into())));
-        assert_eq!(follow(&Value::Null, true, Some("t0"), None), Follow::Waiting);
+        assert_eq!(follow(&Value::Null, true, Some("t0")), Follow::Waiting);
     }
 
     #[test]
@@ -1408,15 +1397,6 @@ mod tests {
         assert_eq!(follow_limit(0, Duration::from_secs(30 * 60)), Some("update_too_long"), "motor travado com pid vivo");
     }
 
-    #[test]
-    fn follow_takes_only_the_outcome_of_the_round_this_app_started() {
-        let done = |pid: Value| serde_json::json!({"fase": "pronto", "ok": true, "ts": "t1", "pid": pid});
-        assert_eq!(follow(&done(42.into()), true, None, Some(42)), Follow::Done(Outcome::Updated));
-        assert_eq!(follow(&done(7.into()), true, None, Some(42)), Follow::NotStarted, "outra rodada (celular, automática)");
-        assert_eq!(follow(&done(Value::Null), true, None, Some(42)), Follow::Done(Outcome::Updated), "motor que morreu antes do pid");
-        assert_eq!(follow(&done(7.into()), true, None, None), Follow::Done(Outcome::Updated), "pid desconhecido: vale o ts");
-    }
-
     fn intent_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("hangar-intent-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1424,7 +1404,7 @@ mod tests {
     }
 
     fn sample_intent() -> Intent {
-        Intent { servidor: "http://127.0.0.1:8765".into(), app_version: "0.1.0.200".into(), pid: None, baseline: Some("t0".into()) }
+        Intent { servidor: "http://127.0.0.1:8765".into(), app_version: "0.1.0.200".into(), baseline: Some("t0".into()) }
     }
 
     #[test]
@@ -1432,13 +1412,12 @@ mod tests {
         let dir = intent_dir("cycle");
         let lock = intent_lock(&dir).expect("primeira trava");
         assert!(intent_lock(&dir).is_none(), "segunda instância não retoma");
-        // Gravada antes do `iniciar`, completada com o pid que ele devolve.
+        // Gravada antes do `iniciar`.
         intent_write(&dir, &sample_intent()).unwrap();
-        intent_write(&dir, &Intent { pid: Some(42), ..intent_read(&dir).unwrap() }).unwrap();
         let read = intent_read(&dir).expect("retomada lê a intenção");
-        assert_eq!(read, Intent { pid: Some(42), ..sample_intent() });
-        let ours = serde_json::json!({"fase": "pronto", "ok": true, "ts": "t1", "pid": 42});
-        assert_eq!(follow(&ours, false, read.baseline.as_deref(), read.pid), Follow::Done(Outcome::Updated));
+        assert_eq!(read, sample_intent());
+        let ours = serde_json::json!({"fase": "pronto", "ok": true, "ts": "t1"});
+        assert_eq!(follow(&ours, false, read.baseline.as_deref()), Follow::Done(Outcome::Updated));
         assert!(install_after(2, Some(2)), "mesmo desfecho com a API suficiente: instala o app");
         intent_delete(&dir);
         assert_eq!(intent_read(&dir), None);
@@ -1456,7 +1435,19 @@ mod tests {
         assert!(!intent_valid(&intent, "http://127.0.0.1:8765", "0.1.0.300"));
         // Desfecho velho (ts da intenção, sem rodando visto) não é o desta rodada.
         let old = serde_json::json!({"fase": "pronto", "ok": true, "ts": "t0"});
-        assert_eq!(follow(&old, false, intent.baseline.as_deref(), None), Follow::NotStarted);
+        assert_eq!(follow(&old, false, intent.baseline.as_deref()), Follow::NotStarted);
+    }
+
+    #[test]
+    fn a_resumed_round_is_the_outcome_after_the_intent_whatever_the_pid() {
+        // No Windows o lançador do venv abre um filho: o pid do estado nunca é o devolvido pelo `iniciar`.
+        let intent: Intent = serde_json::from_value(serde_json::json!({"servidor": "s", "app_version": "0.1.0.200",
+            "pid": 111, "baseline": "2026-10-19T10:00:00-03:00"})).unwrap();
+        let after = serde_json::json!({"fase": "pronto", "ok": true, "pid": 222, "ts": "2026-10-19T10:05:00-03:00"});
+        assert_eq!(follow(&after, false, intent.baseline.as_deref()), Follow::Done(Outcome::Updated));
+        assert!(install_after(2, Some(2)), "releitura da API passa: instala");
+        let before = serde_json::json!({"fase": "pronto", "ok": true, "pid": 222, "ts": "2026-10-19T09:59:00-03:00"});
+        assert_eq!(follow(&before, false, intent.baseline.as_deref()), Follow::NotStarted, "desfecho anterior à intenção");
     }
 
     #[test]
@@ -1483,9 +1474,9 @@ mod tests {
     fn an_update_capped_at_the_last_published_build_is_a_normal_update() {
         // Servidor antigo ainda manda o campo: build pendente no CI não é falha nem aviso para quem atualiza.
         let state = serde_json::json!({"fase": "pronto", "ok": true, "ts": "t1", "waiting_for_server_build": true, "commit_para": "991bb4f123456789"});
-        assert_eq!(follow(&state, true, Some("t0"), None), Follow::Done(Outcome::Updated));
+        assert_eq!(follow(&state, true, Some("t0")), Follow::Done(Outcome::Updated));
         let manual = serde_json::json!({"fase": "pronto", "ok": true, "ts": "t1", "reiniciar_manual": true, "waiting_for_server_build": true});
-        assert_eq!(follow(&manual, true, Some("t0"), None), Follow::Done(Outcome::UpdatedManual));
+        assert_eq!(follow(&manual, true, Some("t0")), Follow::Done(Outcome::UpdatedManual));
     }
 
     #[test]
