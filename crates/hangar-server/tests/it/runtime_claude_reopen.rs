@@ -201,6 +201,21 @@ async fn a_terminal_whose_mode_was_never_known_is_refused_before_anything_stops(
     fx.finish();
 }
 
+/// O segundo pedido de ir ao terminal chega com o pane novo de pé e o Claude dele ainda sem o registro
+/// nativo: a sessão já é com terminal, nada a trocar, em vez de recusar pela adoção que ainda não dá.
+#[tokio::test]
+async fn switching_to_terminal_while_the_new_claude_has_no_native_record_yet_changes_nothing() {
+    let fx = fixture();
+    std::process::Command::new(&fx.tmux).args(["new-session","-d","-s","s1","-c"]).arg(&fx.cwd).status().unwrap();
+    let agent = fx.agent().unwrap();
+    std::fs::remove_file(fx.home.join(format!(".claude/sessions/{agent}.json"))).unwrap();
+    let registry = fx.registry().await;
+    let same = registry.reopen_claude_session("s1",mode_switch(true),None).await.expect("é sessão Claude daqui").map_err(|f|f.error.code).unwrap();
+    assert!(!same.changed);
+    assert!(std::path::Path::new(&format!("/proc/{agent}")).exists(),"o Claude do terminal segue vivo");
+    fx.finish();
+}
+
 async fn post(server:std::net::SocketAddr,route:&str,body:Value) -> (u16,Value) {
     let response = crate::fake::client().post(format!("http://{server}/api/sessions/s1/{route}"))
         .header("authorization", format!("Bearer {}", crate::fake::OWNER)).header("content-type", "application/json")

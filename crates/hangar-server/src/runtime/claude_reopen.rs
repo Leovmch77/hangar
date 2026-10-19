@@ -461,7 +461,10 @@ impl RuntimeRegistry {
             Ok(Some(_))=>Surface::Headless,
             Ok(None)=>{
                 let watcher=self.watcher_ref()?;
-                if let Err(error)=watcher.adopt_claude(self,name).await? {return Some(Err(ReopenFailure::refused(error)));}
+                let to_terminal=change.reason==crate::session_open::ChangeReason::ModeSwitch && change.surface==Some(Surface::Terminal);
+                // Sem sidecar a sessão já é com terminal: ir a ele não depende da adoção, que o Claude recém-nascido
+                // no pane (outra troca em curso) ainda não prova sem o registro nativo.
+                if let Err(error)=watcher.adopt_claude(self,name).await? && !to_terminal {return Some(Err(ReopenFailure::refused(error)));}
                 Surface::Terminal
             },
         };
