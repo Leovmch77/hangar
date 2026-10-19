@@ -235,27 +235,40 @@ fn cause(error: reqwest::Error) -> String {
     std::iter::successors(Some(&error as &dyn std::error::Error), |e| e.source()).map(ToString::to_string).collect::<Vec<_>>().join(": ")
 }
 
-async fn install(client: reqwest::Client, exe: Option<PathBuf>, offer: Offer) -> Result<(), String> {
-    // A oferta pode ter horas e a release é republicada a cada push: o sha que vale é o do manifesto de agora. Release que
-    // passou a exigir mais que a oferta aceita no plano não entra: o sha antigo recusa o binário novo.
-    let need = offer.requires_api;
-    let fresh = |found: Option<Offer>| found.filter(|fresh| fresh.requires_api <= need);
-    let offer = fresh(check(&client, &offer.channel).await.ok().flatten()).unwrap_or(offer);
+/// A oferta aceita contra o manifesto relido agora: a release republicada vale se couber na API que o plano aceitou;
+/// passou a exigir mais, a oferta acabou (`None`). Leitura que falha ou sem oferta mantém a aceita.
+fn still_offered(accepted: Offer, read: Result<Option<Offer>, CheckFail>) -> Option<Offer> {
+    match read {
+        Ok(Some(fresh)) if fresh.requires_api > accepted.requires_api => None,
+        Ok(Some(fresh)) => Some(fresh),
+        Ok(None) | Err(_) => Some(accepted),
+    }
+}
+
+/// `Ok(false)`: a oferta acabou antes da troca (a release passou a exigir mais) e nada foi mexido; sem aviso, o próximo
+/// ciclo refaz o plano.
+async fn install(client: reqwest::Client, exe: Option<PathBuf>, offer: Offer) -> Result<bool, String> {
+    // A oferta pode ter horas e a release é republicada a cada push: o sha que vale é o do manifesto de agora.
+    let channel = offer.channel.clone();
+    let Some(offer) = still_offered(offer, check(&client, &channel).await) else { return Ok(false) };
     let exe = exe.ok_or_else(|| tr("app_update_swap_failed").replace("{reason}", "current_exe"))?;
     // O instalador pode ter posto esta versão no caminho do app com ele aberto: não há o que baixar nem trocar.
     let (disk, wanted) = (exe.clone(), offer.sha256.clone());
     let placed = tokio::task::spawn_blocking(move || std::fs::read(&disk).is_ok_and(|bytes| sha256_hex(&bytes) == wanted));
     if placed.await.unwrap_or(false) {
-        return relaunch(&exe).await.map_err(|reason| with_reason(tr("app_update_relaunch_failed"), &reason));
+        return relaunch(&exe).await.map(|()| true).map_err(|reason| with_reason(tr("app_update_relaunch_failed"), &reason));
     }
     let bytes = download(&client, &offer.url, RETRY_PAUSE).await?;
     // O CI sobe os binários antes do manifesto: no meio da publicação o binário já é o novo e o sha ainda o antigo.
-    let sha256 = if sha256_hex(&bytes) == offer.sha256 { offer.sha256 }
-        else { fresh(check(&client, &offer.channel).await.ok().flatten()).map_or(offer.sha256, |fresh| fresh.sha256) };
+    let sha256 = if sha256_hex(&bytes) == offer.sha256 { offer.sha256 } else {
+        // O binário novo pode ser de uma release que já exige mais: sem ele não há o que trocar, nem erro de checksum.
+        let Some(fresh) = still_offered(offer, check(&client, &channel).await) else { return Ok(false) };
+        fresh.sha256
+    };
     // Dezenas de MB conferidos, gravados e copiados: fora das duas threads do runtime.
     let target = exe.clone();
     let old = tokio::task::spawn_blocking(move || swap(&target, &bytes, &sha256)).await.map_err(|e| e.to_string())??;
-    let Err(reason) = relaunch(&exe).await else { return Ok(()) };
+    let Err(reason) = relaunch(&exe).await else { return Ok(true) };
     rollback(&exe, &old).map_err(|e| tr("app_update_rollback_failed").replace("{reason}", &e.to_string()))?;
     Err(with_reason(tr("app_update_rolled_back"), &reason))
 }
@@ -833,7 +846,14 @@ impl Updater {
         cx.spawn(async move |this, cx| {
             let result = task.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = this.update(cx, |this, cx| match result {
-                Ok(()) => cx.quit(),
+                Ok(true) => cx.quit(),
+                Ok(false) => {
+                    crate::log_line("a release do app passou a exigir mais que a oferta aceita: nada foi trocado");
+                    this.offer = None;
+                    this.run = Run::Idle;
+                    this.check_app(cx);
+                    cx.notify();
+                }
                 Err(reason) => {
                     // O motivo não cabe na barra: vai no aviso e fica no tooltip do "Tentar de novo".
                     let _ = handle.update(cx, |_, window, cx| window.push_notification(Notification::error(reason.clone()).id::<Updater>(), cx));
@@ -982,14 +1002,14 @@ mod tests {
     #[test]
     fn remote_only_uses_the_active_server_api() {
         let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None,
-            offer: Some(Offer { version: "9999.0.0.0".into(), url: String::new(), sha256: String::new(), channel: "main".into(), requires_api: 2 }),
-            local: None, server: None, server_api: None, server_seq: 0, active: None, active_state: None, active_api: Some(2), active_seq: 0,
+            offer: Some(Offer { version: "9999.0.0.0".into(), url: String::new(), sha256: String::new(), channel: "main".into(), requires_api: REQUIRED_API }),
+            local: None, server: None, server_api: None, server_seq: 0, active: None, active_state: None, active_api: Some(REQUIRED_API), active_seq: 0,
             run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None, suspended: false };
         assert!(updater.plan().app);
         assert!(!updater.server_outdated());
-        updater.active_api = Some(1);
+        updater.active_api = Some(REQUIRED_API - 1);
         assert!(!updater.plan().app);
-        assert_eq!(updater.server_outdated(), REQUIRED_API > 1);
+        assert!(updater.server_outdated());
     }
 
     #[test]
@@ -1126,6 +1146,16 @@ mod tests {
         assert_eq!(plan(Some(2), Some(&behind), None), Plan { server: ServerStep::Update, app: false });
         assert_eq!(plan(Some(1), Some(&behind), None), Plan { server: ServerStep::Update, app: true });
         assert_eq!(plan(Some(1), None, None), Plan { server: ServerStep::Skip, app: true });
+    }
+
+    #[test]
+    fn an_offer_republished_needing_more_api_expires() {
+        let offer = |sha: &str, api: u32| Offer { version: "1".into(), url: String::new(), sha256: sha.into(), channel: "main".into(), requires_api: api };
+        let sha = |found: Option<Offer>| found.map(|o| o.sha256);
+        assert_eq!(sha(still_offered(offer("a", 2), Ok(Some(offer("b", 2))))), Some("b".into()), "republicada na mesma API: vale a nova");
+        assert_eq!(sha(still_offered(offer("a", 2), Ok(Some(offer("b", 3))))), None, "passou a exigir mais: a oferta acabou");
+        assert_eq!(sha(still_offered(offer("a", 2), Err(CheckFail::Network("x".into())))), Some("a".into()), "leitura que falha");
+        assert_eq!(sha(still_offered(offer("a", 2), Ok(None))), Some("a".into()));
     }
 
     #[test]
