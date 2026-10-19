@@ -275,8 +275,11 @@ impl OpenHost for ServerHost {
                 return Err(OpenError::new(503, "erro_lista_indisponivel", format!("a fila da sessão antiga não foi apagada: {error}"))
                     .with_params(json!({"detalhe": "fila_antiga"})));
             }
-            // Com o Rust de pé o registro dos terminais Claude é dele (a adoção): no Python não há
-            // registro em espera a soltar.
+            // O registro das sessões abertas é do Rust: a vida que acabou com este nome não prende a nova
+            // (conversa, pane e fila dela). No Python não há registro em espera a soltar.
+            if let Some(runtime) = self.st.state.runtime.get().cloned() && let Err(error) = runtime.release_name(name).await {
+                return Err(OpenError::new(503, "erro_sessao_antiga_presa", format!("a sessão antiga com este nome não saiu do registro: {}", error.code)));
+            }
             Ok(())
         })
     }

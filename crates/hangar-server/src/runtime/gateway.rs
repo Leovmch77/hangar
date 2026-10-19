@@ -170,6 +170,16 @@ fn healthy(terminal:bool,view:&Value)->bool {
 
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível para esta chave ou geração") }
 
+/// Encerrar recusado porque a vida guardada não se comprova; ocupação e transferência não estão aqui.
+const LIFE_UNPROVEN:[&str;6]=["lifecycle_binding","lifecycle_binding_unavailable","lifecycle_process_birth_missing","lifecycle_process_changed","lifecycle_process_read","lifecycle_target_unavailable"];
+
+/// `list-sessions` (`nome\tcriação`) ainda tem a sessão `name` desta vida. Outra criação no mesmo nome é
+/// outra vida; criação ilegível não prova que é outra.
+fn session_of_life(list:&str,name:&str,created:u64) -> bool {
+    list.lines().filter_map(|line|line.split_once('\t')).filter(|(session,_)|*session==name)
+        .any(|(_,born)|born.trim().parse::<u64>().map_or(true,|born|born==created))
+}
+
 /// Fila com mensagem ainda não entregue. Ilegível conta como pendente: abrir é o que mostra a recusa dela.
 pub(super) fn pending(state_path:&std::path::Path) -> bool {
     match super::queue::read_replaced(state_path) {
@@ -388,6 +398,13 @@ impl RuntimeRegistry {
         }
         let watcher = || self.watcher.get().cloned().ok_or_else(||failure("runtime_binding"));
         let reopened = match handle {
+            // Agente desta vida morto: reabrir o mesmo alvo ressuscitaria pane, pid e conversa mortos; a vida
+            // que estiver no nome agora é adotada.
+            EntryHandle::Terminal {target,..} if super::lifecycle::process_absent(&crate::list::procs::SystemProcs::default(),
+                i64::from(target.metadata.agent_pid),target.metadata.agent_birth).unwrap_or(false)=>match watcher()?.adopt_claude(self,name).await {
+                None=>return Ok(false),
+                adopted=>adopted,
+            },
             EntryHandle::Terminal {target,..}=>Some(self.open_terminal(target).await.map(|_|())),
             EntryHandle::CodexTerminal {..}=>watcher()?.adopt_now(self,name).await,
             EntryHandle::Headless(_) if provider == "codex"=>watcher()?.open_parked(self,name).await,
@@ -403,6 +420,7 @@ impl RuntimeRegistry {
     /// `ensure_running` do Python antes de toda operação) e, com a vigia ligada, o Codex é adotado agora.
     /// `None` = não é sessão sem ator do Rust.
     pub async fn adopt_now(&self,name:&str) -> Option<Result<(),RuntimeError>> {
+        if let Err(error) = self.retire_other_life(name).await { return Some(Err(error)); }
         // Pela porta, como as escritas: no meio de uma troca (porta fechada) abrir ou adotar subiria a vida
         // antiga por cima da que está nascendo.
         let _pass = match self.ingress.enter(name,Duration::ZERO).await {
@@ -442,6 +460,93 @@ impl RuntimeRegistry {
     pub(super) async fn close_claude_entry(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
         let barrier=self.barrier(key).await;let _guard=barrier.lock().await;
         self.close_locked(key,generation,false).await
+    }
+    /// Chave, instante em que nasceu a sessão do multiplexador e agente (pid, nascimento) da entrada com
+    /// terminal de `name`.
+    pub(super) async fn terminal_life(&self,name:&str) -> Option<(String,u64,i64,f64)> {
+        self.entries.lock().await.iter().find_map(|(key,entry)|match &entry.handle {
+            EntryHandle::Terminal {target,..} if entry.name==name=>Some((key.clone(),target.binding.created,
+                i64::from(target.metadata.agent_pid),target.metadata.agent_birth)),
+            _=>None,
+        })
+    }
+    /// A entrada com terminal `key` de `name`, nascida em `created`, é de outra vida do nome: sai daqui sem
+    /// matar nada. O instante também é conferido: a reabertura (conta, `/recarregar`) herda a chave, e a
+    /// entrada da vida nova com ela nunca sai por aqui.
+    pub(super) async fn retire_terminal(&self,name:&str,key:&str,created:u64) -> Result<(),RuntimeError> {
+        let found=self.entries.lock().await.get(key).filter(|entry|entry.name==name
+            && matches!(&entry.handle,EntryHandle::Terminal {target,..} if target.binding.created==created)).map(|entry|entry.generation);
+        let Some(generation)=found else { return Ok(()) };
+        tracing::warn!(session=%name,key,code="runtime_stale_life","entrada de outra vida da sessão saiu do registro");
+        self.diag.report("runtime.stale_life",name,"runtime_stale_life","a entrada guardada era de uma vida anterior da sessão");
+        self.close_claude_entry(key,generation).await.map(|_|())
+    }
+    /// Criação de sessão com `name`, já conferido livre (sem pane nem sidecar): toda entrada guardada com
+    /// ele é de uma vida que acabou e sai daqui sem matar nada, antes de a vida nova nascer.
+    pub async fn release_name(&self,name:&str) -> Result<(),RuntimeError> {
+        let stale:Vec<(String,u64)>=self.entries.lock().await.iter().filter(|(_,entry)|entry.name==name)
+            .map(|(key,entry)|(key.clone(),entry.generation)).collect();
+        for (key,generation) in stale {
+            tracing::warn!(session=%name,key,code="runtime_stale_life","entrada de uma vida que acabou saiu do registro na criação");
+            self.diag.report("runtime.stale_life",name,"runtime_stale_life","a entrada guardada era de uma vida anterior da sessão");
+            self.close_claude_entry(&key,generation).await?;
+        }
+        Ok(())
+    }
+    /// Antes de pegar a porta: a entrada com terminal guardada para `name` que é de outra vida sai daqui
+    /// (`Watcher::retire_other_life`). Depois da porta, ela disputaria a barreira com o `dead` da vida velha.
+    pub async fn retire_other_life(&self,name:&str) -> Result<(),RuntimeError> {
+        match self.watcher.get().cloned() { Some(watcher)=>watcher.retire_other_life(self,name).await, None=>Ok(()) }
+    }
+    /// `DELETE` do Claude aberto aqui, com ou sem terminal: o Rust encerra a vida que guarda. O `Ok` leva o
+    /// `transcript`. `None` = não há Claude com esse nome aqui, ou a vida guardada já não era a do nome (a
+    /// entrada sai e o Python fecha pelo nome, como antes).
+    pub async fn kill_claude(&self,name:&str) -> Option<Result<Value,RuntimeError>> {
+        if let Err(error)=self.retire_other_life(name).await { return Some(Err(error)); }
+        let found=self.entries.lock().await.iter().find_map(|(key,entry)|match &entry.handle {
+            EntryHandle::Terminal {target,..} if entry.name==name=>Some((key.clone(),entry.generation,target.transcript.clone(),
+                Some((target.binding.mux_argv.clone(),i64::from(target.metadata.agent_pid),target.metadata.agent_birth)))),
+            EntryHandle::Headless(_) if entry.name==name && entry.provider=="claude"=> {
+                // A conversa viva (depois de um `/clear` no processo), como em `context_transcript`.
+                let conversation=entry.live.borrow().as_ref().and_then(|live|live.binding.as_ref().map(|binding|binding.conversation.clone())).filter(|c|!c.is_empty());
+                let transcript=match conversation { Some(c)=>entry.mode_source.transcript.with_file_name(format!("{c}.jsonl")), None=>entry.mode_source.transcript.clone() };
+                Some((key.clone(),entry.generation,transcript,None))
+            },
+            _=>None,
+        });
+        let (key,generation,transcript,terminal)=found?;
+        // Agente desta vida já morto: nada a matar aqui; a entrada sai e o Python fecha pelo nome.
+        if let Some((_,pid,birth))=&terminal
+            && super::lifecycle::process_absent(&crate::list::procs::SystemProcs::default(),*pid,*birth).unwrap_or(false) {
+            return match self.close_claude_entry(&key,generation).await { Ok(_)=>None, Err(error)=>Some(Err(error)) };
+        }
+        let mux_argv=terminal.map(|(argv,_,_)|argv);
+        let result=self.close_with_kill_as(&key,generation,true).await;
+        let gone=!self.entries.lock().await.contains_key(&key);
+        match result {
+            Ok(mut value) if value["killed"]==json!(true)=>{
+                if let Some(program)=mux_argv.as_ref().and_then(|argv|argv.first()) {
+                    // O shell do painel (`term-<nome>`) morre junto, só com a marca de que é nosso.
+                    let mux=crate::state::capture::MuxProcess::new(program,crate::state::capture::TIMEOUT);
+                    let hidden=format!("term-{name}");
+                    if mux.is_hidden(&hidden).await && mux.kill_session(&hidden).await!=Some(true) {
+                        tracing::warn!(session=%name,"shell escondido do Claude com terminal não fechou");
+                    }
+                }
+                if !transcript.as_os_str().is_empty() { value["transcript"]=json!(transcript.to_string_lossy()); }
+                Some(Ok(value))
+            },
+            Ok(_)|Err(_) if gone=>{
+                tracing::warn!(session=%name,key=%key,"vida guardada do Claude não era a do nome; o fechamento segue pelo nome");
+                None
+            },
+            // A vida guardada não se comprova (pane, nascimento ou vínculo): o Python fecha pelo nome, como antes.
+            Err(error) if LIFE_UNPROVEN.contains(&error.code.as_str())=>{
+                tracing::warn!(session=%name,key=%key,code=%error.code,"vida guardada do Claude não se comprova; o fechamento segue pelo nome");
+                None
+            },
+            other=>Some(other),
+        }
     }
     /// `DELETE` que entra pelo Python: `None` = não é Codex com terminal do Rust.
     pub async fn kill_codex_terminal(&self,name:&str) -> Option<Result<Value,RuntimeError>> {
@@ -596,6 +701,8 @@ impl RuntimeRegistry {
         };
         let key = meta.get("key").and_then(Value::as_str).filter(|key|!key.is_empty())?.to_owned();
         if self.entries.lock().await.get(&key).is_some_and(|entry|entry.name == name) { return Some(Ok(())); }
+        // Entrada com terminal de outra vida (o Claude que saiu deste nome) não barra a sem terminal.
+        if let Err(error) = self.retire_other_life(name).await { return Some(Err(error)); }
         if self.has_entry(Some(&key),name).await {
             return Some(Err(RuntimeError::new("claude_headless_entry_conflict","já há outra sessão aberta aqui com este nome ou chave")));
         }
@@ -1419,6 +1526,11 @@ impl RuntimeRegistry {
     /// Encerrar a sessão: o ator para e o processo dela morre, com os arquivos do cano. Sem a sessão
     /// aberta aqui não há o que matar (`killed: false`): quem pediu decide.
     pub async fn close_with_kill(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
+        self.close_with_kill_as(key,generation,false).await
+    }
+    /// `refuse_transfer`: a porta retida pela troca de conversa recusa na hora (o `DELETE` do dono), em vez
+    /// de esperar a troca terminar e encerrar a sessão que acabou de mudar.
+    async fn close_with_kill_as(&self,key:&str,generation:u64,refuse_transfer:bool) -> Result<Value,RuntimeError> {
         let codex = match self.entries.lock().await.get(key) {
             Some(Entry { generation:open,handle:EntryHandle::CodexTerminal { target,.. },.. }) if *open == generation=>Some((**target).clone()),
             _=>None,
@@ -1428,9 +1540,14 @@ impl RuntimeRegistry {
             let watcher = self.watcher.get().cloned().ok_or_else(||failure("close_kill"))?;
             return watcher.kill(self,&target).await;
         }
-        self.barrier(key).await.cancel();
+        if !refuse_transfer {self.barrier(key).await.cancel();}
         let name=self.entries.lock().await.get(key).filter(|e|e.generation==generation).map(|e|e.name.clone());
-        let _ingress=match &name {Some(name)=>Some(super::lifecycle::ClosedIngress::acquire(&self.ingress,name).await?),None=>None};
+        let _ingress=match &name {
+            Some(name) if refuse_transfer=>Some(super::lifecycle::ClosedIngress::acquire_unless_transfer(&self.ingress,name).await?),
+            Some(name)=>Some(super::lifecycle::ClosedIngress::acquire(&self.ingress,name).await?),
+            None=>None,
+        };
+        if refuse_transfer {self.barrier(key).await.cancel();}
         let barrier = self.barrier(key).await;
         let _guard = barrier.lock().await;
         let result=self.close_locked(key,generation,true).await;
@@ -2157,11 +2274,11 @@ impl RuntimeRegistry {
                 // Se a sessão sumiu, a lista do multiplexador deve provar isso; silêncio não prova.
                 use crate::terminal_input::{TerminalIo,CommandRequest};
                 let (program,prefix)=target.binding.mux_argv.split_first().ok_or_else(||failure("lifecycle_mux"))?;
-                let mut args=prefix.to_vec();args.extend(["list-sessions".into(),"-F".into(),"#{session_name}".into()]);
+                let mut args=prefix.to_vec();args.extend(["list-sessions".into(),"-F".into(),"#{session_name}\t#{session_created}".into()]);
                 let list=io.command(CommandRequest {program:program.clone(),args,stdin:vec![]}).await.map_err(|_|failure("lifecycle_mux"))?;
                 if !list.success {return Err(error);}
                 let text=std::str::from_utf8(&list.stdout).map_err(|_|failure("lifecycle_capture"))?;
-                if text.lines().any(|n|n==name) {return Err(error);}
+                if session_of_life(text,name,target.binding.created) {return Err(error);}
                 true
             },
         };
@@ -2570,6 +2687,14 @@ async fn events(State(state):State<Gateway>) -> Response {
 mod tests {
     use super::*;
     use crate::runtime::queue::acquire_lease;
+
+    #[test]
+    fn a_session_recreated_with_the_same_name_is_not_the_dead_life() {
+        assert!(session_of_life("a\t10\njefferson-3\t500\n","jefferson-3",500));
+        assert!(!session_of_life("a\t10\njefferson-3\t900\n","jefferson-3",500),"mesmo nome, outra criação: a vida morreu");
+        assert!(!session_of_life("jefferson-30\t500\n","jefferson-3",500));
+        assert!(session_of_life("jefferson-3\t\n","jefferson-3",500),"criação ilegível não prova outra vida");
+    }
 
     /// Executor disputado, como no servidor carregado: cada volta da espera atrasa além dos 50 ms.
     #[tokio::test]

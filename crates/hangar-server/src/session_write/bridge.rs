@@ -123,8 +123,8 @@ pub const RUST_CLOSED: &str = "x-hangar-rust-closed";
 /// Transcript (percent-encoded) da sessão que o Rust encerrou, junto da marca.
 pub const CLOSED_TRANSCRIPT: &str = "x-hangar-closed-transcript";
 
-/// `DELETE /api/sessions/{name}` do dono. Codex com terminal do Rust: encerra aqui (pane, ator, app-server,
-/// sidecar, fila e saída do grupo) e só então repassa o pedido marcado ao Python, para convites, "then",
+/// `DELETE /api/sessions/{name}` do dono. Codex com terminal e Claude abertos no Rust: encerra aqui (pane ou
+/// processo, ator, sidecar, fila e saída do grupo) e só então repassa o pedido marcado ao Python, para convites, "then",
 /// terminais de atalho e caches dele. Falha no encerramento responde com o código e não repassa. Outra
 /// sessão segue ao Python como chegou.
 pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, mut req: Request) -> Response {
@@ -143,10 +143,19 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     }
     let (Some(runtime), true, Some(name)) = (st.state.runtime.get().cloned(), owner, name)
         else { return crate::routes::pass(&st, req, &fwd).await };
-    match runtime.kill_codex_terminal(&name).await {
+    // Claude aberto aqui (com ou sem terminal) também fecha aqui: só matar pelo nome no Python deixava a
+    // entrada da vida morta presa ao nome, e a próxima sessão com ele herdava a conversa dela.
+    let closed = match runtime.kill_codex_terminal(&name).await {
+        None => runtime.kill_claude(&name).await,
+        codex => codex,
+    };
+    match closed {
         None => return crate::routes::pass(&st, req, &fwd).await,
         Some(Err(error)) => {
-            let mut response = super::detail(StatusCode::INTERNAL_SERVER_ERROR, &error.code, &error.message, json!({}));
+            let mut response = match super::busy_refusal(&error) {
+                Some((status, body)) => super::json_response(status, body),
+                None => super::detail(StatusCode::INTERNAL_SERVER_ERROR, &error.code, &error.message, json!({})),
+            };
             crate::routes::cors(req.headers(), response.headers_mut());
             return response;
         }
@@ -161,7 +170,7 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     if let Some(groups) = st.groups.clone() {
         match crate::groups::exit::leave_and_notify(&st, &groups, &name).await {
             Ok((_, warnings)) if !warnings.is_empty() => tracing::warn!(session = %name, avisos = warnings.len(), "aviso de saída do grupo falhou ao encerrar"),
-            Err(error) => tracing::warn!(session = %name, error = %error, "saída do grupo falhou ao encerrar o Codex com terminal"),
+            Err(error) => tracing::warn!(session = %name, error = %error, "saída do grupo falhou ao encerrar a sessão"),
             _ => {}
         }
     }

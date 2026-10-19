@@ -144,6 +144,62 @@ async fn the_drain_of_a_restored_claude_terminal_adopts_it_instead_of_failing() 
     finish(&mut agent);
 }
 
+/// A vida `old_key` adotada em `s1` morre e o nome volta com outra sessão, de chave `new_key`, nascida em
+/// `created`. Devolve o registro com a entrada da vida morta ainda guardada.
+async fn recreated(fx:&Fixture,created:u64) -> (Arc<RuntimeRegistry>,Child,String) {
+    let mut old = claude();
+    named(&old).await;
+    fx.pane("s1",old.id(),1700000000);
+    fx.native(old.id(),SID);
+    std::fs::write(fx.panes.with_extension("env"),format!("CP_SESSION_KEY={}\n","ab".repeat(16))).unwrap();
+    let registry = fx.registry().await;
+    assert_eq!(registry.adopt_now("s1").await.map(|r|r.map_err(|e|e.code)),Some(Ok(())));
+    finish(&mut old);
+    let new = claude();
+    named(&new).await;
+    fx.pane("s1",new.id(),created);
+    fx.native(new.id(),"22222222-2222-4222-8222-222222222222");
+    let new_key = "cd".repeat(16);
+    std::fs::write(fx.panes.with_extension("env"),format!("CP_SESSION_KEY={new_key}\n")).unwrap();
+    (registry,new,new_key)
+}
+
+async fn adopted_key(registry:&RuntimeRegistry,new_key:&str,mut new:Child) -> String {
+    let (found,_) = registry.terminal_view("s1").await.expect("a vida nova foi adotada");
+    registry.close(new_key,1).await.unwrap();
+    finish(&mut new);
+    found
+}
+
+/// Criada pelo Hangar com o nome de uma sessão que acabou: a criação solta a vida morta, e a escrita adota
+/// a nova, com a chave e a conversa dela.
+#[tokio::test]
+async fn creating_a_session_with_the_name_of_a_dead_one_releases_the_dead_life() {
+    let fx = fixture();
+    let (registry,new,new_key) = recreated(&fx,1700000500).await;
+    registry.release_name("s1").await.unwrap();
+    assert_eq!(registry.drain("s1").await.map(|_|()).map_err(|e|e.code),Ok(()));
+    assert_eq!(adopted_key(&registry,&new_key,new).await,new_key,"a fila e a conversa são as da vida nova, não as da morta");
+}
+
+/// Recriada por fora do Hangar (o CLI no tmux): a adoção vê outra chave no pane e troca de vida.
+#[tokio::test]
+async fn a_session_recreated_outside_the_hangar_is_adopted_instead_of_the_dead_life() {
+    let fx = fixture();
+    let (registry,new,new_key) = recreated(&fx,1700000500).await;
+    assert_eq!(registry.adopt_now("s1").await.map(|r|r.map_err(|e|e.code)),Some(Ok(())));
+    assert_eq!(adopted_key(&registry,&new_key,new).await,new_key);
+}
+
+/// Recriada no mesmo segundo (o instante do tmux tem resolução de 1 s): a chave do pane separa as vidas.
+#[tokio::test]
+async fn a_session_recreated_in_the_same_second_is_told_apart_by_its_key() {
+    let fx = fixture();
+    let (registry,new,new_key) = recreated(&fx,1700000000).await;
+    assert_eq!(registry.adopt_now("s1").await.map(|r|r.map_err(|e|e.code)),Some(Ok(())));
+    assert_eq!(adopted_key(&registry,&new_key,new).await,new_key);
+}
+
 /// O fim de turno com limite de uso precisa do alvo do terminal: o restaurado sem ator é adotado, e sem
 /// Claude no pane o código diz isso, nunca silêncio.
 #[tokio::test]

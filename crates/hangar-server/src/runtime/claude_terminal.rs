@@ -130,6 +130,7 @@ impl Watcher {
     /// no pane com esse nome.
     pub async fn adopt_claude(&self, registry: &RuntimeRegistry, name: &str) -> Option<Result<(), RuntimeError>> {
         let _round = self.misses.lock().await;
+        if let Err(error) = self.retire_other_life(registry, name).await { return Some(Err(error)); }
         if registry.has_entry(None, name).await { return Some(Ok(())); }
         let panes = match self.cfg.mux.list_panes().await {
             Ok(panes) => panes,
@@ -148,6 +149,24 @@ impl Watcher {
             Err(error) => return Some(Err(error)),
         };
         Some(self.open_claude(registry, name, &pane, proven).await)
+    }
+
+    /// O nome não é a identidade, a `CP_SESSION_KEY` é: a entrada com terminal guardada para `name` é de
+    /// outra sessão quando o pane de agora com esse nome leva outra chave (a reabertura herda a chave, e fica).
+    /// Pane sem chave (o CLI cru no tmux): decide o instante em que a sessão do multiplexador nasceu. Sem
+    /// sessão no nome, decide a morte do agente dela (o `dead` só roda com alguém assinando). Sai sem matar
+    /// nada, e o nome fica livre para qualquer agente. Multiplexador sem responder não decide nada.
+    pub async fn retire_other_life(&self, registry: &RuntimeRegistry, name: &str) -> Result<(), RuntimeError> {
+        let Some((key, created, agent, birth)) = registry.terminal_life(name).await else { return Ok(()) };
+        let Ok(panes) = self.cfg.mux.list_panes().await else { return Ok(()) };
+        let other = match panes.iter().filter(|p| p.session == name).find_map(|p| p.session_created) {
+            Some(now) => {
+                let shown = self.mux_text(&["show-environment", "-t", &session_target(name), "CP_SESSION_KEY"]).await.unwrap_or_default();
+                match session_key(&shown) { Some(current) => current != key, None => now != created }
+            },
+            None => super::lifecycle::process_absent(&SystemProcs::default(), agent, birth).unwrap_or(false),
+        };
+        if other { registry.retire_terminal(name, &key, created).await } else { Ok(()) }
     }
 
     /// Na subida: adota cada Claude com terminal que já tinha fila aqui (a chave do pane com estado

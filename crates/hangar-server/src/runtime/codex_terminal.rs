@@ -492,6 +492,10 @@ impl Watcher {
                 tracing::warn!(session=%name,code=%error.code,reason=%error.message,"Codex com terminal não adotado");
             }
             let Some(c) = candidate(meta,home) else { continue };
+            // Entrada com terminal de outra vida (o Claude que saiu deste nome) não reserva o nome para o Codex.
+            if let Err(error) = self.retire_other_life(registry,&c.name).await && crate::warn_limit::allow(Some(&c.name),&error.code) {
+                tracing::warn!(session=%c.name,code=%error.code,"entrada de outra vida não saiu; o Codex espera");
+            }
             if registry.has_entry(c.key.as_deref(),&c.name).await { continue; }
             match pane_of(&panes,&c.name) {
                 Some(pane) => if let Err(error) = self.adopt(registry,c.clone(),pane).await
@@ -530,6 +534,7 @@ impl Watcher {
         let file = codex_sidecar::path(&codex_sidecar::dir(&self.cfg.home),name);
         let meta = tokio::task::spawn_blocking(move||codex_sidecar::load(&file)).await.ok().flatten()?;
         if meta.get("headless").is_some_and(truthy) { return None; }
+        if let Err(error) = self.retire_other_life(registry,name).await { return Some(Err(error)); }
         if registry.has_entry(None,name).await { return Some(Ok(())); }
         // TUI ainda subindo: a mensagem fica na fila pelo nome (o Python a grava) e a adoção a assume,
         // como antes de existir o sidecar. Presa abrindo além do prazo, a escrita para de ir ao Python.
