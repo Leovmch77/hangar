@@ -164,7 +164,7 @@ async fn resume(st: &Arc<AppState>, runtime: &crate::runtime::gateway::RuntimeRe
     st.list.invalidate();
     match outcome {
         None => refused(StatusCode::NOT_FOUND, "erro_sessao_inexistente", "sessao nao encontrada", json!({})),
-        Some(Err(failure)) => super::relaunch::claude_refusal("não retomei a conversa", &failure),
+        Some(Err(failure)) => super::relaunch::claude_refusal(super::relaunch::CLAUDE_RESUME, &failure),
         Some(Ok(_)) => {
             st.list.seed(name, &transcript.to_string_lossy());
             let row = st.list.find_row(name).await.ok().flatten().and_then(|row| serde_json::to_value(row).ok());

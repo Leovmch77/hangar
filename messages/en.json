@@ -3169,6 +3169,8 @@
   "erro_par_externo_orq": "This session is an orchestration's arbiter and can't pair with another machine; its group was left as it was.",
   "erro_modo_so_claude": "switching mode only works for Claude sessions",
   "erro_troca_modo": "mode not switched: {erro}",
+  "erro_recarregar": "session not reloaded: {erro}",
+  "erro_retomar": "conversation not resumed: {erro}",
   "erro_conta_so_claude": "only a Claude session on an Anthropic account can switch accounts",
   "erro_conta_cheia": "the {conta} account is at {pct}% of its quota: the conversation would run out there on the first turn",
   "erro_conversa_ja_na_conta": "the target account already has this conversation",

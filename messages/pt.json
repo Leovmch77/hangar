@@ -3169,6 +3169,8 @@
   "erro_par_externo_orq": "A sessão é árbitra de uma orquestração e não pareia com outra máquina; o grupo dela ficou como estava.",
   "erro_modo_so_claude": "a troca de modo só vale para sessões Claude",
   "erro_troca_modo": "não troquei de modo: {erro}",
+  "erro_recarregar": "não recarreguei: {erro}",
+  "erro_retomar": "não retomei a conversa: {erro}",
   "erro_conta_so_claude": "só sessão Claude na conta Anthropic troca de conta",
   "erro_conta_cheia": "a conta {conta} está em {pct}% da cota: a conversa acabaria nela no primeiro turno",
   "erro_conversa_ja_na_conta": "a conta destino já tem esta conversa",
