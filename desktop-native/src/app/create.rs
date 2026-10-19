@@ -1296,9 +1296,9 @@ impl NewSession {
             CreateReply::HarnessDefaultSaved(save_seq, scope_seq, result) => {
                 if save_seq != self.default_save_seq { return None; }
                 self.default_saving = false;
-                if scope_seq != self.models.seq { cx.notify(); return None; }
                 match result {
-                    Ok(saved) => self.saved_default = saved,
+                    Ok(saved) if scope_seq == self.models.seq => self.saved_default = saved,
+                    Ok(_) => {},
                     Err(error) => self.error = Some(tr("create_default_failed").replace("{erro}", &Hangar::fetch_failure(&error))),
                 }
             }

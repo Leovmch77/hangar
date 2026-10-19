@@ -55,6 +55,22 @@ fn changing_scope_keeps_the_save_pending_and_ignores_its_old_default(cx: &mut Te
 }
 
 #[gpui::test]
+fn failed_save_stays_visible_after_changing_scope_without_replacing_the_current_default(cx: &mut TestAppContext) {
+    let (view, cx) = dialog(cx);
+    cx.update(|window, cx| view.update(cx, |dialog, cx| {
+        let old_scope = dialog.models.seq;
+        dialog.models.start();
+        dialog.default_save_seq = 1;
+        dialog.default_saving = true;
+        dialog.saved_default = Some(choice("current"));
+        dialog.receive(CreateReply::HarnessDefaultSaved(1, old_scope, Err(Failure::local("fixture-error"))), window, cx);
+        assert!(!dialog.default_saving);
+        assert_eq!(dialog.saved_default, Some(choice("current")));
+        assert!(dialog.error.as_ref().is_some_and(|error| error.contains("fixture-error")));
+    }));
+}
+
+#[gpui::test]
 fn changing_server_invalidates_the_old_save_reply(cx: &mut TestAppContext) {
     let (view, cx) = dialog(cx);
     cx.update(|window, cx| view.update(cx, |dialog, cx| {
