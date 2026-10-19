@@ -132,12 +132,7 @@ impl Hangar {
             label.push_str(&format!(" · {}", tr_shared("sessao_grupo_pareado", &[("label", group)])));
         }
         if session.pending_questions > 0 { label.push_str(&format!(" · ? {}", session.pending_questions)); }
-        let mark = if session.state == "working" {
-            self.working_mark_slot(panes::Area::Nav, format!("tab-mark-{}", target.id()), 14., theme::accent())
-        } else {
-            div().size(px(8.)).mx(px(2.)).flex_shrink_0().rounded_full()
-                .bg(if state == "limited" { theme::limited() } else { theme::status(state) }).into_any_element()
-        };
+        let mark = self.avatar_slot(panes::Area::Nav, format!("tab-mark-{}", target.id()), sidebar::session_look(session), if compact { 16. } else { 20. });
         let pick = target.clone();
         let open = target.clone();
         let menu_target = target.clone();
@@ -159,7 +154,6 @@ impl Hangar {
             .role(Role::Tab).aria_selected(on).aria_label(label.clone())
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx))
             .child(mark).children(self.session_number_badge(target))
-            .when(!grouped, |el| el.child(chrome::provider_glyph(&session.provider, 14.)))
             .child(title)
             .when(remote && !compact, |el| el.child(div().max_w(px(48.)).truncate().text_size(px(9.)).text_color(theme::faint()).child(machine.to_owned())))
             .when(session.pending_questions > 0, |el| el.child(div().flex_shrink_0().text_size(px(if compact { 9. } else { 12. })).text_color(theme::warning())

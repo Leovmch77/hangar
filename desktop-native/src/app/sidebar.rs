@@ -1595,6 +1595,17 @@ fn rail_label(name: &str) -> (String, String) {
     }
 }
 
+/// O que o avatar mostra de uma sessão: o orquestrador não roda agente, fica com a marca do Hangar.
+pub(super) fn session_look(session: &SessionInfo) -> chrome::AvatarLook {
+    session_look_as(session, &session.state, session.limited == Some(true))
+}
+
+/// O mesmo, com o estado de outra fonte (o chat ao vivo no cabeçalho).
+pub(super) fn session_look_as(session: &SessionInfo, state: &str, limited: bool) -> chrome::AvatarLook {
+    let provider = if session.orq() { "orq" } else { session.provider.as_str() };
+    chrome::AvatarLook::new(provider, session.engine.as_deref(), state, limited)
+}
+
 impl Hangar {
     /// A lista recolhida no trilho, como o Ctrl+B do web. Com abas não há barra para recolher.
     pub(super) fn rail(&self) -> bool {
@@ -1633,17 +1644,10 @@ impl Hangar {
         self.apply_appearance(next, !pressed, cx);
     }
 
-    /// A marca de "trabalhando" de uma linha da barra. Durante a troca com o trilho ela fica parada dentro da linha: a
-    /// animada é pintada fora da lista e não acompanharia a camada que some.
-    pub(super) fn nav_mark(&self, key: String, size: f32, color: Hsla, badge: Option<SharedString>) -> AnyElement {
-        if self.rail_progress().is_some() {
-            return div().relative().size(px(size)).flex_shrink_0().child(chrome::hangar_mark(size, color))
-                .children(badge.map(|provider| chrome::provider_badge(&provider))).into_any_element();
-        }
-        match badge {
-            Some(provider) => self.badged_mark_slot(panes::Area::Nav, key, size, color, provider),
-            None => self.working_mark_slot(panes::Area::Nav, key, size, color),
-        }
+    /// O avatar de uma linha da barra; durante a troca com o trilho fica parado, a animada é pintada fora da lista e não acompanharia a camada que some.
+    pub(super) fn nav_avatar(&self, key: String, look: chrome::AvatarLook, size: f32) -> AnyElement {
+        if self.rail_progress().is_some() { return chrome::session_avatar(&look, size, None).into_any_element(); }
+        self.avatar_slot(panes::Area::Nav, key, look, size)
     }
 
     /// Quanto a troca andou rumo ao trilho, de 0 (lista cheia) a 1 (trilho); `None` parada.
@@ -1686,13 +1690,12 @@ impl Hangar {
     pub(super) fn render_nav_rail(&self, selected_name: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let a = appearance::get();
         let fit_content = a.panels == appearance::Panels::Floating && a.sidebar_height == appearance::SidebarHeight::Content;
-        let mixed = self.sessions.iter().filter(|s| !s.orq()).map(|s| agent_name(&s.provider)).collect::<HashSet<_>>().len() > 1;
         let local = self.sidebar_layout(cx);
         let mut rows: Vec<AnyElement> = Vec::new();
         let place = |layout: &Layout, remote: Option<&str>, rows: &mut Vec<AnyElement>, cx: &mut Context<Self>| {
             for session in layout.waiting.iter().chain(layout.groups.iter().flat_map(|g| g.sessions.iter())) {
                 let selected = selected_name == Some(session.name.as_str()) && self.open_key().as_deref() == remote;
-                rows.push(self.render_rail_row((*session).clone(), selected, mixed, remote.map(str::to_owned), cx));
+                rows.push(self.render_rail_row((*session).clone(), selected, remote.map(str::to_owned), cx));
             }
         };
         if self.multi_server() {
@@ -1739,11 +1742,10 @@ impl Hangar {
             .into_any_element()
     }
 
-    fn render_rail_row(&self, session: SessionInfo, selected: bool, mixed: bool, remote: Option<String>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_rail_row(&self, session: SessionInfo, selected: bool, remote: Option<String>, cx: &mut Context<Self>) -> AnyElement {
         let state = session.state.as_str();
         let limited = session.limited == Some(true);
         let awaiting = state == "awaiting_input";
-        let color = if limited { theme::limited() } else { theme::status(state) };
         let (top, bottom) = rail_label(&session.name);
         let target = Target::new(&remote.clone().unwrap_or_else(|| self.active_key()), &session.name);
         let row_key = match &remote { Some(_) => target.id(), None => session.name.clone() };
@@ -1753,14 +1755,7 @@ impl Hangar {
         let mut tip = format!("{} · {host} · {}", session.name, tr(&format!("chip_{}", if limited { "limited" } else { state })));
         if questions > 0 { tip.push_str(&format!(" · ? {questions}")); }
         if session.orq() { tip.push_str(&format!(" · {}", tr_shared("orq_row_badge", &[]))); }
-        // Trabalhando é a marca animada da lista aberta, pintada fora da lista guardada; os outros estados são um ponto na cor
-        // deles, e quem espera resposta ganha o halo (parado: pulsar redesenharia a janela o tempo todo).
-        let status = if state == "working" && !limited {
-            self.nav_mark(format!("rail-mark-{row_key}"), 12., color, None)
-        } else {
-            div().size(px(11.)).flex().items_center().justify_center().rounded_full().when(awaiting, |el| el.bg(color.opacity(0.55)))
-                .child(div().size(px(7.)).rounded_full().bg(color)).into_any_element()
-        };
+        let status = self.nav_avatar(format!("rail-mark-{row_key}"), session_look(&session), 24.);
         let tip_text = tip.clone();
         let el = div().id(SharedString::from(format!("rail-{row_key}"))).relative().flex_shrink_0().w_full().min_h(px(44.)).pt(px(3.))
             .flex().flex_col().items_center().gap(px(2.)).rounded(px(8.)).cursor_pointer()
@@ -1769,12 +1764,11 @@ impl Hangar {
             .role(Role::Button).aria_selected(selected).aria_label(self.session_number_label(&target, tip))
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip_text.clone()).build(window, cx))
             .children(self.session_number_badge(&target).map(|badge| div().absolute().top_0().right_0().child(badge)))
-            .child(div().h(px(11.)).flex().items_center().justify_center().child(status))
+            .child(status)
             .child(div().flex().flex_col().items_center().font_family(theme::MONO).text_size(px(9.)).line_height(px(10.)).whitespace_nowrap()
                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(if awaiting { theme::warning() } else { theme::text() }).child(top))
                 .child(div().min_h(px(10.)).text_color(theme::faint()).child(bottom)))
-            .when(questions > 0, |el| el.child(div().text_size(px(9.)).text_color(theme::warning()).child(format!("? {questions}"))))
-            .when(mixed && !session.orq(), |el| el.child(chrome::provider_badge(&session.provider)));
+            .when(questions > 0, |el| el.child(div().text_size(px(9.)).text_color(theme::warning()).child(format!("? {questions}"))));
         // Linha de qualquer máquina: o mesmo menu e o mesmo clique, cada um na máquina dela.
         let (weak, menu_target, open) = (cx.entity().downgrade(), target.clone(), target.clone());
         el.on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_target.clone(), cx)))

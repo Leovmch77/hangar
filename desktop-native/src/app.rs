@@ -5546,7 +5546,6 @@ impl Hangar {
         let outcome = selected.then(|| self.selected_key()).flatten().and_then(|key| self.delivery.outcome(&key));
         let queued = selected && self.history_installed && self.pending_count() > 0;
         let state = conversation_row_state(&session, outcome, queued);
-        let color = theme::conversation_status(state);
         let status_label = tr(&format!("sidebar_state_{state}"));
         let label = self.session_number_label(&target,
             match folder_name(&session) { Some(folder) => format!("{name} · {folder} · {status_label}"), None => format!("{name} · {status_label}") });
@@ -5562,10 +5561,10 @@ impl Hangar {
             .children(session.last_activity.map(side::since));
         // Id da marca com a máquina: a de mesmo nome em outra máquina não divide a animação.
         let row_key = if remote.is_some() { target.id() } else { name.clone() };
-        let glyph = if state == "working" {
-            self.nav_mark(format!("conversation-mark-{row_key}"), 13., color, None)
-        } else { div().size(px(6.)).rounded_full().bg(color).into_any_element() };
-        let status = div().size(px(13.)).flex_shrink_0().flex().items_center().justify_center().child(glyph);
+        let mut look = sidebar::session_look(&session);
+        // O que só esta linha conta (envio recusado, problema, fila) continua no anel; o resto o avatar já mostra.
+        if !matches!(state, "working" | "input" | "idle" | "limited" | "dead" | "unknown") { look = look.ring(theme::conversation_status(state)); }
+        let status = self.nav_avatar(format!("conversation-mark-{row_key}"), look, 18.);
         let weak = cx.weak_entity();
         let menu = || {
             let (weak, target) = (weak.clone(), target.clone());
@@ -5581,10 +5580,9 @@ impl Hangar {
                     this.sidebar.hover = hover;
                 }); })
         };
-        let title = div().w_full().min_w_0().h(px(17.)).flex().items_center().gap(px(4.))
+        let title = div().w_full().min_w_0().h(px(18.)).flex().items_center().gap(px(4.))
             .child(status)
             .children(self.session_number_badge(&target))
-            .when(!session.orq(), |el| el.child(badge(agent_name(&session.provider).to_owned(), theme::muted())))
             .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).line_height(px(17.)).child(name.clone()))
             .when(session.pending_questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning())
                 .child(format!("? {}", session.pending_questions))))
@@ -5598,7 +5596,7 @@ impl Hangar {
         let hover_target = target.clone();
         let row_id = format!("conversation-row-{row_key}");
         div().id(SharedString::from(row_id)).relative().flex_shrink_0()
-            .h(px(if second_line { 45. } else { 29. }))
+            .h(px(if second_line { 46. } else { 30. }))
             .px(px(8.)).py(px(6.)).flex().flex_col().gap(px(2.)).rounded(px(8.)).text_color(theme::text())
             .when_some(focus, |el, focus| el.track_focus(focus))
             .when(focus.is_some_and(|f| f.is_focused(window)), |el| el.focus_ring_style(window, cx))
@@ -5612,8 +5610,8 @@ impl Hangar {
             .role(Role::Button).aria_selected(selected).aria_label(label.clone())
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx))
             .child(title)
-            // Recuo do estado mais o vão: a branch começa embaixo do glifo.
-            .when(second_line, |el| el.child(div().w_full().min_w_0().h(px(14.)).pl(px(17.)).flex().items_center().gap(px(4.))
+            // Recuo do avatar mais o vão: a branch começa embaixo do nome.
+            .when(second_line, |el| el.child(div().w_full().min_w_0().h(px(14.)).pl(px(22.)).flex().items_center().gap(px(4.))
                 .text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
                 .when_some(branch, |el, branch| el
                     .child(chrome::small_icon(IconName::GitBranch, 12., theme::muted()))
@@ -5663,13 +5661,9 @@ impl Hangar {
         let state = session.state.as_str();
         let limited = session.limited == Some(true);
         let untracked = session.tracked == Some(false);
-        let mark_color = if limited { theme::limited() } else { theme::status(state) };
-        // Trabalhando, a marca é pintada fora da lista guardada: a batida não redesenha a lista.
         let working = state == "working" && !limited;
-        let mark = if working {
-            self.nav_mark(format!("row-mark-{row_key}"), 18., mark_color, None)
-        } else { chrome::hangar_mark(18., mark_color).into_any_element() };
-        let avatar = div().relative().size(px(18.)).flex_shrink_0().flex().items_center().justify_center().child(mark);
+        // Trabalhando, a animação é pintada fora da lista guardada: a batida não redesenha a lista.
+        let avatar = self.nav_avatar(format!("row-mark-{row_key}"), sidebar::session_look(&session), 30.);
         let state_label = tr(&format!("chip_{}", if limited { "limited" } else { state }));
         let reply = session.last_reply.as_deref().filter(|r| state == "idle" && !r.trim().is_empty());
         let asking = state == "awaiting_input" || session.pending_questions > 0;
@@ -5710,7 +5704,6 @@ impl Hangar {
                     .dropdown_menu_with_anchor(Anchor::TopRight, sidebar::session_menu(weak.clone(), target.server.clone(), session.clone()))
                     .on_open_change(move |open, _, cx| { let _ = weak.update(cx, |this, cx| this.button_menu(target.clone(), *open, cx)); }))
         });
-        let lane = || div().w(px(18.)).flex_shrink_0();
         let name_el = match editing {
             // O campo não deixa o clique nele virar clique na linha.
             Some(input) => div().flex_1().min_w_0().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -5736,7 +5729,7 @@ impl Hangar {
         if let Some(label) = &provider_label { spoken.push(label.clone()); }
         spoken.push(state_label);
         if session.headless { spoken.push(tr("create_mode_headless")); }
-        div().id(SharedString::from(row_id)).relative().flex_shrink_0().flex().flex_col().gap(px(1.)).px(px(8.)).py(px(7.)).rounded(px(10.))
+        div().id(SharedString::from(row_id)).relative().flex_shrink_0().flex().items_center().gap(px(10.)).px(px(8.)).py(px(7.)).rounded(px(10.))
             .when_some(focus.as_ref(), |el, focus| el.track_focus(focus))
             .when(focus.as_ref().is_some_and(|f| f.is_focused(window)), |el| el.focus_ring_style(window, cx))
             .when(selected, |el| el.bg(theme::selected_row()))
@@ -5754,9 +5747,10 @@ impl Hangar {
             }))
             .role(Role::Button).aria_selected(selected)
             .aria_label(self.session_number_label(&target, spoken.join(" · ")))
+            .child(avatar)
+            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.))
             // O ⋯ fica por cima do fim da linha do nome: ela cede o espaço dele.
             .child(div().flex().items_center().gap(px(8.)).when(show_menu, |el| el.pr(px(22.)))
-                .child(avatar)
                 .children(self.session_number_badge(&target))
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(6.)).when(untracked, |el| el.opacity(0.45)).child(name_el))
                 .when_some(account, |el, (label, color)| el.child(div().flex_shrink_1().min_w_0().max_w(px(96.)).h(px(16.)).px(px(6.))
@@ -5765,12 +5759,12 @@ impl Hangar {
                     .child(div().size(px(5.)).flex_shrink_0().rounded_full().bg(color))
                     .child(div().min_w_0().truncate().child(label))))
                 .when_some(when, |el, w| el.child(div().flex_shrink_0().text_size(px(10.)).text_color(theme::faint()).child(w))))
-            .when_some(sub, |el, (text, kind)| el.child(div().flex().items_center().gap(px(8.)).child(lane())
+            .when_some(sub, |el, (text, kind)| el.child(div().flex().items_center()
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(4.)).text_xs().text_color(sub_color)
                     .when(kind == sidebar::Sub::Reply, |el| el.child(div().flex_shrink_0().text_size(px(8.)).text_color(theme::faint()).child("◆")))
                     .child(div().min_w_0().truncate().when(kind == sidebar::Sub::Working && working, |el| el.italic()).child(text)))))
             .when(provider_label.is_some() || folder.is_some() || branch.is_some() || added.is_some() || removed.is_some() || ahead.is_some() || behind.is_some(), |el| el.child(div().flex().items_center().gap(px(8.))
-                .text_size(px(11.5)).text_color(theme::faint()).child(lane())
+                .text_size(px(11.5)).text_color(theme::faint())
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(6.))
                     .when_some(provider_label, |el, label| el.child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD)
                         .text_color(if on_engine { theme::accent() } else { theme::muted() }).child(label)))
@@ -5785,7 +5779,7 @@ impl Hangar {
                         .when_some(ahead, |el, n| el.child(div().text_color(theme::accent()).child(format!("↑{n}"))))
                         .when_some(behind, |el, n| el.child(div().text_color(theme::warning()).child(format!("↓{n}"))))))
                     .when_some(added, |el, a| el.child(div().flex_shrink_0().text_color(theme::success()).child(format!("+{a}"))))
-                    .when_some(removed, |el, r| el.child(div().flex_shrink_0().text_color(theme::removed()).child(format!("−{r}")))))))
+                    .when_some(removed, |el, r| el.child(div().flex_shrink_0().text_color(theme::removed()).child(format!("−{r}"))))))))
             .children(menu_button)
             .map(|el| self.group_row(el, &session, remote.as_deref(), 10., cx))
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -6800,14 +6794,20 @@ impl Render for Hangar {
         let limited_now = if self.chat.state.state.is_empty() { self.selected.as_ref().and_then(|s| s.limited) == Some(true) } else { self.chat.state.limited };
         let chip_state = if limited_now && session_chip { "limited".to_owned() } else { header_state.clone() };
         let place = self.selected.as_ref().map(|s| place(s, &self.session_label(cx)));
+        // O cabeçalho é desenhado pela raiz, fora das áreas guardadas: a animação vai direto nele, numa view própria.
+        let header_avatar = self.selected.as_ref().map(|s| {
+            let look = sidebar::session_look_as(s, &header_state, limited_now);
+            if look.working() { chrome::LiveAvatar::new("header-avatar", look, 26.).into_any_element() }
+            else { chrome::session_avatar(&look, 26., None).into_any_element() }
+        });
         let landing::Frame { drop, shown, rise } = self.landing_frame(window, cx);
         let opening = self.opening.clone().filter(|_| self.selected.is_none());
         let content = div().relative().flex_1().min_w_0().h_full().flex().flex_col()
             .when(!beside_sidebar, |el| chat_fill(el, self, window))
             .child(div().h(px(44.)).pl(px(20.)).pr(px(12.)).flex_shrink_0().flex().items_center().gap(px(10.)).when(floating, |el| el.mx(px(4.)))
                 .relative().opacity(shown).top(px(rise))
-                .when_some(self.selected.as_ref(), |el, s| el.child(chrome::provider_glyph(&s.provider, 18.)))
-                .when_some(opening.as_ref(), |el, o| el.child(chrome::provider_glyph(&o.provider, 18.)))
+                .when_some(header_avatar, |el, avatar| el.child(avatar))
+                .when_some(opening.as_ref(), |el, o| el.child(chrome::session_avatar(&chrome::AvatarLook::new(&o.provider, None, "", false), 26., None)))
                 .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD)
                     .child(selected_name.clone().or_else(|| opening.as_ref().map(|o| o.name.clone())).unwrap_or_else(|| tr("title"))))
                 .when_some(place, |el, place| el.child(div().min_w_0().truncate().text_color(theme::faint()).child(place)))

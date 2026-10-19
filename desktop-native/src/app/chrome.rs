@@ -486,16 +486,120 @@ pub fn provider_glyph(provider: &str, size: f32) -> Div {
     }
 }
 
-/// O selo do provider no canto de cima da marca da linha, quando a lista mistura providers.
-pub fn provider_badge(provider: &str) -> Div {
-    div().absolute().left(px(-4.)).top(px(-4.)).p(px(1.)).rounded_full()
-        .bg(theme::raised()).border_1().border_color(theme::border()).child(provider_glyph(provider, 10.))
-}
-
 /// Logo vetorial do provider (Claude, Codex/OpenAI, Kimi); `None` para quem não tem marca.
 pub fn provider_logo(provider: &str, size: f32, color: Hsla) -> Option<Svg> {
     let path = match provider { "claude" => "providers/claude.svg", "codex" => "providers/codex.svg", "kimi" => "providers/kimi.svg", _ => return None };
     Some(svg().path(path).size(px(size)).flex_shrink_0().text_color(color))
+}
+
+/// O que o avatar da sessão mostra: o agente dentro do círculo e o estado no anel, como o `SessionAvatar` do app.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AvatarLook { glyph: SharedString, state: AvatarState, limited: bool, ring: Option<Hsla> }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AvatarState { Working, Waiting, Ready, Other }
+
+impl AvatarLook {
+    pub fn new(provider: &str, engine: Option<&str>, state_name: &str, limited: bool) -> Self {
+        // Motor GPT pelo Claude Code roda o modelo da OpenAI: o logo é o dele.
+        let gpt = engine.is_some_and(|e| { let e = e.to_ascii_lowercase(); ["gpt", "openai", "codex"].iter().any(|k| e.contains(k)) });
+        let glyph = if provider == "claude" && gpt { "codex" } else { provider };
+        let state = match state_name { "working" => AvatarState::Working, "awaiting_input" => AvatarState::Waiting, "idle" => AvatarState::Ready, _ => AvatarState::Other };
+        // Sessão morta fica com o anel vermelho: sem ele pareceria só parada.
+        let ring = (state_name == "dead").then(theme::danger);
+        Self { glyph: glyph.to_owned().into(), state, limited, ring }
+    }
+
+    /// Anel numa cor própria, para um estado que o app não tem (envio recusado, problema da sessão).
+    pub fn ring(mut self, color: Hsla) -> Self { self.ring = Some(color); self }
+
+    pub fn working(&self) -> bool { self.state == AvatarState::Working }
+}
+
+const AVATAR_PULSE: Duration = Duration::from_millis(1600);
+const AVATAR_TURN: Duration = Duration::from_millis(1400);
+
+/// O avatar parado, ou num quadro da animação (`motion` = respiro 0..1 e giro em graus). Trabalhando sem `motion` é o
+/// movimento reduzido: anel no destaque, brilho fixo e a bolinha no alto.
+pub fn session_avatar(look: &AvatarLook, side: f32, motion: Option<(f32, f32)>) -> Div {
+    let accent = theme::accent();
+    let working = look.working();
+    let ready = look.state == AvatarState::Ready;
+    let ring = if let Some(color) = look.ring { color }
+        else if look.state == AvatarState::Waiting || (ready && look.limited) { theme::warning() }
+        else if working && motion.is_none() { accent } else { theme::muted().opacity(0.4) };
+    let logo = side * 20. / 36.;
+    let glyph = look.glyph.as_ref();
+    let (color, mark) = theme::provider(glyph);
+    // Pi e omp não têm logo vetorial: a letra deles, como no `provider_glyph`; sem agente, a marca do Hangar.
+    let inner = match provider_logo(glyph, logo, if glyph == "codex" { theme::text() } else { color }) {
+        Some(svg) => svg.into_any_element(),
+        None if matches!(glyph, "pi" | "omp") => div().text_size(px(logo)).line_height(px(logo)).font_weight(FontWeight::BOLD)
+            .text_color(color).child(mark).into_any_element(),
+        None => hangar_mark(logo, theme::muted()).into_any_element(),
+    };
+    let badge = (side * 14. / 36.).max(8.);
+    div().relative().size(px(side)).flex_shrink_0().flex().items_center().justify_center()
+        .child(canvas(|_, _, _| {}, move |bounds, _, window, _| {
+            let center = bounds.center();
+            let circle = |diameter: f32| Bounds::centered_at(center, size(px(diameter), px(diameter)));
+            if working {
+                let (glow, scale) = motion.map_or((0.2, 1.), |(p, _)| (0.12 + p * 0.2, 0.9 + p * 0.18));
+                let d = (side - 6.) * scale;
+                // O halo largo faz as vezes do `boxShadow` de 10 px do app.
+                window.paint_quad(fill(circle(d + 8.), accent.opacity(glow * 0.35)).corner_radii(px((d + 8.) / 2.)));
+                window.paint_quad(fill(circle(d), accent.opacity(glow)).corner_radii(px(d / 2.)));
+            }
+            let d = side - 2.;
+            window.paint_quad(quad(circle(d), px(d / 2.), transparent_black(), px(1.5), ring, BorderStyle::Solid));
+            if working {
+                let dot = (side * 5. / 36.).max(3.);
+                let angle = (motion.map_or(0., |(_, turn)| turn) - 90.).to_radians();
+                let radius = side / 2. - 1.75;
+                let at = point(center.x + px(radius * angle.cos()), center.y + px(radius * angle.sin()));
+                window.paint_quad(fill(Bounds::centered_at(at, size(px(dot), px(dot))), accent).corner_radii(px(dot / 2.)));
+            }
+        }).absolute().inset_0())
+        .child(inner)
+        .when(ready, |el| el.child(div().absolute().right(px(-1.)).bottom(px(-1.)).size(px(badge)).rounded_full()
+            .bg(if look.limited { theme::warning() } else { theme::success() }).flex().items_center().justify_center()
+            .child(small_icon(if look.limited { IconName::Hourglass } else { IconName::Check }, badge * 0.72, theme::surface()))))
+}
+
+/// O avatar trabalhando, animado no relógio comum numa view própria guardada entre quadros, como a `WorkingMark`:
+/// fora da área visível para de pedir quadro, e com movimento reduzido fica parado.
+#[derive(IntoElement)]
+pub struct LiveAvatar { key: ElementId, look: AvatarLook, size: f32 }
+
+impl LiveAvatar {
+    pub fn new(key: impl Into<ElementId>, look: AvatarLook, size: f32) -> Self { Self { key: key.into(), look, size } }
+}
+
+struct LiveAvatarView { look: AvatarLook, size: f32, visible: Rc<Cell<bool>> }
+
+impl Render for LiveAvatarView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Respiro de 800 ms em vai e volta e uma volta da bolinha a cada 1400 ms.
+        let motion = (!cx.reduce_motion()).then(|| (crate::motion::pulse_wave(pulse_phase(AVATAR_PULSE)), pulse_phase(AVATAR_TURN) * 360.));
+        let visible = self.visible.clone();
+        session_avatar(&self.look, self.size, motion)
+            .child(canvas(move |bounds, window, _| visible.set(window.content_mask().bounds.intersects(&bounds)), |_, _, _, _| {})
+                .absolute().inset_0())
+    }
+}
+
+impl RenderOnce for LiveAvatar {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let (look, size) = (self.look, self.size);
+        let view = keyed_view(self.key, window, cx, |cx| {
+            pulse(Duration::ZERO, |view: &LiveAvatarView| view.visible.get(), cx);
+            LiveAvatarView { look: look.clone(), size, visible: Rc::new(Cell::new(true)) }
+        });
+        view.update(cx, |view, cx| {
+            if view.size != size || view.look != look { (view.size, view.look) = (size, look); cx.notify(); }
+        });
+        view.cached(StyleRefinement::default().size(px(size)))
+    }
 }
 
 pub(super) const GLASS_BLUR: Pixels = px(16.);
@@ -707,6 +811,18 @@ mod tests {
     use super::*;
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
+
+    #[test]
+    fn avatar_shows_the_agent_behind_the_engine_and_the_app_states() {
+        let look = AvatarLook::new("claude", Some("gpt-6-luna"), "working", false);
+        assert_eq!((look.glyph.as_ref(), look.state), ("codex", AvatarState::Working));
+        assert_eq!(AvatarLook::new("claude", Some("kimi-k3"), "idle", false).glyph.as_ref(), "claude");
+        assert_eq!(AvatarLook::new("codex", None, "awaiting_input", false).state, AvatarState::Waiting);
+        assert_eq!(AvatarLook::new("pi", None, "dead", false).ring, Some(theme::danger()));
+        assert_eq!(AvatarLook::new("pi", None, "reconnecting", false).ring, None);
+        // Limitada trabalhando continua animando, como no app.
+        assert!(AvatarLook::new("claude", None, "working", true).working());
+    }
 
     #[test]
     fn thinking_focus_layout_matches_the_label_row() {
