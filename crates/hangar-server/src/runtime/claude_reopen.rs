@@ -183,7 +183,8 @@ fn bypass_policy(config:&std::path::Path,cwd:&std::path::Path,settings:Option<&V
     if cfg!(target_os="linux") {paths.push(PathBuf::from("/etc/claude-code/managed-settings.json"));}
     if cfg!(target_os="macos") {paths.push(PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.json"));}
     if cfg!(windows) {
-        let program_files=env.get("ProgramFiles").ok_or_else(||refused("relaunch_policy_source","a pasta de programas do Windows não é conhecida"))?;
+        // Nome de variável no Windows não tem caixa, e o Python repassa o ambiente em maiúsculas.
+        let program_files=env.iter().find(|(key,_)|key.eq_ignore_ascii_case("ProgramFiles")).map(|(_,value)|value).ok_or_else(||refused("relaunch_policy_source","a pasta de programas do Windows não é conhecida"))?;
         paths.push(PathBuf::from(program_files).join("ClaudeCode/managed-settings.json"));
     }
     for path in paths {
@@ -1009,6 +1010,19 @@ impl RuntimeRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O Python repassa o ambiente com o nome em maiúsculas (`PROGRAMFILES`); no Windows o nome não tem caixa.
+    #[cfg(windows)]
+    #[test]
+    fn the_managed_policy_is_found_whatever_the_case_of_the_variable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("ClaudeCode")).unwrap();
+        std::fs::write(dir.path().join("ClaudeCode/managed-settings.json"),
+            r#"{"permissions":{"disableBypassPermissionsMode":"disable"}}"#).unwrap();
+        let env = std::collections::BTreeMap::from([("PROGRAMFILES".to_owned(), dir.path().to_string_lossy().into_owned())]);
+        let error = bypass_policy(&dir.path().join("conta"), &dir.path().join("cwd"), None, &env).unwrap_err();
+        assert_eq!(error.code, "relaunch_policy_forbids_bypass");
+    }
     use crate::list::procs::ChildrenMap;
     use std::ffi::OsString;
     use std::sync::Arc;

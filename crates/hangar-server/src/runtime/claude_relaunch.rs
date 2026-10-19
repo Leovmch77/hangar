@@ -16,7 +16,11 @@ fn variable<'a>(recipe:&'a ProcessRecipe,key:&str)->Option<&'a OsStr> {
     let prefix=format!("{key}=");
     recipe.environ.iter().find_map(|entry| {
         let raw=entry.as_encoded_bytes();
-        let value=raw.strip_prefix(prefix.as_bytes())?;
+        let head=raw.get(..prefix.len())?;
+        // No Windows o nome da variável não tem caixa (o Python a repassa em maiúsculas).
+        let same=if cfg!(windows) {head.eq_ignore_ascii_case(prefix.as_bytes())} else {head==prefix.as_bytes()};
+        if !same {return None;}
+        let value=&raw[prefix.len()..];
         // SAFETY: `=` ASCII delimita uma fronteira do encoding de OsStr.
         Some(unsafe {OsStr::from_encoded_bytes_unchecked(value)})
     })
