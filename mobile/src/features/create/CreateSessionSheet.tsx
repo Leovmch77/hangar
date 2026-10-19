@@ -4,7 +4,7 @@ import { AccessibilityInfo, ActivityIndicator, BackHandler, Platform, Pressable,
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { getArchivePorCwd, getCodexAccountsForServer, defaultCodexAccount,
-  getEnginesForServer, fetchSessionsForServer, listClaudeConfigsForServer, probeServerResponse,
+  getEnginesForServer, getSessionDefaultsForServer, fetchSessionsForServer, listClaudeConfigsForServer, probeServerResponse,
   modelOptionsForServer, resumeArchivedConversation, getProvidersForServer, createSessionForServer, sanitizeSessionName, getWorktreesForServer } from '@hangar/core';
 import { basename, ctxWindow, providerName, contaComFolga, cotaDaConta, cotaParada, janelaEsgotada, motivoCotaAntiga, resumoCota, CLAUDE_PERMISSION_MODES, EFFORT_LEVELS,
   SESSION_PROVIDERS, hasExecutionMode, effortLevels, contextRefsPlainText } from '@hangar/core';
@@ -183,6 +183,13 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
   const [subagente, setSubagente] = useState('');
   const [esforco, setEsforco] = useState('');
   const [permissao, setPermissao] = useState('');
+  const [loadedDefaultsKey, setLoadedDefaultsKey] = useState<string | null>(null);
+  const [defaultsError, setDefaultsError] = useState('');
+  const [defaultsTry, setDefaultsTry] = useState(0);
+  const defaultsKey = `${provider}:${provider === 'claude' ? engine : ''}`;
+  const defaultsReady = loadedDefaultsKey === defaultsKey;
+  const choiceTouched = useRef(false);
+  const permissionTouched = useRef(false);
   const [listaReduzida, setListaReduzida] = useState(false);
   const [erroModelos, setErroModelos] = useState('');
 
@@ -352,9 +359,30 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
     return () => { alive = false; retry.cancel(); };
   }, [enabled, active, enginesTry, startEnginesRetry]);
 
-  const catalogEngine = provider === 'codex' ? null : engine || null;
+  const catalogEngine = provider === 'claude' ? engine || null : null;
   const catalogConfig = provider === 'codex' ? null : selectedConfig;
   const catalogAccount = provider === 'codex' ? codexAccount : null;
+
+  useEffect(() => {
+    if (!enabled) return;
+    const controller = new AbortController();
+    let alive = true;
+    setDefaultsError('');
+    setLoadedDefaultsKey(null);
+    setPermissao('');
+    permissionTouched.current = false;
+    void getSessionDefaultsForServer(active, provider, catalogEngine, controller.signal)
+      .then((value) => {
+        if (!alive) return;
+        if (value && !choiceTouched.current) desired.current = { model: value.model, effort: value.effort };
+        if (!permissionTouched.current) setPermissao(value?.permission ?? '');
+        setLoadedDefaultsKey(defaultsKey);
+      })
+      .catch((cause: unknown) => {
+        if (alive) setDefaultsError(loadErrorText(cause, m.criar_sessao_erro()));
+      });
+    return () => { alive = false; controller.abort(); };
+  }, [enabled, active, provider, catalogEngine, defaultsKey, defaultsTry]);
 
   // modelos quando o destino efetivo do catálogo muda
   useEffect(() => {
@@ -371,6 +399,7 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
   useEffect(() => {
     if (!enabled) return;
     setModelsLoading(false);
+    if (!defaultsReady) return;
     if (provider !== 'claude' && provider !== 'codex' && provider !== 'pi' && provider !== 'kimi' && provider !== 'omp') {
       setModelos([]);
       setListaReduzida(false);
@@ -420,7 +449,7 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
       retry.cancel();
       controller.abort();
     };
-  }, [enabled, provider, catalogEngine, catalogConfig, catalogAccount, active, active?.id, active?.baseUrl, active?.token, modelsTry, startModelsRetry]);
+  }, [enabled, defaultsReady, provider, catalogEngine, catalogConfig, catalogAccount, active, active?.id, active?.baseUrl, active?.token, modelsTry, startModelsRetry]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -507,7 +536,7 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
   // Nome em branco: o store gera projeto + sufixo da tentativa.
   const canHeadless = hasExecutionMode(provider);
   const settings: Omit<NewConversationInput['body'], 'cwd'> = provider === 'codex'
-    ? { provider: 'codex', model: modelo || null, effort: esforco || null, codex_account: codexAccount, headless }
+    ? { provider: 'codex', model: modelo || null, effort: esforco || null, permission_mode: headless ? permissao || null : null, codex_account: codexAccount, headless }
     : {
       provider,
       config_dir: provider === 'claude' && accountChosen ? selectedConfig : null,
@@ -518,18 +547,20 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
       subagent_model: provider === 'claude' && !engine ? subagente || null : null,
       ...(canHeadless ? { headless } : {}),
     };
-  const body = picked && codexReady && !providersLoading && (!providersError || providerTouched.current) ? { ...settings, ...(fastAvailable && serviceTier ? { service_tier: serviceTier } : {}), cwd: picked, remember_provider: true, ...(name.trim() ? { name: name.trim() } : {}), ...(worktree ?? {}) } : null;
+  const body = picked && defaultsReady && !modelsLoading && codexReady && !providersLoading && (!providersError || providerTouched.current) ? { ...settings, ...(fastAvailable && serviceTier ? { service_tier: serviceTier } : {}), cwd: picked, remember_provider: true, ...(name.trim() ? { name: name.trim() } : {}), ...(worktree ?? {}) } : null;
 
   // Toda escolha feita aqui volta na próxima abertura desta máquina.
   const chooseProvider = (p: Provider) => {
     providerTouched.current = true;
     setProvidersError('');
     if (p === provider) return;
+    choiceTouched.current = false;
     desired.current = { model: '', effort: '' };
     setProvider(p);
     remember({ provider: p, model: '', effort: '' });
   };
   const chooseModel = (v: string) => {
+    choiceTouched.current = true;
     if (!v) setServiceTier(undefined);
     providerTouched.current = true;
     setProvidersError('');
@@ -541,6 +572,7 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
     remember({ model: v, effort });
   };
   const chooseEffort = (v: string) => {
+    choiceTouched.current = true;
     providerTouched.current = true;
     setProvidersError('');
     desired.current = { ...desired.current, effort: v };
@@ -550,6 +582,10 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
   const chooseHeadless = (v: boolean) => {
     setHeadless(v);
     remember({ headless: v });
+  };
+  const choosePermission = (value: string) => {
+    permissionTouched.current = true;
+    setPermissao(value);
   };
   const chooseConfig = (v: string) => {
     providerTouched.current = true;
@@ -716,6 +752,12 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
       {projectWarning ? <Text style={styles.error} accessibilityRole="alert">{projectWarning}</Text> : null}
       {error ? <Text style={styles.error} accessibilityRole="alert">{error}</Text> : null}
       {catalogError ? <Text style={styles.error} accessibilityRole="alert">{catalogError}</Text> : null}
+      {defaultsError ? <View>
+        <Text style={styles.error} accessibilityRole="alert">{m.native_create_default_failed({ erro: defaultsError })}</Text>
+        <Pressable accessibilityRole="button" onPress={() => setDefaultsTry((n) => n + 1)}>
+          <Text style={styles.hint}>{m.native_retry()}</Text>
+        </Pressable>
+      </View> : null}
       {providersError ? <Text style={styles.error} accessibilityRole="alert">{providersError}</Text> : null}
       {!retomavel && listaReduzida ? <Text style={styles.hint}>{m.criar_lista_reduzida()}</Text> : null}
       {!retomavel && erroModelos ? <Text style={styles.hint} accessibilityRole="alert">{m.criar_abre_padrao({ erro: erroModelos } as any)}</Text> : null}
@@ -749,7 +791,7 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
       <PanelSelect
         value={engine}
         options={[{ value: '', label: m.criar_claude_sua_conta() }, ...Object.entries(motores).map(([k, v]) => ({ value: k, label: (v as any).label ?? k, hint: (v as any).model }))]}
-        onChange={(v) => setEngine(v)}
+        onChange={(v) => { choiceTouched.current = false; setEngine(v); }}
       />
     </View>
   ) : null;
@@ -759,7 +801,7 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
       <PanelSelect
         value={permissao}
         options={[{ value: '', label: m.criar_permissao_padrao() }, ...CLAUDE_PERMISSION_MODES.map((n) => ({ value: n, label: n }))]}
-        onChange={(v) => setPermissao(v)}
+        onChange={choosePermission}
       />
     </View>
   );
@@ -952,7 +994,7 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
                 onAction={chooseEffort} /> : null}
               {provider === 'claude' ? <SettingRow icon="ShieldCheck" label={m.criar_permissao()} value={permissao || m.criar_padrao()}
                 actions={[{ id: '', title: m.criar_permissao_padrao(), state: on(!permissao) }, ...CLAUDE_PERMISSION_MODES.map((n) => ({ id: n, title: n, state: on(n === permissao) }))]}
-                onAction={setPermissao} /> : null}
+                onAction={choosePermission} /> : null}
               <SettingRow icon="SquareTerminal" label={m.criar_modo_exec()} value={terminalChoice.label} actions={terminalChoice.actions}
                 menuTitle={terminalChoice.menuTitle} onAction={terminalChoice.onAction} />
             </RowGroup>

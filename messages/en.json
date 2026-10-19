@@ -1,5 +1,8 @@
 {
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "session_defaults_owner_only": "Only the owner can access session creation defaults.",
+  "session_defaults_invalid": "Invalid model, effort, permission, or defaults scope.",
+  "session_defaults_unavailable": "Could not read or save session creation defaults. Check the server and try again.",
   "sync_boot_loading": "Connecting to Hangar…",
   "sync_boot_error": "Unable to check the connection. Check your network and try again.",
   "sync_retry": "Try again",

@@ -12,7 +12,7 @@ function overwriteGetLocale(fn: () => 'en' | 'pt') {
 import { configureApi } from './apiEnv';
 // `getHistoryDesde` veio da main junto com o histórico condicional (304 + ETag).
 import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, createSession, getHistory, getHistoryDesde, isAbortError, transcribeFile, transcribeFileForServer, transcribeUploaded, transcribeUploadedForServer, uploadFile, uploadFileForServer, getModelOptions, setEngineModel, rotaGenerica, pairSession } from './api';
-import { createSessionForServer, getFolderGitForServer, folderGitActionForServer, defaultBase, resumeArchivedConversation } from './api';
+import { createSessionForServer, getSessionDefaultsForServer, getFolderGitForServer, folderGitActionForServer, defaultBase, resumeArchivedConversation } from './api';
 import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 import { fetchSessionsForServer, getSessions, probeServerResponse } from './api';
@@ -188,6 +188,24 @@ beforeEach(() => {
     onUnauthorized: onUnauthorizedSpy as unknown as () => void,
     origin: 'https://app.test',
     createEventSource: () => stubEventSource(),
+  });
+});
+
+describe('padrões de criação do servidor', () => {
+  it('a leitura combina prazo e cancelamento sem trocar o servidor escolhido', async () => {
+    const deadline = new AbortController();
+    vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
+    const caller = new AbortController();
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      configured: true, defaults: { model: 'opus', effort: 'high', permission: 'bypassPermissions' },
+    })));
+    expect(await getSessionDefaultsForServer(server, 'claude', 'proxy', caller.signal))
+      .toEqual({ model: 'opus', effort: 'high', permission: 'bypassPermissions' });
+    expect(fetchMock.mock.calls[0][0]).toBe('https://a.test/api/session-defaults?provider=claude&engine=proxy');
+    expect(fetchMock.mock.calls[0][1]?.headers).toMatchObject({ Authorization: 'Bearer token-a' });
+    deadline.abort(new DOMException('deadline', 'TimeoutError'));
+    expect(fetchMock.mock.calls[0][1]?.signal?.aborted).toBe(true);
+    expect(caller.signal.aborted).toBe(false);
   });
 });
 

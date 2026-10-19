@@ -1,5 +1,8 @@
 {
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "session_defaults_owner_only": "Só o dono pode acessar os padrões da abertura de sessões.",
+  "session_defaults_invalid": "Modelo, esforço, permissão ou destino do padrão inválidos.",
+  "session_defaults_unavailable": "Não foi possível ler ou guardar os padrões da abertura de sessões. Confira o servidor e tente novamente.",
   "sync_boot_loading": "Conectando ao Hangar…",
   "sync_boot_error": "Não foi possível verificar a conexão. Confira a rede e tente novamente.",
   "sync_retry": "Tentar novamente",

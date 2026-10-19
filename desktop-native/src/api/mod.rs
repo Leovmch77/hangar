@@ -2,6 +2,7 @@ pub mod dto;
 mod local;
 pub mod route;
 pub mod sse;
+mod session_defaults;
 
 use std::time::Duration;
 use reqwest::{Client, Method, Response, StatusCode, header};

@@ -267,12 +267,13 @@ pub(super) enum CreateReply {
     CreatedWithInput(u64, u64, String, String, Result<Delivery, Failure>, Result<Opened, String>),
     /// O catálogo de modelos e o último modelo e esforço lembrados para a chave dele.
     /// O catálogo, o modelo e esforço a pré-escolher e o padrão marcado do harness (modelo, esforço, permissão).
-    Models(u64, Result<Value, Failure>, (String, String), Option<(String, String, String)>),
+    Models(u64, Result<Value, Failure>, (String, String), Result<Option<(String, String, String)>, Failure>),
     Engines(u64, Result<Value, Failure>),
     /// A configuração do servidor: modo de sessão e Jev.
     Config(u64, (bool, Result<Option<Value>, Failure>)),
     HeadlessSaved(u64, Result<Value, Failure>),
     ClaudeDefaultSaved(Result<Value, Failure>),
+    HarnessDefaultSaved(u64, Result<Option<(String, String, String)>, Failure>),
     Quotas(u64, Result<Value, Failure>),
     Context(u64, Result<Value, Failure>),
     Account(u64, AccountDone),
@@ -519,6 +520,8 @@ pub(in crate::app) struct NewSession {
     permission: String,
     /// O padrão marcado do harness, como foi lido na última leitura do catálogo.
     saved_default: Option<(String, String, String)>,
+    defaults_ready: bool,
+    default_saving: bool,
     /// Permissão escolhida à mão: o padrão do harness não a troca quando o catálogo é relido.
     permission_touched: bool,
     subagent: String,
@@ -638,7 +641,7 @@ impl NewSession {
             customizations_focus: cx.focus_handle().tab_stop(true), codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true, headless_owner: None, headless_touched: false, headless_saving: false,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
             step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, account_touched: false, account_suggested: false, effort: String::new(), service_tier: None,
-            permission: String::new(), saved_default: None, permission_touched: false, subagent: String::new(), engine: String::new(), engine_account: String::new(), engine_account_pick: None, model_pick: None, effort_pick: None,
+            permission: String::new(), saved_default: None, defaults_ready: false, default_saving: false, permission_touched: false, subagent: String::new(), engine: String::new(), engine_account: String::new(), engine_account_pick: None, model_pick: None, effort_pick: None,
             permission_pick: None, subagent_pick: None, engine_pick: None, engines: Remote::default(), jev: Remote::default(), jev_on: false,
             more: false, omp, quotas: Remote::default(), reopen_config: None, reopen_default: false, asking: false, confirming: false, keep_transcripts: true, account_busy: false, account_seq: 0, account_name,
             notice: None, created_path: None, context_seq: 0, context_busy: false, context_on: None, context_want: None, context_error: None,
@@ -825,6 +828,8 @@ impl NewSession {
         self.engine_account_pick = None;
         // O catálogo da outra máquina não vale aqui; o novo vem depois das contas.
         self.models.reset();
+        self.defaults_ready = false;
+        self.default_saving = false;
         self.sync_customizations(window, cx);
         self.service_tier = None;
         self.before = None;
@@ -1133,7 +1138,7 @@ impl NewSession {
     }
 
     pub(super) fn can_create(&self, cx: &App) -> bool {
-        !self.is_transfer() && !self.customizations.is_open() && !self.creating && !self.headless_saving && !self.jev.loading && self.picked.is_some() && !self.sessions.loading && (self.compact || !self.name.read(cx).value().trim().is_empty())
+        !self.is_transfer() && self.defaults_ready && !self.default_saving && !self.customizations.is_open() && !self.creating && !self.headless_saving && !self.jev.loading && self.picked.is_some() && !self.sessions.loading && (self.compact || !self.name.read(cx).value().trim().is_empty())
             && self.provider_ready() == Some(true) && self.codex_ready() && self.engine_ready() && !(self.provider == "codex" && self.context_busy)
             && !self.checkout.loading
             && (!self.compact || ((self.provider != "claude" || (!self.configs.loading && self.configs.ok().is_some_and(|list| !list.is_empty())))
@@ -1283,6 +1288,14 @@ impl NewSession {
             }
             CreateReply::ClaudeDefaultSaved(result) => {
                 if let Err(error) = result { self.error = Some(tr("create_default_failed").replace("{erro}", &Hangar::fetch_failure(&error))); }
+            }
+            CreateReply::HarnessDefaultSaved(seq, result) => {
+                if seq != self.models.seq { return None; }
+                self.default_saving = false;
+                match result {
+                    Ok(saved) => self.saved_default = saved,
+                    Err(error) => self.error = Some(tr("create_default_failed").replace("{erro}", &Hangar::fetch_failure(&error))),
+                }
             }
             CreateReply::Roots(seq, result, last) => {
                 let roots = result.map_err(|e| Hangar::fetch_failure(&e))

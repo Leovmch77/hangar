@@ -683,6 +683,15 @@ async def mermaid_pelo_rust(request: Request):
                                   "/__hangar_server/forwarded", keep=_MERMAID_HEADERS, limit=64 * 1024 * 1024)
 
 
+@app.api_route("/api/session-defaults", methods=["GET", "PUT"], dependencies=[Depends(require_auth)])
+async def session_defaults_forward(request: Request):
+    """O Connect só transporta o padrão; leitura e escrita pertencem ao Rust."""
+    if guest_of(request) is not None or guest_users.current.get() is not None:
+        raise HTTPException(403, detail=erro("session_defaults_owner_only", "só o dono pode acessar o padrão da abertura"))
+    return await _repasse_ao_rust(request, erro("session_defaults_unavailable", "o padrão da abertura precisa do servidor Rust"),
+                                  "/__hangar_server/forwarded")
+
+
 @app.middleware("http")
 async def _correlaciona_diag(request: Request, call_next):
     """Põe o id do front no contexto, pra o diário poder LIGAR as duas pontas.
