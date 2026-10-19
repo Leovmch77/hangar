@@ -238,12 +238,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           c="${{ github.sha }}"
-          chave=$(git rev-parse "$c:frontend" "$c:packages" "$c:messages" "$c:project.inlang" | sha256sum | cut -d' ' -f1)
+          chave=$(git rev-parse "$c:frontend" "$c:packages" "$c:messages" "$c:project.inlang" "$c:package.json" "$c:package-lock.json" | sha256sum | cut -d' ' -f1)
           nome="frontend-dist-$chave.tar.gz"
           gh release view dist-commits --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
             || gh release create dist-commits --repo "$GITHUB_REPOSITORY" --latest=false \
                  --title 'frontend compilado por chave das fontes' \
-                 --notes 'frontend-dist-<chave>.tar.gz: chave = sha256 das arvores frontend, packages, messages e project.inlang do commit. O atualizador baixa daqui quando para antes do topo.'
+                 --notes 'frontend-dist-<chave>.tar.gz: chave = sha256 das arvores frontend, packages, messages, project.inlang e de package.json e package-lock.json da raiz no commit. O atualizador baixa daqui quando para antes do topo.'
           id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/dist-commits" --jq .id)
           gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/$id/assets" > assets.json
           if jq -e --arg n "$nome" 'add | any(.name == $n)' assets.json >/dev/null; then

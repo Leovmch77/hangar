@@ -1495,8 +1495,10 @@ def reiniciar_agora(porta: int = 8765) -> dict:
 
 _DIST_URL = "https://github.com/jeffer1312/hangar/releases/download/dist-latest"
 _DIST_COMMITS_URL = "https://github.com/jeffer1312/hangar/releases/download/dist-commits"
-# De onde a tela compila: o `build` do front roda `i18n:compile` com `../project.inlang`, que lê `messages/`.
-_FONTES_DA_TELA = ("frontend", "packages", "messages", "project.inlang")
+# De onde a tela compila: o `build` do front roda `i18n:compile` com `../project.inlang`, que lê
+# `messages/`; o lock e o package.json da raiz decidem as dependências com que ela compila.
+_FONTES_DA_TELA = ("frontend", "packages", "messages", "project.inlang",
+                   "package.json", "package-lock.json")
 
 
 def _chave_da_tela(rev: str) -> str | None:

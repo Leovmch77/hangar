@@ -1412,6 +1412,8 @@ def _fontes_da_tela(repo):
                         ("messages", "en.json"), ("project.inlang", "settings.json")):
         (repo / pasta).mkdir(parents=True, exist_ok=True)
         (repo / pasta / nome).write_text(nome, encoding="utf-8")
+    for nome in ("package.json", "package-lock.json"):
+        (repo / nome).write_text("{}", encoding="utf-8")
     (repo / "frontend" / "dist").mkdir()
     (repo / "frontend" / "dist" / "index.html").write_text("velho", encoding="utf-8")
     _git(repo, "add", "-A")
@@ -1519,6 +1521,15 @@ def test_chave_do_dist_so_muda_com_as_fontes_da_tela(repo):
     assert antes and atualizar._chave_da_tela("HEAD") == antes
     (repo / "messages" / "en.json").write_text("mudou", encoding="utf-8")
     _git(repo, "commit", "-qam", "texto")
+    assert atualizar._chave_da_tela("HEAD") not in (None, antes)
+
+
+def test_chave_do_dist_muda_com_o_lock_das_dependencias(repo):
+    """Mesmas fontes compiladas com outras dependências dão outra tela."""
+    _fontes_da_tela(repo)
+    antes = atualizar._chave_da_tela("HEAD")
+    (repo / "package-lock.json").write_text('{"lockfileVersion": 3}', encoding="utf-8")
+    _git(repo, "commit", "-qam", "lock")
     assert atualizar._chave_da_tela("HEAD") not in (None, antes)
 
 
