@@ -80,10 +80,11 @@ impl Navigation {
 pub const SIDEBAR_MIN: f32 = 200.;
 pub const SIDEBAR_MAX: f32 = 520.;
 
-/// Como a barra lateral agrupa as sessões (`cp_group_by` do web; "Servidor" não se aplica a um servidor só).
+/// Como a barra lateral agrupa as sessões (`cp_group_by` do web; "Servidor" não se aplica a um servidor só). `Machine` é o
+/// do app do celular: quem trabalha sobe para "Trabalhando" no topo e o resto fica no bloco da máquina dele.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SidebarGroup { None, Project }
+pub enum SidebarGroup { None, Project, Machine }
 
 /// Aba do painel da direita, lembrada entre aberturas (`ctxPanel.aba` do web).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -584,6 +585,15 @@ mod tests {
         assert_eq!(loaded, adjusted);
         assert_ne!(loaded, loaded.compact_style());
         assert_eq!(loaded.compact_style(), compact);
+    }
+
+    #[test]
+    fn grouping_by_machine_is_saved_off_by_default_and_kept_by_reset() {
+        assert_eq!(Appearance::default().sidebar_group, SidebarGroup::None);
+        let loaded: Appearance = serde_json::from_value(serde_json::json!({"sidebar_group": "machine"})).unwrap();
+        assert_eq!(loaded.sidebar_group, SidebarGroup::Machine);
+        assert_eq!(serde_json::to_value(loaded).unwrap()["sidebar_group"], "machine");
+        assert_eq!(loaded.reset_keeping_choices().sidebar_group, SidebarGroup::Machine);
     }
 
     #[test]

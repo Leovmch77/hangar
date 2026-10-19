@@ -55,7 +55,7 @@ impl Page {
 
 /// Linhas da Aparência que a busca acha: título e descrição, como chaves de tradução. O título é também
 /// o que a linha desenhada compara para se destacar.
-const APPEARANCE_ROWS: [(&str, Option<&str>); 38] = [
+const APPEARANCE_ROWS: [(&str, Option<&str>); 39] = [
     ("settings_live", None), ("settings_reset", Some("settings_reset_hint")),
     ("settings_style", Some("settings_style_hint")), ("settings_theme", None),
     ("settings_panels", Some("settings_panels_floating_desc")), ("settings_palette", Some("settings_palette_desc")),
@@ -72,6 +72,7 @@ const APPEARANCE_ROWS: [(&str, Option<&str>); 38] = [
     ("settings_tool_calls", None), ("settings_task_list", None), ("settings_thinking", None), ("settings_table_chart", None),
     ("settings_ask_highlight", Some("settings_ask_highlight_desc")),
     ("settings_collapsed_nav", None), ("settings_sidebar_density", Some("settings_sidebar_density_hint")), ("settings_sidebar_height", Some("settings_only_floating")),
+    ("settings_sidebar_grouping", Some("settings_sidebar_grouping_desc")),
 ];
 
 /// Linhas das outras páginas prontas, no mesmo formato.
