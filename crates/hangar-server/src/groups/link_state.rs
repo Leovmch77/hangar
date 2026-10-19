@@ -59,6 +59,22 @@ pub fn record_linked(hangar_dir: &Path, children: &[String], now: f64) -> io::Re
     })
 }
 
+/// Filha ligada sem registro (a gravação da ligação falhou): `linked_at` agora, então só resposta de
+/// agora em diante volta. Devolve as que foram criadas; as que já tinham ficam intactas.
+pub fn ensure_linked(hangar_dir: &Path, children: &[String], now: f64) -> io::Result<Vec<String>> {
+    let mut created = Vec::new();
+    modify(hangar_dir, |all| {
+        for child in children {
+            if !all.contains_key(child) {
+                all.insert(child.clone(), LinkReturn { linked_at: now, ..LinkReturn::default() });
+                created.push(child.clone());
+            }
+        }
+        !created.is_empty()
+    })?;
+    Ok(created)
+}
+
 /// Filha renomeada leva o registro junto: sem ele, nunca mais volta resposta dela.
 pub fn rename(hangar_dir: &Path, old: &str, new: &str) -> io::Result<()> {
     modify(hangar_dir, |all| match all.remove(old) {
@@ -110,5 +126,21 @@ mod tests {
         assert_eq!(all["a2"].returned_at, Some(2.0));
         retain(dir.path(), |name| name == "b").unwrap();
         assert_eq!(read(dir.path()).unwrap().keys().collect::<Vec<_>>(), ["b"]);
+    }
+
+    #[test]
+    fn a_linked_child_without_entry_gets_one_from_now_and_existing_ones_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = LinkReturn { linked_at: 1.0, returned_at: Some(2.0), returned_key: Some("k".into()) };
+        update(dir.path(), |all| { all.insert("a".into(), old.clone()); }).unwrap();
+        let created = ensure_linked(dir.path(), &["a".to_owned(), "b".to_owned()], 50.0).unwrap();
+        assert_eq!(created, ["b"]);
+        let all = read(dir.path()).unwrap();
+        assert_eq!(all["a"], old);
+        assert_eq!(all["b"], LinkReturn { linked_at: 50.0, ..LinkReturn::default() });
+        assert!(ensure_linked(dir.path(), &["b".to_owned()], 60.0).unwrap().is_empty(), "a segunda vez não recria");
+        assert_eq!(read(dir.path()).unwrap()["b"].linked_at, 50.0);
+        std::fs::write(path(dir.path()), "{torto").unwrap();
+        assert!(ensure_linked(dir.path(), &["c".to_owned()], 1.0).is_err());
     }
 }

@@ -22,7 +22,7 @@ export const LinkedChildren = memo(function LinkedChildren({ serverId, name }: {
   const done = linkedChildrenDone(children);
   const toggle = () => { haptic.selection(); setOpen(v => !v); };
   return <View style={styles.wrap}>
-    <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} accessibilityLabel={m.linked_children_toggle()}
+    <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} accessibilityHint={m.linked_children_toggle()}
       onPress={toggle} style={styles.head}>
       <Icon name={open ? 'ChevronDown' : 'ChevronRight'} size={14} color={theme.tokens.text.muted} />
       <Icon name="GitBranch" size={14} color={theme.tokens.text.secondary} />
@@ -33,7 +33,7 @@ export const LinkedChildren = memo(function LinkedChildren({ serverId, name }: {
       <View style={styles.dots}>
         {children.map(child => <StateDot key={child.name} state={child.state} size={7} />)}
       </View>
-      <Text style={styles.meta}>{m.linked_children_done({ done, total: children.length })}</Text>
+      <Text style={[styles.meta, { flexShrink: 0 }]}>{m.linked_children_done({ done, total: children.length })}</Text>
     </Pressable>
     {open ? children.map(child => {
       const last = child.last_reply?.trim().split('\n')[0];
@@ -56,13 +56,13 @@ export const LinkedChildren = memo(function LinkedChildren({ serverId, name }: {
 });
 
 const styles = StyleSheet.create(theme => ({
-  wrap: { marginHorizontal: theme.base.space[3], borderColor: theme.tokens.border.subtle, borderWidth: 1, borderRadius: theme.base.radius.sm },
+  wrap: { marginHorizontal: theme.base.space[3], borderColor: theme.tokens.border.subtle, borderWidth: 1, borderRadius: theme.base.radius.sm, overflow: 'hidden' },
   head: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5], paddingHorizontal: theme.base.space[2] },
-  count: { ...theme.type.label, color: theme.tokens.text.primary },
+  count: { ...theme.type.label, color: theme.tokens.text.primary, flexShrink: 0 },
   chips: { flex: 1, flexDirection: 'row', gap: theme.base.space[1], overflow: 'hidden', minWidth: 0 },
   chip: { ...theme.type.caption, flexShrink: 1, color: theme.tokens.text.secondary, backgroundColor: superficie(theme, 0.8),
     borderRadius: theme.base.radius.xs, paddingHorizontal: theme.base.space[1.5], overflow: 'hidden' },
-  dots: { flexDirection: 'row', gap: theme.base.space[0.5] },
+  dots: { flexDirection: 'row', gap: theme.base.space[0.5], flexShrink: 0 },
   meta: { ...theme.type.meta, color: theme.tokens.text.muted },
   row: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingLeft: theme.base.space[2],
     borderTopColor: theme.tokens.border.subtle, borderTopWidth: 1 },

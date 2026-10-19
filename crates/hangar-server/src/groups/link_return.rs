@@ -16,8 +16,8 @@ use tokio::time::Instant;
 
 use super::link_state::{self, LinkReturn, LinkReturns, blocking};
 use super::local::is_remote;
-use super::service::GroupService;
-use super::store::file_stem;
+use super::service::{GroupError, GroupService};
+use super::store::{StoreError, file_stem};
 use crate::routes::AppState;
 use crate::state::monitor::wall_now;
 use crate::transcript::history::merged_history_capped;
@@ -49,13 +49,14 @@ pub fn wake() { WAKE.notify_one(); }
 pub fn spawn(st: Arc<AppState>) -> Option<JoinHandle<()>> {
     let groups = st.groups.clone()?;
     Some(tokio::spawn(async move {
-        // Pânico não pode parar o retorno de vez e calado.
+        // Pânico não pode parar o retorno de vez e calado; pânico em laço não pode girar a cada 2 s.
+        let mut pause = PANIC_PAUSE;
         loop {
             match tokio::spawn(run(st.clone(), groups.clone())).await {
                 Err(e) if e.is_panic() => {
-                    tracing::error!(code = "link_return_panicked", "groups: retorno da filha ligada entrou em pânico; recomeça");
-                    st.diag.report(EVENT, "", "link_return_panicked", "retorno da filha ligada caiu; recomeça");
-                    tokio::time::sleep(TICK).await;
+                    report(&st, "", "link_return_panicked", "retorno da filha ligada caiu; recomeça", "");
+                    tokio::time::sleep(pause).await;
+                    pause = next_pause(pause);
                 }
                 _ => return,
             }
@@ -63,11 +64,36 @@ pub fn spawn(st: Arc<AppState>) -> Option<JoinHandle<()>> {
     }))
 }
 
+const PANIC_PAUSE: Duration = Duration::from_secs(2);
+const PANIC_PAUSE_MAX: Duration = Duration::from_secs(60);
+
+fn next_pause(pause: Duration) -> Duration { (pause * 2).min(PANIC_PAUSE_MAX) }
+
+/// Sem filha devolvível, o que esperar antes de varrer de novo.
+#[derive(Debug, PartialEq)]
+enum Idle {
+    /// Há filha devolvível: vigia a lista.
+    Watch,
+    /// Nenhuma: só a mudança do grupo no disco acorda.
+    UntilWake,
+    /// Arquivos de grupo ilegíveis: a mudança que os conserta pode não passar pelo `wake`.
+    Retry(Duration),
+}
+
+fn idle(links: Option<&[(String, String)]>) -> Idle {
+    match links {
+        None => Idle::Retry(RESCAN),
+        Some(l) if any_returnable(l, None) => Idle::Watch,
+        Some(_) => Idle::UntilWake,
+    }
+}
+
 async fn run(st: Arc<AppState>, groups: Arc<GroupService>) {
     loop {
-        if !scan_links(&st, &groups).await.is_some_and(|l| any_returnable(&l, None)) {
-            WAKE.notified().await;
-            continue;
+        match idle(scan_links(&st, &groups).await.as_deref()) {
+            Idle::Watch => {}
+            Idle::UntilWake => { WAKE.notified().await; continue }
+            Idle::Retry(after) => { let _ = tokio::time::timeout(after, WAKE.notified()).await; continue }
         }
         let sub = st.hub.subscribe_internal(&st.list, &st.diag);
         let mut watcher = Watcher::default();
@@ -92,7 +118,9 @@ async fn run(st: Arc<AppState>, groups: Arc<GroupService>) {
 /// Filha renomeada: o registro dela segue o nome novo. Falhar não desfaz a troca de nome, já feita.
 pub(crate) async fn renamed(st: &AppState, old: &str, new: &str) {
     let (dir, from, to) = (st.hangar_dir.clone(), old.to_owned(), new.to_owned());
-    if blocking(move || link_state::rename(&dir, &from, &to)).await.is_err() { report(st, new, "link_returns_rename_failed", "registro da filha ligada não seguiu o nome novo"); }
+    if let Err(e) = blocking(move || link_state::rename(&dir, &from, &to)).await {
+        report(st, new, "link_returns_rename_failed", "registro da filha ligada não seguiu o nome novo", &io_kind(&e));
+    }
 }
 
 /// Pi, omp e Kimi não têm retorno automático: nem seguram a assinatura da lista.
@@ -105,7 +133,11 @@ fn returnable(provider: &str) -> bool {
 async fn scan_links(st: &AppState, groups: &GroupService) -> Option<Vec<(String, String)>> {
     let all = match groups.sidecars().await {
         Ok(all) => all,
-        Err(_) => { report(st, "", "link_return_groups_unreadable", "arquivos de grupo ilegíveis; retorno da filha parado"); return None }
+        Err(e) => {
+            let detail = match &e { GroupError::Store(StoreError::Io(io)) => io_kind(io), GroupError::Store(StoreError::Json(_)) => "json".into(), _ => "other".into() };
+            report(st, "", "link_return_groups_unreadable", "arquivos de grupo ilegíveis; retorno da filha parado", &detail);
+            return None
+        }
     };
     let linked: Vec<(String, String)> = all.into_iter()
         .filter(|(_, s)| s.linked_parent().is_some())
@@ -114,7 +146,7 @@ async fn scan_links(st: &AppState, groups: &GroupService) -> Option<Vec<(String,
             (stem, provider)
         }).collect();
     let (dir, stems) = (st.hangar_dir.clone(), linked.iter().map(|(s, _)| s.clone()).collect::<HashSet<_>>());
-    if blocking(move || link_state::retain(&dir, |name| stems.contains(&file_stem(name)))).await.is_err() { unreadable(st); }
+    if let Err(e) = blocking(move || link_state::retain(&dir, |name| stems.contains(&file_stem(name)))).await { unreadable(st, &e); }
     Some(linked)
 }
 
@@ -129,9 +161,10 @@ fn any_returnable(linked: &[(String, String)], rows: Option<&[SessionRow]>) -> b
     })
 }
 
-/// Retornos por filha numa janela; conta a tentativa quando deixa passar.
+/// Retornos por filha numa janela; conta a tentativa quando deixa passar. O segundo mapa guarda o último
+/// aviso de limite: um aviso por resposta manteria o laço girando no mesmo ritmo.
 #[derive(Default)]
-struct RateLimit(HashMap<String, VecDeque<Instant>>);
+struct RateLimit(HashMap<String, VecDeque<Instant>>, HashMap<String, Instant>);
 
 impl RateLimit {
     fn allow(&mut self, child: &str, now: Instant) -> bool {
@@ -142,8 +175,16 @@ impl RateLimit {
         true
     }
 
+    /// Um aviso de limite por filha por janela.
+    fn notice_once(&mut self, child: &str, now: Instant) -> bool {
+        if self.1.get(child).is_some_and(|t| now.duration_since(*t) < RATE_WINDOW) { return false; }
+        self.1.insert(child.to_owned(), now);
+        true
+    }
+
     fn forget_old(&mut self, now: Instant) {
         self.0.retain(|_, hits| hits.back().is_some_and(|t| now.duration_since(*t) < RATE_WINDOW));
+        self.1.retain(|_, t| now.duration_since(*t) < RATE_WINDOW);
     }
 }
 
@@ -169,6 +210,8 @@ struct Watcher {
     handled: HashMap<String, f64>,
     retry_at: HashMap<String, Instant>,
     rate: RateLimit,
+    /// Filhas com registro em `link-returns.json` já conferido nesta vigia.
+    known: HashSet<String>,
 }
 
 impl Watcher {
@@ -190,7 +233,22 @@ impl Watcher {
         self.idle.retain(|n, _| present(n));
         self.handled.retain(|n, _| present(n));
         self.retry_at.retain(|n, _| present(n));
+        self.known.retain(|n| present(n));
         self.rate.forget_old(now);
+        // Já na primeira vista: o registro criado aqui só deixa voltar resposta posterior a ele.
+        let unseen: Vec<String> = children.iter().map(|r| r.name.clone()).filter(|n| !self.known.contains(n)).collect();
+        if !unseen.is_empty() {
+            let (dir, names, at) = (st.hangar_dir.clone(), unseen.clone(), wall_now());
+            match blocking(move || link_state::ensure_linked(&dir, &names, at)).await {
+                Ok(created) => {
+                    for child in created {
+                        report(st, &child, "link_returns_entry_missing", "filha ligada sem registro de ligação; só respostas de agora em diante voltam", "");
+                    }
+                    self.known.extend(unseen);
+                }
+                Err(e) => return unreadable(st, &e),
+            }
+        }
         let mut links: Option<LinkReturns> = None;
         for row in children {
             if row.state != "idle" {
@@ -207,7 +265,7 @@ impl Watcher {
                 let dir = st.hangar_dir.clone();
                 match blocking(move || link_state::read(&dir)).await {
                     Ok(read) => links = Some(read),
-                    Err(_) => return unreadable(st),
+                    Err(e) => return unreadable(st, &e),
                 }
             }
             let check = Check {
@@ -272,14 +330,24 @@ fn asked_by_parent(turn: &Turn, parent: &str, server: &str) -> bool {
 
 /// Por que a resposta não volta.
 #[derive(Debug, PartialEq)]
-enum Refusal { NotAsked, NoAnswer, AlreadyReturned, TooOld }
+enum Refusal {
+    NotAsked,
+    /// Pedido pelo pai, mas sem resposta final em texto; leva a identidade do turno para o aviso.
+    NoAnswer(String),
+    AlreadyReturned,
+    TooOld,
+}
 
 /// Critérios 4 em diante, sobre o turno lido: devolve o texto e a identidade da resposta.
 fn decide<'a>(c: &Check, turn: &'a Turn) -> Result<(&'a str, String), Refusal> {
     if !asked_by_parent(turn, c.parent, c.server) { return Err(Refusal::NotAsked); }
-    let (answer, asked) = final_answer(&turn.events).ok_or(Refusal::NoAnswer)?;
+    let returned = |key: &str| c.link.as_ref().and_then(|l| l.returned_key.as_deref()) == Some(key);
+    let Some((answer, asked)) = final_answer(&turn.events) else {
+        let key = unanswered_key(&turn.events);
+        return Err(if returned(&key) { Refusal::AlreadyReturned } else { Refusal::NoAnswer(key) });
+    };
     let key = answer_key(answer, asked);
-    if c.link.as_ref().and_then(|l| l.returned_key.as_deref()) == Some(key.as_str()) { return Err(Refusal::AlreadyReturned); }
+    if returned(&key) { return Err(Refusal::AlreadyReturned); }
     // `last_reply_at` cai no mtime do transcript sem hora no evento; a do evento é a da resposta.
     let at = answer.ts.filter(|&t| t != 0.0).or(c.last_reply_at).unwrap_or(0.0);
     if c.now - at >= MAX_AGE { return Err(Refusal::TooOld); }
@@ -307,6 +375,20 @@ fn answer_key(answer: &ChatEvent, asked: Option<&ChatEvent>) -> String {
     sha1_smol::Sha1::from(format!("{asked}\n{}", answer.text.as_deref().unwrap_or_default())).digest().to_string()
 }
 
+/// Turno sem resposta: a pergunta que ele responde, com prefixo próprio para não colidir com uma resposta.
+fn unanswered_key(events: &[ChatEvent]) -> String {
+    let asked = events.iter().rfind(|e| e.kind == ChatKind::UserMsg);
+    match asked {
+        Some(e) if !e.id.is_empty() => format!("sem-resposta:{}", e.id),
+        _ => format!("sem-resposta:{}", sha1_smol::Sha1::from(asked.and_then(|e| e.text.as_deref()).unwrap_or_default()).digest()),
+    }
+}
+
+/// O pai pediu e espera: resposta descartada vira um aviso curto, não silêncio.
+fn not_returned(child: &str, why: &str) -> String {
+    format!("[de: {child}] (a resposta não voltou sozinha: {why}; abra a conversa de {child})")
+}
+
 fn message(child: &str, answer: &str) -> String {
     if answer.chars().count() <= MAX_CHARS { return format!("[de: {child}] {answer}"); }
     let cut: String = answer.chars().take(MAX_CHARS).collect();
@@ -323,13 +405,17 @@ fn still_same(rows: Option<&[SessionRow]>, child: &str, reply_at: f64) -> bool {
     rows.is_some_and(|rows| rows.iter().any(|r| r.name == child && r.state == "idle" && r.last_reply_at == Some(reply_at)))
 }
 
-fn unreadable(st: &AppState) { report(st, "", "link_returns_unreadable", "link-returns.json ilegível; retorno parado"); }
+fn unreadable(st: &AppState, e: &io::Error) { report(st, "", "link_returns_unreadable", "link-returns.json ilegível; retorno parado", &io_kind(e)); }
 
-/// Falha que se repete a cada tique (arquivo ilegível, pai fora) sai uma vez por minuto.
-fn report(st: &AppState, child: &str, code: &str, reason: &'static str) {
-    if !crate::warn_limit::allow(Some(child), code) { return; }
+fn io_kind(e: &io::Error) -> String { format!("{:?}", e.kind()) }
+
+/// Falha que se repete a cada tique (arquivo ilegível, pai fora) sai uma vez por minuto. `detail` é o tipo
+/// do erro (E/S, status HTTP), nunca texto da conversa; vai ao código como `codigo:detalhe`.
+fn report(st: &AppState, child: &str, code: &str, reason: &'static str, detail: &str) {
+    let code = if detail.is_empty() { code.to_owned() } else { format!("{code}:{detail}") };
+    if !crate::warn_limit::allow(Some(child), &code) { return; }
     tracing::warn!(code, session = %child, reason, "groups: retorno da filha ligada falhou");
-    st.diag.report(EVENT, child, code, reason);
+    st.diag.report(EVENT, child, &code, reason);
 }
 
 fn read_history(provider: Provider, jsonl: &Path) -> io::Result<Option<Turn>> {
@@ -345,45 +431,67 @@ async fn give_back(st: &AppState, row: &SessionRow, check: &Check<'_>, reply_at:
     current: &Rows<'_>) -> Outcome {
     let child = row.name.as_str();
     let (Some(provider), Some(jsonl)) = (Provider::parse(&row.provider), row.jsonl.as_deref().filter(|j| !j.is_empty())) else {
-        report(st, child, "link_return_no_transcript", "filha parada sem transcript");
+        report(st, child, "link_return_no_transcript", "filha parada sem transcript", "");
         return Outcome::Done;
     };
     let jsonl = PathBuf::from(jsonl);
     let turn = match blocking(move || read_history(provider, &jsonl)).await {
         Ok(Some(turn)) => turn,
         Ok(None) => {
-            report(st, child, "link_return_turn_unknown", "começo do turno da filha fora do teto de leitura; resposta não volta");
+            report(st, child, "link_return_turn_unknown", "começo do turno da filha fora do teto de leitura; resposta não volta", "");
             return Outcome::Done;
         }
-        Err(_) => { report(st, child, "link_return_history_failed", "histórico da filha ilegível"); return Outcome::Retry }
+        Err(e) => { report(st, child, "link_return_history_failed", "histórico da filha ilegível", &io_kind(&e)); return Outcome::Retry }
     };
-    let (answer, key) = match decide(check, &turn) {
-        Ok(found) => found,
-        Err(Refusal::NoAnswer) => {
-            report(st, child, "link_return_no_answer", "turno da filha sem resposta final em texto (interrompido ou parado em ferramenta)");
+    let found = decide(check, &turn);
+    match &found {
+        Err(Refusal::TooOld) => {
+            report(st, child, "link_return_too_old", "resposta da filha com mais de 2 h; não volta", "");
             return Outcome::Done;
         }
-        Err(Refusal::NotAsked | Refusal::AlreadyReturned | Refusal::TooOld) => return Outcome::Done,
-    };
-    if !still_same(current().as_deref().map(Vec::as_slice), child, reply_at) { return Outcome::Moved; }
-    if !rate.allow(child, Instant::now()) {
-        report(st, child, "link_return_rate_limited", "retornos demais da filha em 10 min; parece laço com o pai");
-        return Outcome::Done;
+        Err(Refusal::NotAsked | Refusal::AlreadyReturned) => return Outcome::Done,
+        Ok(_) | Err(Refusal::NoAnswer(_)) => {}
     }
-    let (status, reply) = crate::session_write::input::deliver_reply(st, check.parent, &message(child, answer)).await;
+    if !still_same(current().as_deref().map(Vec::as_slice), child, reply_at) { return Outcome::Moved; }
+    let Some(Reply { text, key, dropped }) = reply(child, found, || rate.allow(child, Instant::now())) else { return Outcome::Done };
+    if let Some((code, reason)) = dropped { report(st, child, code, reason, ""); }
+    if dropped == Some(RATE_LIMITED) && !rate.notice_once(child, Instant::now()) { return Outcome::Done; }
+    let (status, answer) = crate::session_write::input::deliver_reply(st, check.parent, &text).await;
     if !status.is_success() {
-        let code = reply["detail"]["code"].as_str().unwrap_or("erro_envio_falhou_desconhecida");
-        report(st, child, code, "entrega da resposta da filha ao pai falhou");
+        let code = answer["detail"]["code"].as_str().unwrap_or("erro_envio_falhou_desconhecida");
+        report(st, child, code, "entrega da resposta da filha ao pai falhou", &status.as_u16().to_string());
         return if transient(status) { Outcome::Retry } else { Outcome::Done };
     }
     let (dir, name) = (st.hangar_dir.clone(), child.to_owned());
     let written = blocking(move || link_state::update(&dir, |all| {
         if let Some(entry) = all.get_mut(&name) { entry.returned_at = Some(reply_at); entry.returned_key = Some(key); }
     })).await;
-    if written.is_err() {
-        report(st, child, "link_returns_write_failed", "returned_at da filha não gravado");
+    if let Err(e) = written {
+        report(st, child, "link_returns_write_failed", "returned_at da filha não gravado", &io_kind(&e));
     }
     Outcome::Done
+}
+
+/// O que segue ao pai; `dropped` = a resposta não foi inteira, com o código e o motivo do diário.
+#[derive(Debug, PartialEq)]
+struct Reply { text: String, key: String, dropped: Option<(&'static str, &'static str)> }
+
+const RATE_LIMITED: (&str, &str) = ("link_return_rate_limited", "retornos demais da filha em 10 min; parece laço com o pai");
+const NO_ANSWER: (&str, &str) = ("link_return_no_answer", "turno da filha sem resposta final em texto (interrompido ou parado em ferramenta)");
+
+/// Resposta pedida pelo pai e descartada vira aviso, com a mesma identidade: avisa uma vez e não relê.
+/// `allow` só é consultado com resposta inteira (conta no limite quando deixa passar).
+fn reply(child: &str, found: Result<(&str, String), Refusal>, allow: impl FnOnce() -> bool) -> Option<Reply> {
+    match found {
+        Ok((answer, key)) if allow() => Some(Reply { text: message(child, answer), key, dropped: None }),
+        Ok((_, key)) => Some(Reply {
+            text: not_returned(child, "respostas demais em 10 minutos, parece um laço entre vocês"), key, dropped: Some(RATE_LIMITED),
+        }),
+        Err(Refusal::NoAnswer(key)) => Some(Reply {
+            text: not_returned(child, "o turno terminou sem resposta em texto (interrompido ou parado em ferramenta)"), key, dropped: Some(NO_ANSWER),
+        }),
+        Err(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -512,17 +620,64 @@ mod tests {
     fn interrupted_or_tool_ending_turns_have_no_final_answer() {
         let mut tool = asked("[de: pai] x");
         tool.push(ev(ChatKind::ToolUse, ""));
-        assert_eq!(decide(&check(), &turn(tool, false)), Err(Refusal::NoAnswer));
+        let no_answer = |events| matches!(decide(&check(), &turn(events, false)), Err(Refusal::NoAnswer(_)));
+        assert!(no_answer(tool));
         for notice in ["interrupted", "turn_aborted"] {
             let mut cut = asked("[de: pai] x");
             cut.push(ev(ChatKind::Notice, notice));
-            assert_eq!(decide(&check(), &turn(cut, false)), Err(Refusal::NoAnswer), "{notice}");
+            assert!(no_answer(cut), "{notice}");
         }
         let mut tail = asked("[de: pai] x");
         tail.push(ev(ChatKind::AssistantMsg, "  "));
         tail.push(ev(ChatKind::Notice, "compacted"));
         assert_eq!(final_answer(&tail).map(|(a, _)| a.text.as_deref()), Some(Some("feito")));
         assert!(final_answer(&asked("[de: pai] x")[..3]).is_none());
+    }
+
+    #[test]
+    fn a_dropped_answer_the_parent_asked_for_becomes_a_notice_once() {
+        // Turno pedido pelo pai e parado em ferramenta: aviso com a identidade do turno.
+        let mut tool = asked("[de: pai] x");
+        tool.push(ev(ChatKind::ToolUse, ""));
+        let Err(Refusal::NoAnswer(key)) = decide(&check(), &turn(tool.clone(), false)) else { panic!("esperava NoAnswer") };
+        let notice = reply("f", Err(Refusal::NoAnswer(key.clone())), || panic!("sem resposta não conta no limite")).unwrap();
+        assert_eq!(notice.key, key);
+        assert_eq!(notice.dropped, Some(NO_ANSWER));
+        assert!(notice.text.starts_with("[de: f] (a resposta não voltou sozinha: "), "{}", notice.text);
+        assert!(notice.text.ends_with("; abra a conversa de f)"), "{}", notice.text);
+        // Avisado (a chave gravada como `returned_key`): não avisa de novo.
+        let notified = Check { link: Some(LinkReturn { linked_at: 0.0, returned_at: Some(1.0), returned_key: Some(key) }), ..check() };
+        assert_eq!(decide(&notified, &turn(tool.clone(), false)), Err(Refusal::AlreadyReturned));
+        // A identidade do aviso não colide com a de uma resposta: a resposta que vier depois volta.
+        let mut answered = tool;
+        answered.push(ev(ChatKind::AssistantMsg, "feito agora"));
+        assert_eq!(decide(&notified, &turn(answered, false)).map(|(a, _)| a), Ok("feito agora"));
+
+        // Limite estourado: a resposta não vai, o aviso vai com a identidade dela.
+        let limited = reply("f", Ok(("texto", "k1".to_owned())), || false).unwrap();
+        assert_eq!((limited.key.as_str(), limited.dropped), ("k1", Some(RATE_LIMITED)));
+        assert!(!limited.text.contains("texto"));
+        let ok = reply("f", Ok(("texto", "k1".to_owned())), || true).unwrap();
+        assert_eq!(ok, Reply { text: "[de: f] texto".into(), key: "k1".into(), dropped: None });
+        // Velha demais, não pedida ou já devolvida: nada vai ao pai.
+        for refusal in [Refusal::TooOld, Refusal::NotAsked, Refusal::AlreadyReturned] {
+            assert!(reply("f", Err(refusal), || true).is_none());
+        }
+    }
+
+    #[test]
+    fn unreadable_group_files_retry_on_their_own() {
+        assert_eq!(idle(None), Idle::Retry(RESCAN));
+        assert_eq!(idle(Some(&[("f".to_owned(), "pi".to_owned())])), Idle::UntilWake);
+        assert_eq!(idle(Some(&[])), Idle::UntilWake);
+        assert_eq!(idle(Some(&[("f".to_owned(), "codex".to_owned())])), Idle::Watch);
+    }
+
+    #[test]
+    fn panic_pause_doubles_up_to_a_minute() {
+        let mut pause = PANIC_PAUSE;
+        let seen: Vec<u64> = (0..7).map(|_| { let s = pause.as_secs(); pause = next_pause(pause); s }).collect();
+        assert_eq!(seen, [2, 4, 8, 16, 32, 60, 60]);
     }
 
     #[test]
@@ -535,6 +690,18 @@ mod tests {
         assert!(rate.allow("f", t0 + RATE_WINDOW + Duration::from_secs(1)));
         rate.forget_old(t0 + RATE_WINDOW * 3);
         assert!(rate.0.is_empty());
+    }
+
+    #[test]
+    fn the_rate_limit_notice_goes_once_per_window() {
+        let mut rate = RateLimit::default();
+        let t0 = Instant::now();
+        assert!(rate.notice_once("f", t0));
+        assert!(!rate.notice_once("f", t0 + Duration::from_secs(60)), "segundo aviso no laço seguraria o pai girando");
+        assert!(rate.notice_once("outra", t0), "por filha");
+        assert!(rate.notice_once("f", t0 + RATE_WINDOW));
+        rate.forget_old(t0 + RATE_WINDOW * 3);
+        assert!(rate.1.is_empty());
     }
 
     #[test]

@@ -23,10 +23,10 @@
 
 {#if children.length > 0}
   <div class="linked-band">
-    <button type="button" class="head" aria-expanded={open} aria-label={m.linked_children_toggle()}
+    <button type="button" class="head" aria-expanded={open} title={m.linked_children_toggle()}
             onclick={() => (open = !open)}>
       <span class="caret" aria-hidden="true">{open ? '▾' : '▸'}</span>
-      <span class="title">⑃ <b>{children.length === 1 ? m.linked_children_count_one() : m.linked_children_count({ count: children.length })}</b></span>
+      <span class="title"><span aria-hidden="true">⑃</span> <b>{children.length === 1 ? m.linked_children_count_one() : m.linked_children_count({ count: children.length })}</b></span>
       <span class="chips">
         {#each children as c (c.name)}<span class="chip">{c.name}</span>{/each}
       </span>

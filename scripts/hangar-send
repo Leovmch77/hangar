@@ -747,10 +747,18 @@ print("".join(" [%s]" % p for p in partes))' "$headless" <<<"$creation_result");
     fi
     [[ -n "$remoto" ]] && name="$remoto::$name"
     [[ "$headless" == "false" ]] && headless=""
-    link_failed=$(python3 -c 'import json,sys
+    link_failed="" link_unread=""
+    # Ligação pedida e resultado ilegível: não dá para dizer que ela vale.
+    if [[ -n "$link_child" ]] && ! link_failed=$(python3 -c 'import json,sys
 e = json.load(sys.stdin).get("link_error")
-e and print("%s: %s" % (e.get("code") or "?", e.get("detail") or ""))' <<<"$creation_result" 2>/dev/null) || true
+e and print("%s: %s" % (e.get("code") or "?", e.get("detail") or ""))' <<<"$creation_result" 2>/dev/null); then
+        link_unread=1
+    fi
     echo "sessão criada: $name ($cwd)${headless:+ [sem terminal]}$herdado${provider:+ [$provider]}${engine:+ [motor: $engine]}${conta:+ [conta: $conta]}${codex_conta:+ [conta codex: $codex_conta]}${model:+ [modelo: $model]}${effort:+ [esforço: $effort]}${permissao:+ [permissão: $permissao]}${subagente:+ [subagentes: $subagente]}${service_tier:+ [service tier: $service_tier]}${perfil:+ [perfil: $perfil]}${jev:+ [jev: $jev]} — fala com ela via: hangar-send $name \"msg\""
+    if [[ -n "$link_unread" ]]; then
+        echo "erro: a sessão $name abriu, mas não consegui ler o resultado da ligação na resposta do servidor (confira com hangar-send --list)" >&2
+        exit 1
+    fi
     if [[ -n "$link_failed" ]]; then
         echo "erro: a sessão $name abriu SEM a ligação — $link_failed" >&2
         exit 1

@@ -41,7 +41,8 @@ impl Hangar {
         let header = AccordionTrigger::new("linked-children-header").open(expanded).track_focus(&focus)
             .flex().items_center().gap(px(10.)).min_w_0().rounded(px(6.)).cursor_pointer().hover(|el| el.bg(theme::hover()))
             .when(focus.is_focused(window), |el| el.focus_ring_style(window, cx))
-            .aria_label(tr_shared("linked_children_toggle", &[]))
+            // O nome falado leva o que se vê (contagem e concluídos), não só a ação.
+            .aria_label(format!("{count}, {}", tr_shared("linked_children_done", &[("done", &done), ("total", &total)])))
             .on_change(move |open, _, _, cx| {
                 let _ = weak.update(cx, |this, cx| {
                     if open { this.linked_children_open.insert(key.clone()); } else { this.linked_children_open.remove(&key); }
