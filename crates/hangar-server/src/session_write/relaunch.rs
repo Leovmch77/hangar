@@ -172,8 +172,10 @@ pub(crate) async fn during_life_change<T>(st:&AppState,name:&str,work:impl Futur
 pub fn claude_refusal(verb: &str, failure: &ReopenFailure) -> (StatusCode, Value) {
     let error = &failure.error;
     if let Some(busy) = super::busy_refusal(error) { return busy; }
-    (StatusCode::CONFLICT, super::detail_body("erro_troca_modo", &format!("{verb}: {}", error.message),
-        json!({"erro": error.message, "code": error.code})))
+    // O app mostra só a frase: sem o código, as falhas de terminal são todas a mesma frase genérica.
+    let shown = format!("{} ({})", error.message, error.code);
+    (StatusCode::CONFLICT, super::detail_body("erro_troca_modo", &format!("{verb}: {shown}"),
+        json!({"erro": shown, "code": error.code})))
 }
 
 #[cfg(test)]
@@ -192,6 +194,16 @@ mod tests {
             let (status, body) = mode_refusal(&RuntimeError::new(code, "O terminal ainda está encerrando; não abri outro processo."));
             assert_eq!((status, body["detail"]["code"].as_str(), body["detail"]["params"]["code"].as_str()), (StatusCode::CONFLICT, Some("erro_troca_modo"), Some(code)));
         }
+    }
+
+    /// O aviso do app mostra só `params.erro`: a frase genérica de um erro de terminal leva o código junto.
+    #[test]
+    fn a_claude_refusal_shows_the_real_code_in_the_message() {
+        let failure = ReopenFailure { error: RuntimeError::new("lifecycle_native_read", "operação terminal conservada no diário"), stopped: false, landed: None };
+        let (status, body) = claude_refusal("não troquei de modo", &failure);
+        assert_eq!((status, body["detail"]["code"].as_str(), body["detail"]["params"]["code"].as_str()), (StatusCode::CONFLICT, Some("erro_troca_modo"), Some("lifecycle_native_read")));
+        assert!(body["detail"]["params"]["erro"].as_str().unwrap().contains("lifecycle_native_read"), "{body}");
+        assert!(body["detail"]["msg"].as_str().unwrap().contains("lifecycle_native_read"), "{body}");
     }
 
     #[test]
