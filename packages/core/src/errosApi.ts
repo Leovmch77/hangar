@@ -489,6 +489,8 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_par_externo_orq: () => m.erro_par_externo_orq(),
   erro_modo_so_claude: () => m.erro_modo_so_claude(),
   erro_troca_modo: (p) => m.erro_troca_modo({ erro: String(p.erro ?? '') }),
+  erro_recarregar: (p) => m.erro_recarregar({ erro: String(p.erro ?? '') }),
+  erro_retomar: (p) => m.erro_retomar({ erro: String(p.erro ?? '') }),
   erro_conta_so_claude: () => m.erro_conta_so_claude(),
   erro_conta_cheia: (p) => m.erro_conta_cheia({ conta: String(p.conta ?? ''), pct: String(Math.round(Number(p.pct ?? 0))) }),
   erro_conversa_ja_na_conta: () => m.erro_conversa_ja_na_conta(),
