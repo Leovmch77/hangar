@@ -685,6 +685,19 @@ def _binary(release: tuple | None) -> tuple[str, int | None] | None:
     return commit, protocol
 
 
+def published_api(release: tuple | None) -> int:
+    """A API de cliente do servidor publicado para este sistema (`platforms.<sistema>.api`).
+
+    Manifesto de antes do campo, ilegível ou sem build deste sistema vale 1: o app nunca vê erro aqui.
+    """
+    manifest = release[2] if release else None
+    plat = rust_release.platform_key()
+    platforms = manifest.get("platforms") if isinstance(manifest, dict) else None
+    entry = platforms.get(plat) if isinstance(platforms, dict) and plat else None
+    api = entry.get("api") if isinstance(entry, dict) else None
+    return api if isinstance(api, int) and not isinstance(api, bool) and api >= 1 else 1
+
+
 def _behind_top() -> bool:
     """HEAD estritamente atrás de `origin/<alvo>`: commit local adiante não conta."""
     topo = _git_quiet("rev-parse", f"origin/{alvo()}").stdout.strip()

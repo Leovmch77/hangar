@@ -371,3 +371,25 @@ def test_409_de_branch_nomeia_o_alvo():
     assert r.status_code == 409 and "nao na teste" in r.json()["detail"]["msg"]
     assert r.json()["detail"]["params"]["alvo"] == "teste"
     assert not ini.called
+
+
+@pytest.mark.parametrize("entrada, esperado", [({"commit": "a" * 40, "api": 3}, 3), ({"commit": "a" * 40}, 1),
+                                                ({"commit": "a" * 40, "api": "3"}, 1), (None, 1)])
+def test_api_publicado_vem_da_entrada_desta_plataforma(monkeypatch, entrada, esperado):
+    """O app nativo compara o contrato do servidor publicado; sem o campo (ou torto) vale 1, nunca erro."""
+    from app import api
+    manifesto = {"platforms": {"linux-x86_64": entrada} if entrada else {}}
+    monkeypatch.setattr(api.atualizar, "pinned_target", lambda destino: (f"origin/{destino}", ("url", None, manifesto)))
+    monkeypatch.setattr(api.atualizar.rust_release, "platform_key", lambda: "linux-x86_64")
+    monkeypatch.setattr(api.atualizar.rust_release, "stale", lambda release: False)
+    with patch("app.api.atualizar.checar", return_value={"pode": True}), \
+         patch("app.api._mudancas_pendentes", return_value=[]):
+        d = _client().get("/api/atualizacao", headers=_AUTH).json()
+    assert d["api_publicado"] == esperado
+
+
+def test_api_publicado_sem_release_lida_vale_1():
+    with patch("app.api.atualizar.checar", return_value={"pode": True}), \
+         patch("app.api._mudancas_pendentes", return_value=[]):
+        d = _client().get("/api/atualizacao", headers=_AUTH).json()
+    assert d["api_publicado"] == 1

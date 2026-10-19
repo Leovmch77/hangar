@@ -7,3 +7,6 @@ pub mod preview;
 pub mod session;
 pub mod state;
 pub mod workspace;
+
+/// Versão da API que o servidor fala; o app nativo compilado exige essa mesma. Suba ao mudar o que o app consome.
+pub const CLIENT_API: u32 = 2;
