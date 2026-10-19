@@ -10,7 +10,9 @@ export type DeliveryFeedback = { text: string; warning: boolean };
 export type JevStatus = 'loading' | 'ready' | 'setup' | 'unsupported' | 'error';
 export type DeliveryControls = { mode: DeliveryMode; status: JevStatus; help: string };
 
-export const deliveryModeLabel = { queued: m.mobile_queue_mode_queued, direct: m.mobile_queue_mode_direct, jev: m.mobile_queue_mode_jev };
+// Lido na hora do uso: quem só importa o módulo (telas e testes com mensagens simuladas) não depende destas chaves.
+export const deliveryModeLabel = (mode: DeliveryMode) =>
+  mode === 'queued' ? m.mobile_queue_mode_queued() : mode === 'direct' ? m.mobile_queue_mode_direct() : m.mobile_queue_mode_jev();
 export type DeliveryOption = { mode: DeliveryMode; checked: boolean; disabled: boolean };
 // Jev salvo e indisponível envia pela fila (queueSendMode), então é a Fila que aparece marcada.
 export function deliveryOptions(d: DeliveryControls): DeliveryOption[] {

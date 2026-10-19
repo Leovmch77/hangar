@@ -94,14 +94,14 @@ export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSte
             style={[styles.segments, { backgroundColor: theme.tokens.fillSubtle, borderColor: theme.tokens.border.subtle }]}>
             {deliveryOptions(delivery).map(({ mode, checked, disabled }) => {
               return (
-                <Pressable key={mode} accessibilityRole="radio" accessibilityLabel={deliveryModeLabel[mode]()}
+                <Pressable key={mode} accessibilityRole="radio" accessibilityLabel={deliveryModeLabel(mode)}
                   accessibilityHint={mode === 'jev' ? delivery.help : undefined}
                   aria-checked={checked} aria-disabled={disabled} aria-busy={mode === 'jev' && delivery.status === 'loading'}
                   disabled={disabled} hitSlop={{ top: 8, bottom: 8 }}
                   onPress={() => { if (delivery.mode === mode) return; haptic.selection(); onModeChange?.(mode); }}
                   style={[styles.segment, checked && { backgroundColor: theme.tokens.bg.elevated }, disabled && styles.disabled]}>
                   <Text style={[styles.segmentText, { color: checked ? (mode === 'queued' ? theme.tokens.text.primary : theme.tokens.accent.base) : theme.tokens.text.secondary }]}>
-                    {deliveryModeLabel[mode]()}
+                    {deliveryModeLabel(mode)}
                   </Text>
                   {mode === 'jev' && jevWarning ? <Icon name="CircleAlert" size={12} color={theme.tokens.status.warning} /> : null}
                 </Pressable>

@@ -51,16 +51,16 @@ export function modeMenuHandlers(menu: ModeMenu | undefined) {
     const jev = options.find((o) => o.mode === 'jev')!;
     ActionSheetIOS.showActionSheetWithOptions({
       title: m.mobile_queue_mode_label(),
-      message: [m.mobile_queue_mode_current({ mode: deliveryModeLabel[current.mode]() }), jev.disabled ? menu.delivery.help : ''].filter(Boolean).join('\n'),
-      options: [...enabled.map((o) => deliveryModeLabel[o.mode]()), m.comum_cancelar()],
+      message: [m.mobile_queue_mode_current({ mode: deliveryModeLabel(current.mode) }), jev.disabled ? menu.delivery.help : ''].filter(Boolean).join('\n'),
+      options: [...enabled.map((o) => deliveryModeLabel(o.mode)), m.comum_cancelar()],
       cancelButtonIndex: enabled.length,
     }, (i) => { if (i < enabled.length) pick(enabled[i].mode); });
   };
   // O PopupMenu do Android não marca opção (state e subtitle são só iOS): a atual vem dita no título.
   const actions = options.map((o) => ({ id: o.mode, attributes: { disabled: o.disabled },
-    title: o.checked ? m.mobile_queue_mode_selected({ mode: deliveryModeLabel[o.mode]() }) : deliveryModeLabel[o.mode]() }));
+    title: o.checked ? m.mobile_queue_mode_selected({ mode: deliveryModeLabel(o.mode) }) : deliveryModeLabel(o.mode) }));
   // O toque longo não chega pelo leitor de tela no Android: cada modo vira uma ação do botão.
-  const a11yActions = options.filter((o) => !o.disabled).map((o) => ({ name: o.mode, label: deliveryModeLabel[o.mode]() }));
+  const a11yActions = options.filter((o) => !o.disabled).map((o) => ({ name: o.mode, label: deliveryModeLabel(o.mode) }));
   return { pick, openIOS, actions, a11yActions };
 }
 
