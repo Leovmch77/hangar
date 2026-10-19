@@ -1105,6 +1105,11 @@ impl Hangar {
         if host.is_empty() { tr("connection") } else { host.to_owned() }
     }
 
+    fn row_server_label(&self, target: &sidebar::Target) -> String {
+        self.server_entry(&target.server).map(|entry| entry.label.clone()).filter(|label| !label.is_empty())
+            .unwrap_or_else(|| servers::default_label(&target.server))
+    }
+
     /// Máquina da sessão aberta: a de outra máquina pelo nome da entrada dela, ou o host.
     fn session_label(&self, cx: &App) -> String {
         let Some(key) = self.open_key() else { return self.server_label(cx) };
@@ -5351,6 +5356,7 @@ impl Hangar {
         // (`motion::Flip`). A sessão tem a mesma chave em qualquer seção; cabeçalho é de uma seção só.
         let mut children: Vec<(String, &'static str, AnyElement)> = Vec::new();
         let (by_machine, now) = (Self::by_machine(), Instant::now());
+        let still = cx.reduce_motion() || !window.is_window_active();
         // Membros de um grupo vêm juntos, sob o cabeçalho do bloco, como o `clusterByPair` do web.
         let rows = |list: &[&SessionInfo], remote: Option<&str>, at: &'static str, children: &mut Vec<(String, &'static str, AnyElement)>, window: &mut Window, cx: &mut Context<Self>| for row in grouping::cluster(list) {
             let (session, remote) = match row {
@@ -5366,8 +5372,9 @@ impl Hangar {
                     Some((session, at_server)) => {
                         let selected = selected_name == Some(session.name.as_str()) && self.open_key() == at_server;
                         let key = format!("{at}/row:{}::{}", at_server.as_deref().unwrap_or(""), session.name);
-                        children.push((key, at, if conversations { self.render_conversation_row(session, selected, at_server, window, cx) }
-                            else { self.render_session_row(session, selected, at_server, window, cx) }));
+                        let show_server = sidebar::row_server_visible(conversations, by_machine, at == "machine" && at_server.as_deref() == remote);
+                        children.push((key, at, if conversations { self.render_conversation_row(session, selected, at_server, show_server, window, cx) }
+                            else { self.render_session_row(session, selected, at_server, show_server, window, cx) }));
                         continue;
                     }
                     None => {
@@ -5384,8 +5391,9 @@ impl Hangar {
             // A linha que troca de seção é pintada depois das outras, fora da ordem que a camada dos avatares animados lê:
             // no trajeto ela leva o avatar parado.
             self.sidebar.still_avatar.set(by_machine && self.sidebar.flip.borrow().lifting(&key, now));
-            let row = if conversations { self.render_conversation_row(session, selected, remote, window, cx) }
-                else { self.render_session_row(session, selected, remote, window, cx) };
+            let show_server = sidebar::row_server_visible(conversations, by_machine, at == "machine");
+            let row = if conversations { self.render_conversation_row(session, selected, remote, show_server, window, cx) }
+                else { self.render_session_row(session, selected, remote, show_server, window, cx) };
             self.sidebar.still_avatar.set(false);
             children.push((key, at, row));
         };
@@ -5416,7 +5424,7 @@ impl Hangar {
                 let row = |at: &'static str| move |s: &&SessionInfo| (format!("row:{}::{}", m.remote.as_deref().unwrap_or(""), s.name), at.to_owned());
                 p.waiting.iter().map(row("waiting")).chain(p.working.iter().map(row("working"))).chain(p.rest.iter().map(row("machine")))
             }).collect();
-            self.sidebar.flip.borrow_mut().sections(&sections, now, cx.reduce_motion());
+            self.sidebar.flip.borrow_mut().sections(&sections, now, still);
             total = machines.iter().map(|m| m.layout.total).sum();
             remote_rows = machines.iter().filter(|m| m.remote.is_some()).map(|m| m.layout.total).sum();
             let top = |label: String, state: &str, count: usize| div().flex().items_center().gap(px(8.)).px(px(8.)).pt(px(12.)).pb(px(6.))
@@ -5603,11 +5611,12 @@ impl Hangar {
     /// Linha do Zeron: estado, glifo, nome e hora numa linha só; no Normal, a branch fora de main/master embaixo.
     /// `remote` é a chave da máquina de uma linha que não é do servidor ativo: menu, foco e gestos são os mesmos, cada um
     /// na máquina da linha.
-    fn render_conversation_row(&self, session: SessionInfo, selected: bool, remote: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_conversation_row(&self, session: SessionInfo, selected: bool, remote: Option<String>, show_server: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let compact = appearance::get().sidebar_compact;
         let (_, selection, hover, _) = theme::conversation_sidebar();
         let name = session.name.clone();
         let target = sidebar::Target::new(&remote.clone().unwrap_or_else(|| self.active_key()), &name);
+        let server = show_server.then(|| self.row_server_label(&target));
         let focus = self.row_focus(&target);
         let focused = focus.is_some_and(|f| f.contains_focused(window, cx));
         let hovered = self.sidebar.hover.as_ref() == Some(&target);
@@ -5623,7 +5632,7 @@ impl Hangar {
         // Como a branch, o chip e o aviso de worktree apagada ficam fora do modo compacto.
         let worktree = worktree_label(&session).filter(|_| !compact && !session.worktree_gone);
         let worktree_gone = !compact && session.worktree_gone;
-        let second_line = branch.is_some() || worktree.is_some() || worktree_gone;
+        let second_line = server.is_some() || branch.is_some() || worktree.is_some() || worktree_gone;
         let worktree_target = session.worktree_path.clone().or_else(|| session.cwd.clone()).unwrap_or_default();
         let worktree_server = target.server.clone();
         let merged = self.worktrees.status(&target.server, &worktree_target).is_some_and(|s| s.merged);
@@ -5683,6 +5692,10 @@ impl Hangar {
             // Recuo do avatar mais o vão: a branch começa embaixo do nome.
             .when(second_line, |el| el.child(div().w_full().min_w_0().h(px(14.)).pl(px(22.)).flex().items_center().gap(px(4.))
                 .text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
+                .when_some(server, |el, server| el
+                    .child(div().flex_shrink_0().max_w(px(112.)).flex().items_center().gap(px(4.))
+                        .child(chrome::small_icon(IconName::Monitor, 12., theme::muted()))
+                        .child(div().min_w_0().truncate().child(server))))
                 .when_some(branch, |el, branch| el
                     .child(chrome::small_icon(IconName::GitBranch, 12., theme::muted()))
                     .child(div().flex_1().min_w_0().truncate().child(branch)))
@@ -5719,7 +5732,7 @@ impl Hangar {
     /// worktree), a branch fora de main/master, o ↑/↓ do upstream e o diff.
     /// Mais, como o web: "? N" das perguntas, o ⋯ e o clique direito com o menu da sessão, pressionar 500 ms para renomear
     /// na própria linha e a prévia da última resposta ao parar o mouse. A linha entra no Tab (Enter abre) e o ⋯ vem depois dela.
-    fn render_session_row(&self, session: SessionInfo, selected: bool, remote: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_session_row(&self, session: SessionInfo, selected: bool, remote: Option<String>, show_server: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // O orquestrador não roda agente: selo de provider nele seria mentira.
         // Sessão de motor roda outro modelo pelo Claude Code: o selo diz o motor, como o chip ⚙ do web.
         let engine = session.engine.clone().filter(|e| !e.is_empty() && session.provider == "claude");
@@ -5728,6 +5741,7 @@ impl Hangar {
         let target = sidebar::Target::new(&remote.clone().unwrap_or_else(|| self.active_key()), &session.name);
         // Ids com a máquina: a de mesmo nome em outra máquina não divide marca, menu nem selos.
         let row_key = if remote.is_some() { target.id() } else { session.name.clone() };
+        let server = show_server.then(|| self.row_server_label(&target));
         let state = session.state.as_str();
         let limited = session.limited == Some(true);
         let untracked = session.tracked == Some(false);
@@ -5833,11 +5847,14 @@ impl Hangar {
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(4.)).text_xs().text_color(sub_color)
                     .when(kind == sidebar::Sub::Reply, |el| el.child(div().flex_shrink_0().text_size(px(8.)).text_color(theme::faint()).child("◆")))
                     .child(div().min_w_0().truncate().when(kind == sidebar::Sub::Working && working, |el| el.italic()).child(text)))))
-            .when(provider_label.is_some() || folder.is_some() || branch.is_some() || added.is_some() || removed.is_some() || ahead.is_some() || behind.is_some(), |el| el.child(div().flex().items_center().gap(px(8.))
+            .when(server.is_some() || provider_label.is_some() || folder.is_some() || branch.is_some() || added.is_some() || removed.is_some() || ahead.is_some() || behind.is_some(), |el| el.child(div().flex().items_center().gap(px(8.))
                 .text_size(px(11.5)).text_color(theme::faint())
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(6.))
                     .when_some(provider_label, |el, label| el.child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD)
                         .text_color(if on_engine { theme::accent() } else { theme::muted() }).child(label)))
+                    .when_some(server, |el, server| el.child(div().flex_shrink_0().max_w(px(112.)).flex().items_center().gap(px(4.))
+                        .child(chrome::small_icon(IconName::Monitor, 12., theme::faint()))
+                        .child(div().min_w_0().truncate().child(server))))
                     .when_some(folder, |el, f| el.child(chrome::small_icon(IconName::Folder, 12., theme::faint()))
                         .child(div().min_w_0().truncate().child(f)))
                     .when_some(branch, |el, b| el.child(chrome::small_icon(IconName::GitBranch, 12., theme::faint()))
@@ -6880,7 +6897,12 @@ impl Render for Hangar {
                 .when_some(opening.as_ref(), |el, o| el.child(chrome::session_avatar(&chrome::AvatarLook::new(&o.provider, None, "", false), 26., None)))
                 .child(div().flex_shrink_0().font_weight(FontWeight::SEMIBOLD)
                     .child(selected_name.clone().or_else(|| opening.as_ref().map(|o| o.name.clone())).unwrap_or_else(|| tr("title"))))
-                .when_some(place, |el, place| el.child(div().min_w_0().truncate().text_color(theme::faint()).child(place)))
+                .when_some(place, |el, place| el.child(div().id("session-place").min_w_0().flex().items_center().gap(px(4.)).text_color(theme::faint()).aria_label(place)
+                    .when_some(self.selected.as_ref().and_then(folder_name), |el, folder| el
+                        .child(chrome::small_icon(IconName::Folder, 12., theme::faint()))
+                        .child(div().min_w_0().truncate().child(folder)).child("@"))
+                    .child(chrome::small_icon(IconName::Monitor, 12., theme::faint()))
+                    .child(div().min_w_0().truncate().child(self.session_label(cx)))))
                 .child(div().flex_1())
                 // Sem sessão, o estado da ligação só aparece quando ela não está normal: "Conectado" não diz nada.
                 .when(session_chip || header_state != "connected", |el| el.child(if session_chip { chrome::state_chip(&chip_state, tr(&format!("chip_{chip_state}")), true) }
