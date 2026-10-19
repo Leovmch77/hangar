@@ -4,7 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Image } from 'expo-image';
 import { WebView } from 'react-native-webview';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import Animated, { useAnimatedStyle, useSharedValue } from 'react-native-reanimated';
+import Animated, { useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as m from '../../paraglide/messages';
@@ -39,6 +39,7 @@ export function Lightbox({ visible, uri, headers, filename, onClose, kind = 'ima
   const translateY = useSharedValue(0);
   const savedX = useSharedValue(0);
   const savedY = useSharedValue(0);
+  const panUsedZoom = useSharedValue(false);
 
   const reset = () => {
     scale.value = 1;
@@ -72,6 +73,7 @@ export function Lightbox({ visible, uri, headers, filename, onClose, kind = 'ima
   };
 
   const pinch = Gesture.Pinch()
+    .onStart(() => { panUsedZoom.value = true; })
     .onUpdate((e) => {
       const next = savedScale.value * e.scale;
       scale.value = Math.min(6, Math.max(1, next));
@@ -89,28 +91,37 @@ export function Lightbox({ visible, uri, headers, filename, onClose, kind = 'ima
     });
 
   const pan = Gesture.Pan()
+    .onBegin(() => { panUsedZoom.value = scale.value > 1; })
     .onUpdate((e) => {
+      if (e.numberOfPointers > 1) panUsedZoom.value = true;
       if (scale.value > 1) {
         translateX.value = savedX.value + e.translationX;
         translateY.value = savedY.value + e.translationY;
+      } else if (onStep && !panUsedZoom.value) {
+        translateX.value = e.translationX;
       }
     })
-    .onEnd((e) => {
+    .onEnd((e, success) => {
       savedX.value = translateX.value;
       savedY.value = translateY.value;
       // Sem zoom, o arrasto de lado é passar de mídia; com zoom ele é panorâmica.
-      if (scale.value <= 1 && onStep && Math.abs(e.translationX) > ARRASTO_PASSA && Math.abs(e.translationX) > Math.abs(e.translationY)) {
+      if (success && !panUsedZoom.value && scale.value <= 1 && onStep && Math.abs(e.translationX) > ARRASTO_PASSA && Math.abs(e.translationX) > Math.abs(e.translationY)) {
         scheduleOnRN(onStep, e.translationX < 0 ? 1 : -1);
+      }
+    })
+    .onFinalize(() => {
+      if (scale.value <= 1) {
+        translateX.value = withTiming(0);
+        savedX.value = 0;
       }
     });
 
-  // Toque fecha, como no visor do web. É gesto e não um Pressable por cima: a camada por cima da
-  // imagem engolia o toque antes da pinça, e o zoom não funcionava.
-  const tap = Gesture.Tap().onEnd(() => {
-    if (scale.value <= 1) scheduleOnRN(handleClose);
+  // No iOS o toque não limita o deslocamento por padrão: um arrasto rápido também fechava.
+  const tap = Gesture.Tap().maxDistance(10).onEnd((_e, success) => {
+    if (success && scale.value <= 1) scheduleOnRN(handleClose);
   });
 
-  const composed = Gesture.Simultaneous(pinch, pan, tap);
+  const composed = Gesture.Race(Gesture.Simultaneous(pinch, pan), tap);
 
   const animatedStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: translateX.value }, { translateY: translateY.value }, { scale: scale.value }],
