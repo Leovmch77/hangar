@@ -10,6 +10,8 @@ import { AskStepper } from '../../../../src/features/ask/AskStepper';
 import { answerQuestions, skipQuestion } from '@hangar/core';
 import type { AnswerItem, AskQuestionPayload } from '@hangar/core';
 import * as m from '../../../../src/paraglide/messages';
+import { answerWithDelivery } from '../../../../src/chat/queueDelivery';
+import { useDeliveryMode, useQueueDelivery } from '../../../../src/chat/useQueueDelivery';
 
 const askKey = (payload: AskQuestionPayload) => JSON.stringify([
   payload.interaction_id, payload.request_id, payload.request_id == null ? payload.questions : null,
@@ -27,6 +29,9 @@ export default function AskSheet() {
 
   const payload = chat.use((s) => s.askPayload);
   const askOpen = chat.use((s) => s.askOpen);
+  const deliveryMode = useDeliveryMode((s) => s.mode);
+  const delivery = useQueueDelivery(useServers.getState().servers.find((s) => s.id === serverId),
+    deliveryMode === 'jev' && !!payload?.is_async && payload.provider === 'codex');
   const [routeError, setRouteError] = useState('');
   const navegando = useRef(false);
   const scope = useRef({ chat, key: payload ? askKey(payload) : null, generation: 0 });
@@ -136,7 +141,10 @@ export default function AskSheet() {
     setRouteError('');
     const requestId = displayed.request_id;
     try {
-      const result = await answerQuestions(sessionName, answers, requestId, displayed.interaction_id, target);
+      const steer = displayed.is_async && displayed.provider === 'codex'
+        && (delivery.mode === 'direct' || (delivery.mode === 'jev' && delivery.status === 'ready'));
+      const result = steer ? await answerWithDelivery(target, sessionName, answers, displayed)
+        : await answerQuestions(sessionName, answers, requestId, displayed.interaction_id, target);
       if (!sameRequest()) return;
       if (!result.ok) { setRouteError(m.native_action_uncertain()); return; }
       if (result.fallback) navegando.current = true;

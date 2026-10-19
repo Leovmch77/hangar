@@ -1,0 +1,83 @@
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { configureApi, type ChatEvent } from '@hangar/core';
+import { queueSendMode, readQueueJev, sendWithDelivery, timingFeedback } from './queueDelivery';
+import * as m from '../paraglide/messages';
+
+const server = { id: 'owner', label: 'fixture', baseUrl: 'https://owner.test', token: 'owner-token' };
+const event = (id: string, kind: ChatEvent['kind'], text: string): ChatEvent => ({ id, kind, text });
+const events = [event('u', 'user_msg', 'criar tela'), event('a', 'assistant_msg', 'Posso usar azul?'),
+  event('queued-q', 'user_msg', 'próxima tarefa'), event('pending-p', 'user_msg', 'pendente'), event('peer', 'user_msg', '[de: par] recado')];
+const select = (text = 'sim', changes: Partial<{ mode: 'queued' | 'direct' | 'jev'; ready: boolean; state: string; provider: string; headless: boolean }> = {}) => {
+  const { mode = 'jev', ready = true, state = 'working', provider = 'codex', headless = false } = changes;
+  return queueSendMode(mode, ready, state, provider, headless, text, events, null);
+};
+
+it('a decisão usa o pedido real e a fala recente, ignorando a fila e recados', () => {
+  expect(select()).toEqual({ kind: 'jev', task: 'Pedido atual:\ncriar tela\n\nFala recente do agente:\nPosso usar azul?', message: 'sim' });
+});
+
+it('a pergunta assíncrona substitui a fala recente', () => {
+  expect(queueSendMode('jev', true, 'working', 'codex', false, 'sim', events,
+    { is_async: true, questions: [{ header: 'fixture', question: 'Confirma excluir?', multiSelect: false, options: [] }] }))
+    .toEqual({ kind: 'jev', task: 'Pedido atual:\ncriar tela\n\nFala recente do agente:\nConfirma excluir?', message: 'sim' });
+});
+
+it.each([{ mode: 'queued' as const }, { ready: false }, { state: 'idle' }, { state: 'awaiting_input' }, { provider: 'pi' }])(
+  'conserva envio normal fora do turno suportado: %j', (changes) => expect(select('oi', changes)).toBeUndefined());
+it('comandos não passam por nenhum modo automático', () => {
+  expect(select('/clear')).toBeUndefined();
+  expect(select('/clear', { mode: 'direct' })).toBeUndefined();
+});
+it.each([
+  ['claude', false, true], ['claude', true, false], ['codex', false, false],
+] as const)('Direto seleciona a rota de %s (sem terminal: %s)', (provider, headless, terminalClaude) => {
+  expect(select('oi', { mode: 'direct', provider, headless })).toEqual({ kind: 'direct', terminalClaude });
+});
+it('limita por caracteres Unicode e conserva o fim da fala recente', () => {
+  const value = queueSendMode('jev', true, 'working', 'claude', true, '🙂'.repeat(2000),
+    [event('u', 'user_msg', '🙂'.repeat(500)), event('a', 'assistant_msg', 'x'.repeat(700) + 'fim')], null);
+  expect(value).toEqual({ kind: 'jev', task: `Pedido atual:\n${'🙂'.repeat(350)}\n\nFala recente do agente:\n${'x'.repeat(597)}fim`, message: '🙂'.repeat(2000) });
+  expect(select('🙂'.repeat(2001))).toEqual({ kind: 'jev', task: '', message: '🙂'.repeat(2000) });
+});
+it('sem contexto não inventa tarefa; sem fala recente limita o pedido', () => {
+  expect(queueSendMode('jev', true, 'working', 'codex', false, 'sim', [], null)).toEqual({ kind: 'jev', task: '', message: 'sim' });
+  expect(queueSendMode('jev', true, 'working', 'codex', false, 'sim', [event('u', 'user_msg', 'x'.repeat(1100))], null))
+    .toEqual({ kind: 'jev', task: 'x'.repeat(1000), message: 'sim' });
+});
+
+it.each([
+  ['direct', m.native_queue_jev_direct, false], ['queue', m.native_queue_jev_queued, false], ['delivered', m.native_queue_jev_delivered, false],
+  ['uncertain', m.native_queue_jev_uncertain, true], ['no_context', m.native_queue_jev_no_context, true], ['timeout', m.native_queue_jev_timeout, true],
+  ['work_changed', m.native_queue_jev_work_changed, true], ['refused', m.native_queue_jev_refused, true], ['future', m.native_queue_jev_unavailable, true],
+] as const)('traduz o resultado %s sem afirmar entrega em aviso', (note, text, warning) => {
+  expect(timingFeedback(note)).toEqual({ text: text(), warning });
+});
+
+beforeEach(() => {
+  configureApi({ getBaseUrl: () => 'https://wrong.test', getToken: () => 'wrong', onUnauthorized: vi.fn(), origin: null, createEventSource: vi.fn() });
+  vi.stubGlobal('fetch', vi.fn());
+});
+afterEach(() => vi.unstubAllGlobals());
+it.each([true, false])('lê disponibilidade %s do servidor da conversa', async (available) => {
+  vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ available })));
+  await expect(readQueueJev(server, new AbortController().signal)).resolves.toBe(available);
+  expect(vi.mocked(fetch).mock.calls[0][0]).toBe('https://owner.test/api/jev/delivery');
+});
+it.each([{}, { available: 'true' }])('não habilita o Jev com resposta fora do contrato: %j', async (value) => {
+  vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify(value)));
+  await expect(readQueueJev(server, new AbortController().signal)).rejects.toThrow();
+});
+it('conserva o 404 para explicar servidor sem suporte', async () => {
+  vi.mocked(fetch).mockResolvedValue(new Response('{"detail":"Not Found"}', { status: 404 }));
+  await expect(readQueueJev(server, new AbortController().signal)).rejects.toMatchObject({ status: 404 });
+});
+it('Direto no Codex usa steer sem prazo local ou outro envio', async () => {
+  vi.mocked(fetch).mockResolvedValue(new Response('{"ok":true}'));
+  await expect(sendWithDelivery(server, 'sess', 'oi', { kind: 'direct', terminalClaude: false }))
+    .resolves.toEqual({ text: m.native_queue_panel_steered(), warning: false });
+  const [url, init] = vi.mocked(fetch).mock.calls[0];
+  expect(url).toBe('https://owner.test/api/sessions/sess/steer');
+  expect(JSON.parse(init!.body as string)).toEqual({ text: 'oi' });
+  expect(init!.signal).toBeUndefined();
+  expect(fetch).toHaveBeenCalledTimes(1);
+});

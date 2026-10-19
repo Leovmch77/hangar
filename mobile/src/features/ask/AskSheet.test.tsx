@@ -6,6 +6,7 @@ import { configureApi } from '@hangar/core';
 import type { AskQuestionPayload } from '@hangar/core';
 import { chatStore, _resetChatsForTests } from '../../stores/chat';
 import * as m from '../../paraglide/messages';
+import { useDeliveryMode } from '../../chat/useQueueDelivery';
 vi.mock('../../stores/prefs', () => ({
   prefs: { getString: () => undefined, set: vi.fn(), remove: vi.fn() },
 }));
@@ -61,6 +62,7 @@ const payload: AskQuestionPayload = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  useDeliveryMode.setState({ mode: 'queued' });
   mocks.params = { server: 'srv', name: 'sess' };
   vi.stubGlobal('fetch', vi.fn(async () => new Response('{"ok":true}', { status: 200 })));
   configureApi({
@@ -89,6 +91,29 @@ async function click(label: string) {
   expect(button, label).toBeDefined();
   await act(async () => button!.click());
 }
+
+test('Direto orienta a resposta assíncrona pelo cartão em que a pessoa tocou', async () => {
+  useDeliveryMode.setState({ mode: 'direct' });
+  await open({ ...payload, is_async: true, request_id: 'async-1', interaction_id: 'card-1' });
+  await click('Primeira');
+  await click(m.lista_enviar());
+  const post = vi.mocked(fetch).mock.calls.find(([, init]) => init?.method === 'POST')!;
+  expect(post[0]).toBe('http://teste/api/sessions/sess/answer');
+  expect(JSON.parse(post[1]!.body as string)).toMatchObject({ steer: true, request_id: 'async-1', interaction_id: 'card-1' });
+});
+
+test.each([true, false])('Jev só orienta resposta assíncrona quando o servidor o oferece: %s', async (available) => {
+  useDeliveryMode.setState({ mode: 'jev' });
+  vi.mocked(fetch).mockImplementation(async (url) => new Response(JSON.stringify(
+    String(url).endsWith('/api/jev/delivery') ? { available } : { ok: true })));
+  await open({ ...payload, is_async: true, request_id: 'async-1', interaction_id: 'card-1' });
+  await click('Primeira');
+  await click(m.lista_enviar());
+  const post = vi.mocked(fetch).mock.calls.find(([, init]) => init?.method === 'POST')!;
+  const body = JSON.parse(post[1]!.body as string);
+  expect(body.interaction_id).toBe('card-1');
+  expect(body.steer).toBe(available ? true : undefined);
+});
 
 test('envia identidades nativas e mantém a pergunta quando RPC falha', async () => {
   vi.stubGlobal('fetch', vi.fn(async () => new Response('{"detail":"indisponível"}', { status: 503 })));

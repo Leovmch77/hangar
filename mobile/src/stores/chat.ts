@@ -41,6 +41,7 @@ import * as m from '../paraglide/messages';
 import { reconcilePending, type PendingMsg } from '../chat/pending';
 import { useServers } from './servers';
 import { readDraft, writeDraft, type ConversationDraft } from './drafts';
+import { sendWithDelivery, type DeliveryFeedback, type QueueSendMode } from '../chat/queueDelivery';
 
 // Store vivo do chat de UMA sessão — porte do núcleo de frontend/src/screens/Chat.svelte
 // para zustand. Histórico janelado (cauda primeiro), merge SSE com dedup por id, preview ao
@@ -107,6 +108,7 @@ export interface ChatState {
   queueEdit: ChatQueueEdit | null;
   // Texto que o composer recebe quando a edição fechou por a entrada ter saído da fila (null = o rascunho guardado).
   queueEditExit: string | null;
+  deliveryFeedback: DeliveryFeedback | null;
   // Uma ação da fila por vez: os botões do painel ficam desativados enquanto ela está em voo.
   queueBusy: boolean;
   queueError: string | null;
@@ -125,7 +127,7 @@ export interface ChatApi {
   retain: () => void;
   release: () => void;
   loadOlder: () => void;
-  send: (text: string, draftRevision?: number, mode?: 'steer') => Promise<void>;
+  send: (text: string, draftRevision?: number, mode?: QueueSendMode) => Promise<void>;
   // Recarrega o histórico depois de falha da primeira carga (o SSE segue vivo por conta
   // própria — onerror reconecta —, então retry é só a parte REST).
   retry: () => void;
@@ -181,6 +183,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     queuePanel: null,
     queueEdit: null,
     queueEditExit: null,
+    deliveryFeedback: null,
     queueBusy: false,
     queueError: null,
   }));
@@ -930,7 +933,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       if (result.promoted) events = events.filter((e) => !(e.kind === 'user_msg' && e.id.startsWith('queued-')));
       publishEvents(events);
     },
-    async send(text: string, draftRevision?: number, mode?: 'steer') {
+    async send(text: string, draftRevision?: number, mode?: QueueSendMode) {
       const trimmed = mode === 'steer' ? text : text.trim();
       if (!trimmed.trim()) return;
       // Destino desta conversa, nunca o servidor ativo: trocar de servidor no meio não desvia o envio.
@@ -939,16 +942,18 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       const wasUnknown = readDraft(serverId, name)?.submission?.status === 'unknown';
       return submitConversationDraft(serverId, name, trimmed, async () => {
         if (wasUnknown) useChatStore.setState((s) => ({ pending: s.pending.filter((p) => p.text !== trimmed) }));
+        useChatStore.setState({ deliveryFeedback: null });
         const id = `pending-${pendingSeq++}`;
         // Em idle a mensagem é digitada na hora: o eco atenuado parecia mensagem entrando na fila.
         const solid = useChatStore.getState().stateEvent?.state === 'idle';
         useChatStore.setState((s) => ({ pending: [...s.pending, { id, text: trimmed, solid }] }));
         try {
           if (mode === 'steer') await steerSession(name, trimmed, target);
+          else if (mode) useChatStore.setState({ deliveryFeedback: await sendWithDelivery(target, name, trimmed, mode) });
           else await sendInputForServer(target, name, trimmed);
         } catch (err) {
           // O /steer também usa 409 quando escreveu sem confirmar: não presumir recusa.
-          if (mode === 'steer' && (err as { status?: number } | null)?.status === 409) {
+          if ((mode === 'steer' || (typeof mode === 'object' && mode.kind === 'direct' && !mode.terminalClaude)) && (err as { status?: number } | null)?.status === 409) {
             throw new Error(m.queue_steer_uncertain(), { cause: err });
           }
           if (isInputRejected(err)) useChatStore.setState((s) => ({ pending: s.pending.filter((p) => p.id !== id) }));

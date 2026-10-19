@@ -5,6 +5,7 @@ import { create } from 'zustand';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MotivoFim, Server } from '@hangar/core';
 import type { DictationDraft } from '../stores/drafts';
+import { useDeliveryMode } from './useQueueDelivery';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const h = vi.hoisted(() => ({
@@ -60,8 +61,10 @@ vi.mock('./draftAttachments', () => ({ retainDraftAttachment: async (attachment:
 vi.mock('./ComposerField', () => ({
   ComposerBox: ({ children }: { children: ReactNode }) => createElement('div', null, children),
   ComposerInput: ({ value }: { value: string }) => createElement('textarea', { value, readOnly: true }),
-  ComposerActions: ({ mic }: { mic: { onPress: () => void; disabled: boolean } }) =>
-    createElement('button', { 'aria-label': 'record', disabled: mic.disabled, onClick: mic.onPress }),
+  ComposerActions: ({ mic, send }: { mic: { onPress: () => void; disabled: boolean }; send: { onPress: () => void; disabled: boolean } }) =>
+    createElement('div', null,
+      createElement('button', { 'aria-label': 'record', disabled: mic.disabled, onClick: mic.onPress }),
+      createElement('button', { 'aria-label': 'send-fixture', disabled: send.disabled, onClick: send.onPress })),
 }));
 vi.mock('./AudioChip', () => ({ AudioChip: ({ name, onRemove }: { name: string; onRemove?: () => void }) =>
   createElement('div', { 'data-audio': name }, name, onRemove ? createElement('button', { 'aria-label': `remove-${name}`, onClick: onRemove }) : null) }));
@@ -102,6 +105,7 @@ const record = async (container: HTMLElement, name = 'voice.m4a') => {
 
 beforeEach(() => {
   overwriteGetLocale(() => 'pt');
+  useDeliveryMode.setState({ mode: 'queued' });
   h.disk.clear(); h.listeners = []; vi.clearAllMocks();
   Object.assign(AppState, { currentState: 'active' });
   h.chat = { use: create(() => ({ pending: [], events: [], draftUpdate: 0, queueEdit: null, queueEditExit: null })), dropQueueEdit: vi.fn() };
@@ -114,7 +118,18 @@ beforeEach(() => {
       raw: result.raw, aviso: '', path, applied: 'cru' };
   });
 });
-afterEach(() => { act(() => roots.splice(0).forEach((root) => root.unmount())); });
+afterEach(() => { act(() => roots.splice(0).forEach((root) => root.unmount())); vi.unstubAllGlobals(); });
+
+it('Enviar respeita Mandar direto sem ignorar a revisão do rascunho', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('{"available":true}')));
+  useDeliveryMode.setState({ mode: 'direct' });
+  writeDraft('srv', 'sess', { version: 1, text: 'usar azul', revision: 7, transcript: '/sessions/current', attachments: [], submission: null });
+  h.chat.use.setState({ stateEvent: { state: 'working' }, events: [] });
+  h.chat.send = vi.fn();
+  const { container } = await mount();
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="send-fixture"]')!.click());
+  expect(h.chat.send).toHaveBeenCalledWith('usar azul', expect.any(Number), { kind: 'direct', terminalClaude: true });
+});
 
 describe('Composer — ditado', () => {
   it('parar depois de voltar ao app transcreve e não rearma autoenvio', async () => {

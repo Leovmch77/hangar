@@ -1618,3 +1618,44 @@ describe('primeiro plano', () => {
     chat.release();
   });
 });
+
+
+describe('envio Direto e Jev pelo mesmo rascunho', () => {
+  test('Claude com terminal manda direto só o texto novo e mantém o recibo', async () => {
+    const chat = chatStore('srv1', 'fila/sess');
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ ok: true, delivered: false, steered: true, native: false })));
+    await chat.send('usar azul', undefined, { kind: 'direct', terminalClaude: true });
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    expect(url).toBe('http://10.0.0.1:8765/api/sessions/fila%2Fsess/input');
+    expect(JSON.parse(init!.body as string)).toEqual({ text: 'usar azul', steer: true });
+    expect(readDraft('srv1', 'fila/sess')?.submission).toBeNull();
+  });
+
+  test('Jev envia contexto e mostra aviso da decisão sem reenviar', async () => {
+    const chat = chatStore('srv1', 'sess');
+    vi.mocked(fetch).mockResolvedValue(new Response(JSON.stringify({ ok: true, delivered: false, steered: false, native: false, timing_note: 'work_changed' })));
+    await chat.send('usar azul', undefined, { kind: 'jev', task: 'criar tela', message: 'usar azul' });
+    expect(JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string)).toEqual({ text: 'usar azul', jev_task: 'criar tela', jev_message: 'usar azul' });
+    expect(chat.use.getState().deliveryFeedback).toEqual({ text: m.native_queue_jev_work_changed(), warning: true });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('queda no envio Jev conserva rascunho e eco incertos sem segundo POST', async () => {
+    const chat = chatStore('srv1', 'sess');
+    vi.mocked(fetch).mockRejectedValue(new TypeError('network'));
+    await expect(chat.send('usar azul', undefined, { kind: 'jev', task: 'criar tela', message: 'usar azul' })).rejects.toThrow(m.chat_envio_incerto());
+    expect(readDraft('srv1', 'sess')?.submission?.status).toBe('unknown');
+    expect(chat.use.getState().pending.map((p) => p.text)).toEqual(['usar azul']);
+    expect(chat.use.getState().deliveryFeedback).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('recusa explícita do Jev preserva o campo e remove só o eco recusado', async () => {
+    const chat = chatStore('srv1', 'sess');
+    vi.mocked(fetch).mockResolvedValue(new Response('{"detail":"runtime_unhealthy"}', { status: 422 }));
+    await expect(chat.send('usar azul', undefined, { kind: 'jev', task: 'criar tela', message: 'usar azul' })).rejects.toMatchObject({ status: 422 });
+    expect(readDraft('srv1', 'sess')?.submission?.status).toBe('rejected');
+    expect(readDraft('srv1', 'sess')?.text).toBe('usar azul');
+    expect(chat.use.getState().pending).toEqual([]);
+  });
+});

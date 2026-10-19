@@ -9,7 +9,7 @@ import { QueuePanel } from './QueuePanel';
 // Cada chave devolve o próprio nome, como nos outros testes de componente do app.
 vi.mock('../paraglide/messages', () => ({ ...Object.fromEntries(
   ('queue_panel_title queue_panel_collapse queue_panel_expand queue_panel_actions queue_panel_move_up queue_panel_move_down '
-    + 'queue_panel_remove codex_orientar codex_orientar_ajuda atalhos_editar comum_apagar comum_cancelar')
+    + 'queue_panel_remove codex_orientar codex_orientar_ajuda atalhos_editar comum_apagar comum_cancelar native_queue_panel_direct native_queue_jev native_queue_jev_help')
     .split(' ').map((k) => [k, () => k]),
 ), queue_panel_steer_message: ({ text }: { text: string }) => `queue_panel_steer_message: ${text}` }));
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
@@ -101,4 +101,25 @@ describe('QueuePanel (app)', () => {
     expect(container.textContent).toBe('');
     act(() => root.unmount());
   });
+});
+
+
+it('oferece Direto e Jev durante trabalho mesmo com fila vazia', () => {
+  const onModeChange = vi.fn();
+  const { container, root } = render({ panel: { entries: [], actions: true },
+    delivery: { mode: 'queued', status: 'ready', help: 'jev-help' }, onModeChange });
+  const direct = buttons(container, 'native_queue_panel_direct')[0];
+  expect(direct).toBeDefined();
+  act(() => direct.click());
+  expect(onModeChange).toHaveBeenCalledWith('direct');
+  expect(buttons(container, 'native_queue_jev')[0]).toBeDefined();
+  act(() => root.unmount());
+});
+
+it.each(['loading', 'setup', 'unsupported', 'error'])('Jev indisponível (%s) conserva Direto e explica a causa', (status) => {
+  const { container, root } = render({ delivery: { mode: 'queued', status, help: `jev-${status}` }, onModeChange: vi.fn() });
+  expect(buttons(container, 'native_queue_jev')[0]?.disabled).toBe(true);
+  expect(buttons(container, 'native_queue_panel_direct')[0]?.disabled).toBe(false);
+  expect(container.textContent).toContain(`jev-${status}`);
+  act(() => root.unmount());
 });

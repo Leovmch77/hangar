@@ -26,6 +26,8 @@ import { SessionSettingsButton } from './SessionSettings';
 import { SideQuestionSheet } from './SideQuestionSheet';
 import { SlashSuggest } from './SlashSuggest';
 import { QueuePanel } from './QueuePanel';
+import { queueSendMode, type QueueSendMode } from './queueDelivery';
+import { useDeliveryMode, useQueueDelivery } from './useQueueDelivery';
 import { readClipboard, type PickedAttachment } from '../ui/attachmentPicker';
 import { AttachSheet } from '../ui/AttachSheet';
 
@@ -208,6 +210,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
   const queueEdit = chat.use((s) => s.queueEdit) ?? null;
   const queueBusy = chat.use((s) => s.queueBusy) ?? false;
   const queueError = chat.use((s) => s.queueError) ?? null;
+  const deliveryFeedback = chat.use((s) => s.deliveryFeedback) ?? null;
   const editing = queueEdit !== null;
   // Citações da bandeja: entram na frente do texto só no envio, e comando de barra não as leva.
   const refsKey = contextRefsKey(serverId, name);
@@ -465,6 +468,14 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
   const [focado, setFocado] = useState(false);
   const [styleMenuOpen, setStyleMenuOpen] = useState(false);
   const styleServer = useServers((s) => s.servers.find((x) => x.id === origin.serverId) ?? null);
+  const supportsDelivery = provider === 'claude' || provider === 'codex';
+  const deliveryVisible = supportsDelivery && (state === 'working' || queueList.entries.length > 0);
+  const delivery = useQueueDelivery(styleServer ?? undefined, deliveryVisible);
+  const deliveryTiming = useCallback((message: string) => {
+    const live = chat.use.getState();
+    return queueSendMode(delivery.mode, delivery.status === 'ready', live.stateEvent?.state ?? 'idle', provider,
+      headless, message, live.events, live.askOpen ? live.askPayload : null);
+  }, [chat, delivery.mode, delivery.status, provider, headless]);
   const dictationStyle = useDictationStyleLabel(styleServer);
   // Organização desligada na máquina da sessão: todo estilo volta cru, então a barra não oferece versões.
   const organizationOff = useDictationOrganization(styleServer) === 'off';
@@ -563,8 +574,10 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
   const hasContent = text.trim().length > 0 || pendingAttachments.length > 0 || refs.length > 0;
 
   // A primeira mensagem já pode ter chegado antes de esta tela montar: nunca criar outro eco.
-  const sendText = useCallback(async (value: string, revision?: number, explicit = false): Promise<void> => {
-    if (!firstInputId) return chat.send(value, revision);
+  const sendText = useCallback(async (value: string, revision?: number, explicit = false, timing: QueueSendMode | null = deliveryTiming(value) ?? null): Promise<void> => {
+    const mode = sendToPair && pairPeers?.length ? undefined : timing ?? undefined;
+    const send = () => mode ? chat.send(value, revision, mode) : chat.send(value, revision);
+    if (!firstInputId) return send();
     const snapshot = readFirstInput(serverId, name);
     // Tentativa já confirmada e apagada enquanto o campo ainda mostrava o texto do handoff: não reenviar.
     const handoff = adoptedDraftRef.current;
@@ -574,7 +587,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
       return;
     }
     if (snapshot?.id !== firstInputId) {
-      return chat.send(value, revision);
+      return send();
     }
     if (snapshot.phase === 'send_unknown') {
       if (!explicit || readDraft(serverId, name)?.submission) {
@@ -583,10 +596,10 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
       if (!abandonUnknownAttempt(serverId, snapshot.id)) {
         throw new Error(useNewConversation.getState().issues[serverId]?.message ?? m.nova_conversa_envio_incerto());
       }
-      return chat.send(value, revision);
+      return send();
     }
     if (value.trim() !== firstInputMessage(snapshot).trim()) {
-      return chat.send(value, revision);
+      return send();
     }
     if (snapshot.phase === 'created') await sendFirstInput(serverId, snapshot.id);
     const current = readFirstInput(serverId, name);
@@ -598,7 +611,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
     const issue = useNewConversation.getState().issues[serverId];
     throw new Error(issue?.message ?? (current.phase === 'created'
       ? m.composer_falha_envio() : m.nova_conversa_envio_incerto()));
-  }, [serverId, name, firstInputId, draft, chat, persistText]);
+  }, [serverId, name, firstInputId, draft, chat, persistText, deliveryTiming, sendToPair, pairPeers]);
 
   const handleSend = useCallback(async (voiceReady = false) => {
     if (voiceReady && (chat.use.getState().queueEdit || submissionBlocksSend || sendingRef.current || sending || uploading
@@ -642,9 +655,11 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
       sendingRef.current = false;
     };
     const body = composeWithContextRefs(sentRefs, trimmed);
+    let timing: QueueSendMode | undefined = deliveryTiming(trimmed);
     let finalText = body;
     // Remover anexo fica desligado durante o envio; colar no meio dele acrescenta um que espera a próxima vez.
     const sentAttachments = attachmentsRef.current;
+    if (sentAttachments.length && typeof timing === 'object' && timing.kind === 'jev') timing = { ...timing, task: '' };
     if (sentAttachments.length) {
       const target = { serverId: origin.serverId, name: origin.name, transcript: transcriptRef.current };
       const inserts: string[] = [];
@@ -711,7 +726,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
           }
         }, sentRevision);
       } else {
-        await sendText(finalText, sentRevision, true);
+        await sendText(finalText, sentRevision, true, timing ?? null);
       }
       removeSentContextRefs(refsKey, sentRefs);
       setBar(null);
@@ -733,7 +748,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
       setSending(false);
       sendingRef.current = false;
     }
-  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttachments, setPendingAttachments, serverId, name, firstInputId, pairPeers, sendToPair, persistText, persistDraft, origin, submissionBlocksSend, isClaude, setBar, queueEdit, navigation, refs, refsKey]);
+  }, [text, sending, uploading, chat, sendText, limparUndo, cancelarAuto, pendingAttachments, setPendingAttachments, serverId, name, firstInputId, pairPeers, sendToPair, persistText, persistDraft, origin, submissionBlocksSend, isClaude, setBar, queueEdit, navigation, refs, refsKey, deliveryTiming]);
 
   // auto-envio: contagem de 3s
   const iniciarAuto = useCallback(
@@ -1501,6 +1516,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
     {/* Colado no topo da caixa: o que espera a vez no Hangar, com as ações por mensagem. */}
     <QueuePanel panel={queueList} editingId={queueEdit?.entryId ?? null} busy={queueBusy}
       onEdit={handleQueueEdit} onCancelEdit={chat.cancelQueueEdit}
+      delivery={deliveryVisible ? delivery : undefined} onModeChange={useDeliveryMode.getState().setMode}
       onSteer={chat.steerQueued} onRemove={chat.removeQueued} onMove={chat.moveQueued} />
     <ComposerBox focused={focado}>
         {/* Fila da TUI do Kimi esperando o turno: diz quantas e dá a saída de mandar agora. */}
@@ -1528,6 +1544,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
         ) : null}
 
         {queueFeedback ? <Text style={[styles.hint, { color: theme.tokens.text.secondary }]} accessibilityLiveRegion="polite">{queueFeedback}</Text> : null}
+        {deliveryFeedback ? <Text style={[styles.hint, { color: deliveryFeedback.warning ? theme.tokens.status.warning : theme.tokens.text.secondary }]}
+          accessibilityRole={deliveryFeedback.warning ? 'alert' : undefined} accessibilityLiveRegion="polite">{deliveryFeedback.text}</Text> : null}
 
         {/* Como o T3: a linha diz que o campo tem a mensagem da fila, e Cancelar devolve o rascunho. */}
         {editing ? (

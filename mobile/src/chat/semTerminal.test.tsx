@@ -65,6 +65,10 @@ const chatRow = vi.hoisted(() => ({ extra: {} as Record<string, unknown> }));
 const navigation = vi.hoisted(() => ({ back: vi.fn(), replace: vi.fn(), dismissTo: vi.fn(), canGoBack: true, depth: 1, above: 0 }));
 const route = vi.hoisted(() => ({ params: { server: 's1', name: 'sess' }, segments: ['s'] }));
 const realSettings = vi.hoisted(() => ({ enabled: false, models: vi.fn(), permissions: vi.fn(), commands: vi.fn() }));
+vi.mock('./queueDelivery', async (original) => ({
+  ...await original<typeof import('./queueDelivery')>(),
+  readQueueJev: vi.fn(async () => false),
+}));
 const realFirstInput = vi.hoisted(() => ({ enabled: false, send: vi.fn(), steer: vi.fn(), history: vi.fn(), transcribe: vi.fn(), relimpar: vi.fn(),
   upload: vi.fn(async () => ({ path: '/up/sess/ditado-1.m4a' })) }));
 const voiceInput = vi.hoisted(() => ({ recording: false, simulateRecorder: false, delayStop: false, stop: vi.fn(),

@@ -10,6 +10,8 @@ import { contextRefsPlainText } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { Icon } from '../ui/Icon';
 import { Glass } from '../ui/Glass';
+import { haptic } from '../ui/haptics';
+import type { DeliveryControls, DeliveryMode } from './queueDelivery';
 
 type MenuId = 'up' | 'down' | 'steer' | 'edit' | 'remove';
 interface MenuAction { id: MenuId; title: string; disabled: boolean; destructive?: boolean }
@@ -40,13 +42,15 @@ interface Props {
   onSteer: (id: string) => void;
   onRemove: (id: string) => void;
   onMove: (id: string, delta: -1 | 1) => void;
+  delivery?: DeliveryControls;
+  onModeChange?: (mode: DeliveryMode) => void;
 }
 
-export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSteer, onRemove, onMove }: Props) {
+export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSteer, onRemove, onMove, delivery, onModeChange }: Props) {
   const { theme } = useUnistyles();
   const [expanded, setExpanded] = useState(true);
   const [full, setFull] = useState<string | null>(null);
-  if (panel.entries.length === 0) return null;
+  if (panel.entries.length === 0 && !delivery) return null;
   const pick = (id: string, action: MenuId) => {
     void Haptics.selectionAsync().catch(() => {});
     if (action === 'up') onMove(id, -1);
@@ -71,6 +75,32 @@ export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSte
         <Text style={styles.count}>{panel.entries.length}</Text>
         <Icon name={expanded ? 'ChevronDown' : 'ChevronUp'} size={14} color={muted} />
       </Pressable>
+      {delivery ? (
+        <View style={styles.delivery}>
+          <View style={styles.modes}>
+            {(['direct', 'jev'] as const).map((mode) => {
+              const disabled = busy || (mode === 'jev' && delivery.status !== 'ready');
+              const checked = delivery.mode === mode && (mode !== 'jev' || delivery.status === 'ready');
+              const label = mode === 'direct' ? m.native_queue_panel_direct() : m.native_queue_jev();
+              return (
+                <Pressable key={mode} accessibilityRole="checkbox" accessibilityLabel={label}
+                  accessibilityHint={mode === 'jev' ? delivery.help : undefined}
+                  accessibilityState={{ checked, disabled, busy: mode === 'jev' && delivery.status === 'loading' }}
+                  disabled={disabled} onPress={() => { haptic.selection(); onModeChange?.(checked ? 'queued' : mode); }}
+                  style={[styles.mode, checked && { backgroundColor: theme.tokens.accent.dim }, disabled && styles.disabled]}>
+                  <View style={[styles.checkbox, checked && { borderColor: theme.tokens.accent.base }]}>
+                    {checked ? <Icon name="Check" size={12} color={theme.tokens.accent.base} /> : null}
+                  </View>
+                  <Text style={styles.modeText}>{label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          {delivery.status !== 'ready' || delivery.mode === 'jev' ? (
+            <Text style={styles.help} accessibilityLiveRegion="polite">{delivery.help}</Text>
+          ) : null}
+        </View>
+      ) : null}
       {expanded ? (
         <ScrollView style={styles.list} nestedScrollEnabled keyboardShouldPersistTaps="handled">
           {panel.entries.map((entry, index) => {
@@ -176,7 +206,13 @@ const styles = StyleSheet.create((theme) => ({
     borderTopRightRadius: theme.base.radius.lg,
     borderBottomWidth: 0,
   },
-  header: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[3], minHeight: 36 },
+  header: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[3], minHeight: 44 },
+  delivery: { paddingHorizontal: theme.base.space[2], paddingBottom: theme.base.space[1.5] },
+  modes: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[1] },
+  mode: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5], paddingHorizontal: theme.base.space[2], borderRadius: theme.base.radius.sm },
+  checkbox: { width: 16, height: 16, borderWidth: 1, borderColor: theme.tokens.text.muted, borderRadius: theme.base.radius.xs, alignItems: 'center', justifyContent: 'center' },
+  modeText: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.medium, color: theme.tokens.text.primary },
+  help: { fontSize: theme.base.text.xxs, color: theme.tokens.text.muted, paddingHorizontal: theme.base.space[2], paddingBottom: theme.base.space[1] },
   title: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.semibold, color: theme.tokens.text.muted },
   count: { marginLeft: 'auto', fontSize: theme.base.text.xs, color: theme.tokens.text.muted, fontVariant: ['tabular-nums'] },
   // Cerca de quatro linhas; passou disso, a lista rola dentro do painel.
