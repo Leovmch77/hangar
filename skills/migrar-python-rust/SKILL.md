@@ -10,7 +10,8 @@ description: |
 
 # Migrar do Python para o Rust
 
-O que o Python aprendeu fica, sem exceção; o jeito Python de fazer não precisa ficar. Nenhuma
+O que o Python aprendeu fica, sem exceção, inclusive o problema que cada mecanismo dele resolve;
+só o jeito Python de fazer pode mudar, e o novo resolve o mesmo problema. Nenhuma
 linha de Rust antes do inventário e dos contratos aprovados pelo usuário. Cada fase grava um
 arquivo em `.superpowers/sdd/<data>-<assunto>/`: `escopo.md`, `inventario-<area>.md`,
 `decisoes.md`, `conferencia.md`, `medicao.md`.
@@ -28,12 +29,15 @@ escopo), nunca pelo agente: registre e pergunte, uma pergunta por vez, opções 
    Leia antes uma migração já feita no repo (a da lista do dono ou a de custos, em
    `docs/decisoes/plataforma.md`) como molde de rota, ponte e repasse.
 3. Marque toda volta Rust → Python → Rust e Python → Rust → Python: todas somem.
-4. O caminho Python sai no mesmo trabalho. Nas portas 8766 e 8768 fica só o repasse ao Rust, num
+4. Estado que o Rust passa a guardar onde o Python relia a fonte viva: todo fim da vida dele
+   entra no escopo e é do Rust — fechar pelo Hangar, processo sair sozinho,
+   morrer por fora, recriar com o mesmo nome, reiniciar o Rust com a vida de pé.
+5. O caminho Python sai no mesmo trabalho. Nas portas 8766 e 8768 fica só o repasse ao Rust, num
    sentido. No modo `python` do Supervisor a rota responde um código de erro próprio, sem reserva.
-5. Divida em rotas e marque de qual rota cada uma depende (lê, chama ou estende o que a outra
+6. Divida em rotas e marque de qual rota cada uma depende (lê, chama ou estende o que a outra
    cria); sem dependência, a rota é independente. Cada rota migra inteira e entra atrás do
    Supervisor uma por vez, nunca tudo junto.
-6. **Contrato por rota**, aprovado antes do Rust: o que se compara (status, corpo JSON, eventos
+7. **Contrato por rota**, aprovado antes do Rust: o que se compara (status, corpo JSON, eventos
    SSE, efeitos em disco, no tmux e em processos) e a lista fechada de diferenças aceitas, cada
    uma com a regra de comparação e o porquê. O que não está na lista sai igual.
 
@@ -43,6 +47,8 @@ Um subagente só de leitura por arquivo ou área, todos em paralelo. Cada um lis
 observáveis, não funções. Fontes, todas obrigatórias:
 
 - **Código:** cada ramo, `except`, valor padrão, prazo, repetição, cache, trava, ordem de chamadas.
+- **Mecanismo:** cada cache, releitura, conferência, trava, espera e ordem vira item com o problema
+  que resolve e o caso que quebra sem ele.
 - **Comentário de porquê:** cada um vira item.
 - **Testes Python:** cada teste é um comportamento; nome e asserções são a especificação.
 - **Histórico:** `git log --follow` e `git blame`; cada commit `fix(...)` vira item com hash, e o
@@ -61,7 +67,9 @@ commit, decisão) | plataforma`. Mostre a contagem por área e peça a aprovaç�
 2. **Mecanismo do Python** (pool/`to_thread`, polling com `sleep`, captura repetida, cache com
    prazo, subprocesso por chamada, volta Python↔Rust) é redesenhado. Grave o equivalente Rust e o
    porquê: evento em vez de polling, async sem pool, estado compartilhado, uma fonte por chave.
-   Contorno que só existia por limite do Python não é copiado.
+   Antes de trocar, o `decisoes.md` diz o problema que o mecanismo resolve e como o desenho Rust
+   resolve o mesmo; o caso que quebra sem ele vira teste Rust. Problema não identificado: o
+   mecanismo fica como está ou se pergunta. Só contorno de limite do Python sai sem par.
 3. **Bug do Python** achado no caminho: registre e pergunte. Enquanto a pergunta está aberta, o padrão
    provisório é o Rust reproduzir o bug; a correção vem em commit próprio, depois da paridade.
 4. Diferença aprovada entra no registro (item, antes, depois, motivo, resposta do usuário) e na
@@ -80,7 +88,8 @@ commit, decisão) | plataforma`. Mostre a contagem por área e peça a aprovaç�
    Rust sobre o estado que o Python já alterou), com o mesmo relógio e os mesmos ids injetados (sem ponto de injeção, registre o limite no
    `conferencia.md`). Compara saída e efeitos (arquivos escritos, teclas enviadas ao tmux,
    processos abertos) pela regra do contrato.
-3. **Entradas** cruzam cada armadilha abaixo e cada ramo de erro do inventário.
+3. **Entradas** cruzam cada armadilha abaixo, cada ramo de erro do inventário e cada fim de vida
+   do item 1.4, com a vida nova já de pé no mesmo nome.
 4. **Teste não é ajustado para passar:** sem truncar saída, sem comparar mais frouxo que o
    contrato, sem gravar a saída do Rust como esperada; Python ausente faz o teste falhar dizendo o
    que não rodou, nunca pular calado.
@@ -95,7 +104,10 @@ commit, decisão) | plataforma`. Mostre a contagem por área e peça a aprovaç�
    - `len` e fatia contam code points, não bytes; surrogates soltos de `surrogateescape` e de
      JSON que o serde recusa;
    - `None`, chave ausente e `null` são três casos; `""`, `0` e `[]` são falsos no Python;
-   - entrada que o Python recusava e o Rust passa a aceitar.
+   - entrada que o Python recusava e o Rust passa a aceitar;
+   - Python relê a fonte a cada chamada × Rust guarda estado: nome não é identidade; o estado
+     leva a da vida (chave) e sai em todo fim de vida;
+   - resposta vazia com sucesso (`tmux display-message` de pane morto, rc 0) não prova o alvo.
 
 ## 5. Implementar rota a rota
 
@@ -143,9 +155,12 @@ commit, decisão) | plataforma`. Mostre a contagem por área e peça a aprovaç�
 
 Todos passam antes de dizer "migrado":
 
-1. **Conferência item a item** (`conferencia.md`): cada ID com situação final, `igual` com o
-   teste, `muda` com a linha do registro ou `sai` com a prova de que ninguém depende. Item sem
-   situação = não pronto.
+1. **Conferência item a item** (`conferencia.md`): todo ID de todo inventário do trabalho, de
+   rodadas anteriores também, com situação final: `igual` com o teste Rust que reproduz o caso
+   que quebra (linha de código não prova), `muda` com a linha do registro ou `sai` com a prova de
+   que ninguém depende. Dono do mecanismo que saiu do Python não fecha o item: o problema segue
+   com a responsabilidade e é conferido no Rust. Um revisor de contexto limpo confere que cada
+   `igual` aponta um teste desse caso. Item sem situação = não pronto.
 2. **Relatório do diferencial** (`conferencia.md`): entradas comparadas, diferenças duras (status,
    campo, código, efeito) e moles (texto) por tipo. Zero diferenças sobre poucas entradas não fecha.
 3. **Revisão de falhas caladas:** um revisor independente (`ecc:silent-failure-hunter` ou equivalente) sobre o
