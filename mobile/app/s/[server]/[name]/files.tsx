@@ -52,10 +52,10 @@ export default function FilesSheet() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, servidorSumiu, serverId, sessionName]);
 
-  // abrir direto via ?path= — espera a lista de servidores carregar (cold deep-link)
+  // abrir direto via ?path= (citação na conversa) — espera a lista de servidores carregar (cold deep-link)
   useEffect(() => {
     if (!ready || servidorSumiu || !pathParam) return;
-    void api.abrir(pathParam);
+    void api.abrirCitado(pathParam);
     setAba('arquivo');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, pathParam, serverId, sessionName, servidorSumiu]);

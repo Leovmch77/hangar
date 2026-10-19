@@ -10,6 +10,9 @@ vi.mock('@hangar/core', async () => {
     pathDiff: vi.fn(),
     writeFile: vi.fn(),
     discardFile: vi.fn(),
+    resolverCitados: vi.fn(),
+    readCitedFile: vi.fn(),
+    writeCitedFile: vi.fn(),
   };
 });
 
@@ -413,5 +416,91 @@ describe('filesStore', () => {
     expect(api.use.getState().resultados).toHaveLength(0);
     // erro deve ser erro_arq_inexistente traduzido? Na implementação mobile usamos m.erro_arq_inexistente() que retorna string traduzida, mas não podemos prever valor exato. Verifica que erro não é null.
     expect(api.use.getState().erro).toBeTruthy();
+  });
+
+  describe('abrirCitado', () => {
+    it('caminho citado fora da pasta da sessão é lido pela rota de arquivo citado', async () => {
+      vi.mocked(core.resolverCitados).mockResolvedValue({
+        ok: { '/tmp/emu/kick.md': { relativo: null, real: '/tmp/emu/kick.md' } },
+        faltam: [],
+      });
+      vi.mocked(core.readCitedFile).mockResolvedValue({ path: '/tmp/emu/kick.md', text: '# Tarefa', size: 8, truncated: false, digest: 'd1' });
+
+      const api = apis();
+      await api.abrirCitado('/tmp/emu/kick.md');
+
+      expect(core.resolverCitados).toHaveBeenCalledWith(sessao, ['/tmp/emu/kick.md'], srv1);
+      expect(core.readCitedFile).toHaveBeenCalledWith(sessao, '/tmp/emu/kick.md', srv1);
+      expect(core.readFile).not.toHaveBeenCalled();
+      const s = api.use.getState();
+      expect(s.erro).toBeNull();
+      expect(s.selecionado).toBe('/tmp/emu/kick.md');
+      expect(s.conteudo?.text).toBe('# Tarefa');
+      expect(s.diff).toBeNull();
+    });
+
+    it('caminho absoluto dentro da pasta da sessão abre pelo relativo, com diff', async () => {
+      vi.mocked(core.resolverCitados).mockResolvedValue({
+        ok: { '/repo/docs/a.md': { relativo: 'docs/a.md', real: '/repo/docs/a.md' } },
+        faltam: [],
+      });
+      vi.mocked(core.readFile).mockResolvedValue({ path: 'docs/a.md', text: 'a', size: 1, truncated: false, digest: 'd1' });
+
+      const api = apis();
+      await api.abrirCitado('/repo/docs/a.md');
+
+      expect(core.readFile).toHaveBeenCalledWith(sessao, 'docs/a.md', srv1);
+      expect(core.pathDiff).toHaveBeenCalledWith(sessao, 'docs/a.md', 'branch', srv1);
+      expect(core.readCitedFile).not.toHaveBeenCalled();
+      expect(api.use.getState().selecionado).toBe('docs/a.md');
+    });
+
+    it('citação que o servidor não acha mostra arquivo inexistente', async () => {
+      vi.mocked(core.resolverCitados).mockResolvedValue({ ok: {}, faltam: ['/tmp/sumiu.md'] });
+
+      const api = apis();
+      await api.abrirCitado('/tmp/sumiu.md');
+
+      expect(core.readFile).not.toHaveBeenCalled();
+      expect(core.readCitedFile).not.toHaveBeenCalled();
+      expect(api.use.getState().selecionado).toBeNull();
+      expect(api.use.getState().erro).toBeTruthy();
+    });
+
+    it('salvar arquivo citado de fora grava pela rota de arquivo citado', async () => {
+      vi.mocked(core.resolverCitados).mockResolvedValue({
+        ok: { '/tmp/emu/kick.md': { relativo: null, real: '/tmp/emu/kick.md' } },
+        faltam: [],
+      });
+      vi.mocked(core.readCitedFile).mockResolvedValue({ path: '/tmp/emu/kick.md', text: 'x', size: 1, truncated: false, digest: 'd1' });
+      vi.mocked(core.writeCitedFile).mockResolvedValue({ path: '/tmp/emu/kick.md', size: 2, digest: 'd2' });
+
+      const api = apis();
+      await api.abrirCitado('/tmp/emu/kick.md');
+      expect(await api.salvar('/tmp/emu/kick.md', 'xy')).toBeNull();
+
+      expect(core.writeCitedFile).toHaveBeenCalledWith(sessao, '/tmp/emu/kick.md', 'xy', 'd1', srv1);
+      expect(core.writeFile).not.toHaveBeenCalled();
+      expect(core.pathDiff).not.toHaveBeenCalled();
+      expect(api.use.getState().conteudo?.digest).toBe('d2');
+    });
+
+    it('arquivo da árvore aberto depois de um citado de fora volta a gravar pela raiz', async () => {
+      vi.mocked(core.resolverCitados).mockResolvedValue({
+        ok: { '/tmp/emu/kick.md': { relativo: null, real: '/tmp/emu/kick.md' } },
+        faltam: [],
+      });
+      vi.mocked(core.readCitedFile).mockResolvedValue({ path: '/tmp/emu/kick.md', text: 'x', size: 1, truncated: false, digest: 'd1' });
+      vi.mocked(core.readFile).mockResolvedValue({ path: 'a.txt', text: 'a', size: 1, truncated: false, digest: 'd3' });
+      vi.mocked(core.writeFile).mockResolvedValue({ path: 'a.txt', size: 2, digest: 'd4' });
+
+      const api = apis();
+      await api.abrirCitado('/tmp/emu/kick.md');
+      await api.abrir('a.txt');
+      expect(await api.salvar('a.txt', 'ab')).toBeNull();
+
+      expect(core.writeFile).toHaveBeenCalledWith(sessao, 'a.txt', 'ab', 'd3', srv1);
+      expect(core.writeCitedFile).not.toHaveBeenCalled();
+    });
   });
 });
