@@ -131,13 +131,17 @@ pub async fn kill_terminal(io:&dyn TerminalIo,procs:&dyn ProcessView,binding:&Te
     let target=if binding.windows {binding.name.clone()} else {format!("={}",binding.name)};
     let output=mux(io,binding,vec!["kill-session".into(),"-t".into(),target]).await?;
     if !output.success {return Err(failure("lifecycle_kill"));}
-    // O `kill-session` só avisa o agente (SIGHUP): ele leva um instante para sair, e no meio da saída a leitura
-    // dele pode falhar. Só o prazo decide: sai o último resultado, vivo ou ilegível.
+    wait_absent(procs,agent_pid,birth,"lifecycle_still_alive").await
+}
+
+/// Encerrar só avisa o processo (SIGHUP, SIGTERM): ele leva um instante para sair, e no meio da saída a leitura dele
+/// pode falhar. Só o prazo decide: sai o último resultado, `alive` (vivo) ou o erro da leitura.
+pub async fn wait_absent(procs:&dyn ProcessView,pid:i64,birth:f64,alive:&str)->Result<(),RuntimeError> {
     let deadline=std::time::Instant::now()+Duration::from_secs(5);
     loop {
-        let last=match process_absent(procs,agent_pid,birth) {
+        let last=match process_absent(procs,pid,birth) {
             Ok(true)=>return Ok(()),
-            Ok(false)=>failure("lifecycle_still_alive"),
+            Ok(false)=>failure(alive),
             Err(error)=>error,
         };
         if std::time::Instant::now()>=deadline {return Err(last);}
@@ -149,8 +153,8 @@ pub async fn kill_pane(io:&dyn TerminalIo,binding:&TerminalBinding,expected:&Pro
     let current=pane(io,binding).await?;
     if current.dead || current.copy || procs.recipe(expected.pid).map_err(|_|failure("lifecycle_process_read"))?!=*expected {return Err(failure("lifecycle_process_changed"));}
     let output=mux(io,binding,vec!["kill-pane".into(),"-t".into(),binding.pane.clone()]).await?;
-    if !output.success || !process_absent(procs,expected.pid,expected.birth)? {return Err(failure("lifecycle_kill"));}
-    Ok(())
+    if !output.success {return Err(failure("lifecycle_kill"));}
+    wait_absent(procs,expected.pid,expected.birth,"lifecycle_kill").await
 }
 
 pub fn terminal_choices(target:&super::terminal::TerminalTarget)->Result<Option<crate::list::facts_files::Published>,RuntimeError> {

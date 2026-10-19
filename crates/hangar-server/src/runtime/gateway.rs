@@ -1611,7 +1611,7 @@ impl RuntimeRegistry {
                 cano.extra.insert("process_birth".into(),json!(born));
                 let dir=super::lifecycle::claude_sidecar_dir()?;
                 process::kill(&cano,key,&dir).await.map_err(|e|RuntimeError::new(e.code(),"o cano da sessão não foi encerrado"))?;
-                if let Some(recipe)=&recipe {let (pid,birth)=recipe.agent_identity();if !super::lifecycle::process_absent(procs.as_ref(),pid,birth)? {return Err(failure("lifecycle_agent_still_alive"));}}
+                if let Some(recipe)=&recipe {let (pid,birth)=recipe.agent_identity();super::lifecycle::wait_absent(procs.as_ref(),pid,birth,"lifecycle_agent_still_alive").await?;}
                 Ok(())
                 }
             },
