@@ -316,7 +316,7 @@ export function CwdPicker({
         {note(listError, scanFailed)}
         {scanFailed ? textRetry(() => setScanTry((n) => n + 1)) : null}
       </View>
-    ) : filtered.length === 0 && !searchErrors.length ? (
+    ) : filtered.length === 0 && (!searching || !searchErrors.length) ? (
       note(q ? m.native_create_no_results() : m.native_create_no_subfolders())
     ) : (
       <FlatList
@@ -508,7 +508,7 @@ export function CwdPicker({
       <Text style={scanFailed ? styles.error : styles.muted} accessibilityRole="alert">{listError}</Text>
       {scanFailed ? retry(() => setScanTry((n) => n + 1)) : null}
     </View>
-  ) : filtered.length === 0 && !searchErrors.length ? (
+  ) : filtered.length === 0 && (!searching || !searchErrors.length) ? (
     <Text style={styles.muted}>{q ? m.native_create_no_results() : m.native_create_no_subfolders()}</Text>
   ) : (
     <FlatList

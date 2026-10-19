@@ -465,6 +465,24 @@ describe('CreateSessionSheet Codex', () => {
     } finally { act(() => root.unmount()); }
   });
 
+  it.each([false, true])('limpar busca com raiz inacessível restaura o estado vazio da pasta (compacto=%s)', async (compact) => {
+    calls.roots.mockResolvedValue([{ name: 'Repo', path: '/repo' }, { name: 'Outros', path: '/other' }]);
+    calls.scan.mockImplementation(async (_server, root) => root === '/other'
+      ? { entries: [], error: 'permission_denied' } : { entries: [] });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const { CwdPicker } = await import('./CwdPicker');
+    await act(async () => root.render(createElement(CwdPicker, { server, onPick: vi.fn(), compact, autoSelect: false })));
+    try {
+      const search = container.querySelector<HTMLTextAreaElement>('[aria-label="native_create_search"]')!;
+      await act(async () => { search.value = 'destino'; search.dispatchEvent(new Event('input', { bubbles: true })); });
+      expect(container.textContent).toContain('Outros: sem_permissao');
+      await act(async () => { search.value = ''; search.dispatchEvent(new Event('input', { bubbles: true })); });
+      expect(container.textContent).toContain('native_create_no_subfolders');
+      expect(container.textContent).not.toContain('Outros: sem_permissao');
+    } finally { act(() => root.unmount()); }
+  });
+
   it.each([false, true])('busca encontra pasta em outra aba e preserva a raiz (compacto=%s)', async (compact) => {
     calls.roots.mockResolvedValue([{ name: 'Repo', path: '/repo' }, { name: 'Outros', path: '/other' }]);
     calls.scan.mockImplementation(async (_server, root) => ({ entries: root === '/other'
