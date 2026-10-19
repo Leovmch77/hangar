@@ -1159,7 +1159,9 @@ def test_reiniciar_agora_no_windows_lanca_sem_janela(repo, monkeypatch):
     monkeypatch.setattr(atualizar.tmux, "_scope_prefix", lambda: [])
     monkeypatch.setattr(atualizar.subprocess, "Popen",
                         lambda a, **kw: (capturado.update(kw), P())[1])
-    assert atualizar.reiniciar_agora() == {"ok": True, "pid": 3}
+    requested = atualizar.reiniciar_agora()
+    assert requested["ok"] is True and requested["pid"] == 3
+    assert capturado["env"][atualizar._RESTART_REQUEST_ENV] == requested["request_id"]
     assert capturado.get("creationflags") == atualizar._FLAGS_MOTOR_WINDOWS
     assert "start_new_session" not in capturado
 
