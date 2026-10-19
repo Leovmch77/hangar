@@ -27,6 +27,7 @@ cada sistema.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -40,6 +41,7 @@ import time
 import urllib.error
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -954,15 +956,30 @@ def _preparar(topologia: str, *, dist: bool = True, release: tuple | None = None
         marca.write_text(atual, encoding="utf-8")
     # Depois do `npm ci`: fora da main a tela é compilada aqui, já com as dependências dela.
     if dist:
-        aviso = _atualizar_dist()
+        # Tela e binário em paralelo: são dois downloads independentes. Sem o hangar-server o
+        # Python atende sozinho: falha do binário é aviso, nunca etapa quebrada. A volta
+        # (`dist=False`) não baixa: a release é a mais nova, não a do commit de antes.
+        with ThreadPoolExecutor(2) as ex:
+            tela = ex.submit(_atualizar_dist)
+            binario = ex.submit(lambda: rust_release.fetch(release=release) if release
+                                else rust_release.fetch())
+        erros: list[Exception] = []
+
+        def _resultado(f):
+            try:
+                return f.result()
+            except Exception as e:
+                erros.append(e)
+                return None
+        aviso = _resultado(tela)
         if aviso:
-            _escrever(avisos=list(estado().get("avisos") or []) + [aviso])
             _log.warning(aviso)
-        # Sem o hangar-server o Python atende sozinho: falha aqui é aviso, nunca etapa quebrada.
-        # A volta (`dist=False`) não baixa: a release é a mais nova, não a do commit de antes.
-        binarios = (rust_release.fetch(release=release) if release else rust_release.fetch()) or []
-        if binarios:
-            _escrever(avisos=list(estado().get("avisos") or []) + binarios)
+        # Os avisos de quem terminou entram antes de a falha do outro parar a etapa.
+        novos = ([aviso] if aviso else []) + (_resultado(binario) or [])
+        if novos:
+            _escrever(avisos=list(estado().get("avisos") or []) + novos)
+        if erros:
+            raise erros[0]
         _renovar_chromium()
 
 
@@ -1477,6 +1494,57 @@ def reiniciar_agora(porta: int = 8765) -> dict:
 
 
 _DIST_URL = "https://github.com/jeffer1312/hangar/releases/download/dist-latest"
+_DIST_COMMITS_URL = "https://github.com/jeffer1312/hangar/releases/download/dist-commits"
+# De onde a tela compila: o `build` do front roda `i18n:compile` com `../project.inlang`, que lê `messages/`.
+_FONTES_DA_TELA = ("frontend", "packages", "messages", "project.inlang")
+
+
+def _chave_da_tela(rev: str) -> str | None:
+    """sha256 das árvores das fontes da tela em `rev`: a mesma conta do `publica-dist` no ci.yml."""
+    p = _git_quiet("rev-parse", *(f"{rev}:{d}" for d in _FONTES_DA_TELA))
+    return hashlib.sha256(p.stdout.encode()).hexdigest() if p.returncode == 0 else None
+
+
+def _trocar_pelo_tar(fileobj, modo: str) -> str | None:
+    """Extrai o tar numa pasta ao lado e só então troca o `dist`. Devolve o problema, se houver."""
+    import tarfile
+    import tempfile
+    tmp = Path(tempfile.mkdtemp(prefix=".dist-baixado.", dir=REPO / "frontend"))
+    try:
+        with tarfile.open(fileobj=fileobj, mode=modo) as tar:
+            tar.extractall(tmp, filter="data")
+        if not (tmp / "index.html").is_file():
+            return "o dist do CI veio incompleto"
+        # O dist velho só sai DEPOIS de o novo estar no lugar: um rename que falha no meio não
+        # pode deixar a máquina sem tela nenhuma. E fica guardado até o fim: o rollback devolve
+        # a tela do commit anterior junto com o código dele.
+        dist = REPO / "frontend" / "dist"
+        velho = _DIST_VELHO()
+        shutil.rmtree(velho, ignore_errors=True)
+        if dist.exists():
+            dist.rename(velho)
+        tmp.rename(dist)
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _baixar_tela_da_chave(chave: str) -> str | None:
+    """Troca o `dist` pelo `dist-commits/frontend-dist-<chave>.tar.gz` conferido. Devolve o problema."""
+    import io
+    import tarfile
+    import urllib.request
+    url = f"{_DIST_COMMITS_URL}/frontend-dist-{chave}.tar.gz"
+    try:
+        with urllib.request.urlopen(f"{url}.sha256", timeout=15) as r:
+            esperado = r.read().decode("ascii", "replace").split()[:1]
+        with urllib.request.urlopen(url, timeout=180) as r:
+            corpo = r.read()
+        if [hashlib.sha256(corpo).hexdigest()] != esperado:
+            return "sha256 não confere"
+        return _trocar_pelo_tar(io.BytesIO(corpo), "r:gz")
+    except (OSError, tarfile.TarError) as e:
+        return str(e)
 
 
 def _DIST_VELHO() -> Path:
@@ -1514,15 +1582,23 @@ def _atualizar_dist() -> str | None:
     `frontend`/`packages` é quem está desenvolvendo e quer o SEU código na tela: aí compila local,
     como o `install.sh` interativo — recusar deixava a máquina de desenvolvimento sem jeito de
     atualizar a tela pelo app, porque a árvore dela está sempre suja. Fora da main também compila:
-    o CI só publica o dist da main. E também com o checkout atrás do topo (a atualização parou
-    antes dele por falta do binário do Rust), porque o dist publicado é o do topo.
+    o CI só publica o dist da main. Com o checkout atrás do topo (a atualização parou antes dele
+    por falta do binário do Rust) o `dist-latest` é o do topo: a tela vem da `dist-commits` pela
+    chave das fontes do commit alcançado, e compila aqui quando essa chave não foi publicada.
     """
     import tarfile
-    import tempfile
     import urllib.request
-    p = _git("status", "--porcelain", "--", "frontend", "packages", timeout=30)
+    p = _git("status", "--porcelain", "--", *_FONTES_DA_TELA, timeout=30)
     fora_da_main = _git("rev-parse", "--abbrev-ref", "HEAD", timeout=30).stdout.strip() not in _PRINCIPAIS
-    if p.returncode != 0 or p.stdout.strip() or fora_da_main or _behind_top():
+    compilar = p.returncode != 0 or bool(p.stdout.strip()) or fora_da_main
+    if not compilar and _behind_top():
+        chave = _chave_da_tela("HEAD")
+        problema = _baixar_tela_da_chave(chave) if chave else "fontes da tela ilegíveis no git"
+        if problema is None:
+            return None
+        _log.info("tela da chave %s não veio do CI (%s); compilando aqui", chave, problema)
+        compilar = True
+    if compilar:
         npm = shutil.which("npm")
         if not npm:
             return "tela não atualizada: ela precisa ser compilada aqui e não achei o npm"
@@ -1549,28 +1625,14 @@ def _atualizar_dist() -> str | None:
                     + (f"; e a tela anterior não voltou: {erro}" if erro else ""))
         return None
     sha_local = _git("rev-parse", "HEAD", timeout=30).stdout.strip()
-    tmp = Path(tempfile.mkdtemp(prefix=".dist-baixado.", dir=REPO / "frontend"))
     try:
         with urllib.request.urlopen(f"{_DIST_URL}/frontend-dist.sha", timeout=15) as r:
             sha_remoto = r.read().decode("ascii", "replace").strip()
-        with urllib.request.urlopen(f"{_DIST_URL}/frontend-dist.tar.gz", timeout=180) as r, \
-                tarfile.open(fileobj=r, mode="r|gz") as tar:
-            tar.extractall(tmp, filter="data")
-        if not (tmp / "index.html").is_file():
-            return "tela não atualizada: o dist do CI veio incompleto"
-        # O dist velho só sai DEPOIS de o novo estar no lugar: um rename que falha no meio não
-        # pode deixar a máquina sem tela nenhuma. E fica guardado até o fim: o rollback devolve
-        # a tela do commit anterior junto com o código dele.
-        dist = REPO / "frontend" / "dist"
-        velho = _DIST_VELHO()
-        shutil.rmtree(velho, ignore_errors=True)
-        if dist.exists():
-            dist.rename(velho)
-        tmp.rename(dist)
+        with urllib.request.urlopen(f"{_DIST_URL}/frontend-dist.tar.gz", timeout=180) as r:
+            if problema := _trocar_pelo_tar(r, "r|gz"):
+                return f"tela não atualizada: {problema}"
     except (OSError, tarfile.TarError) as e:
         return f"tela não atualizada: não consegui baixar o dist do CI ({e})"
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
     if sha_remoto != sha_local:
         return f"a tela é do commit {sha_remoto[:8]}; este checkout está em {sha_local[:8]}"
     return None
