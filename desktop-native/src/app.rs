@@ -2170,6 +2170,11 @@ impl Hangar {
                     self.error = Some(tr("invalid_response"));
                     return (false, Changed::Screen);
                 };
+                // O aviso do Jev diz "na fila": com a fila vazia a mensagem já saiu e ele ficaria mentindo.
+                if panel.entries.is_empty() && let Some(key) = self.selected_key()
+                    && self.action_feedback.get(&key).is_some_and(|(text, _)| *text == tr("queue_jev_refused") || *text == tr("queue_jev_queued")) {
+                    self.action_feedback.remove(&key);
+                }
                 self.chat.set_queue_panel(Some(panel));
                 for id in crate::queue_panel::removed(&data) { self.chat.retire(&id); }
                 self.queue_panel_changed(window, cx);
