@@ -222,18 +222,21 @@ impl Hangar {
             .child(tr_shared("queue_panel_editing", &[])))
     }
 
-    /// O painel; sem mensagem esperando ele só aparece com o "mandar direto" ligado e o agente trabalhando, para desligar.
+    /// O painel; sem mensagem esperando só aparece com o "mandar direto" ligado e o agente trabalhando, porque aí nada entra
+    /// na fila e esta é a única caixinha para desligá-lo.
     pub(super) fn render_queue_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let panel = self.chat.queue_panel();
         let direct = appearance::get().steer_while_working;
         let supports = matches!(self.provider().0, "claude" | "codex");
-        if panel.entries.is_empty() && !(supports && self.chat.state.state == "working") { return None; }
+        if panel.entries.is_empty() && !(supports && direct && self.chat.state.state == "working") { return None; }
         // Uma cópia por quadro, dividida pelas linhas e pelos handlers de setas e de soltar.
         let (entries, actions): (Rc<[QueueEntry]>, bool) = (panel.entries.iter().cloned().collect(), panel.actions);
         drop(panel);
         if supports { self.refresh_queue_jev(cx); }
         let jev_ready = self.queue_jev_ready();
-        let jev_help = self.selected_key().and_then(|key| self.queue.jev.get(&key.server)).map(|(_, _, state)| match state {
+        let jev_state = self.selected_key().and_then(|key| self.queue.jev.get(&key.server)).map(|(_, _, state)| state);
+        let jev_configured = !matches!(jev_state, Some(Some(Ok(false))));
+        let jev_help = jev_state.map(|state| match state {
             None => tr("queue_jev_loading"),
             Some(Err(error)) => tr("queue_jev_read_error").replace("{error}", error),
             Some(Ok(false)) => tr("queue_jev_setup"),
@@ -260,7 +263,7 @@ impl Hangar {
         // Fora do cabeçalho: clicar na caixinha não abre nem fecha o painel.
         let toggle = supports.then(|| Checkbox::new("queue-direct").small().label(tr("queue_panel_direct")).checked(direct)
             .on_click(cx.listener(|this, checked: &bool, _, cx| this.set_queue_direct(*checked, cx))));
-        let jev_toggle = supports.then(|| Checkbox::new("queue-jev").small().label(tr("queue_jev"))
+        let jev_toggle = (supports && jev_configured).then(||Checkbox::new("queue-jev").small().label(tr("queue_jev"))
             .checked(appearance::get().jev_delivery && jev_ready).disabled(!jev_ready)
             .tooltip(jev_help)
             .on_click(cx.listener(|this, checked: &bool, _, cx| this.set_queue_jev(*checked, cx))));

@@ -100,11 +100,12 @@ it.each([
   await expect(answerWithDelivery(server, 'sess', [], ask)).resolves.toMatchObject({ ok: true, feedback });
 });
 
-it('opções do modo: a salva vem marcada; Jev indisponível fica desativado e marca a Fila', () => {
+it('opções do modo: a salva vem marcada; Jev indisponível fica desativado e marca a Fila; sem Jev configurado some', () => {
   const pick = (mode: 'queued' | 'direct' | 'jev', status: 'loading' | 'ready' | 'setup' | 'unsupported' | 'error') =>
     deliveryOptions({ mode, status, help: 'h' }).map((o) => `${o.mode}:${o.checked ? 'on' : 'off'}:${o.disabled ? 'dis' : 'ok'}`);
   expect(pick('direct', 'ready')).toEqual(['queued:off:ok', 'direct:on:ok', 'jev:off:ok']);
   expect(pick('jev', 'ready')).toEqual(['queued:off:ok', 'direct:off:ok', 'jev:on:ok']);
-  expect(pick('jev', 'setup')).toEqual(['queued:on:ok', 'direct:off:ok', 'jev:off:dis']);
+  expect(pick('jev', 'setup')).toEqual(['queued:on:ok', 'direct:off:ok']);
+  expect(pick('jev', 'error')).toEqual(['queued:on:ok', 'direct:off:ok', 'jev:off:dis']);
   expect(pick('direct', 'loading')).toEqual(['queued:off:ok', 'direct:on:ok', 'jev:off:dis']);
 });

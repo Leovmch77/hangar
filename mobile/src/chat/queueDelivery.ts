@@ -15,10 +15,12 @@ export const deliveryModeLabel = (mode: DeliveryMode) =>
   mode === 'queued' ? m.mobile_queue_mode_queued() : mode === 'direct' ? m.mobile_queue_mode_direct() : m.mobile_queue_mode_jev();
 export type DeliveryOption = { mode: DeliveryMode; checked: boolean; disabled: boolean };
 // Jev salvo e indisponível envia pela fila (queueSendMode), então é a Fila que aparece marcada.
+// Servidor sem o Jev configurado não oferece a opção.
 export function deliveryOptions(d: DeliveryControls): DeliveryOption[] {
   const ready = d.status === 'ready';
   const effective = d.mode === 'jev' && !ready ? 'queued' : d.mode;
-  return (['queued', 'direct', 'jev'] as const).map((mode) => ({ mode, checked: effective === mode, disabled: mode === 'jev' && !ready }));
+  const modes = d.status === 'setup' ? (['queued', 'direct'] as const) : (['queued', 'direct', 'jev'] as const);
+  return modes.map((mode) => ({ mode, checked: effective === mode, disabled: mode === 'jev' && !ready }));
 }
 
 const chars = (value: string, count: number) => Array.from(value).slice(0, count).join('');

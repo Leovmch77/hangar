@@ -84,10 +84,10 @@ export function modeMenuHandlers(menu: ModeMenu | undefined) {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
     const enabled = options.filter((o) => !o.disabled);
     const current = options.find((o) => o.checked)!;
-    const jev = options.find((o) => o.mode === 'jev')!;
+    const jev = options.find((o) => o.mode === 'jev');
     ActionSheetIOS.showActionSheetWithOptions({
       title: m.mobile_queue_mode_label(),
-      message: [m.mobile_queue_mode_current({ mode: deliveryModeLabel(current.mode) }), jev.disabled ? menu.delivery.help : ''].filter(Boolean).join('\n'),
+      message: [m.mobile_queue_mode_current({ mode: deliveryModeLabel(current.mode) }), jev?.disabled ? menu.delivery.help : ''].filter(Boolean).join('\n'),
       options: [...enabled.map((o) => deliveryModeLabel(o.mode)), m.comum_cancelar()],
       cancelButtonIndex: enabled.length,
     }, (i) => { if (i < enabled.length) pick(enabled[i].mode); });
