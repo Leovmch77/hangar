@@ -9,9 +9,10 @@ import { QueuePanel } from './QueuePanel';
 // Cada chave devolve o próprio nome, como nos outros testes de componente do app.
 vi.mock('../paraglide/messages', () => ({ ...Object.fromEntries(
   ('queue_panel_title queue_panel_collapse queue_panel_expand queue_panel_actions queue_panel_move_up queue_panel_move_down '
-    + 'queue_panel_remove codex_orientar codex_orientar_ajuda atalhos_editar comum_apagar comum_cancelar native_queue_panel_direct native_queue_jev native_queue_jev_help')
+    + 'queue_panel_remove codex_orientar codex_orientar_ajuda atalhos_editar comum_apagar comum_cancelar mobile_queue_mode_label mobile_queue_mode_queued mobile_queue_mode_direct mobile_queue_mode_jev mobile_queue_jev_short')
     .split(' ').map((k) => [k, () => k]),
-), queue_panel_steer_message: ({ text }: { text: string }) => `queue_panel_steer_message: ${text}` }));
+), queue_panel_steer_message: ({ text }: { text: string }) => `queue_panel_steer_message: ${text}`,
+  mobile_queue_jev_fallback: ({ reason }: { reason: string }) => `fallback: ${reason}` }));
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 // O mock de react-native diz Android: sem isto o menu nativo de verdade seria carregado.
@@ -104,22 +105,75 @@ describe('QueuePanel (app)', () => {
 });
 
 
-it('oferece Direto e Jev durante trabalho mesmo com fila vazia', () => {
-  const onModeChange = vi.fn();
-  const { container, root } = render({ panel: { entries: [], actions: true },
-    delivery: { mode: 'queued', status: 'ready', help: 'jev-help' }, onModeChange });
-  const direct = buttons(container, 'native_queue_panel_direct')[0];
-  expect(direct).toBeDefined();
-  act(() => direct.click());
-  expect(onModeChange).toHaveBeenCalledWith('direct');
-  expect(buttons(container, 'native_queue_jev')[0]).toBeDefined();
-  act(() => root.unmount());
-});
+describe('QueuePanel: modo de envio', () => {
+  const radios = (container: HTMLElement) => [...container.querySelectorAll<HTMLElement>('[role="radio"]')];
+  const radio = (container: HTMLElement, label: string) => radios(container).find((r) => r.getAttribute('aria-label') === label)!;
 
-it.each(['loading', 'setup', 'unsupported', 'error'])('Jev indisponível (%s) conserva Direto e explica a causa', (status) => {
-  const { container, root } = render({ delivery: { mode: 'queued', status, help: `jev-${status}` }, onModeChange: vi.fn() });
-  expect(buttons(container, 'native_queue_jev')[0]?.disabled).toBe(true);
-  expect(buttons(container, 'native_queue_panel_direct')[0]?.disabled).toBe(false);
-  expect(container.textContent).toContain(`jev-${status}`);
-  act(() => root.unmount());
+  it('fila vazia: nada aparece, nem o modo de envio', () => {
+    const { container, root } = render({ panel: { entries: [], actions: true },
+      delivery: { mode: 'direct', status: 'ready', help: 'jev-help' }, onModeChange: vi.fn() });
+    expect(container.textContent).toBe('');
+    act(() => root.unmount());
+  });
+
+  it('com itens: Fila, Direto e Jev são escolha única e a salva vem marcada', () => {
+    const onModeChange = vi.fn();
+    const { container, root } = render({ delivery: { mode: 'direct', status: 'ready', help: 'jev-help' }, onModeChange });
+    expect(radios(container).map((r) => r.getAttribute('aria-label')))
+      .toEqual(['mobile_queue_mode_queued', 'mobile_queue_mode_direct', 'mobile_queue_mode_jev']);
+    expect(radios(container).map((r) => r.getAttribute('aria-checked'))).toEqual(['false', 'true', 'false']);
+    act(() => radio(container, 'mobile_queue_mode_queued').click());
+    expect(onModeChange).toHaveBeenLastCalledWith('queued');
+    act(() => radio(container, 'mobile_queue_mode_jev').click());
+    expect(onModeChange).toHaveBeenLastCalledWith('jev');
+    act(() => root.unmount());
+  });
+
+  it('Jev escolhido e pronto: linha curta explica o modo', () => {
+    const { container, root } = render({ delivery: { mode: 'jev', status: 'ready', help: 'jev-help' }, onModeChange: vi.fn() });
+    expect(container.textContent).toContain('mobile_queue_jev_short');
+    act(() => root.unmount());
+  });
+
+  it.each(['loading', 'setup', 'unsupported', 'error'])('Jev indisponível (%s): segmento desativado, salvo Jev cai na fila com a causa', (status) => {
+    const onModeChange = vi.fn();
+    const { container, root } = render({ delivery: { mode: 'jev', status, help: `jev-${status}…` }, onModeChange });
+    const jev = radio(container, 'mobile_queue_mode_jev');
+    expect(jev.getAttribute('aria-disabled')).toBe('true');
+    expect(radio(container, 'mobile_queue_mode_queued').getAttribute('aria-checked')).toBe('true');
+    // A causa fecha a frase do modelo: sem "…." dobrado.
+    expect(container.textContent).toContain(`fallback: jev-${status}`);
+    expect(container.textContent).not.toContain('…');
+    act(() => jev.click());
+    expect(onModeChange).not.toHaveBeenCalled();
+    // Fila aparece marcada, mas o salvo é Jev: tocar nela grava a troca.
+    act(() => radio(container, 'mobile_queue_mode_queued').click());
+    expect(onModeChange).toHaveBeenCalledWith('queued');
+    act(() => root.unmount());
+  });
+
+  it('Jev indisponível com outro modo salvo: sem aviso', () => {
+    const { container, root } = render({ delivery: { mode: 'direct', status: 'setup', help: 'jev-setup' }, onModeChange: vi.fn() });
+    expect(container.textContent).not.toContain('jev-setup');
+    act(() => root.unmount());
+  });
+
+  it('mensagem que entra e sai da fila num instante não pisca o painel', () => {
+    vi.useFakeTimers();
+    try {
+      const { container, root, handlers } = render({ panel: { entries: [], actions: true } });
+      const props = { editingId: null, busy: false, ...handlers };
+      act(() => root.render(createElement(QueuePanel, { panel, ...props })));
+      act(() => vi.advanceTimersByTime(300));
+      expect(container.textContent).toBe('');
+      act(() => root.render(createElement(QueuePanel, { panel: { entries: [], actions: true }, ...props })));
+      act(() => root.render(createElement(QueuePanel, { panel, ...props })));
+      // O prazo recomeça: o da primeira passagem não pode ter sobrado.
+      act(() => vi.advanceTimersByTime(400));
+      expect(container.textContent).toBe('');
+      act(() => vi.advanceTimersByTime(200));
+      expect(container.textContent).toContain('primeira');
+      act(() => root.unmount());
+    } finally { vi.useRealTimers(); }
+  });
 });

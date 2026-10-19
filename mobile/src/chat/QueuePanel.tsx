@@ -1,6 +1,7 @@
-// Painel "Na fila" acima do composer: o que espera a vez no Hangar. Toque longo na linha abre o menu
-// (Subir, Descer, Orientar, Editar, Apagar), como o T3 mobile; tocar no texto mostra a mensagem inteira.
-import { useState } from 'react';
+// Painel "Na fila", faixa de cima da caixa do composer: o que espera a vez no Hangar e o modo de envio.
+// Toque longo na linha abre o menu (Subir, Descer, Orientar, Editar, Apagar), como o T3 mobile; tocar no
+// texto mostra a mensagem inteira. Fila vazia não ocupa espaço nenhum.
+import { useEffect, useState } from 'react';
 import { ActionSheetIOS, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { MenuView, type NativeActionEvent } from '@react-native-menu/menu';
 import * as Haptics from 'expo-haptics';
@@ -9,7 +10,6 @@ import type { QueuePanel as Panel } from '@hangar/core';
 import { contextRefsPlainText } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { Icon } from '../ui/Icon';
-import { Glass } from '../ui/Glass';
 import { haptic } from '../ui/haptics';
 import type { DeliveryControls, DeliveryMode } from './queueDelivery';
 
@@ -46,11 +46,24 @@ interface Props {
   onModeChange?: (mode: DeliveryMode) => void;
 }
 
+// ponytail: a linha nasce e é despachada em escritas separadas, e entre as duas ela aparece como "esperando"
+// por um instante; o painel só surge se ela continuar esperando, para a mensagem que já está indo não piscar.
+export const QUEUE_PANEL_APPEAR_MS = 600;
+const MODES = ['queued', 'direct', 'jev'] as const;
+const modeLabel = { queued: m.mobile_queue_mode_queued, direct: m.mobile_queue_mode_direct, jev: m.mobile_queue_mode_jev };
+
 export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSteer, onRemove, onMove, delivery, onModeChange }: Props) {
   const { theme } = useUnistyles();
   const [expanded, setExpanded] = useState(true);
   const [full, setFull] = useState<string | null>(null);
-  if (panel.entries.length === 0 && !delivery) return null;
+  const waiting = panel.entries.length > 0;
+  const [shown, setShown] = useState(waiting);
+  useEffect(() => {
+    if (!waiting) { setShown(false); return; }
+    const timer = setTimeout(() => setShown(true), QUEUE_PANEL_APPEAR_MS);
+    return () => clearTimeout(timer);
+  }, [waiting]);
+  if (!waiting || !shown) return null;
   const pick = (id: string, action: MenuId) => {
     void Haptics.selectionAsync().catch(() => {});
     if (action === 'up') onMove(id, -1);
@@ -60,46 +73,53 @@ export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSte
     else onRemove(id);
   };
   const muted = theme.tokens.text.muted;
+  const jevReady = delivery?.status === 'ready';
+  // Jev salvo e indisponível: o envio vai pela fila, e é ela que aparece marcada.
+  const effective = delivery && (delivery.mode !== 'jev' || jevReady) ? delivery.mode : 'queued';
+  const jevWarning = delivery?.status === 'setup' || delivery?.status === 'error';
   return (
-    <Glass variant="chrome" style={styles.box}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={expanded ? m.queue_panel_collapse() : m.queue_panel_expand()}
-        accessibilityState={{ expanded }}
-        onPress={() => setExpanded(!expanded)}
-        hitSlop={4}
-        style={styles.header}
-      >
-        <Icon name="ListOrdered" size={14} color={muted} />
-        <Text style={styles.title}>{m.queue_panel_title()}</Text>
-        <Text style={styles.count}>{panel.entries.length}</Text>
-        <Icon name={expanded ? 'ChevronDown' : 'ChevronUp'} size={14} color={muted} />
-      </Pressable>
-      {delivery ? (
-        <View style={styles.delivery}>
-          <View style={styles.modes}>
-            {(['direct', 'jev'] as const).map((mode) => {
-              const disabled = busy || (mode === 'jev' && delivery.status !== 'ready');
-              const checked = delivery.mode === mode && (mode !== 'jev' || delivery.status === 'ready');
-              const label = mode === 'direct' ? m.native_queue_panel_direct() : m.native_queue_jev();
+    <View style={styles.band}>
+      <View style={styles.header}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={expanded ? m.queue_panel_collapse() : m.queue_panel_expand()}
+          accessibilityState={{ expanded }}
+          onPress={() => setExpanded(!expanded)}
+          hitSlop={4}
+          style={styles.toggle}
+        >
+          <Icon name="ListOrdered" size={14} color={muted} />
+          <Text style={styles.title}>{m.queue_panel_title()}</Text>
+          <Text style={[styles.count, { backgroundColor: theme.tokens.fillSubtle }]}>{panel.entries.length}</Text>
+          <Icon name={expanded ? 'ChevronDown' : 'ChevronUp'} size={14} color={muted} />
+        </Pressable>
+        {delivery ? (
+          <View accessibilityRole="radiogroup" accessibilityLabel={m.mobile_queue_mode_label()}
+            style={[styles.segments, { backgroundColor: theme.tokens.fillSubtle, borderColor: theme.tokens.border.subtle }]}>
+            {MODES.map((mode) => {
+              const disabled = mode === 'jev' && !jevReady;
+              const checked = effective === mode;
               return (
-                <Pressable key={mode} accessibilityRole="checkbox" accessibilityLabel={label}
+                <Pressable key={mode} accessibilityRole="radio" accessibilityLabel={modeLabel[mode]()}
                   accessibilityHint={mode === 'jev' ? delivery.help : undefined}
-                  accessibilityState={{ checked, disabled, busy: mode === 'jev' && delivery.status === 'loading' }}
-                  disabled={disabled} onPress={() => { haptic.selection(); onModeChange?.(checked ? 'queued' : mode); }}
-                  style={[styles.mode, checked && { backgroundColor: theme.tokens.accent.dim }, disabled && styles.disabled]}>
-                  <View style={[styles.checkbox, checked && { borderColor: theme.tokens.accent.base }]}>
-                    {checked ? <Icon name="Check" size={12} color={theme.tokens.accent.base} /> : null}
-                  </View>
-                  <Text style={styles.modeText}>{label}</Text>
+                  aria-checked={checked} aria-disabled={disabled} aria-busy={mode === 'jev' && delivery.status === 'loading'}
+                  disabled={disabled} hitSlop={{ top: 8, bottom: 8 }}
+                  onPress={() => { if (delivery.mode === mode) return; haptic.selection(); onModeChange?.(mode); }}
+                  style={[styles.segment, checked && { backgroundColor: theme.tokens.bg.elevated }, disabled && styles.disabled]}>
+                  <Text style={[styles.segmentText, { color: checked ? (mode === 'queued' ? theme.tokens.text.primary : theme.tokens.accent.base) : theme.tokens.text.secondary }]}>
+                    {modeLabel[mode]()}
+                  </Text>
+                  {mode === 'jev' && jevWarning ? <Icon name="CircleAlert" size={12} color={theme.tokens.status.warning} /> : null}
                 </Pressable>
               );
             })}
           </View>
-          {delivery.status !== 'ready' || delivery.mode === 'jev' ? (
-            <Text style={styles.help} accessibilityLiveRegion="polite">{delivery.help}</Text>
-          ) : null}
-        </View>
+        ) : null}
+      </View>
+      {delivery?.mode === 'jev' ? (
+        <Text style={[styles.help, !jevReady && delivery.status !== 'loading' && { color: theme.tokens.status.warning }]} accessibilityLiveRegion="polite">
+          {jevReady ? m.mobile_queue_jev_short() : m.mobile_queue_jev_fallback({ reason: delivery.help.replace(/[\s.…]+$/, '') })}
+        </Text>
       ) : null}
       {expanded ? (
         <ScrollView style={styles.list} nestedScrollEnabled keyboardShouldPersistTaps="handled">
@@ -189,7 +209,7 @@ export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSte
           })}
         </ScrollView>
       ) : null}
-    </Glass>
+    </View>
   );
 }
 QueuePanel.menuActions = menuActions;
@@ -197,26 +217,24 @@ QueuePanel.menuActions = menuActions;
 const ROW_HEIGHT = 40;
 
 const styles = StyleSheet.create((theme) => ({
-  // Aba colada no topo da caixa do composer, um pouco mais estreita que ela, como no T3.
-  box: {
-    marginHorizontal: theme.base.space[2] + 18,
-    marginBottom: -1,
-    borderRadius: 0,
-    borderTopLeftRadius: theme.base.radius.lg,
-    borderTopRightRadius: theme.base.radius.lg,
-    borderBottomWidth: 0,
+  // Faixa de cima da caixa do composer: anula o recuo dela para a linha de baixo ir de borda a borda.
+  band: {
+    marginHorizontal: -theme.base.space[3],
+    marginTop: -theme.base.space[3],
+    marginBottom: theme.base.space[1],
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: theme.tokens.border.default,
   },
-  header: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[3], minHeight: 44 },
-  delivery: { paddingHorizontal: theme.base.space[2], paddingBottom: theme.base.space[1.5] },
-  modes: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[1] },
-  mode: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5], paddingHorizontal: theme.base.space[2], borderRadius: theme.base.radius.sm },
-  checkbox: { width: 16, height: 16, borderWidth: 1, borderColor: theme.tokens.text.muted, borderRadius: theme.base.radius.xs, alignItems: 'center', justifyContent: 'center' },
-  modeText: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.medium, color: theme.tokens.text.primary },
-  help: { fontSize: theme.base.text.xxs, color: theme.tokens.text.muted, paddingHorizontal: theme.base.space[2], paddingBottom: theme.base.space[1] },
+  header: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingLeft: theme.base.space[3], paddingRight: theme.base.space[2], minHeight: 44 },
+  toggle: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5], minHeight: 44 },
+  segments: { flexDirection: 'row', padding: theme.base.space[0.5], borderRadius: theme.base.radius.full, borderWidth: StyleSheet.hairlineWidth },
+  segment: { minHeight: 28, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], paddingHorizontal: theme.base.space[3], borderRadius: theme.base.radius.full },
+  segmentText: { fontSize: theme.base.text.xxs, fontWeight: theme.base.weight.semibold },
+  help: { fontSize: theme.base.text.xxs, color: theme.tokens.text.muted, paddingHorizontal: theme.base.space[3], paddingBottom: theme.base.space[1.5] },
   title: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.semibold, color: theme.tokens.text.muted },
-  count: { marginLeft: 'auto', fontSize: theme.base.text.xs, color: theme.tokens.text.muted, fontVariant: ['tabular-nums'] },
+  count: { fontSize: theme.base.text.xxs, color: theme.tokens.text.muted, fontVariant: ['tabular-nums'], paddingHorizontal: theme.base.space[1.5], borderRadius: theme.base.radius.full, overflow: 'hidden' },
   // Cerca de quatro linhas; passou disso, a lista rola dentro do painel.
-  list: { maxHeight: 4 * ROW_HEIGHT + 6, paddingHorizontal: theme.base.space[1.5], marginBottom: theme.base.space[1.5] },
+  list: { maxHeight: 4 * ROW_HEIGHT + 6, paddingHorizontal: theme.base.space[1], marginBottom: theme.base.space[1] },
   row: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], minHeight: ROW_HEIGHT, paddingLeft: theme.base.space[2], borderRadius: theme.base.radius.sm },
   text: { flex: 1, fontSize: theme.base.text.xs, color: theme.tokens.text.primary, paddingVertical: theme.base.space[1.5] },
   iconBtn: { width: 32, height: 32, borderRadius: theme.base.radius.full, alignItems: 'center', justifyContent: 'center' },

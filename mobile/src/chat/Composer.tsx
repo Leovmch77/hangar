@@ -469,8 +469,9 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
   const [styleMenuOpen, setStyleMenuOpen] = useState(false);
   const styleServer = useServers((s) => s.servers.find((x) => x.id === origin.serverId) ?? null);
   const supportsDelivery = provider === 'claude' || provider === 'codex';
-  const deliveryVisible = supportsDelivery && (state === 'working' || queueList.entries.length > 0);
-  const delivery = useQueueDelivery(styleServer ?? undefined, deliveryVisible);
+  // Segue lendo o Jev com a fila vazia: o modo salvo vale para o envio mesmo sem painel à vista.
+  const deliveryActive = supportsDelivery && (state === 'working' || queueList.entries.length > 0);
+  const delivery = useQueueDelivery(styleServer ?? undefined, deliveryActive);
   const deliveryTiming = useCallback((message: string) => {
     const live = chat.use.getState();
     return queueSendMode(delivery.mode, delivery.status === 'ready', live.stateEvent?.state ?? 'idle', provider,
@@ -1513,12 +1514,12 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
 
   return (
     <>
-    {/* Colado no topo da caixa: o que espera a vez no Hangar, com as ações por mensagem. */}
-    <QueuePanel panel={queueList} editingId={queueEdit?.entryId ?? null} busy={queueBusy}
-      onEdit={handleQueueEdit} onCancelEdit={chat.cancelQueueEdit}
-      delivery={deliveryVisible ? delivery : undefined} onModeChange={useDeliveryMode.getState().setMode}
-      onSteer={chat.steerQueued} onRemove={chat.removeQueued} onMove={chat.moveQueued} />
     <ComposerBox focused={focado}>
+        {/* Faixa de cima da caixa: o que espera a vez no Hangar, as ações por mensagem e o modo de envio. */}
+        <QueuePanel panel={queueList} editingId={queueEdit?.entryId ?? null} busy={queueBusy}
+          onEdit={handleQueueEdit} onCancelEdit={chat.cancelQueueEdit}
+          delivery={supportsDelivery ? delivery : undefined} onModeChange={useDeliveryMode.getState().setMode}
+          onSteer={chat.steerQueued} onRemove={chat.removeQueued} onMove={chat.moveQueued} />
         {/* Fila da TUI do Kimi esperando o turno: diz quantas e dá a saída de mandar agora. */}
         {showSteer ? (
           <Pressable
