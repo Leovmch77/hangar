@@ -983,14 +983,19 @@ def _preparar(topologia: str, *, dist: bool = True, release: tuple | None = None
         _renovar_chromium()
 
 
-def _renovar_chromium() -> None:
+def _renovar_chromium(agora: float | None = None) -> None:
     """O chrome-headless-shell baixado não se atualiza como o Chrome da distro, e é ele que abre
     qualquer site para o agente: cada Atualizar confere a versão estável e baixa de novo se mudou.
     Roda em toda máquina onde o script já rodou (a marca existe), para que um download que falhou
     seja tentado de novo. O script nunca falha; código diferente de zero ou marca de falha só vira
-    log, sem derrubar a atualização."""
+    log, sem derrubar a atualização. A versão estável muda no máximo uma vez por dia: marca boa
+    regravada (pelo script) há menos de 24 h não roda de novo; marca de falha tenta sempre."""
     marca = Path.home() / ".hangar" / "native" / "chromium-ok"
     if not sys.platform.startswith("linux") or not marca.is_file():
+        return
+    agora = time.time() if agora is None else agora
+    if (agora - marca.stat().st_mtime < 24 * 3600
+            and "falhou" not in marca.read_text(encoding="utf-8", errors="replace")):
         return
     p = _rodar([str(REPO / "scripts" / "install-chromium.sh")], cwd=REPO, timeout=900)
     if p.returncode != 0:

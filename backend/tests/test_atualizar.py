@@ -433,6 +433,27 @@ def test_renovar_chromium_onde_o_script_ja_rodou_mesmo_com_download_falho(tmp_pa
     assert len(chamadas) == 1 and chamadas[0][0].endswith("install-chromium.sh")
 
 
+@pytest.mark.parametrize("texto,idade_h,roda", [
+    ("baixado: /x/chrome-headless-shell (1.2.3.4)\n", 2, False),
+    ("baixado: /x/chrome-headless-shell (1.2.3.4)\n", 25, True),
+    ("download falhou: sem rede\n", 2, True),
+])
+def test_renovar_chromium_no_maximo_uma_vez_por_dia(tmp_path, monkeypatch, texto, idade_h, roda):
+    chamadas = []
+    class P:
+        returncode = 0
+        stdout = stderr = ""
+    monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: (chamadas.append(args), P())[1])
+    monkeypatch.setattr(atualizar.sys, "platform", "linux")
+    monkeypatch.setattr(atualizar.Path, "home", lambda: tmp_path)
+    marca = tmp_path / ".hangar" / "native" / "chromium-ok"
+    marca.parent.mkdir(parents=True)
+    marca.write_text(texto)
+    agora = marca.stat().st_mtime + idade_h * 3600
+    atualizar._renovar_chromium(agora=agora)
+    assert (len(chamadas) == 1) is roda
+
+
 def test_preparar_sincroniza_o_uv_e_nao_chama_o_instalador(repo, monkeypatch):
     """O caminho do botão: dist + `uv sync`. Nada de `install.sh --update`."""
     cmds = _preparo_gravado(repo, monkeypatch, lock_igual=True, node_modules=True)
