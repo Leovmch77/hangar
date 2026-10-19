@@ -281,7 +281,7 @@ impl Hangar {
 
     fn start_session_drag(&mut self, target: Target, cx: &mut Context<Self>) {
         self.row_release(); // senão o pressionar longo abre o renomear no meio do arrasto
-        self.hide_preview();
+        self.clear_hover();
         let g = &mut self.sidebar.grouping;
         (g.origin, g.spot, g.in_list) = (Some(target), None, true);
         cx.notify();

@@ -11,13 +11,7 @@ use std::{cell::RefCell, rc::Rc};
 
 /// O filtro aparece com mais de 6 sessões, contadas antes de filtrar (`FILTER_FROM` do web).
 const FILTER_FROM: usize = 6;
-const PREVIEW_DELAY: Duration = Duration::from_millis(400);
-const PREVIEW_TTL: Duration = Duration::from_secs(30);
-// Cauda de 8 e não 3: corridas de ferramentas empurram a última resposta para trás (mesmo número do web).
-const PREVIEW_TAIL: usize = 8;
 const PRESS: Duration = Duration::from_millis(500);
-pub(super) const PREVIEW_W: f32 = 380.;
-pub(super) const PREVIEW_H: f32 = 220.;
 const NO_CWD: &str = "no-cwd";
 
 /// O cabeçalho da própria máquina já identifica a linha; Conversas sempre mostra a origem.
@@ -116,7 +110,6 @@ pub(super) enum Write { Rename(String, u64), Mute(bool), Editor, Delete, Mode(bo
 enum GitWrite { Pull, Checkout(String), StashCheckout(String), Unlink }
 
 pub(super) enum SidebarReply {
-    Preview(u64, Target, Result<String, Failure>),
     MuteRead(u64, Result<Value, Failure>),
     BranchRead(u64, Result<Value, Failure>),
     AccountsRead(u64, Result<(Vec<AccountTarget>, Option<String>), Failure>),
@@ -259,10 +252,6 @@ pub(super) struct Sidebar {
     /// Linha cujo ⋯ está com o menu aberto: o botão fica na tela enquanto o ponteiro anda pelo menu.
     pub(super) button_menu: Option<Target>,
     pub(super) hover: Option<Target>,
-    hover_seq: u64,
-    pointer_y: f32,
-    pub(super) preview: Option<(Target, Entity<TextViewState>, f32)>,
-    cache: HashMap<Target, (String, Instant)>,
     /// Última segunda linha mostrada de cada sessão, com o transcript dela: vale enquanto a nova vier vazia.
     last_sub: std::cell::RefCell<LastSubs>,
     press_seq: u64,
@@ -284,7 +273,7 @@ impl Sidebar {
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder(tr("sidebar_filter")).clean_on_escape());
         cx.subscribe(&filter, |_, _, _: &InputEvent, cx| cx.notify()).detach();
         Self { filter, collapsed: load_collapsed(), deleting: HashSet::new(), editing: None, renaming: HashSet::new(), follow: None, lost: None, moving: HashMap::new(),
-            menu: None, menu_seq: 0, rename_seq: 0, chain: None, chain_seq: 0, focus_tab: None, remote_focus: HashMap::new(), collapse_gen: 0, button_menu: None, hover: None, hover_seq: 0, pointer_y: 0., preview: None, cache: HashMap::new(), last_sub: Default::default(), press_seq: 0,
+            menu: None, menu_seq: 0, rename_seq: 0, chain: None, chain_seq: 0, focus_tab: None, remote_focus: HashMap::new(), collapse_gen: 0, button_menu: None, hover: None, last_sub: Default::default(), press_seq: 0,
             long_pressed: false, rail_anim: None, resize: None, grouping: Default::default(), flip: Default::default(), still_avatar: Default::default() }
     }
 
@@ -292,14 +281,12 @@ impl Sidebar {
     pub(super) fn reset_server(&mut self) {
         self.deleting.clear();
         self.renaming.clear();
-        (self.editing, self.follow, self.lost, self.menu, self.button_menu, self.hover, self.preview) = (None, None, None, None, None, None, None);
+        (self.editing, self.follow, self.lost, self.menu, self.button_menu, self.hover) = (None, None, None, None, None, None);
         (self.focus_tab, self.chain) = (None, None);
         self.grouping.reset();
         self.chain_seq += 1;
-        self.cache.clear();
         self.last_sub.borrow_mut().clear();
         self.menu_seq += 1;
-        self.hover_seq += 1;
         self.press_seq += 1;
     }
 
@@ -527,7 +514,7 @@ impl Hangar {
 
     /// O clique na linha: abre e leva o foco ao compositor.
     pub(super) fn open_target(&mut self, target: &Target, window: &mut Window, cx: &mut Context<Self>) {
-        self.hide_preview();
+        self.clear_hover();
         if let Some(session) = self.select_target(target, window, cx) { self.focus_composer_for(&session, window, cx); }
     }
 
@@ -651,7 +638,7 @@ impl Hangar {
         self.refresh_group_ask();
         self.refresh_group_sheet(window, cx);
         self.external_pairs_changed(window, cx);
-        if self.sidebar.hover.as_ref().is_some_and(|t| !alive(self, t)) { self.hide_preview(); }
+        if self.sidebar.hover.as_ref().is_some_and(|t| !alive(self, t)) { self.clear_hover(); }
         // Só se o foco ainda está onde o renomear o deixou: gesto novo nesse meio-tempo vence.
         if let Some(new) = self.sidebar.focus_tab.clone().filter(|t| alive(self, t)) {
             self.sidebar.focus_tab = None;
@@ -674,54 +661,17 @@ impl Hangar {
         renaming
     }
 
-    // ── Prévia ──
-
     pub(super) fn row_hover(&mut self, target: Target, hovered: bool, cx: &mut Context<Self>) {
         if !hovered {
-            if self.sidebar.hover.as_ref() == Some(&target) { self.hide_preview(); cx.notify(); }
+            if self.sidebar.hover.as_ref() == Some(&target) { self.clear_hover(); cx.notify(); }
             self.sidebar.press_seq += 1;
             return;
         }
-        self.hide_preview();
-        self.sidebar.hover = Some(target.clone());
-        let seq = self.sidebar.hover_seq;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(PREVIEW_DELAY).await;
-            let _ = this.update(cx, |this, cx| this.preview_due(seq, target, cx));
-        }).detach();
+        self.sidebar.hover = Some(target);
         cx.notify();
     }
 
-    pub(super) fn row_pointer(&mut self, y: f32) { self.sidebar.pointer_y = y; }
-
-    pub(super) fn hide_preview(&mut self) {
-        self.sidebar.hover_seq += 1;
-        (self.sidebar.hover, self.sidebar.preview) = (None, None);
-    }
-
-    fn preview_due(&mut self, seq: u64, target: Target, cx: &mut Context<Self>) {
-        if seq != self.sidebar.hover_seq { return; }
-        if let Some((text, _)) = self.sidebar.cache.get(&target).filter(|(_, at)| at.elapsed() < PREVIEW_TTL).cloned() {
-            self.show_preview(target, text, cx);
-            return;
-        }
-        let Some(api) = self.machine_api(&target.server) else { return };
-        let tell = self.sidebar_tell();
-        self.runtime.spawn(async move {
-            let result = api.history(&target.name, PREVIEW_TAIL, None).await.map(|h| h.events.unwrap_or_default().into_iter().rev()
-                .find(|e| e.kind == "assistant_msg" && e.text.as_deref().is_some_and(|t| !t.is_empty()))
-                .and_then(|e| e.text).unwrap_or_default());
-            tell.send(SidebarReply::Preview(seq, target, result)).await;
-        });
-    }
-
-    fn show_preview(&mut self, target: Target, text: String, cx: &mut Context<Self>) {
-        // Texto vazio não abre, como o web.
-        if text.trim().is_empty() { return; }
-        let view = cx.new(|cx| TextViewState::markdown(&safe_markdown(&text), cx));
-        self.sidebar.preview = Some((target, view, self.sidebar.pointer_y));
-        cx.notify();
-    }
+    pub(super) fn clear_hover(&mut self) { self.sidebar.hover = None; }
 
     // ── Pressionar para renomear ──
 
@@ -748,7 +698,7 @@ impl Hangar {
 
     /// Abrir o menu lê o silenciar daquela sessão; resposta de um menu anterior é descartada pelo número.
     pub(super) fn start_menu(&mut self, target: Target, cx: &mut Context<Self>) {
-        self.hide_preview();
+        self.clear_hover();
         self.sidebar.press_seq += 1;
         self.sidebar.menu_seq += 1;
         let seq = self.sidebar.menu_seq;
@@ -808,7 +758,7 @@ impl Hangar {
         // Foco e seleção no quadro seguinte: o campo ainda não está na tela, e o diálogo toma o foco ao abrir.
         let field = input.clone();
         cx.defer_in(window, move |_, window, cx| field.update(cx, |state, cx| { state.focus(window, cx); state.select_all(window, cx); }));
-        self.hide_preview();
+        self.clear_hover();
         let status = Rc::new(RefCell::new(Pending::default()));
         self.sidebar.editing = Some(Edit { target: target.clone(), input: input.clone(), inline, status: status.clone(), _events: events });
         if !inline {
@@ -1129,12 +1079,6 @@ impl Hangar {
                 eprintln!("grupos recolhidos não gravaram: {error}");
                 window.push_notification(Notification::warning(tr("sidebar_collapse_not_saved").replace("{n}", &error)), cx);
             }
-            SidebarReply::Preview(seq, target, result) => {
-                // Espiada é opcional: falha não vira erro na tela (como o web), só no log.
-                let text = match result { Ok(text) => text, Err(error) => { eprintln!("prévia de {}: {}", target.id(), error.detail); return; } };
-                self.sidebar.cache.insert(target.clone(), (text.clone(), Instant::now()));
-                if seq == self.sidebar.hover_seq && self.sidebar.hover.as_ref() == Some(&target) { self.show_preview(target, text, cx); }
-            }
             SidebarReply::MuteRead(seq, result) => {
                 let Some(menu) = self.sidebar.menu.as_mut().filter(|m| m.seq == seq) else { return };
                 menu.mute = match result {
@@ -1316,17 +1260,6 @@ impl Hangar {
             })
     }
 
-    pub(super) fn render_preview(&self, window: &Window) -> Option<AnyElement> {
-        let (_, view, y) = self.sidebar.preview.as_ref()?;
-        if appearance::get().navigation != appearance::Navigation::Sidebar || self.settings.is_some() { return None; }
-        let left = 284. + 8. + if theme::is_floating() { 10. } else { 0. };
-        let max_top = (f32::from(window.viewport_size().height) - PREVIEW_H - 8.).max(8.);
-        Some(div().absolute().left(px(left)).top(px((y - 14.).clamp(8., max_top))).w(px(PREVIEW_W)).max_h(px(PREVIEW_H)).overflow_hidden()
-            .px(px(14.)).py(px(10.)).rounded(px(12.)).bg(theme::elevated()).border_1().border_color(theme::border_strong())
-            .shadow(theme::popover_shadow()).text_sm()
-            .child(TextView::new(view).selectable(false).scrollable(false))
-            .into_any_element())
-    }
 }
 
 /// Apresentação da T37; teclado, foco e submenus continuam pertencendo ao kit.
@@ -1740,7 +1673,7 @@ impl Hangar {
 
     pub(super) fn toggle_rail(&mut self, cx: &mut Context<Self>) {
         if appearance::get().navigation.tabs() { return; }
-        self.hide_preview();
+        self.clear_hover();
         // Movimento reduzido troca direto; senão a largura anda de onde estiver agora.
         self.sidebar.rail_anim = (!cx.reduce_motion()).then(|| (Instant::now(), !self.rail()));
         self.toggle_group(RAIL_KEY.into(), cx);

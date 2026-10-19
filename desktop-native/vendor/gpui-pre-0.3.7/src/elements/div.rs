@@ -49,7 +49,8 @@ type StackSafe<T> = stacksafe::StackSafe<T>;
 #[cfg(not(feature = "stacker"))]
 type StackSafe<T> = T;
 
-const DRAG_THRESHOLD: f64 = 2.;
+// Ajuste do Hangar (era 2): com 2 px, o tremor de um clique comum já começava a arrastar a linha da sessão.
+const DRAG_THRESHOLD: f64 = 8.;
 const DEFAULT_TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
 const HOVERABLE_TOOLTIP_HIDE_DELAY: Duration = Duration::from_millis(500);
 

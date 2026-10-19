@@ -5821,7 +5821,6 @@ impl Hangar {
             .when(selected, |el| el.bg(theme::selected_row()))
             .when(!selected, |el| el.hover(|el| el.bg(theme::hover())))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| this.row_hover(hover_target.clone(), *hovered, cx)))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| this.row_pointer(f32::from(event.position.y))))
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| this.row_press(press_target.clone(), window, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.row_release()))
             .on_mouse_down(MouseButton::Right, cx.listener(move |this, _, _, cx| this.start_menu(menu_target.clone(), cx)))
@@ -5873,7 +5872,7 @@ impl Hangar {
             .children(menu_button)
             .map(|el| self.group_row(el, &session, remote.as_deref(), 10., cx))
             .on_click(cx.listener(move |this, _, window, cx| {
-                this.hide_preview();
+                this.clear_hover();
                 if this.take_long_press() { return; }
                 // Foco só no gesto sobre a lista; troca automática de transcript não tira o foco de ninguém.
                 this.open_target(&click_target, window, cx);
@@ -7203,7 +7202,6 @@ impl Render for Hangar {
                     }),
             }))
             .children(live)
-            .children(self.render_preview(window))
             .children(self.render_landing_ghost(cx))
             .children(self.render_popup(window, cx))
             .children(self.render_search(window, cx))
