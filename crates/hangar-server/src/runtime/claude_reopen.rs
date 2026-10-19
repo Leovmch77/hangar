@@ -456,6 +456,7 @@ impl RuntimeRegistry {
     /// com uma conversa Claude), e a rota segue o caminho de sempre. Troca de modo para o modo em que a
     /// sessão já está não toca em nada (`changed: false`).
     pub async fn reopen_claude_session(&self,name:&str,change:SessionChange,between:Option<&dyn Between>) -> Option<Result<Reopened,ReopenFailure>> {
+        let mut warnings=Vec::new();
         let surface=match self.claude_sidecar(name).await {
             Err(error)=>return Some(Err(ReopenFailure::refused(error))),
             Ok(Some(_))=>Surface::Headless,
@@ -464,12 +465,15 @@ impl RuntimeRegistry {
                 let to_terminal=change.reason==crate::session_open::ChangeReason::ModeSwitch && change.surface==Some(Surface::Terminal);
                 // Sem sidecar a sessão já é com terminal: ir a ele não depende da adoção, que o Claude recém-nascido
                 // no pane (outra troca em curso) ainda não prova sem o registro nativo.
-                if let Err(error)=watcher.adopt_claude(self,name).await? && !to_terminal {return Some(Err(ReopenFailure::refused(error)));}
+                if let Err(error)=watcher.adopt_claude(self,name).await? {
+                    if !to_terminal {return Some(Err(ReopenFailure::refused(error)));}
+                    warnings.push(format!("o Claude do terminal ainda não foi adotado: {} ({})",error.message,error.code));
+                }
                 Surface::Terminal
             },
         };
         if change.reason==crate::session_open::ChangeReason::ModeSwitch && change.surface==Some(surface) {
-            return Some(Ok(Reopened { spec:None,changed:false,warnings:Vec::new() }));
+            return Some(Ok(Reopened { spec:None,changed:false,warnings }));
         }
         Some(self.reopen_by_spec(name,change,between,None).await)
     }

@@ -212,6 +212,7 @@ async fn switching_to_terminal_while_the_new_claude_has_no_native_record_yet_cha
     let registry = fx.registry().await;
     let same = registry.reopen_claude_session("s1",mode_switch(true),None).await.expect("é sessão Claude daqui").map_err(|f|f.error.code).unwrap();
     assert!(!same.changed);
+    assert!(same.warnings.iter().any(|w|w.contains("claude_terminal_conversation_unproved")),"o motivo da adoção vai no aviso: {:?}",same.warnings);
     assert!(std::path::Path::new(&format!("/proc/{agent}")).exists(),"o Claude do terminal segue vivo");
     fx.finish();
 }
