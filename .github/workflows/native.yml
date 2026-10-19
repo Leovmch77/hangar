@@ -293,10 +293,13 @@ jobs:
         run: |
           test -f out/Hangar-linux-x86_64 || { echo "sem o binário do Linux, nada a publicar"; exit 1; }
           version="$(tr -d '[:space:]' < VERSION).$(git rev-list --count HEAD)"
+          # A API que este app exige do servidor; sem ela o app não sabe se pode se atualizar sozinho.
+          requires_api=$(sed -n 's/^pub const CLIENT_API: u32 = \([0-9][0-9]*\);.*/\1/p' crates/hangar-api/src/lib.rs)
+          test -n "$requires_api" || { echo "::error::CLIENT_API não encontrado em crates/hangar-api/src/lib.rs"; exit 1; }
           cd out
           for f in Hangar-*; do sha256sum "$f" > "$f.sha256"; done
-          jq -n --arg version "$version" --arg commit "$GITHUB_SHA" \
-            '{version: $version, commit: $commit, files: [inputs | capture("^(?<sha>[0-9a-f]{64})  (?<name>.+)$") | {(.name): .sha}] | add}' \
+          jq -n --arg version "$version" --arg commit "$GITHUB_SHA" --argjson requires_api "$requires_api" \
+            '{version: $version, commit: $commit, requires_api: $requires_api, files: [inputs | capture("^(?<sha>[0-9a-f]{64})  (?<name>.+)$") | {(.name): .sha}] | add}' \
             -R Hangar-*.sha256 > native-latest.json
           cat native-latest.json
       # O manifesto sobe por ÚLTIMO: até ele trocar, o app ainda vê o sha antigo e recusa o binário novo em vez de

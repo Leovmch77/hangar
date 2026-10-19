@@ -77,6 +77,10 @@ _raiz="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ -f "$_raiz/scripts/check-passo-de-atualizacao.sh" ]]; then
     bash "$_raiz/scripts/check-passo-de-atualizacao.sh" --staged || exit 1
 fi
+# Terceira: mudança na API que o app nativo consome sem subir o CLIENT_API.
+if [[ -f "$_raiz/scripts/check-client-api.sh" ]]; then
+    bash "$_raiz/scripts/check-client-api.sh" --staged || exit 1
+fi
 
 PADRAO_TAILNET='100\.(6[5-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}'
 
