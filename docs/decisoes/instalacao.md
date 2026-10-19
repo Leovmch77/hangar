@@ -6,8 +6,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 ## Regras vigentes
 
 - **Quem serve a interface é o BACKEND; o `frontend/dist` chega pronto do CI.** Gate que pergunta
-  "o front mudou?" tem que conhecer TODAS as árvores de onde o front é compilado (`frontend` **e**
-  `packages`) — senão serve tela velha ou apaga edição local.
+  "o front mudou?" tem que conhecer TODAS as entradas de onde o front é compilado (`frontend`,
+  `packages`, `messages`, `project.inlang` e o `package.json`/`package-lock.json` da raiz) — senão
+  serve tela velha ou apaga edição local.
 - **Instalador com portão de prova por etapa**: essencial que falha para na hora; extra opcional
   que falha entra na lista e o fim nunca diz "Pronto". Nada é dado como feito sem prova.
 - **O backend escuta em `0.0.0.0` por padrão**, gravado pelo instalador e pelo `--update`/
