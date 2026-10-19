@@ -195,10 +195,12 @@ pub(crate) async fn fake_app_server(answer_turns:bool) -> FakeAppServer {
 }
 
 /// Processo cujo argv é o de um app-server deste endereço (`sh -c '…' app-server <endpoint>`): prova o pid
-/// sem app-server de verdade. Dois comandos no `-c`: o shell não troca a própria imagem pelo `sleep`.
+/// sem app-server de verdade. O `read` embutido bloqueia na entrada (presa ao `Child`) sem `fork`: um `sleep`
+/// filho criado logo depois da prova deixava, no macOS, o argv do shell ilegível na leitura seguinte.
 #[cfg(unix)]
 pub(crate) fn app_server_process(endpoint:&str) -> std::process::Child {
-    with_app_server_argv(std::process::Command::new("sh").args(["-c","sleep 120; true","app-server",endpoint]).spawn().unwrap(),endpoint)
+    with_app_server_argv(std::process::Command::new("sh").args(["-c","read x","app-server",endpoint])
+        .stdin(std::process::Stdio::piped()).spawn().unwrap(),endpoint)
 }
 
 /// O `spawn` volta quando o exec troca a memória do filho, antes de o kernel gravar o argv novo: por um

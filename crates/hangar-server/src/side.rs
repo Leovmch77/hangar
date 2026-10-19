@@ -1934,7 +1934,9 @@ mod tests {
                 if let Ok(ws) = tokio_tungstenite::accept_async(stream).await { held.push(ws); }
             }
         });
-        let mut child = std::process::Command::new("sh").args(["-c", "sleep 120; true", "app-server", &endpoint]).spawn().unwrap();
+        // `read` embutido, sem `sleep` filho: o fork logo depois da prova deixava o argv ilegível no macOS.
+        let mut child = std::process::Command::new("sh").args(["-c", "read x", "app-server", &endpoint])
+            .stdin(std::process::Stdio::piped()).spawn().unwrap();
         // O `spawn` volta quando o exec troca a memória do filho, antes de o kernel gravar o argv novo: por um
         // instante o `cmdline` vem vazio, e a admissão lê o argv. O app-server adotado de verdade já roda há tempo.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
