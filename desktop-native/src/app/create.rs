@@ -4,6 +4,8 @@ pub(super) mod choices;
 mod customizations;
 mod folder_git;
 mod resume;
+#[cfg(test)]
+mod default_tests;
 
 use super::*;
 use choices::{AccountDone, Catalog, Jev, Motor, QuotaLine};
