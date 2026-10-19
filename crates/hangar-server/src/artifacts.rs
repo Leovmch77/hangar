@@ -229,10 +229,24 @@ impl Stamp {
     fn same_file(&self, other: &Self) -> bool {
         self.identity == other.identity && self.created == other.created
     }
+    /// A mudança mais recente que a assinatura registra (conteúdo ou metadados).
+    fn latest_change(&self) -> Option<SystemTime> {
+        #[cfg(windows)]
+        let changed = u64::try_from(self.changed.0 - 116_444_736_000_000_000).ok()
+            .map(|ticks| SystemTime::UNIX_EPOCH + std::time::Duration::from_nanos(ticks.saturating_mul(100)));
+        #[cfg(not(windows))]
+        let changed = u64::try_from(self.changed.0).ok()
+            .map(|secs| SystemTime::UNIX_EPOCH + std::time::Duration::new(secs, self.changed.1 as u32));
+        changed.max(self.modified)
+    }
 }
+/// O relógio dos arquivos anda em saltos (~15,6 ms no Windows): duas gravações no mesmo salto dão a mesma assinatura.
+const STAMP_TICK: std::time::Duration = std::time::Duration::from_millis(50);
 struct Entry {
     binding: Binding,
     stamp: Option<Stamp>,
+    /// Quando a assinatura guardada foi lida: só prova o conteúdo se foi um salto depois da última mudança.
+    read_at: Option<SystemTime>,
     offset: u64,
     prefix_hash: ring::digest::Context,
     fold: Fold,
@@ -244,6 +258,7 @@ impl Entry {
         Self {
             binding,
             stamp: None,
+            read_at: None,
             offset: 0,
             prefix_hash: ring::digest::Context::new(&ring::digest::SHA256),
             fold: Fold::default(),
@@ -252,6 +267,7 @@ impl Entry {
     }
     fn reset(&mut self) {
         self.stamp = None;
+        self.read_at = None;
         self.offset = 0;
         self.prefix_hash = ring::digest::Context::new(&ring::digest::SHA256);
         self.fold = Fold::default();
@@ -271,12 +287,15 @@ impl Entry {
         };
         self.seen = true;
         let stamp = Stamp::of(&file, &file.metadata()?)?;
+        let read_at = SystemTime::now();
         let unchanged = self.stamp.as_ref() == Some(&stamp);
+        // Assinatura igual lida no mesmo salto da última mudança não prova nada: confere o conteúdo indexado.
+        let racy = unchanged && self.read_at.zip(stamp.latest_change()).is_none_or(|(at, changed)| at < changed + STAMP_TICK);
         let mut reusable = self.stamp.as_ref().is_some_and(|old| {
             old.same_file(&stamp) && stamp.size >= old.size && (unchanged || stamp.size > old.size)
         });
         // Crescer não prova append: valida todos os bytes indexados, sem refazer o parsing deles.
-        if reusable && !unchanged {
+        if reusable && (!unchanged || racy) {
             let actual = prefix_digest(&mut file, self.offset)?;
             let expected = self.prefix_hash.clone().finish();
             reusable = actual.as_ref() == expected.as_ref();
@@ -285,6 +304,7 @@ impl Entry {
             self.reset();
         }
         if reusable && unchanged {
+            self.read_at = Some(read_at);
             return Ok(());
         }
         file.seek(SeekFrom::Start(self.offset))?;
@@ -309,6 +329,7 @@ impl Entry {
         }
         drop(reader);
         self.stamp = Some(stamp);
+        self.read_at = Some(read_at);
         Ok(())
     }
 }
@@ -547,5 +568,33 @@ mod windows_identity_tests {
         let second_stamp = Stamp::of(&second, &second_meta).unwrap();
         assert_ne!(first_stamp.identity, second_stamp.identity);
         assert!(!first_stamp.same_file(&second_stamp));
+    }
+}
+
+#[cfg(test)]
+mod same_tick_tests {
+    use super::*;
+
+    fn frame(id: &str) -> String {
+        format!("{}\n", json!({"type":"frame-link","frameUrl":format!("https://claude.ai/artifact/{id}"),"title":"Novo"}))
+    }
+
+    /// Duas gravações do mesmo tamanho no mesmo tique do relógio (~15,6 ms no Windows) dão a mesma assinatura:
+    /// logo depois de uma gravação ela não prova que o conteúdo é o mesmo.
+    #[test]
+    fn a_same_size_rewrite_with_the_same_stamp_right_after_a_write_is_reread() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        std::fs::write(&path, frame("c")).unwrap();
+        let mut entry = Entry::new(Binding { provider: Provider::Claude, jsonl: path.clone(), key: "k".into(), headless: false, life: None });
+        entry.sync().unwrap();
+        assert!(entry.fold.items.contains_key("c"));
+        std::fs::write(&path, frame("d")).unwrap();
+        // O tique de Windows, forçado: a assinatura lida antes é a mesma de agora.
+        let file = File::open(&path).unwrap();
+        entry.stamp = Some(Stamp::of(&file, &file.metadata().unwrap()).unwrap());
+        entry.sync().unwrap();
+        assert!(entry.fold.items.contains_key("d"), "serviu o conteúdo velho");
+        assert!(!entry.fold.items.contains_key("c"));
     }
 }
