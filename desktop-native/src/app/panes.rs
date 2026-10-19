@@ -23,10 +23,9 @@ pub(super) struct Panes {
     pub marks: MarkPlaces,
 }
 
-/// O que se pinta num lugar: a marca animada (com o selo do provider por cima, quando a linha tem um) ou os segundos da
-/// linha "trabalhando".
+/// O que se pinta num lugar: a marca animada, o avatar trabalhando ou os segundos da linha "trabalhando".
 #[derive(Clone)]
-pub(super) enum Floating { Mark(Hsla, Option<SharedString>), Elapsed(Instant, Option<SharedString>), Shimmer(SharedString), ThinkingFocus(SharedString) }
+pub(super) enum Floating { Mark(Hsla), Avatar(super::chrome::AvatarLook), Elapsed(Instant, Option<SharedString>), Shimmer(SharedString), ThinkingFocus(SharedString) }
 
 /// Um lugar vazio deixado por uma área guardada: posição, recorte dela e quando o lugar nasceu. A área que não repinta
 /// deixa os lugares do último desenho, que continuam certos; a que redesenha apaga os seus e grava os que aparecerem.
@@ -159,11 +158,12 @@ impl Hangar {
         mark_slot(&self.panes.marks, area, key, size, color)
     }
 
-    /// O `working_mark_slot` com o selo do provider pintado por cima da marca, fora da área também: pintado dentro dela,
-    /// ficaria por baixo da marca.
-    pub(super) fn badged_mark_slot(&self, area: Area, key: impl Into<SharedString>, size: f32, color: Hsla, provider: SharedString) -> AnyElement {
+    /// O avatar da sessão: trabalhando, ele é pintado fora da view guardada (a animação não redesenha a área); nos
+    /// outros estados é parado, dentro dela.
+    pub(super) fn avatar_slot(&self, area: Area, key: impl Into<SharedString>, look: super::chrome::AvatarLook, size: f32) -> AnyElement {
+        if !look.working() { return super::chrome::session_avatar(&look, size, None).into_any_element(); }
         div().size(px(size)).flex_shrink_0()
-            .child(mark_place(self.panes.marks.clone(), area, key.into(), Floating::Mark(color, Some(provider)))).into_any_element()
+            .child(mark_place(self.panes.marks.clone(), area, key.into(), Floating::Avatar(look))).into_any_element()
     }
 
     /// O lugar dos segundos contados desde `since`, pintados fora da view guardada: o tique de 1 s não redesenha a área.
@@ -204,7 +204,7 @@ pub(super) fn float_marks(places: MarkPlaces, area: Area, fade: Duration, reduce
 
 /// O mesmo lugar de `working_mark_slot`, na lista de lugares de quem chama.
 pub(super) fn mark_slot(places: &MarkPlaces, area: Area, key: impl Into<SharedString>, size: f32, color: Hsla) -> AnyElement {
-    div().size(px(size)).flex_shrink_0().child(mark_place(places.clone(), area, key.into(), Floating::Mark(color, None))).into_any_element()
+    div().size(px(size)).flex_shrink_0().child(mark_place(places.clone(), area, key.into(), Floating::Mark(color))).into_any_element()
 }
 
 /// O mesmo lugar de `elapsed_slot`, na lista de lugares de quem chama.
@@ -256,21 +256,19 @@ impl Element for FloatingMark {
         // Cópia dos lugares: desenhar o filho não pode achar a lista emprestada.
         let places: Vec<MarkPlace> = self.places.borrow().iter().filter(|place| place.area == self.area).cloned().collect();
         places.into_iter().map(|place| {
-            // Texto em cache nasce visível: sem foco, o relógio não redesenha depois do primeiro quadro.
-            let t = if self.reduce_motion || matches!(place.draw, Floating::Elapsed(..) | Floating::Shimmer(_) | Floating::ThinkingFocus(_)) { 1. }
+            // Texto em cache nasce visível: sem foco, o relógio não redesenha depois do primeiro quadro. O avatar já estava
+            // parado na linha: entrar com o fade apagaria o logo.
+            let t = if self.reduce_motion || matches!(place.draw, Floating::Avatar(_) | Floating::Elapsed(..) | Floating::Shimmer(_) | Floating::ThinkingFocus(_)) { 1. }
                 else { crate::motion::ease_out((place.born.elapsed().as_secs_f32() / self.fade.as_secs_f32()).min(1.)) };
-            // Só a marca entra com o fade: o selo já estava na linha antes de ela começar a trabalhar.
-            let (inner, badge) = match place.draw {
-                Floating::Mark(color, badge) => (
-                    super::chrome::WorkingMark::new(place.key.clone(), f32::from(place.at.size.width), color).into_any_element(),
-                    badge.map(|provider| super::chrome::provider_badge(&provider)),
-                ),
-                Floating::Elapsed(since, suffix) => (super::chrome::Elapsed::new(place.key.clone(), since).suffix(suffix).into_any_element(), None),
-                Floating::Shimmer(text) => (super::chrome::Shimmer::new(place.key.clone(), text).into_any_element(), None),
-                Floating::ThinkingFocus(label) => (super::chrome::ThinkingFocus::new(place.key.clone(), label).into_any_element(), None),
+            let width = f32::from(place.at.size.width);
+            let inner = match place.draw {
+                Floating::Mark(color) => super::chrome::WorkingMark::new(place.key.clone(), width, color).into_any_element(),
+                Floating::Avatar(look) => super::chrome::LiveAvatar::new(place.key.clone(), look, width).into_any_element(),
+                Floating::Elapsed(since, suffix) => super::chrome::Elapsed::new(place.key.clone(), since).suffix(suffix).into_any_element(),
+                Floating::Shimmer(text) => super::chrome::Shimmer::new(place.key.clone(), text).into_any_element(),
+                Floating::ThinkingFocus(label) => super::chrome::ThinkingFocus::new(place.key.clone(), label).into_any_element(),
             };
-            let mut child = div().size_full().relative().child(div().size_full().opacity(t).child(inner)).children(badge)
-                .into_any_element();
+            let mut child = div().size_full().opacity(t).child(inner).into_any_element();
             window.with_content_mask(Some(ContentMask { bounds: place.clip }), |window| {
                 child.layout_as_root(place.at.size.map(AvailableSpace::Definite), window, cx);
                 child.prepaint_at(place.at.origin, window, cx);
