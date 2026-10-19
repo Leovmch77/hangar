@@ -274,6 +274,7 @@ impl FlipBook {
         let (pass, epoch) = (self.pass, self.epoch);
         for (key, section) in entries {
             let row = self.rows.entry(key.clone()).or_insert_with(|| FlipRow::new(section.clone(), epoch));
+            if reduce { row.fade = None; row.slide = None; }
             // Só quem foi pintado na passada anterior acende: sumida e voltando, entra parada.
             if row.section != *section && row.placed.is_some_and(|p| p + 1 == pass) && !reduce { row.fade = Some(now); }
             row.section.clone_from(section);
@@ -282,6 +283,8 @@ impl FlipBook {
 
     /// Fecha a passada com a ordem de tudo o que a lista vai pintar: ordem nova anima; quem saiu é esquecido.
     pub fn order(&mut self, keys: &[String]) {
+        // A transição repete a mesma ordem por vários quadros; só uma lista diferente precisa da tabela de retenção.
+        if keys == self.order.as_slice() && self.rows.len() == keys.len() { return; }
         if keys != self.order.as_slice() {
             self.epoch += 1;
             self.order = keys.to_vec();
@@ -368,7 +371,8 @@ impl Element for Flip {
 
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (),
         window: &mut Window, cx: &mut App) {
-        let place = self.book.borrow_mut().place(&self.key, f32::from(bounds.origin.y), Instant::now(), cx.reduce_motion());
+        let still = cx.reduce_motion() || !window.is_window_active();
+        let place = self.book.borrow_mut().place(&self.key, f32::from(bounds.origin.y), Instant::now(), still);
         if place.moving { request_frame(window, cx); }
         let offset = point(px(0.), px(place.dy));
         if place.lift {
@@ -532,6 +536,23 @@ mod tests {
     #[test]
     fn pulse_ends() {
         assert!((pulse_wave(0.) - 0.).abs() < 1e-6 && (pulse_wave(0.5) - 1.).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stopping_motion_discards_an_inflight_slide_and_highlight() {
+        let (mut book, now) = (FlipBook::default(), Instant::now());
+        book.begin(&entries(&[("a", "machine"), ("b", "machine")]), now, false);
+        book.place("a", 0., now, false);
+        book.place("b", 40., now, false);
+        let moved = entries(&[("b", "working"), ("a", "machine")]);
+        book.begin(&moved, now, false);
+        assert!(book.place("b", 0., now, false).moving);
+        assert!(book.arrival("b", now).is_some());
+        book.begin(&moved, now, true);
+        assert_eq!(book.place("b", 0., now, true), Placement { dy: 0., lift: false, moving: false });
+        assert_eq!(book.arrival("b", now), None);
+        book.begin(&moved, now, false);
+        assert!(!book.place("b", 0., now, false).moving, "voltar ao foco não repete a transição");
     }
 
     #[test]
