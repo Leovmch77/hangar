@@ -756,6 +756,13 @@ impl RuntimeRegistry {
             escuta:field("escuta"),token:field("token"),versao:cano.and_then(|cano|cano["versao"].as_u64()).and_then(|v|u32::try_from(v).ok()).unwrap_or(2) };
         let target = RuntimeTarget { key,generation,name:name.into(),provider:"claude".into(),binding,transcript,
             created:meta.get("created").and_then(Value::as_f64).unwrap_or(0.0),metadata,lease_path,state_path,projection_dir:queue_dir };
+        // A vida fechada aqui com outro processo de pé (o Claude que sobreviveu ao cano): subir outro seriam dois
+        // na mesma conversa. O cano gravado no sidecar é o que a abertura adota, não conta.
+        let closed=self.barrier(&target.key).await.closed.lock().ok().and_then(|closed|closed.clone());
+        if let Some(closed)=closed && closed.pid!=i64::from(target.binding.pid)
+            && !super::lifecycle::process_absent(&crate::list::procs::SystemProcs::default(),closed.pid,closed.birth).unwrap_or(false) {
+            return Some(Err(RuntimeError::new("lifecycle_agent_still_alive","o Claude anterior desta sessão ainda está vivo; nada novo sobe por cima dele")));
+        }
         Some(if launch { self.open_with_launch(target,dir).await } else { self.open_managed(target,dir).await }.map(|_|()))
     }
     /// Ambiente-base do Codex (o de teste, se injetado), para a troca de modo montar lançador e conta.
@@ -1586,7 +1593,7 @@ impl RuntimeRegistry {
             Some(entry) if entry.generation == generation=>(entry.handle.clone(),entry.lease_path.clone(),entry.name.clone(),entry.mods_life,entry.runtime_target.clone(),entry.cano_birth,entry.relaunch.clone(),entry.settings_owner.clone()),
             _=>return Err(failure("runtime_generation")),
         };
-        let closed_life=match &handle {
+        let mut closed_life=match &handle {
             EntryHandle::Terminal {target,..}=>Some(super::lifecycle::ClosedLife {name:name.clone(),binding:crate::terminal_facts::LocalTerminalFacts::binding(target),pid:i64::from(target.metadata.agent_pid),birth:target.metadata.agent_birth,state_path:target.state_path.clone(),lease_path:target.lease_path.clone(),projection:target.projection_dir.clone()}),
             EntryHandle::Headless(_) if runtime_target.as_ref().is_some_and(|target|target.provider=="claude")=> {
                 let target=runtime_target.as_ref().unwrap();
@@ -1621,12 +1628,17 @@ impl RuntimeRegistry {
                 cano.extra.insert("process_birth".into(),json!(born));
                 // O ator já parou: erro daqui em diante é o valor de `stopped`, para a entrada sair abaixo em vez
                 // de ficar com o ator morto.
-                async {
+                let killed:Result<(),RuntimeError>=async {
                     let dir=super::lifecycle::claude_sidecar_dir()?;
                     process::kill(&cano,key,&dir).await.map_err(|e|RuntimeError::new(e.code(),"o cano da sessão não foi encerrado"))?;
                     if let Some(recipe)=&recipe {let (pid,birth)=recipe.agent_identity();super::lifecycle::wait_absent(procs.as_ref(),pid,birth,"lifecycle_agent_still_alive").await?;}
                     Ok(())
-                }.await
+                }.await;
+                // O cano morreu e o Claude não: a vida fechada é a dele, e nada sobe por cima enquanto ele viver.
+                if let (Err(error),Some(closed),Some(recipe))=(&killed,closed_life.as_mut(),&recipe) && error.code=="lifecycle_agent_still_alive" {
+                    (closed.pid,closed.birth)=recipe.agent_identity();
+                }
+                killed
                 }
             },
             (EntryHandle::Headless(handle),true)=>handle.stop_killing().await,
@@ -3502,24 +3514,29 @@ mod tests {
     /// Cano de verdade (um `sh` com o argv do cano da chave, em grupo próprio) e um `claude` de mentira filho
     /// dele, que some junto com o cano: o bastante para o fechamento provar e matar a vida.
     #[cfg(target_os="linux")]
-    struct ParkProcesses {canos:std::sync::Mutex<Vec<i64>>,dir:std::path::PathBuf,stuck_agent:std::sync::atomic::AtomicBool}
+    /// `agent`: um processo de verdade fora do grupo do cano faz o `claude`, e sobrevive a ele.
+    struct ParkProcesses {canos:std::sync::Mutex<Vec<i64>>,dir:std::path::PathBuf,agent:std::sync::Mutex<Option<i64>>}
     #[cfg(target_os="linux")]
     const FAKE_AGENT:i64=10_000_000;
     #[cfg(target_os="linux")]
     impl crate::list::procs::ProcessView for ParkProcesses {
         fn children(&self,_:Duration)->std::io::Result<Arc<crate::list::procs::ChildrenMap>> {
-            Ok(Arc::new(self.canos.lock().unwrap().iter().filter(|pid|process::probe_alive(**pid as u32)).map(|pid|(*pid,vec![pid+FAKE_AGENT])).collect()))
+            let agent=*self.agent.lock().unwrap();
+            Ok(Arc::new(self.canos.lock().unwrap().iter().filter(|pid|process::probe_alive(**pid as u32)).map(|pid|(*pid,vec![agent.unwrap_or(pid+FAKE_AGENT)])).collect()))
         }
         fn argv(&self,_:i64)->Vec<String> {vec![]}
         fn cwd(&self,_:i64)->Option<std::path::PathBuf> {Some(self.dir.clone())}
         fn env_var(&self,_:i64,_:&str)->std::io::Result<Option<std::ffi::OsString>> {Ok(None)}
         fn start_time(&self,pid:i64)->Option<f64> {crate::list::procs::SystemProcs::default().start_time(pid)}
         fn recipe(&self,pid:i64)->std::io::Result<crate::list::procs::ProcessRecipe> {
+            let environ=vec![format!("CLAUDE_CONFIG_DIR={}",self.dir.display()).into()];
+            if *self.agent.lock().unwrap()==Some(pid) {
+                let birth=crate::list::procs::SystemProcs::default().recipe(pid)?.birth;
+                return Ok(crate::list::procs::ProcessRecipe {pid,birth,executable:"/fixture/claude".into(),cwd:self.dir.clone(),argv:vec!["claude".into(),"--session-id".into(),"a".into()],environ,cgroup:None});
+            }
             let canos=self.canos.lock().unwrap().clone();
             let cano=if canos.contains(&pid) {pid} else {pid-FAKE_AGENT};
-            // `stuck_agent`: o `claude` sobrevive ao cano, como o agente que não morreu no fechamento.
-            let stuck=pid!=cano && self.stuck_agent.load(std::sync::atomic::Ordering::Relaxed);
-            if !canos.contains(&cano) || (!stuck && !process::probe_alive(cano as u32)) {return Err(std::io::ErrorKind::NotFound.into());}
+            if !canos.contains(&cano) || !process::probe_alive(cano as u32) {return Err(std::io::ErrorKind::NotFound.into());}
             let (birth,argv,executable)=if pid==cano {(crate::terminal_facts::agent_birth(cano as u32).unwrap(),vec!["hangar-cano".into()],"/fixture/hangar-cano")}
                 else {(1000.0,vec!["claude".into(),"--session-id".into(),"a".into()],"/fixture/claude")};
             Ok(crate::list::procs::ProcessRecipe {pid,birth,executable:executable.into(),cwd:self.dir.clone(),argv,environ:vec![format!("CLAUDE_CONFIG_DIR={}",self.dir.display()).into()],cgroup:None})
@@ -3566,7 +3583,7 @@ mod tests {
             "cano":{"pid":first.0.id(),"escuta":escuta,"token":"fixture","versao":2}});
         let dir=home.path().join(".hangar/claude-headless");std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("cl.json"),sidecar.to_string()).unwrap();
-        let processes=Arc::new(ParkProcesses {canos:std::sync::Mutex::new(vec![i64::from(first.0.id())]),dir:home.path().into(),stuck_agent:Default::default()});
+        let processes=Arc::new(ParkProcesses {canos:std::sync::Mutex::new(vec![i64::from(first.0.id())]),dir:home.path().into(),agent:Default::default()});
         let env=crate::accounts::environment::AccountEnvironment::from_map([("HOME".to_owned(),home.path().to_string_lossy().into_owned())].into());
         let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"fixture".into(),"instance".into()).with_processes(processes.clone()).with_codex_environment(env));
         registry.bind_lifecycle();
@@ -3644,7 +3661,7 @@ mod tests {
             "cano":{"pid":first.0.id(),"escuta":escuta,"token":"fixture","versao":2}});
         let dir=home.path().join(".hangar/claude-headless");std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("cl.json"),sidecar.to_string()).unwrap();
-        let processes=Arc::new(ParkProcesses {canos:std::sync::Mutex::new(vec![i64::from(first.0.id())]),dir:home.path().into(),stuck_agent:Default::default()});
+        let processes=Arc::new(ParkProcesses {canos:std::sync::Mutex::new(vec![i64::from(first.0.id())]),dir:home.path().into(),agent:Default::default()});
         let env=crate::accounts::environment::AccountEnvironment::from_map([("HOME".to_owned(),home.path().to_string_lossy().into_owned())].into());
         let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"fixture".into(),"instance".into()).with_processes(processes.clone()).with_codex_environment(env));
         registry.bind_lifecycle();
@@ -3685,7 +3702,8 @@ mod tests {
     }
 
     /// Estacionar com o agente que não morre: o erro aparece uma vez e a sessão sai do Rust, em vez de ficar
-    /// com o ator parado e cada rodada seguinte dar `runtime_closed`.
+    /// com o ator parado e cada rodada seguinte dar `runtime_closed`. Enquanto o agente viver, a sessão
+    /// fica perdida com código e a escrita seguinte não sobe outro Claude na mesma conversa.
     #[cfg(target_os="linux")]
     #[tokio::test]
     async fn a_park_whose_agent_survives_releases_the_entry() {
@@ -3696,17 +3714,23 @@ mod tests {
             "cano":{"pid":first.0.id(),"escuta":escuta,"token":"fixture","versao":2}});
         let dir=home.path().join(".hangar/claude-headless");std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("cl.json"),sidecar.to_string()).unwrap();
-        let processes=Arc::new(ParkProcesses {canos:std::sync::Mutex::new(vec![i64::from(first.0.id())]),dir:home.path().into(),stuck_agent:Default::default()});
+        let processes=Arc::new(ParkProcesses {canos:std::sync::Mutex::new(vec![i64::from(first.0.id())]),dir:home.path().into(),agent:Default::default()});
         let env=crate::accounts::environment::AccountEnvironment::from_map([("HOME".to_owned(),home.path().to_string_lossy().into_owned())].into());
         let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"fixture".into(),"instance".into()).with_processes(processes.clone()).with_codex_environment(env));
         registry.bind_lifecycle();
         let hubs=crate::side::Hubs::default();registry.bind_hubs(hubs.downgrade());
+        let agent=Reaped(std::process::Command::new("sleep").arg("300").spawn().unwrap());
+        *processes.agent.lock().unwrap()=Some(i64::from(agent.0.id()));
         registry.open_claude_headless("cl",false).await.unwrap().unwrap();
-        processes.stuck_agent.store(true,std::sync::atomic::Ordering::Relaxed);
         let error=registry.park_claude(&key,1,"cl",Duration::ZERO).await.expect_err("o agente não morreu");
         assert_eq!(error.code,"lifecycle_agent_still_alive");
         assert!(!registry.has_entry(None,"cl").await,"a sessão sai do Rust com o ator parado");
         assert!(registry.park_claude(&key,1,"cl",Duration::ZERO).await.unwrap().is_none(),"a rodada seguinte não acha o que estacionar");
+        assert!(registry.runtime_lost("cl").await.is_some(),"perdida com código, não pronta para entregar");
+        let refused=registry.adopt_now("cl").await.expect("é sessão Claude sem terminal daqui").expect_err("nada sobe por cima do Claude vivo");
+        assert_eq!(refused.code,"lifecycle_agent_still_alive");
+        assert!(!registry.has_entry(None,"cl").await,"nenhuma vida nova");
+        drop(agent);
         server.abort();
     }
 }
