@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
@@ -6,17 +6,18 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { listClaudeConfigsForServer, probeServerResponse, rotuloEstado, type AggSession, type CotaContaResumo } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 import { Icon, type IconName } from '../../ui/Icon';
-import { WorkingMark } from '../../ui/WorkingMark';
+import { SPACE } from '../../theme/scale';
 import { useSessions } from '../../stores/sessions';
 import { useServers } from '../../stores/servers';
 import { useLiveVoice } from '../voice/liveVoiceStore';
 import { accountQuotaLine, recentSessions } from './drawerMenu';
 import { HeadlessSignal } from './HeadlessSignal';
+import { SessionAvatar } from './SessionAvatar';
 
 const RECENT = 5;
 const NO_ROWS: AggSession[] = [];
 
-// Menu da gaveta no padrão dos apps de chat: destinos, recentes só pelo nome e a ação principal
+// Menu da gaveta no padrão dos apps de chat: destinos, recentes compactos e a ação principal
 // flutuando embaixo. A lista completa de sessões mora no Início. `onClose` roda antes de navegar.
 export function DrawerMenu({ open, onClose, onOpenServers }: { open: boolean; onClose: () => void; onOpenServers: () => void }) {
   const { theme } = useUnistyles();
@@ -30,7 +31,8 @@ export function DrawerMenu({ open, onClose, onOpenServers }: { open: boolean; on
   const voiceOk = !!server && !server.invite && !server.inviteEnded && !server.removed;
   const quota = useAccountQuota(server?.invite ? undefined : server, open);
 
-  const go = (path: string) => { onClose(); router.push(path as never); };
+  const go = useCallback((path: string) => { onClose(); router.push(path as never); }, [onClose, router]);
+  const openSession = useCallback((session: AggSession) => go(`/s/${session.serverId}/${session.name}`), [go]);
   const ink = theme.tokens.text.primary;
   const item = (icon: IconName, label: string, onPress: () => void, hint?: string) => (
     <Pressable key={label} onPress={onPress} accessibilityRole="button" accessibilityLabel={hint ? `${label}, ${hint}` : label}
@@ -58,7 +60,7 @@ export function DrawerMenu({ open, onClose, onOpenServers }: { open: boolean; on
         {item('CircleUser', m.contas_titulo(), () => go('/config/contas'), quota || undefined)}
         {item('GitBranch', m.worktrees_titulo(), () => go('/config/worktrees'))}
         {recent.length ? <Text style={styles.section} accessibilityRole="header">{m.conversas_recentes()}</Text> : null}
-        {recent.map((s) => <RecentRow key={`${s.serverId}:${s.name}`} session={s} onPress={() => go(`/s/${s.serverId}/${s.name}`)} />)}
+        {recent.map((s) => <RecentRow key={`${s.serverId}:${s.name}`} session={s} onOpen={openSession} />)}
         <Pressable onPress={onClose} accessibilityRole="button" style={({ pressed }) => [styles.item, pressed && styles.pressed]}>
           <Text style={styles.more}>{m.native_sidebar_all_sessions()}</Text>
         </Pressable>
@@ -78,21 +80,25 @@ export function DrawerMenu({ open, onClose, onOpenServers }: { open: boolean; on
   );
 }
 
-function RecentRow({ session, onPress }: { session: AggSession; onPress: () => void }) {
+const RecentRow = memo(function RecentRow({ session, onOpen }: { session: AggSession; onOpen: (session: AggSession) => void }) {
   const { theme } = useUnistyles();
-  const waiting = session.state === 'awaiting_input';
   return (
-    <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={`${session.name}${session.headless === true ? `, ${m.criar_modo_exec_headless()}` : ''}, ${rotuloEstado(session.state)}`}
-      style={({ pressed }) => [styles.item, pressed && styles.pressed]}>
-      {session.state === 'working'
-        ? <WorkingMark size={20} color={theme.tokens.accent.base} />
-        : <Icon name="MessageCircle" size={20} color={theme.tokens.text.secondary} />}
-      <Text style={styles.itemText} numberOfLines={1}>{session.name}</Text>
-      {session.headless === true ? <HeadlessSignal /> : null}
-      {waiting ? <View style={[styles.dot, { backgroundColor: theme.tokens.status.warning }]} /> : null}
+    <Pressable onPress={() => onOpen(session)} accessibilityRole="button" accessibilityLabel={`${session.name}${session.headless === true ? `, ${m.criar_modo_exec_headless()}` : ''}, ${rotuloEstado(session.state)}, ${session.serverLabel}`}
+      style={({ pressed }) => [styles.item, styles.recent, pressed && styles.pressed]}>
+      <SessionAvatar session={session} size={SPACE[8]} />
+      <View style={styles.recentText}>
+        <View style={styles.recentLine}>
+          <Text style={styles.itemText} numberOfLines={1}>{session.name}</Text>
+          {session.headless === true ? <HeadlessSignal /> : null}
+        </View>
+        <View style={styles.recentLine} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+          <Icon name="Monitor" size={SPACE[3]} color={theme.tokens.text.muted} />
+          <Text style={styles.serverLabel} numberOfLines={1}>{session.serverLabel}</Text>
+        </View>
+      </View>
     </Pressable>
   );
-}
+});
 
 // A cota é só uma dica na linha: sem leitura, a linha fica sem ela e a tela de Contas mostra o motivo.
 // Relida a cada abertura: a gaveta fica montada e o número de horas atrás pareceria atual.
@@ -124,7 +130,10 @@ const styles = StyleSheet.create((theme) => ({
   hint: { flex: 1, textAlign: 'right', fontSize: theme.base.text.xs, color: theme.tokens.text.muted },
   section: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted, paddingHorizontal: theme.base.space[5], paddingTop: theme.base.space[4], paddingBottom: theme.base.space[1] },
   more: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted },
-  dot: { width: 8, height: 8, borderRadius: theme.base.radius.full, marginLeft: 'auto' },
+  recent: { minHeight: 48, paddingVertical: theme.base.space[1] },
+  recentText: { flex: 1, minWidth: 0 },
+  recentLine: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1] },
+  serverLabel: { ...theme.type.caption, flexShrink: 1, color: theme.tokens.text.muted },
   bottom: { position: 'absolute', left: 16, right: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   pill: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingHorizontal: theme.base.space[4], borderRadius: theme.base.radius.full, backgroundColor: theme.tokens.text.primary, boxShadow: '0px 6px 20px rgba(0,0,0,0.35)' },
   pillPressed: { opacity: 0.85 },

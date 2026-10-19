@@ -9,9 +9,9 @@ import { rotuloEstado } from '@hangar/core';
 const nav = vi.hoisted(() => ({ push: vi.fn(), order: [] as string[] }));
 const state = vi.hoisted(() => ({
   rows: [
-    { serverId: 'casa', name: 'antiga', state: 'idle', last_activity: 1 },
-    { serverId: 'casa', name: 'mobile-menu', state: 'working', last_activity: 9, headless: true },
-    { serverId: 'casa', name: 'pm19016', state: 'awaiting_input', last_activity: 5 },
+    { serverId: 'casa', serverLabel: 'Casa', name: 'antiga', provider: 'kimi', state: 'idle', last_activity: 1 },
+    { serverId: 'casa', serverLabel: 'Casa', name: 'mobile-menu', provider: 'codex', state: 'working', last_activity: 9, headless: true },
+    { serverId: 'trabalho', serverLabel: 'Trabalho', name: 'pm19016', provider: 'claude', state: 'awaiting_input', last_activity: 5 },
     { serverId: 'casa', name: 'encerrada', state: 'dead', last_activity: 10 },
   ],
   server: { id: 'casa', label: 'Casa', baseUrl: 'http://x', token: 't' },
@@ -23,7 +23,6 @@ vi.mock('../../stores/servers', () => ({
   useServers: (pick: (s: unknown) => unknown) => pick({ activeId: 'casa', servers: [state.server] }),
 }));
 vi.mock('../voice/liveVoiceStore', () => ({ useLiveVoice: { getState: () => ({ openFor: state.openVoice }) } }));
-vi.mock('../../ui/WorkingMark', () => ({ WorkingMark: () => createElement('span', { 'data-testid': 'working' }) }));
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
   listClaudeConfigsForServer: async () => [{ path: '/b', label: 'Felizardo e Batista', active: true }],
@@ -59,9 +58,28 @@ it('recentes: mais novas primeiro, sem encerradas', () => {
   const names = ['mobile-menu', 'pm19016', 'antiga'].map((n) => startsWith(`${n},`));
   expect(names.every(Boolean)).toBe(true);
   expect(startsWith('encerrada')).toBeUndefined();
-  expect(startsWith('pm19016,')!.getAttribute('aria-label')).toBe(`pm19016, ${rotuloEstado('awaiting_input')}`);
+  expect(startsWith('pm19016,')!.getAttribute('aria-label')).toBe(`pm19016, ${rotuloEstado('awaiting_input')}, Trabalho`);
   act(() => startsWith('pm19016,')!.click());
-  expect(nav.push).toHaveBeenLastCalledWith('/s/casa/pm19016');
+  expect(nav.push).toHaveBeenLastCalledWith('/s/trabalho/pm19016');
+});
+
+it('recentes usam avatar com estado e mostram só nome e máquina em duas linhas compactas', () => {
+  for (const name of ['mobile-menu', 'pm19016', 'antiga']) {
+    const row = startsWith(`${name},`)!;
+    const avatar = row.querySelector('[testid="session-avatar"]') as HTMLElement | null;
+    expect(avatar).not.toBeNull();
+    expect(parseFloat(avatar!.style.width)).toBeLessThan(36);
+    expect(parseFloat(row.style.minHeight)).toBeGreaterThanOrEqual(44);
+    expect(parseFloat(row.style.minHeight)).toBeLessThanOrEqual(48);
+    expect(row.querySelector('[testid="session-avatar-ring"]')).not.toBeNull();
+    const serverLabel = name === 'pm19016' ? 'Trabalho' : 'Casa';
+    const serverText = [...row.querySelectorAll('span')].find((el) => el.textContent === serverLabel)!;
+    expect(serverText.previousElementSibling?.tagName.toLowerCase()).toBe('svg');
+    expect(row.textContent).toBe(`${name}${serverLabel}`);
+    expect(row.getAttribute('aria-label')).toContain(name === 'pm19016' ? 'Trabalho' : 'Casa');
+  }
+  expect(startsWith('mobile-menu,')!.querySelector('[testid="session-avatar-dot"]')).not.toBeNull();
+  expect(startsWith('antiga,')!.querySelector('[testid="session-avatar-badge"]')).not.toBeNull();
 });
 
 it('recentes mostram o sinal e anunciam sessão sem terminal', () => {
