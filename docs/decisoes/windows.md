@@ -119,6 +119,31 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `install-native.ps1`) apaga os restos que der e, com o `.old` preso, usa `.old-<horário>`. Exe
   em disco que já tem o sha256 da oferta não se baixa nem se troca: o app só reabre. Medição em
   [Troca do app nativo com o exe anterior preso](#troca-do-app-nativo-com-o-exe-anterior-preso).
+- **O terminal de sessão nasce FORA do Job do `hangar-server`.** O backend contém o Rust num Job
+  que mata o grupo ao fechar (`runtime_process.WindowsJob`), e no psmux cada sessão tem servidor
+  próprio, subido pelo `new-session`. Por isso o Job leva `0x800` (permite sair) e o `new-session`
+  do `ProcessMux` nasce com `CREATE_BREAKAWAY_FROM_JOB`. Sem isso, todo reinício do backend
+  (atualização incluída) mata as sessões que o Rust abriu. Medição em
+  [Sessão morta no reinício do backend](#sessão-morta-no-reinício-do-backend-19102026).
+
+## Sessão morta no reinício do backend (19/10/2026)
+
+DELPHI-02, psmux 3.3.x. A atualização das 09:50 reiniciou o backend e a sessão `hangar`, criada
+pelo `hangar-server` às 09:35, sumiu (`sessao.sumiu session_gone_without_close`), sem registro de
+saída no transcript. Outra sessão, aberta fora do lançador, sobreviveu. O
+`runtime-process.json` listava como membros do Job o `tmux.exe server -s <sessão>` e o `claude.exe`
+das sessões que o Rust abriu; as abertas por outro caminho não estavam lá.
+
+Sonda com o psmux real, lançada fora do Job da sessão (pelo WMI): processo num Job `0x2000` roda
+`tmux new-session`, e o Job é fechado.
+
+| Job do servidor | `new-session` | Sessão depois de fechar o Job |
+|---|---|---|
+| `0x2000` | sem flag | morta |
+| `0x2000 \| 0x800` | `CREATE_BREAKAWAY_FROM_JOB` | viva |
+| idem, dentro de Job externo sem `0x800` (como o do backend) | idem | viva |
+
+Sem o `0x800` no Job, a flag no `CreateProcess` não dá erro: o filho fica no Job e morre junto.
 
 ## Terminais de atalho no psmux
 

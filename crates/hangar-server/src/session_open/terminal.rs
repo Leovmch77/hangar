@@ -332,6 +332,8 @@ impl Mux for ProcessMux {
             let started = std::time::Instant::now();
             let mut command = client_command(program);
             command.args(args).stdin(std::process::Stdio::null()).kill_on_drop(true);
+            #[cfg(windows)]
+            if creation_flags(args) != 0 { command.creation_flags(creation_flags(args)); }
             let (out, failure) = match tokio::time::timeout(self.timeout, command.output()).await {
                 Ok(Ok(out)) => (MuxOutput { code: out.status.code(), stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
                     stderr: String::from_utf8_lossy(&out.stderr).into_owned() }, None),
@@ -346,6 +348,13 @@ impl Mux for ProcessMux {
             out
         })
     }
+}
+
+/// O `new-session` sai do Job do servidor (`CREATE_BREAKAWAY_FROM_JOB`): o psmux sobe dele o servidor
+/// da sessão, e dentro do Job a sessão morreria quando o backend reinicia.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn creation_flags(args: &[String]) -> u32 {
+    if args.first().is_some_and(|cmd| cmd == "new-session") { 0x0100_0000 } else { 0 }
 }
 
 static RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -607,6 +616,17 @@ pub(crate) mod tests {
         assert!(exported.len() >= 20, "o padrão não achou as variáveis do motor: {exported:?}");
         let missing: Vec<&&str> = exported.iter().filter(|var| !NOT_INHERITED.contains(var)).collect();
         assert!(missing.is_empty(), "o pane herdaria do motor: {missing:?}");
+    }
+
+    /// Só o `new-session` sai do Job do servidor: o psmux sobe o servidor da sessão a partir dele, e
+    /// dentro do Job a sessão morreria no reinício do backend.
+    #[test]
+    fn only_new_session_breaks_away_from_the_server_job() {
+        let args = |cmd: &str| vec![cmd.to_owned(), "-d".to_owned()];
+        assert_eq!(creation_flags(&args("new-session")), 0x0100_0000);
+        for cmd in ["has-session", "send-keys", "kill-session", "list-sessions"] {
+            assert_eq!(creation_flags(&args(cmd)), 0, "{cmd}");
+        }
     }
 
     #[tokio::test]

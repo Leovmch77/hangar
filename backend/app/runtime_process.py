@@ -62,7 +62,9 @@ class WindowsJob:
             return
         try:
             limits = Extended()
-            limits.basic.flags = 0x2000  # O handle pertence só à vigia; fechar encerra o grupo.
+            # O handle pertence só à vigia; fechar encerra o grupo. 0x800: o terminal de sessão sai do
+            # Job ao nascer (CREATE_BREAKAWAY_FROM_JOB), senão o reinício do backend mata a sessão.
+            limits.basic.flags = 0x2000 | 0x800
             self.check(self.api.SetInformationJobObject(self.handle, 9, c.byref(limits), c.sizeof(limits)))
         except BaseException:
             self.close()

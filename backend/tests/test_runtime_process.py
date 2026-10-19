@@ -197,6 +197,35 @@ def test_windows_jobs_keep_unique_and_explicit_names_with_fake_api(monkeypatch):
         first.close();second.close();existing.close()
 
 
+@pytest.mark.skipif(sys.platform != 'win32', reason='Job Object só existe no Windows')
+def test_windows_job_lets_terminal_sessions_break_away(tmp_path):
+    from app.runtime_process import WindowsJob
+    pid_file = tmp_path / 'pid'
+    inner = ("import subprocess,sys,time;"
+             "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],creationflags=0x01000000|0x08000000);"
+             f"open(r'{pid_file}','w').write(str(p.pid));time.sleep(60)")
+    job = WindowsJob()
+    proc = subprocess.Popen([sys.executable, '-c', inner], creationflags=0x00000004 | 0x08000000)
+    session = None
+    try:
+        job.assign(proc)
+        psutil.Process(proc.pid).resume()
+        deadline = time.monotonic() + 15
+        while not (pid_file.exists() and pid_file.read_text()):
+            assert proc.poll() is None, 'o Job recusou a saída do filho'
+            assert time.monotonic() < deadline, 'filho com breakaway não nasceu'
+            time.sleep(.05)
+        session = psutil.Process(int(pid_file.read_text()))
+        job.terminate()
+        proc.wait(5)
+        assert session.is_running(), 'o fim do Job derrubou o processo que saiu dele'
+    finally:
+        proc.kill()
+        if session is not None and session.is_running():
+            session.kill()
+        job.close()
+
+
 def test_job_cleanup_terminates_even_when_members_cannot_be_listed(monkeypatch):
     from app.runtime_process import Containment, cleanup
     events = []
