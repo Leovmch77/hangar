@@ -131,13 +131,18 @@ pub async fn kill_terminal(io:&dyn TerminalIo,procs:&dyn ProcessView,binding:&Te
     let target=if binding.windows {binding.name.clone()} else {format!("={}",binding.name)};
     let output=mux(io,binding,vec!["kill-session".into(),"-t".into(),target]).await?;
     if !output.success {return Err(failure("lifecycle_kill"));}
-    // O `kill-session` só avisa o agente (SIGHUP): ele leva um instante para sair.
+    // O `kill-session` só avisa o agente (SIGHUP): ele leva um instante para sair, e no meio da saída a leitura
+    // dele pode falhar. Só o prazo decide: sai o último resultado, vivo ou ilegível.
     let deadline=std::time::Instant::now()+Duration::from_secs(5);
-    while !process_absent(procs,agent_pid,birth)? {
-        if std::time::Instant::now()>=deadline {return Err(failure("lifecycle_still_alive"));}
+    loop {
+        let last=match process_absent(procs,agent_pid,birth) {
+            Ok(true)=>return Ok(()),
+            Ok(false)=>failure("lifecycle_still_alive"),
+            Err(error)=>error,
+        };
+        if std::time::Instant::now()>=deadline {return Err(last);}
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    Ok(())
 }
 
 pub async fn kill_pane(io:&dyn TerminalIo,binding:&TerminalBinding,expected:&ProcessRecipe,procs:&dyn ProcessView)->Result<(),RuntimeError> {
@@ -319,8 +324,10 @@ mod tests {
             fn env_var(&self,_:i64,_:&str)->std::io::Result<Option<std::ffi::OsString>> {Ok(None)}
             fn start_time(&self,_:i64)->Option<f64> {None}
             fn recipe(&self,pid:i64)->std::io::Result<crate::list::procs::ProcessRecipe> {
-                // Duas leituras antes do kill, mais duas logo depois com o agente ainda saindo.
-                let alive=self.calls.fetch_add(1,std::sync::atomic::Ordering::SeqCst)<4;
+                // Duas leituras antes do kill; logo depois, uma ilegível (o agente no meio da saída) e uma ainda viva.
+                let call=self.calls.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+                if call==2 {return Err(std::io::ErrorKind::PermissionDenied.into());}
+                let alive=call<4;
                 Ok(crate::list::procs::ProcessRecipe {pid,birth:if alive {7.0} else {8.0},executable:"claude".into(),cwd:"/".into(),argv:vec![],environ:vec![],cgroup:None})
             }
         }
