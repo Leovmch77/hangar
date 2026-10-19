@@ -8,14 +8,14 @@ use super::sidebar::Target;
 /// Cerca de quatro filhas à vista; o resto rola, para a faixa não empurrar a conversa.
 const LIST_MAX: f32 = 4. * 24.;
 
-/// O que não é pergunta nem pronto conta como trabalhando (carregando, sem estado).
+/// O que não é pergunta, pronto nem encerrado conta como trabalhando (carregando, sem estado).
 fn tone(state: &str) -> &'static str {
-    match state { "awaiting_input" => "awaiting_input", "idle" => "idle", _ => "working" }
+    match state { "awaiting_input" => "awaiting_input", "idle" => "idle", "dead" => "dead", _ => "working" }
 }
 
 /// As palavras do `rotuloEstado` do web, pelo tom.
 fn state_label(tone: &str) -> String {
-    tr_shared(match tone { "awaiting_input" => "estado_aguardando", "idle" => "estado_pronto", _ => "estado_em_execucao" }, &[])
+    tr_shared(match tone { "awaiting_input" => "estado_aguardando", "idle" => "estado_pronto", "dead" => "estado_encerrado", _ => "estado_em_execucao" }, &[])
 }
 
 fn dot(state: &str) -> Div { div().flex_shrink_0().size(px(8.)).rounded_full().bg(theme::status(tone(state))) }

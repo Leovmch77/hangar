@@ -81,7 +81,10 @@
   }
   .right { margin-left: auto; display: flex; gap: var(--space-2); align-items: center; white-space: nowrap; }
   .dots { display: flex; gap: 6px; }
-  .list { list-style: none; margin: 4px 0 0; padding: 4px 0 0; border-top: 1px solid var(--border-subtle); }
+  .list {
+    list-style: none; margin: 4px 0 0; padding: 4px 0 0; border-top: 1px solid var(--border-subtle);
+    max-height: 96px; overflow-y: auto;
+  }
   .row {
     display: grid; grid-template-columns: 10px auto auto auto minmax(0, 1fr) auto; gap: var(--space-2);
     align-items: center; padding: 2px var(--space-2) 2px calc(var(--space-2) + 18px);

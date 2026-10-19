@@ -52,7 +52,9 @@ pub fn spawn(st: Arc<AppState>) -> Option<JoinHandle<()>> {
         // Pânico não pode parar o retorno de vez e calado; pânico em laço não pode girar a cada 2 s.
         let mut pause = PANIC_PAUSE;
         loop {
-            match tokio::spawn(run(st.clone(), groups.clone())).await {
+            // Abortar o laço de fora tem de abortar o `run`: soltar o JoinHandle só desanexa.
+            let mut inner = crate::AbortOnDrop(tokio::spawn(run(st.clone(), groups.clone())));
+            match (&mut inner.0).await {
                 Err(e) if e.is_panic() => {
                     report(&st, "", "link_return_panicked", "retorno da filha ligada caiu; recomeça", "");
                     tokio::time::sleep(pause).await;
@@ -170,10 +172,11 @@ impl RateLimit {
     fn allow(&mut self, child: &str, now: Instant) -> bool {
         let hits = self.0.entry(child.to_owned()).or_default();
         while hits.front().is_some_and(|t| now.duration_since(*t) >= RATE_WINDOW) { hits.pop_front(); }
-        if hits.len() >= RATE_MAX { return false; }
-        hits.push_back(now);
-        true
+        hits.len() < RATE_MAX
     }
+
+    /// Só entrega feita conta: tentativa que falhou passageira e volta não pode gastar vaga.
+    fn record(&mut self, child: &str, now: Instant) { self.0.entry(child.to_owned()).or_default().push_back(now); }
 
     /// Um aviso de limite por filha por janela.
     fn notice_once(&mut self, child: &str, now: Instant) -> bool {
@@ -462,6 +465,7 @@ async fn give_back(st: &AppState, row: &SessionRow, check: &Check<'_>, reply_at:
         report(st, child, code, "entrega da resposta da filha ao pai falhou", &status.as_u16().to_string());
         return if transient(status) { Outcome::Retry } else { Outcome::Done };
     }
+    if dropped.is_none() { rate.record(child, Instant::now()); }
     let (dir, name) = (st.hangar_dir.clone(), child.to_owned());
     let written = blocking(move || link_state::update(&dir, |all| {
         if let Some(entry) = all.get_mut(&name) { entry.returned_at = Some(reply_at); entry.returned_key = Some(key); }
@@ -684,7 +688,12 @@ mod tests {
     fn at_most_three_returns_per_child_in_ten_minutes() {
         let mut rate = RateLimit::default();
         let t0 = Instant::now();
-        for i in 0..RATE_MAX { assert!(rate.allow("f", t0 + Duration::from_secs(30 * i as u64)), "{i}"); }
+        assert!(rate.allow("f", t0) && rate.allow("f", t0), "consultar sem entregar não gasta vaga");
+        for i in 0..RATE_MAX {
+            let at = t0 + Duration::from_secs(30 * i as u64);
+            assert!(rate.allow("f", at), "{i}");
+            rate.record("f", at);
+        }
         assert!(!rate.allow("f", t0 + Duration::from_secs(120)));
         assert!(rate.allow("outra", t0 + Duration::from_secs(120)), "o limite é por filha");
         assert!(rate.allow("f", t0 + RATE_WINDOW + Duration::from_secs(1)));
