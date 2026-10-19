@@ -210,7 +210,7 @@ def _install(data: bytes, target: Path) -> None:
 
 
 def _fetch_one(url: str, files: object, plat: str, name: str, target: Path,
-               commit: str, tag: str | None) -> str | None:
+               commit: str, tag: str | None, hold: list | None = None) -> str | None:
     entry = files.get(f"{plat}/{name}") if isinstance(files, dict) else None
     if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) \
             or not isinstance(entry.get("sha256"), str):
@@ -227,6 +227,13 @@ def _fetch_one(url: str, files: object, plat: str, name: str, target: Path,
     if hashlib.sha256(data).hexdigest() != sha:
         diag.registrar("hangar_server.baixar", "erro", etapa="sha256", detalhe=name)
         return f"{name}: o sha256 não confere com a release; o binário anterior ficou"
+    if hold is not None:
+        hold.append((data, target, name, commit, tag))
+        return None
+    return _install_one(data, target, name, commit, tag)
+
+
+def _install_one(data: bytes, target: Path, name: str, commit: str, tag: str | None) -> str | None:
     try:
         _install(data, target)
     except OSError as e:
@@ -236,14 +243,23 @@ def _fetch_one(url: str, files: object, plat: str, name: str, target: Path,
     return None
 
 
+def install_held(hold: list) -> list[str]:
+    """Grava o que o `fetch(hold=...)` baixou e segurou. Devolve os avisos de quem não gravou."""
+    avisos = [a for item in hold if (a := _install_one(*item))]
+    for aviso in avisos:
+        _log.warning(aviso)
+    return avisos
+
+
 def fetch(base_url: str | None = None, dest: Path | None = None,
-          release: tuple[str, str | None, dict] | None = None) -> list[str] | None:
+          release: tuple[str, str | None, dict] | None = None, hold: list | None = None) -> list[str] | None:
     """Põe em `dest` os binários desta máquina, conferidos pelo sha256 do manifesto.
 
     `release` = (url, tag, manifesto) já lido por quem escolheu o commit do checkout: baixar por
     ele garante o binário daquela escolha, e um manifesto trocado depois só faz o sha não conferir.
     `None` = a release não tem build para esta máquina; `[]` = tudo no lugar; senão, os avisos.
     Nunca levanta: quem chama (instalador, botão Atualizar) segue sem os binários.
+    `hold` = lista onde o baixado e conferido fica, sem gravar, até o `install_held`.
     """
     plat = platform_key()
     if plat is None:
@@ -292,7 +308,7 @@ def fetch(base_url: str | None = None, dest: Path | None = None,
         if branch_tag and not _free(target):
             kept.append(name)
             continue
-        if aviso := _fetch_one(url, files, plat, name, target, commit, tag):
+        if aviso := _fetch_one(url, files, plat, name, target, commit, tag, hold):
             avisos.append(f"release {branch_tag} {missing}; da main, {aviso}" if branch_tag else aviso)
         elif branch_tag:
             installed.append(name)

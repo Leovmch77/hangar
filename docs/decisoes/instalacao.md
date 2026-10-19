@@ -77,7 +77,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   ativo, nunca por contagem de commits. Oferta republicada exigindo mais no meio do clique é
   descartada calada e o próximo ciclo refaz o plano.
 - **App só instala depois do servidor, e a ordem sobrevive a reabrir o app.** Depois do desfecho
-  `Updated`, o app relê `/api/client-api` e só instala se couber; o acompanhamento não desiste com o
+  `Updated`, o app relê `/api/client-api` e só instala se couber; não coube (API desconhecida,
+  oferta republicada, instalação manual), o servidor sai como sucesso e o app fica calado para o
+  próximo ciclo; o acompanhamento não desiste com o
   motor `rodando` (o teto vale só para leituras seguidas sem resposta) e para em 30 min. Antes do
   `POST /iniciar`, quando há app a instalar depois, grava `update-intent.json` em `appearance::dir()`
   (trava de arquivo contra duas instâncias); a rodada é o desfecho com `estado.ts` posterior à
@@ -89,7 +91,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `package.json` e `package-lock.json` da raiz, a mesma conta no CI e no motor. Atrás do topo, na main
   e com essas árvores limpas, o motor baixa a da chave e confere o sha256; 404 compila aqui calado,
   outra falha compila aqui e grava `atualizacao.tela_da_chave` no diário. Tela e binário do Rust baixam
-  em paralelo, cada um com o seu erro. A conferência do Chromium roda no máximo uma vez por dia
+  em paralelo, cada um com o seu erro; o binário só é gravado com a tela no lugar (tela que levanta
+  erro volta o checkout, e binário novo sob o Python velho recusaria o protocolo). A conferência do Chromium roda no máximo uma vez por dia
   (marca `chromium-ok` com menos de 24 h e sem "falhou" pula).
 - **Build do CI: testes ao lado do build, e o push novo cancela o run substituído.** No `server.yml`
   os testes de cada sistema são um job próprio, em paralelo ao build de release, e o `publish` daquele

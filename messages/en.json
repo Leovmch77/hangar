@@ -5962,7 +5962,6 @@
   "native_update_not_started": "The update did not start.",
   "native_update_silent": "The machine did not answer for 10 minutes. Check the server.",
   "native_update_too_long": "The server update ran past 30 minutes without finishing. Check the server.",
-  "native_app_update_server_short": "The server updated, but it stayed on API {api} and app {version} requires {need}. The app was not replaced.",
   "native_accounts_lead": "Accounts the sessions on this server can use, and the models connected to Claude Code.",
   "native_accounts_this_server": "This server: {server}",
   "native_accounts_subscriptions": "Subscriptions",

@@ -958,11 +958,14 @@ def _preparar(topologia: str, *, dist: bool = True, release: tuple | None = None
     if dist:
         # Tela e binário em paralelo: são dois downloads independentes. Sem o hangar-server o
         # Python atende sozinho: falha do binário é aviso, nunca etapa quebrada. A volta
-        # (`dist=False`) não baixa: a release é a mais nova, não a do commit de antes.
+        # (`dist=False`) não baixa: a release é a mais nova, não a do commit de antes. O binário
+        # só é gravado com a tela no lugar: tela que falha leva à volta do checkout, e um
+        # binário novo sob o Python velho recusaria o protocolo.
+        baixados: list = []
         with ThreadPoolExecutor(2) as ex:
             tela = ex.submit(_atualizar_dist)
-            binario = ex.submit(lambda: rust_release.fetch(release=release) if release
-                                else rust_release.fetch())
+            binario = ex.submit(lambda: rust_release.fetch(release=release, hold=baixados) if release
+                                else rust_release.fetch(hold=baixados))
         erros: list[Exception] = []
 
         def _resultado(f):
@@ -980,6 +983,8 @@ def _preparar(topologia: str, *, dist: bool = True, release: tuple | None = None
             _escrever(avisos=list(estado().get("avisos") or []) + novos)
         if erros:
             raise erros[0]
+        if baixados and (falhas := rust_release.install_held(baixados)):
+            _escrever(avisos=list(estado().get("avisos") or []) + falhas)
         _renovar_chromium()
 
 

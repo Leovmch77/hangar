@@ -984,20 +984,15 @@ impl Updater {
     }
 
     fn server_updated(&mut self, manual: bool, running: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
-        match self.offer.clone() {
-            Some(offer) if install_after(offer.requires_api, running) => return self.install_app(window, cx),
-            Some(offer) => {
-                let api = running.map_or_else(|| "?".to_owned(), |api| api.to_string());
-                let text = tr("app_update_server_short").replace("{version}", &offer.version)
-                    .replace("{need}", &offer.requires_api.to_string()).replace("{api}", &api);
-                window.push_notification(Notification::warning(text).id::<Updater>(), cx);
-            }
-            None => {
-                let version = self.server.as_ref().and_then(|s| s["versao_legivel"]["backend"].as_str()).unwrap_or("?").to_owned();
-                let text = if manual { tr("update_done_manual") } else { tr("update_done").replace("{version}", &version) };
-                window.push_notification(Notification::success(text).id::<Updater>(), cx);
-            }
+        if let Some(offer) = self.offer.clone() {
+            if install_after(offer.requires_api, running) { return self.install_app(window, cx); }
+            // O servidor atualizou; o app espera, calado, que o próximo ciclo refaça o plano com a API real.
+            crate::log_line(&format!("update: app {} exige a API {} e o servidor está na {:?}; o app fica para o próximo ciclo",
+                offer.version, offer.requires_api, running));
         }
+        let version = self.server.as_ref().and_then(|s| s["versao_legivel"]["backend"].as_str()).unwrap_or("?").to_owned();
+        let text = if manual { tr("update_done_manual") } else { tr("update_done").replace("{version}", &version) };
+        window.push_notification(Notification::success(text).id::<Updater>(), cx);
         self.end_intent();
         cx.notify();
         self.refresh_server(cx);

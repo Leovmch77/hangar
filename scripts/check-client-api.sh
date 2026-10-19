@@ -36,6 +36,8 @@ disparou() {
 case "${1:-}" in
     --staged)
         git rev-parse -q --verify HEAD >/dev/null || exit 0
+        # Commit de merge traz o que já foi conferido do outro lado, como no modo intervalo.
+        [[ -e "$(git rev-parse --git-path MERGE_HEAD)" ]] && exit 0
         disparou "$(git diff --cached --name-only)" \
                  "$(git diff --cached -U0 --no-color -- desktop-native/src)" || exit 0
         base_rev=HEAD

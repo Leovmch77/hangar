@@ -101,6 +101,13 @@ confere "stage subindo → 0" 0 --staged
 git commit -q --no-verify -m 'subiu'
 api 3 'pub fn mais() {}'; git add -A
 confere "segundo commit local acima da origin/main → 0" 0 --staged
+# Merge da main em andamento: o stage traz a mudança já conferida lá, no mesmo número da origin/main.
+git update-ref refs/remotes/origin/main HEAD
+api 3 'pub fn da_main() {}'; git add -A
+confere "stage no mesmo número da origin/main → 1" 1 --staged
+git rev-parse HEAD > "$(git rev-parse --git-path MERGE_HEAD)"
+confere "commit de merge → 0" 0 --staged
+rm -f "$(git rev-parse --git-path MERGE_HEAD)"
 git reset -q --hard
 
 # ── o pre-commit chama a trava ────────────────────────────────────────────────────────────────

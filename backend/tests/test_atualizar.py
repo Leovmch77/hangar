@@ -392,7 +392,7 @@ def test_aviso_do_instalador_chega_no_estado(repo, monkeypatch):
 
 
 def _preparo_gravado(repo, monkeypatch, *, lock_igual: bool, node_modules: bool,
-                     topologia: str = "systemd", fetch=lambda: []):
+                     topologia: str = "systemd", fetch=lambda **kw: []):
     chamadas = []
     class P:
         returncode = 0
@@ -490,7 +490,7 @@ def test_preparar_sem_marca_assume_o_node_modules_do_instalador(repo, monkeypatc
         stderr = ""
     monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: (chamadas.append(args), P())[1])
     monkeypatch.setattr(atualizar, "_atualizar_dist", lambda **k: None)
-    monkeypatch.setattr(atualizar.rust_release, "fetch", lambda: [])
+    monkeypatch.setattr(atualizar.rust_release, "fetch", lambda **kw: [])
     monkeypatch.setattr(atualizar, "_renovar_chromium", lambda: None)
     monkeypatch.setattr(atualizar.shutil, "which", lambda nome: f"/bin/{nome}")
     (repo / "backend").mkdir(exist_ok=True)
@@ -512,13 +512,13 @@ def test_preparar_sem_node_modules_nao_instala_front(repo, monkeypatch):
 def test_preparar_baixa_os_binarios_e_a_falha_vira_aviso(repo, monkeypatch):
     """Sem os binários o Python atende sozinho: o download que falha avisa e não para o `uv sync`."""
     cmds = _preparo_gravado(repo, monkeypatch, lock_igual=True, node_modules=True,
-                            fetch=lambda: ["binários Rust não baixados: rede fora"])
+                            fetch=lambda **kw: ["binários Rust não baixados: rede fora"])
     assert any(c.endswith("uv sync") for c in cmds)
     assert "binários Rust não baixados: rede fora" in atualizar.estado()["avisos"]
 
 
 def test_preparar_sem_build_para_a_maquina_nao_avisa(repo, monkeypatch):
-    _preparo_gravado(repo, monkeypatch, lock_igual=True, node_modules=True, fetch=lambda: None)
+    _preparo_gravado(repo, monkeypatch, lock_igual=True, node_modules=True, fetch=lambda **kw: None)
     assert not atualizar.estado().get("avisos")
 
 
@@ -1625,7 +1625,7 @@ def test_preparar_baixa_dist_e_binario_juntos_e_guarda_os_dois_avisos(repo, monk
     monkeypatch.setattr(atualizar.shutil, "which", lambda nome: f"/bin/{nome}")
     monkeypatch.setattr(atualizar, "_renovar_chromium", lambda: None)
     monkeypatch.setattr(atualizar, "_atualizar_dist", lambda: (juntos.wait(), "tela não atualizada: X")[1])
-    monkeypatch.setattr(atualizar.rust_release, "fetch", lambda: (juntos.wait(), ["binários: Y"])[1])
+    monkeypatch.setattr(atualizar.rust_release, "fetch", lambda **kw: (juntos.wait(), ["binários: Y"])[1])
     (repo / "backend").mkdir(exist_ok=True)
     atualizar._preparar("systemd")
     assert atualizar.estado()["avisos"] == ["tela não atualizada: X", "binários: Y"]
@@ -1642,11 +1642,41 @@ def test_preparar_com_dist_que_explode_guarda_o_aviso_do_binario(repo, monkeypat
     def _explode():
         raise RuntimeError("build travou")
     monkeypatch.setattr(atualizar, "_atualizar_dist", _explode)
-    monkeypatch.setattr(atualizar.rust_release, "fetch", lambda: ["binários: Y"])
+    monkeypatch.setattr(atualizar.rust_release, "fetch", lambda **kw: ["binários: Y"])
     (repo / "backend").mkdir(exist_ok=True)
     with pytest.raises(RuntimeError, match="build travou"):
         atualizar._preparar("systemd")
     assert atualizar.estado()["avisos"] == ["binários: Y"]
+
+
+@pytest.mark.parametrize("tela_explode", [True, False])
+def test_binario_baixado_junto_so_e_gravado_com_a_tela_no_lugar(repo, monkeypatch, tela_explode):
+    """Tela que falha leva à volta do checkout: o binário novo não pode ficar gravado sob o Python velho."""
+    class P:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    gravados = []
+    def _fetch(release=None, hold=None):
+        (gravados if hold is None else hold).append("hangar-server")
+        return []
+    monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: P())
+    monkeypatch.setattr(atualizar.shutil, "which", lambda nome: f"/bin/{nome}")
+    monkeypatch.setattr(atualizar, "_renovar_chromium", lambda: None)
+    def _tela():
+        if tela_explode:
+            raise RuntimeError("build travou")
+    monkeypatch.setattr(atualizar, "_atualizar_dist", _tela)
+    monkeypatch.setattr(atualizar.rust_release, "fetch", _fetch)
+    monkeypatch.setattr(atualizar.rust_release, "install_held", lambda hold: (gravados.extend(hold), [])[1], raising=False)
+    (repo / "backend").mkdir(exist_ok=True)
+    if tela_explode:
+        with pytest.raises(RuntimeError, match="build travou"):
+            atualizar._preparar("systemd")
+        assert gravados == []
+    else:
+        atualizar._preparar("systemd")
+        assert gravados == ["hangar-server"]
 
 
 def test_contagem_de_commits_que_falha_resgata_por_precaucao(repo, canal, monkeypatch):
