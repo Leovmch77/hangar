@@ -301,19 +301,9 @@ impl Plan {
 fn behind(state: &Value, target: &str) -> bool {
     let flag = state["atualizacao_disponivel"].as_bool() == Some(true);
     let older = state["versao_legivel"]["backend"].as_str().is_some_and(|running| newer(target, running));
-    flag || older || restart_pending(state)
-}
-
-fn restart_pending(state: &Value) -> bool {
     let clean = |v: &Value| v.as_str().map(|s| s.trim_end_matches("-dirty").to_owned());
-    matches!((clean(&state["versoes"]["repo"]), clean(&state["versoes"]["backend"])), (Some(disk), Some(up)) if disk != up)
-}
-
-/// O remoto tem commits e nada pode ser puxado: o binário do Rust deles ainda não saiu para este sistema.
-fn waiting_for_build(state: &Value) -> bool {
-    let legivel = &state["versao_legivel"];
-    state["atualizacao_disponivel"].as_bool() != Some(true)
-        && matches!((legivel["remoto"].as_str(), legivel["repo"].as_str()), (Some(remote), Some(disk)) if newer(remote, disk))
+    let restart = matches!((clean(&state["versoes"]["repo"]), clean(&state["versoes"]["backend"])), (Some(disk), Some(up)) if disk != up);
+    flag || older || restart
 }
 
 /// Lido do mesmo `pre_voo` que o servidor usa para recusar o `iniciar`: o botão sabe antes do clique.
@@ -336,11 +326,6 @@ fn hold(state: &Value) -> Option<Hold> {
 /// O que o "Atualizar tudo" faz: `current` é a versão deste app, `offer` a da release, `server` o `GET /api/atualizacao` do
 /// servidor desta máquina (nenhum = não há servidor local).
 fn plan(current: &str, offer: Option<&str>, server: Option<&Value>) -> Plan {
-    // Servidor desta máquina esperando o binário do commit novo: o app novo espera junto, senão o clique leva só ele e
-    // o servidor fica para trás. Reinício pendente não depende de build e segue.
-    if server.is_some_and(|state| waiting_for_build(state) && !restart_pending(state)) {
-        return Plan { server: ServerStep::Skip, app: false };
-    }
     let target = offer.unwrap_or(current);
     let server = match server {
         Some(state) if behind(state, target) => hold(state).map_or(ServerStep::Update, ServerStep::Held),
@@ -1046,22 +1031,6 @@ mod tests {
         let s = server(serde_json::json!({"versao_legivel": {"backend": "0.1.0.105"}}));
         assert_eq!(plan(APP, Some("0.1.0.110"), Some(&s)).server, ServerStep::Update);
         assert_eq!(plan("0.1.0.105", None, Some(&s)).server, ServerStep::Skip);
-    }
-
-    /// O servidor desta máquina espera o binário do Rust do commit novo (remoto à frente e nada a puxar): o app novo
-    /// espera junto, e o botão só aparece quando um clique leva os dois.
-    #[test]
-    fn plan_holds_the_app_while_the_local_server_waits_for_its_build() {
-        let legivel = serde_json::json!({"backend": "0.1.0.105", "repo": "0.1.0.105", "remoto": "0.1.0.112"});
-        let waiting = server(serde_json::json!({"versao_legivel": legivel.clone()}));
-        let p = plan(APP, Some("0.1.0.110"), Some(&waiting));
-        assert_eq!(p, Plan { server: ServerStep::Skip, app: false });
-        assert!(!p.visible(), "clicar agora só levaria o app");
-        assert!(!plan("0.1.0.110", None, Some(&waiting)).visible(), "app em dia e servidor sem binário: nada a fazer");
-        let restart = server(serde_json::json!({"versao_legivel": legivel.clone(), "versoes": {"repo": "dist-latest-4-gdef"}}));
-        assert_eq!(plan(APP, Some("0.1.0.110"), Some(&restart)).server, ServerStep::Update, "reinício pendente não espera build");
-        let ready = server(serde_json::json!({"atualizacao_disponivel": true, "versao_legivel": legivel}));
-        assert_eq!(plan(APP, Some("0.1.0.110"), Some(&ready)), Plan { server: ServerStep::Update, app: true });
     }
 
     #[test]
