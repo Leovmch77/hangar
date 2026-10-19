@@ -345,8 +345,26 @@ fn outdated(state: &Value, app: &str) -> bool {
     }
 }
 
+pub(crate) fn update_process_id(value: &Value) -> Option<i64> {
+    (value["ok"].as_bool() == Some(true)).then(|| value["pid"].as_i64()).flatten().filter(|pid| *pid > 0)
+}
+
+pub(crate) fn restart_result_matches(state: &Value, pid: i64, request_id: Option<&str>) -> bool {
+    match request_id {
+        Some(id) => state["request_id"].as_str() == Some(id),
+        None => state["pid"].as_i64() == Some(pid),
+    }
+}
+
+pub(crate) fn partial_update_message(state: &Value) -> Option<String> {
+    if state["waiting_for_server_build"].as_bool() != Some(true) { return None; }
+    let commit = state["commit_para"].as_str().filter(|s| !s.is_empty()).unwrap_or("—");
+    let short: String = commit.chars().take(8).collect();
+    Some(crate::i18n::tr_shared("atualizar_parcial_build", &[("commit", &short)]))
+}
+
 #[derive(Debug, PartialEq)]
-enum Outcome { Updated, UpdatedManual, Failed(String) }
+enum Outcome { Updated, UpdatedManual, Partial(String), Failed(String) }
 
 #[derive(Debug, PartialEq)]
 enum Follow { Running { step: u64, total: u64, text: String }, Waiting, NotStarted, Done(Outcome) }
@@ -362,6 +380,7 @@ fn follow(state: &Value, saw_running: bool, baseline: Option<&str>) -> Follow {
             let reason = Some(text("erro").trim_end_matches('.').to_owned()).filter(|e| !e.is_empty()).unwrap_or_else(|| "?".into());
             Follow::Done(Outcome::Failed(reason))
         }
+        Some("pronto") if partial_update_message(state).is_some() => Follow::Done(Outcome::Partial(partial_update_message(state).unwrap())),
         Some("pronto") if state["reiniciar_manual"].as_bool() == Some(true) => Follow::Done(Outcome::UpdatedManual),
         Some("pronto") => Follow::Done(Outcome::Updated),
         _ => Follow::Waiting,
@@ -696,7 +715,8 @@ impl Updater {
             let result = task.await.unwrap_or_else(|e| Err(Failure::local(e.to_string())));
             let _ = handle.update(cx, |_, window, cx| { let _ = this.update(cx, |this, cx| match result {
                 // O servidor grava "rodando" antes de responder: o próximo "pronto" é o desfecho.
-                Ok(_) => this.follow_server(api, true, baseline, window, cx),
+                Ok(value) if update_process_id(&value).is_some() => this.follow_server(api, true, baseline, window, cx),
+                Ok(_) => this.fail(tr("invalid_response"), cx),
                 Err(error) if error.uncertain => this.follow_server(api, false, baseline, window, cx),
                 // Recusa que o estado lido não previa: relê e decide pela mesma regra (branch → só o app).
                 Err(error) if error.status == Some(409) => this.recheck_after_refusal(api, error.detail, window, cx),
@@ -757,6 +777,14 @@ impl Updater {
         let manual = matches!(outcome, Outcome::UpdatedManual);
         match outcome {
             Outcome::Failed(reason) => return self.fail(tr("update_failed").replace("{reason}", &reason), cx),
+            Outcome::Partial(message) => {
+                self.run = Run::Idle;
+                window.push_notification(Notification::warning(message).autohide(false).id::<Updater>(), cx);
+                if self.offer.is_some() { return self.install_app(window, cx); }
+                self.refresh_server(cx);
+                self.refresh_active(cx);
+                return;
+            }
             Outcome::Updated | Outcome::UpdatedManual => {}
         }
         self.run = Run::Idle;
@@ -1077,6 +1105,28 @@ mod tests {
         assert_eq!(follow(&state(serde_json::json!({"fase": "pronto", "ok": false, "erro": "npm ci falhou.", "ts": "t1"})), true, Some("t0")),
             Follow::Done(Outcome::Failed("npm ci falhou".into())));
         assert_eq!(follow(&Value::Null, true, Some("t0")), Follow::Waiting);
+    }
+
+    #[test]
+    fn update_process_id_requires_an_accepted_positive_integer() {
+        for response in [serde_json::json!({}), serde_json::json!({"ok": false, "pid": 42}),
+            serde_json::json!({"ok": true, "pid": 0}), serde_json::json!({"ok": true, "pid": 1.5})] {
+            assert_eq!(update_process_id(&response), None, "{response}");
+        }
+        assert_eq!(update_process_id(&serde_json::json!({"ok": true, "pid": 42})), Some(42));
+        assert!(restart_result_matches(&serde_json::json!({"pid": 88, "request_id": "a"}), 42, Some("a")));
+        assert!(!restart_result_matches(&serde_json::json!({"pid": 42, "request_id": "old"}), 42, Some("a")));
+        assert!(restart_result_matches(&serde_json::json!({"pid": 42}), 42, None));
+    }
+
+    #[test]
+    fn partial_update_is_not_complete_even_when_restart_is_manual() {
+        let state = serde_json::json!({"fase": "pronto", "ok": true, "ts": "t1", "reiniciar_manual": true,
+            "waiting_for_server_build": true, "commit_para": "991bb4f123456789"});
+        assert!(!matches!(follow(&state, true, Some("t0")), Follow::Done(Outcome::Updated | Outcome::UpdatedManual)));
+        let Follow::Done(Outcome::Partial(message)) = follow(&state, true, Some("t0")) else { panic!("missing partial result") };
+        assert!(message.contains("991bb4f1"));
+        assert!(plan(APP, Some("0.1.0.140"), None).app);
     }
 
     #[test]

@@ -1008,8 +1008,10 @@ export interface AtualizacaoPasso {
 /** O que o motor está fazendo agora. Vem do arquivo de estado, que sobrevive ao restart. */
 export interface AtualizacaoEstado {
   fase?: 'rodando' | 'pronto';
-  /** Pid do processo que está atualizando/reiniciando — o mesmo que o POST devolve. */
+  /** PID do motor de atualização/reinício; no Windows pode diferir do lançador do POST. */
   pid?: number;
+  /** Identifica o reinício mesmo quando o lançador do Python abre outro processo. */
+  request_id?: string | null;
   etapa?: string;
   passo?: number;
   total?: number;
@@ -1036,6 +1038,8 @@ export interface AtualizacaoEstado {
   shell_mudou?: boolean;
   commit_de?: string;
   commit_para?: string;
+  /** O código parou no último commit compatível com o servidor Rust publicado. */
+  waiting_for_server_build?: boolean;
   ts?: string;
 }
 
