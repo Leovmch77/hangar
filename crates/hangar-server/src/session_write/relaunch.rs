@@ -121,8 +121,7 @@ pub async fn reload(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         Some(Relaunched::Codex(Err(error))) => reload_refusal(&error),
         Some(Relaunched::Claude(Ok(reopened), _)) => (StatusCode::OK, reopened.answer(json!({"ok": true}))),
         Some(Relaunched::Claude(Err(failure), from_terminal)) if failure.ended_without_terminal(from_terminal) =>
-            (StatusCode::BAD_GATEWAY, super::detail_body("erro_recarregar_sem_terminal", &failure.error.message,
-                json!({"erro": failure.error.message, "code": failure.error.code}))),
+            reload_ended_without_terminal(&failure),
         Some(Relaunched::Claude(Err(failure), _)) => claude_refusal(CLAUDE_RELOAD, &failure),
     };
     st.list.invalidate();
@@ -167,6 +166,13 @@ pub(crate) async fn during_life_change<T>(st:&AppState,name:&str,work:impl Futur
     }
     share.lives.facts().end_mode_change(name);
     result
+}
+
+/// O terminal não reabriu e a sessão seguiu sem ele: o aviso leva o código de origem, como as outras recusas.
+fn reload_ended_without_terminal(failure: &ReopenFailure) -> (StatusCode, Value) {
+    let error = &failure.error;
+    let shown = format!("{} ({})", error.message, error.code);
+    (StatusCode::BAD_GATEWAY, super::detail_body("erro_recarregar_sem_terminal", &shown, json!({"erro": shown, "code": error.code})))
 }
 
 /// Código do aviso e a frase dele, por ação recusada.
@@ -233,6 +239,15 @@ mod tests {
             assert_eq!(body["detail"]["params"]["code"], "relaunch_confirmation");
             for messages in [pt, en] { assert!(messages.contains(&format!("\"{code}\": ")), "{code} sem frase nos idiomas"); }
         }
+    }
+
+    #[test]
+    fn a_reload_that_ended_without_terminal_shows_the_real_code() {
+        let failure = ReopenFailure { error: RuntimeError::new("relaunch_confirmation", "o Claude não voltou"), stopped: true, landed: None };
+        let (status, body) = reload_ended_without_terminal(&failure);
+        assert_eq!((status, body["detail"]["code"].as_str()), (StatusCode::BAD_GATEWAY, Some("erro_recarregar_sem_terminal")));
+        assert!(body["detail"]["params"]["erro"].as_str().unwrap().contains("relaunch_confirmation"), "{body}");
+        assert!(body["detail"]["msg"].as_str().unwrap().contains("relaunch_confirmation"), "{body}");
     }
 
     #[test]

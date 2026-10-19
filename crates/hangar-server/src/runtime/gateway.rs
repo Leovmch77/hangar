@@ -456,6 +456,14 @@ impl RuntimeRegistry {
             _=>None,
         })
     }
+    /// Fecha a entrada de `key` só se o ator dela ainda estiver morto, conferido dentro da barreira: outra
+    /// abertura concorrente pode já ter posto um ator vivo com a mesma geração. `true`: há ator vivo.
+    async fn close_if_dead(&self,key:&str) -> Result<bool,RuntimeError> {
+        let barrier=self.barrier(key).await;let _guard=barrier.lock().await;
+        let Some((generation,handle))=self.entries.lock().await.get(key).map(|entry|(entry.generation,entry.handle.clone())) else {return Ok(false)};
+        if handle.snapshot().await.is_ok() {return Ok(true)}
+        self.close_locked(key,generation,false).await.map(|_|false)
+    }
     /// Fecha a entrada sob a barreira da chave; o processo segue vivo.
     pub(super) async fn close_claude_entry(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
         let barrier=self.barrier(key).await;let _guard=barrier.lock().await;
@@ -713,11 +721,11 @@ impl RuntimeRegistry {
             },
         };
         let key = meta.get("key").and_then(Value::as_str).filter(|key|!key.is_empty())?.to_owned();
-        let open = self.entries.lock().await.get(&key).filter(|entry|entry.name == name).map(|entry|(entry.generation,entry.handle.clone()));
-        if let Some((generation,handle)) = open {
+        let open = self.entries.lock().await.get(&key).filter(|entry|entry.name == name).map(|entry|entry.handle.clone());
+        if let Some(handle) = open {
             if handle.snapshot().await.is_ok() { return Some(Ok(())); }
             // Ator morto não é sessão aberta: a entrada sai sem matar nada e a sessão abre de verdade.
-            if let Err(error) = self.close_claude_entry(&key,generation).await { return Some(Err(error)); }
+            match self.close_if_dead(&key).await { Ok(true)=>return Some(Ok(())),Ok(false)=>{},Err(error)=>return Some(Err(error)) }
         }
         // Entrada com terminal de outra vida (o Claude que saiu deste nome) não barra a sem terminal.
         if let Err(error) = self.retire_other_life(name).await { return Some(Err(error)); }
@@ -2871,6 +2879,29 @@ mod tests {
         registry.open_claude_headless("cl",false).await.expect("é dela").expect("abriu");
         let handle=registry.entries.lock().await.get(&key).unwrap().handle.clone();
         assert!(handle.snapshot().await.is_ok(),"a entrada tem ator vivo");
+        registry.close(&key,1).await.unwrap();server.abort();
+    }
+
+    /// Duas aberturas viram o mesmo ator morto: a que chega à barreira depois de a outra já ter reaberto
+    /// (mesma geração, que vem do arquivo da fila) acha o ator vivo e não o fecha.
+    #[tokio::test]
+    async fn a_late_close_of_the_dead_actor_keeps_the_reopened_one() {
+        let home=tempfile::tempdir().unwrap();
+        let (escuta,server)=fake_cano().await;
+        let key="ab".repeat(16);
+        let meta=|escuta:&str|json!({"name":"cl","key":key,"cwd":home.path(),"session_id":"a","headless":true,
+            "permission_mode":"manual","cano":{"pid":42,"escuta":escuta,"token":"fixture","versao":2}});
+        let (registry,_hubs)=claude_registry(home.path(),&[meta(&escuta)]);
+        registry.open_claude_headless("cl",false).await.expect("é dela").expect("abriu");
+        registry.entries.lock().await.get(&key).unwrap().handle.clone().stop().await.unwrap();
+        registry.live_sender("cl").send_replace(None);
+        server.abort();
+        let (escuta,server)=fake_cano().await;
+        std::fs::write(home.path().join(".hangar/claude-headless/cl.json"),meta(&escuta).to_string()).unwrap();
+        registry.open_claude_headless("cl",false).await.expect("é dela").expect("abriu");
+        assert!(registry.close_if_dead(&key).await.unwrap(),"o ator reaberto está vivo");
+        let handle=registry.entries.lock().await.get(&key).unwrap().handle.clone();
+        assert!(handle.snapshot().await.is_ok(),"o fechamento atrasado não derrubou o ator reaberto");
         registry.close(&key,1).await.unwrap();server.abort();
     }
 
