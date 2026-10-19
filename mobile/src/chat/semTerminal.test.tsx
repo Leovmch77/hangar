@@ -373,6 +373,7 @@ import { MessageList } from './MessageList';
 import { MoreSheet } from './MoreSheet';
 import { Composer } from './Composer';
 import { OptionButtons } from './OptionButtons';
+import { QUEUE_PANEL_APPEAR_MS } from './QueuePanel';
 import ChatScreen from '../../app/s/[server]/[name]/index';
 import CreateRoute from '../../app/create';
 import { NewConversation } from '../features/create/NewConversation';
@@ -2057,6 +2058,7 @@ describe('Enviar encerra o ditado e aguarda o texto completo', () => {
     const request = pendingTranscription();
     const { container, root } = await start('antes');
     await act(async () => root.render(createElement(Composer, { ...props, queuePanel: panel })));
+    await act(async () => vi.advanceTimersByTimeAsync(QUEUE_PANEL_APPEAR_MS));
     expect(container.querySelectorAll('[aria-label="composer_steer_current_text"]')).toHaveLength(1);
     const queuedSteer = container.querySelectorAll('[aria-label="queue_panel_steer_message: na fila"]');
     expect(queuedSteer).toHaveLength(1);
