@@ -44,18 +44,52 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `paths` do push no `.github/workflows/server.yml` de lá, nunca recua, e o download usa o manifesto lido na
   escolha; sem ler a lista, para no commit do binário. Só binário de commit fora de `origin/<branch>`
   cai no commit mais novo com o mesmo número. A tela conta as mudanças até esse commit e também oferece atualizar quando o binário
-  instalado não é o publicado (código em dia, binário que saiu depois). Atrás do topo, a tela é
-  compilada aqui (também no Reiniciar) e a atualização até o último binário publicado é completa e
+  instalado não é o publicado (código em dia, binário que saiu depois). Atrás do topo, a tela vem
+  da release `dist-commits` pela chave das fontes (regra abaixo) e só é compilada aqui sem ela (também
+  no Reiniciar); a atualização até o último binário publicado é completa e
   normal: build pendente no CI não vira aviso nem "incompleta" em nenhum cliente, só o registro
   `atualizacao.limitada_ao_binario` no diário; o servidor ainda zera `waiting_for_server_build` para
-  cliente antigo. O botão de cima do nativo segura o app novo enquanto o servidor desta máquina espera
-  o build, para um clique levar os dois. Checkout já à frente com binário de outro contrato continua
+  cliente antigo. Quando o botão de cima do nativo aparece segue o contrato `CLIENT_API` (regra
+  abaixo). Checkout já à frente com binário de outro contrato continua
   avisando. Evidência em [Build pendente não é aviso](#build-pendente-no-ci-não-é-aviso-19102026). Sem Rust (`CP_RUST_SERVER=0`) ou sem release própria de branch fora da main (404): topo,
   como antes, calado. Sem como conferir (rede, git, 404 na release da main, sem build deste
   sistema no manifesto, commit ilegível): o checkout só avança no contrato que já tem, com aviso
   na tela (checkout sem contrato vai ao topo), e o auto-update espera; ele só avança com o topo
   inteiro publicado.
   Evidência em [Atualizar para no binário publicado](#atualizar-para-no-binário-publicado-06102026).
+- **App e servidor se entendem por um número de contrato, `CLIENT_API`** (`crates/hangar-api`). O
+  servidor responde `GET /api/client-api` → `{"api": N}` (pelo Connect, repassado ao Rust); 404
+  (servidor antigo) = 1; 503 `client_api_need_rust_server` (modo `python`) = desconhecido, que nunca
+  instala app nem acende "desatualizado". O CI grava `api` em `server-<sistema>.json` e no
+  `server-latest.json` (entrada sem o campo ganha o valor do commit dela) e `requires_api` no
+  `native-latest.json`; manifesto sem o campo = 1. `scripts/check-client-api.sh` (pre-commit e CI)
+  recusa mudança em `crates/hangar-api/src/`, `desktop-native/src/api/` ou literal `"/api/` novo no
+  nativo sem subir o número acima do da base; escape `HANGAR_SEM_CLIENT_API: <motivo>` na mensagem.
+  O servidor só acrescenta API: remover ou quebrar rota que o app consome exige um ciclo de aviso (a
+  rota fica até nenhum app publicado precisar dela). Evidência em
+  [Atualização com contrato de API](#atualização-com-contrato-de-api-19102026).
+- **O botão de cima do nativo só aparece quando um clique conclui.** App novo com `requires_api` ≤ o
+  `api` do servidor no ar: só o app, sem aviso. Exige mais e o servidor publicado para esta máquina
+  (`api_publicado` do `GET /api/atualizacao`) atende: servidor primeiro, depois o app. Não atende
+  (inclusive branch sem release do servidor): o botão some, sem aviso. Sem servidor local vale o
+  `api` do servidor ativo. "Servidor desatualizado" só com `CLIENT_API` do app > `api` do servidor
+  ativo, nunca por contagem de commits. Oferta republicada exigindo mais no meio do clique é
+  descartada calada e o próximo ciclo refaz o plano.
+- **App só instala depois do servidor, e a ordem sobrevive a reabrir o app.** Depois do desfecho
+  `Updated`, o app relê `/api/client-api` e só instala se couber; o acompanhamento não desiste com o
+  motor `rodando` (o teto vale só para leituras seguidas sem resposta) e para em 30 min. Antes do
+  `POST /iniciar`, quando há app a instalar depois, grava `update-intent.json` em `appearance::dir()`
+  (trava de arquivo contra duas instâncias); a rodada é o desfecho com `estado.ts` posterior à
+  intenção, nunca o pid (no Windows o lançador do venv muda o pid). Intenção de outro servidor, com o
+  app já igual ou mais novo, ou com desfecho de falha é apagada.
+- **A tela pronta vem da chave das fontes, não do commit.** O CI publica `frontend-dist-<chave>.tar.gz`
+  e `.sha256` na release `dist-commits` (as 50 mais novas; chave com um dos dois faltando é reenviada);
+  a chave é o sha256 do `git rev-parse` de `frontend`, `packages`, `messages`, `project.inlang`,
+  `package.json` e `package-lock.json` da raiz, a mesma conta no CI e no motor. Atrás do topo, na main
+  e com essas árvores limpas, o motor baixa a da chave e confere o sha256; 404 compila aqui calado,
+  outra falha compila aqui e grava `atualizacao.tela_da_chave` no diário. Tela e binário do Rust baixam
+  em paralelo, cada um com o seu erro. A conferência do Chromium roda no máximo uma vez por dia
+  (marca `chromium-ok` com menos de 24 h e sem "falhou" pula).
 - **Build do CI: testes ao lado do build, e o push novo cancela o run substituído.** No `server.yml`
   os testes de cada sistema são um job próprio, em paralelo ao build de release, e o `publish` daquele
   sistema só sobe com os dois artefatos dele (`server-<sistema>` e `testes-ok-<sistema>`). Na main e no
@@ -945,3 +979,25 @@ sozinho. Agora o app novo espera o build do servidor desta máquina (`plan()` em
 `desktop-native/src/update.rs`), e o aviso, o título "incompleta" e o estado `Pending`/`partial`
 saíram do nativo, do PWA e do app; o diário guarda `atualizacao.limitada_ao_binario` como registro
 normal.
+
+## Atualização com contrato de API (19/10/2026)
+
+Pedido do Jefferson: o botão Atualizar só aparece quando um clique conclui, atualiza servidor e app na
+ordem certa sem perder nada no meio, e não compila a tela na máquina de quem atualiza. Medido no mesmo
+dia:
+
+- **O botão de cima nunca levava o servidor.** O app decidia "servidor desatualizado" pela contagem de
+  commits, sem saber se o app novo precisava do servidor novo; o `Native` publica antes do `Server`, e o
+  clique instalava só o app. A espera pelo build do servidor desta máquina (entrada anterior) segurava
+  também o app que não precisava de servidor novo; saiu em favor do `CLIENT_API`.
+- **O passo 4 ("Instalando dependências") levava ~2 min 15 s no Windows** só no `vite build` local,
+  sempre que a atualização parava antes do topo (DELPHI-02, 15:41). Chegando ao topo, a atualização
+  inteira leva 6–17 s (notebook e DELPHI-02). O dist publicado por commit não casava com o commit em
+  que a atualização parava (o CI só compila a ponta do push), daí a chave pelas fontes.
+- **O app perdia o servidor no meio.** O acompanhamento desistia em 10 min (300 × 2 s) e não era
+  retomado depois de reabrir; casar a rodada pelo pid falharia no Windows, onde o lançador do venv
+  muda o pid.
+- **CI no mesmo período:** `Server` 25–63 min e `Native` 5–52 min por push, com 20–28 min só de fila.
+- **Entrada presa no registro do Rust** (fechamento que falhava depois de parar o ator) vinha em laço
+  desde 17/10 (`hangar` 1032×, `cx-herda4` 597×) e derrubava a troca de conta no limite com
+  `relaunch_initialize`; corrigida no mesmo trabalho.
