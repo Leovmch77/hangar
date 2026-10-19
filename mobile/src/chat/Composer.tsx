@@ -1637,7 +1637,6 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
             onChangeText={handleChangeText}
             placeholder={busyVoice ? m.composer_transcrevendo_audio()
               : provider ? m.composer_mensagem_para({ nome: providerName(provider as Provider) }) : m.composer_mensagem()}
-            maxHeight={120}
             onKeyPress={handleKeyPress}
             selection={selection}
             onSelectionChange={(e) => {

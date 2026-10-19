@@ -16,6 +16,7 @@ import { useActivity } from '../../../../src/features/activity/useActivity';
 import { MessageList } from '../../../../src/chat/MessageList';
 import { pararTts } from '../../../../src/chat/BubbleActions';
 import { Composer } from '../../../../src/chat/Composer';
+import { ComposerViewport } from '../../../../src/chat/ComposerField';
 import { ComposerStatusLine } from '../../../../src/chat/ComposerStatusLine';
 import { OrqFooter } from '../../../../src/chat/OrqFooter';
 import { TuiPill } from '../../../../src/chat/TuiPill';
@@ -511,6 +512,7 @@ export default function ChatScreen() {
         <SessionPickerSheet open={pickerOpen} onClose={() => setPickerOpen(false)} atual={name} serverId={serverId} />
         {/* Lista e Composer dentro do mesmo KAV: ambos sobem com o teclado e a lista termina acima do composer */}
         <KeyboardAvoidingView behavior="padding" automaticOffset style={styles.body}>
+          <ComposerViewport>
           {stateEvent?.codex_buffering ? (
             <Text style={styles.notice} accessibilityLiveRegion="polite">{m.chat_codex_buffering()}</Text>
           ) : null}
@@ -602,7 +604,7 @@ export default function ChatScreen() {
               />
             )}
           </View>
-          <View testID="chat-dock" onLayout={(e) => setDockH(e.nativeEvent.layout.height)}>
+          <View testID="chat-dock" style={styles.dock} onLayout={(e) => setDockH(e.nativeEvent.layout.height)}>
           {sseRecusado && !servidorSumiu && !codexPreThread ? (
             <View style={styles.sseRecusado} accessibilityRole="alert">
               <Text style={styles.sseRecusadoTexto}>{m.chat_sse_recusado()}</Text>
@@ -656,6 +658,7 @@ export default function ChatScreen() {
               )
             : null}
           </View>
+          </ComposerViewport>
           {/* Linha de status do app de PC, colada embaixo da caixa e fora da área que a conversa cobre. */}
           {!servidorSumiu && !codexPreThread && fetchedSession !== null && !orq && !soLeitura && !dead
             ? <ComposerStatusLine key={`status:${rota}`} serverId={serverId} name={name} onOpenSettings={openSettings} />
@@ -671,7 +674,10 @@ export default function ChatScreen() {
 const styles = StyleSheet.create((theme) => ({
   body: {
     flex: 1,
+    minHeight: 0,
   },
+  // O teto já desconta cabeçalho, teclado e status; o excesso rola dentro da caixa.
+  dock: { maxHeight: '100%', flexShrink: 1 },
   carregando: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: theme.base.space[2] },
   inner: {
     flex: 1,

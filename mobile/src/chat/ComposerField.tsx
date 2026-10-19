@@ -1,5 +1,5 @@
-import { forwardRef, useMemo, type ComponentProps, type ReactNode } from 'react';
-import { ActionSheetIOS, ActivityIndicator, Platform, Pressable, Text, View, type TextInput } from 'react-native';
+import { createContext, forwardRef, useCallback, useContext, useMemo, useState, type ComponentProps, type ReactNode } from 'react';
+import { ActionSheetIOS, ActivityIndicator, Platform, Pressable, ScrollView, Text, View, useWindowDimensions, type LayoutChangeEvent, type TextInput } from 'react-native';
 import { MenuView, type NativeActionEvent } from '@react-native-menu/menu';
 import * as Haptics from 'expo-haptics';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -13,18 +13,43 @@ import * as m from '../paraglide/messages';
 import { haptic } from '../ui/haptics';
 import { deliveryModeLabel, deliveryOptions, type DeliveryControls, type DeliveryMode } from './queueDelivery';
 
+const ComposerSpace = createContext<number | null>(null);
+
+export function ComposerViewport({ children }: { children: ReactNode }) {
+  const [height, setHeight] = useState<number | null>(null);
+  const measure = useCallback((e: LayoutChangeEvent) => setHeight(e.nativeEvent.layout.height), []);
+  return <View style={styles.viewport} testID="composer-viewport" onLayout={measure}>
+    <ComposerSpace.Provider value={height}>{children}</ComposerSpace.Provider>
+  </View>;
+}
+
 export function ComposerBox({ focused, children }: { focused: boolean; children: ReactNode }) {
   const { theme } = useUnistyles();
   const accent = hexParaRgb(theme.tokens.accent.base);
-  return <Glass variant="chrome" style={[styles.box, focused && accent ? { borderColor: `rgba(${accent.join(',')},0.45)` } : null]}>{children}</Glass>;
+  return <Glass variant="chrome" style={[styles.box, focused && accent ? { borderColor: `rgba(${accent.join(',')},0.45)` } : null]}>
+    <ScrollView style={styles.boxScroll} contentContainerStyle={styles.boxContent} keyboardShouldPersistTaps="handled" nestedScrollEnabled>
+      {children}
+    </ScrollView>
+  </Glass>;
 }
 
 export const ComposerInput = forwardRef<TextInput, ComponentProps<typeof MultilineInput> & {
   recording: boolean; rms: SharedValue<number>; onCancelRecording: () => void;
 }>(function ComposerInput({ recording, rms, onCancelRecording, ...props }, ref) {
+  const { height } = useWindowDimensions();
+  const availableHeight = useContext(ComposerSpace);
+  const maxHeight = Math.min(props.maxHeight ?? height * 0.4, availableHeight === null ? Infinity : availableHeight * 0.6);
+  const [textHeight, setTextHeight] = useState(40);
+  const measureText = useCallback((e: LayoutChangeEvent) => setTextHeight(Math.ceil(e.nativeEvent.layout.height)), []);
   return <View style={[styles.inputWrap, recording && styles.recordingWrap]}>
-    <MultilineInput {...props} ref={ref} maxHeight={props.maxHeight ?? 120}
-      style={[props.style, recording && styles.hidden]} editable={!recording && props.editable !== false}
+    {/* O tamanho do input pode não mudar ao receber ditado; a medida precisa independer dele. */}
+    <Text style={[styles.inputText, styles.measureText]} onLayout={measureText} pointerEvents="none"
+      accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
+      allowFontScaling={props.allowFontScaling} maxFontSizeMultiplier={props.maxFontSizeMultiplier}>
+      {`${props.value ?? ''}\u200b`}
+    </Text>
+    <MultilineInput {...props} ref={ref} maxHeight={maxHeight} measuredHeight={textHeight}
+      style={[styles.inputText, styles.shrinkInput, props.style, recording && styles.hidden]} editable={!recording && props.editable !== false}
       accessibilityElementsHidden={recording} importantForAccessibility={recording ? 'no-hide-descendants' : 'auto'} />
     {recording ? <View style={styles.wave}><RecordingWave rms={rms} onCancel={onCancelRecording} /></View> : null}
   </View>;
@@ -131,8 +156,15 @@ function withModeMenu(menu: ReturnType<typeof modeMenuHandlers>, ios: boolean, s
 }
 
 const styles = StyleSheet.create((theme) => ({
-  box: { marginHorizontal: theme.base.space[2], borderRadius: theme.base.radius.xl, paddingHorizontal: theme.base.space[3], paddingTop: theme.base.space[3], paddingBottom: theme.base.space[2], gap: theme.base.space[1] },
-  inputWrap: { minHeight: 40, justifyContent: 'center', paddingHorizontal: theme.base.space[1] },
+  viewport: { flex: 1, minHeight: 0 },
+  box: { flexShrink: 1, marginHorizontal: theme.base.space[2], borderRadius: theme.base.radius.xl },
+  boxScroll: { flexGrow: 0, flexShrink: 1 },
+  // Fila, anexos e áudio também precisam ficar alcançáveis quando juntos excedem a área útil.
+  boxContent: { paddingHorizontal: theme.base.space[3], paddingTop: theme.base.space[3], paddingBottom: theme.base.space[2], gap: theme.base.space[1] },
+  inputWrap: { flexShrink: 1, minHeight: 40, justifyContent: 'center', paddingHorizontal: theme.base.space[1] },
+  inputText: { ...theme.type.body, paddingVertical: theme.base.space[2], paddingHorizontal: theme.base.space[2] },
+  shrinkInput: { flexShrink: 1 },
+  measureText: { position: 'absolute', top: 0, left: theme.base.space[1], right: theme.base.space[1], opacity: 0 },
   // Montado e sem altura: com display none o Fabric desmonta o campo nativo e ele perde o foco.
   hidden: { height: 0, paddingVertical: 0, opacity: 0 },
   recordingWrap: { minHeight: 92 },
