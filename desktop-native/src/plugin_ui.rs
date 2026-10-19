@@ -611,23 +611,25 @@ fn contains_settings_button(v: &Value) -> bool {
     is_settings_button(v) || children(v).iter().any(contains_settings_button)
 }
 
-/// O lançador usa o título da aba ou o namespace compartilhado pela key e pelos ids dos painéis.
+/// O lançador usa o namespace compartilhado pela key e pelos ids, com o título como reserva.
 fn captured_pane<'a>(v: &Value, label: &str, panes: &'a [Value], active: Option<&str>) -> Option<&'a Value> {
     if v["props"]["plain"] != true { return None; }
     let title = label.strip_prefix('▸').or_else(|| label.strip_prefix('▾'))?.trim();
-    let mut matching = panes.iter().filter(|pane| pane["title"].as_str() == Some(title));
-    if let Some(pane) = matching.next() {
-        return (matching.next().is_none() && pane["id"].as_str().is_some_and(|id| !id.is_empty())).then_some(pane);
+    // O conjunto pode ter várias abas: recolher ou restaurar conserva a que está na frente.
+    if let Some((_, key)) = control_ref(v, "Button")
+        && let Some((namespace, _)) = key.rsplit_once('-')
+        && !namespace.is_empty() {
+        let prefix = format!("{namespace}-");
+        let mut members = panes.iter().filter(|pane| pane["id"].as_str().is_some_and(|id| id.starts_with(&prefix) && id.len() > prefix.len()));
+        let mut matching = members.clone().filter(|pane| pane["title"].as_str() == Some(title));
+        let named = matching.next().filter(|_| matching.next().is_none());
+        if let Some(pane) = members.clone().find(|pane| pane["id"].as_str() == active).or(named).or_else(|| members.next()) {
+            return Some(pane);
+        }
     }
-    // Fora de uma tarefa, o rótulo pode ser o projeto e as abas terem títulos próprios.
-    let control = button_control(v)?;
-    let (namespace, _) = control.key.rsplit_once('-')?;
-    if namespace.is_empty() { return None; }
-    let prefix = format!("{namespace}-");
-    let mut matching = panes.iter().filter(|pane| pane["id"].as_str().is_some_and(|id| id.starts_with(&prefix) && id.len() > prefix.len()));
-    let first = matching.next()?;
-    if first["id"].as_str() == active { return Some(first); }
-    Some(matching.find(|pane| pane["id"].as_str() == active).unwrap_or(first))
+    let mut matching = panes.iter().filter(|pane| pane["title"].as_str() == Some(title));
+    let pane = matching.next()?;
+    (matching.next().is_none() && pane["id"].as_str().is_some_and(|id| !id.is_empty())).then_some(pane)
 }
 
 fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
@@ -669,7 +671,8 @@ fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
             let label = Some(text_of(&p["label"])).filter(|s| !s.is_empty()).unwrap_or_else(|| plain(v));
             if c.site == BAND_SITE && let Some(pane) = captured_pane(v, &label, c.view.panes, c.view.active.as_deref()) {
                 let site = pane["id"].as_str().unwrap().to_owned();
-                let label = format!("{}{}", if c.view.expanded { '▾' } else { '▸' }, &label['▸'.len_utf8()..]);
+                let expanded = c.view.expanded && c.view.active.as_deref() == Some(site.as_str());
+                let label = format!("{}{}", if expanded { '▾' } else { '▸' }, &label['▸'.len_utf8()..]);
                 let toggle = c.view.toggle.clone();
                 return div().id(SharedString::from(format!("plg-open-{site}"))).flex_shrink_0().cursor_pointer()
                     .focusable().tab_stop(true).role(Role::Button)
@@ -1083,6 +1086,18 @@ mod tests {
         let progress = serde_json::json!({"type": "Button", "props": {"plain": true, "key": "progress-toggle"},
             "press": {"plugin": "example"}});
         assert!(super::captured_pane(&progress, "▸ projeto", &panes, None).is_none());
+    }
+
+    #[test]
+    fn named_launcher_keeps_its_active_sibling_and_resolves_duplicate_titles() {
+        let launcher = serde_json::json!({"type": "Button", "props": {"plain": true, "key": "project-open"},
+            "press": {"plugin": "example"}});
+        let panes = vec![serde_json::json!({"id": "project-review", "title": "Revisão"}),
+            serde_json::json!({"id": "project-build", "title": "Compilação"}),
+            serde_json::json!({"id": "other-review", "title": "Revisão"})];
+        assert_eq!(super::captured_pane(&launcher, "▸ Revisão", &panes[..2], Some("project-build")), Some(&panes[1]));
+        assert_eq!(super::captured_pane(&launcher, "▸ Revisão", &panes, Some("other-review")), Some(&panes[0]));
+        assert_eq!(super::captured_pane(&launcher, "▸ Revisão", &panes[1..], None), Some(&panes[1]));
     }
 
     #[test]

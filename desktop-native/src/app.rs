@@ -6510,9 +6510,10 @@ impl Hangar {
 
     fn toggle_plugin(&mut self, site: &str, window: &mut Window, cx: &mut Context<Self>) {
         let ids = crate::plugin_ui::pane_ids(&self.plugin_panes);
+        let active = crate::plugin_ui::active_pane(&ids, &self.plugin_shown, self.plugin_local_tab.as_deref());
         let expanded = self.selected_key().and_then(|key| self.plugin_presentations.get(&key))
             .is_some_and(|view| view.reserves_panel(!ids.is_empty()));
-        if expanded {
+        if expanded && active.as_deref() == Some(site) {
             self.minimize_plugin(site.to_owned(), window, cx);
         } else {
             self.open_plugin(Some(site), window, cx);
