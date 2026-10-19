@@ -370,7 +370,7 @@ fn plan(need: Option<u32>, server: Option<&Value>, run: Option<u32>) -> Plan {
     };
     let Some(need) = need else { return Plan { server: step, app: false } };
     // Todo servidor fala a API 1; desconhecido não promete mais que isso.
-    if need <= first_api() || run.is_some_and(|run| need <= run) {
+    if need <= first_api() || install_after(need, run) {
         let stops = matches!(&step, ServerStep::Held(h) if h.stops());
         return Plan { app: !stops, server: step };
     }
@@ -969,7 +969,8 @@ impl Updater {
         cx.notify();
         let (client, channel) = (self.client.clone(), self.channel());
         let task = self.runtime.spawn(async move {
-            (client_api(api.server_read(&["client-api"], &[], 20).await), check(&client, &channel).await)
+            let (running, found) = tokio::join!(api.server_read(&["client-api"], &[], 20), check(&client, &channel));
+            (client_api(running), found)
         });
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {

@@ -687,7 +687,7 @@ async def mermaid_pelo_rust(request: Request):
 async def client_api_pelo_rust(request: Request):
     """O número é do Rust (`hangar_api::CLIENT_API`). Aqui chega o dono pelo Connect, que segue pela
     ponte; sem o Rust é 503 com código, nunca um número que o Python não conhece."""
-    if guest_of(request) is not None or guest_users.current.get() is not None:
+    if _convidado(request):
         return JSONResponse({"detail": "Not Found"}, status_code=404)
     return await _repasse_ao_rust(request, erro("client_api_need_rust_server", "a versão da API precisa do servidor Rust"),
                                   "/__hangar_server/forwarded")

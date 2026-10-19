@@ -599,16 +599,10 @@ async fn health(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response
     resp
 }
 
-/// `GET /api/client-api`: só o dono. O Python não tem a rota (daria 404), então a recusa é aqui e
-/// conta no bloqueio por IP como a 401 que volta dele.
+/// `GET /api/client-api`: só o dono.
 async fn client_api(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let (fwd, owner) = gate(&st, peer, &req);
-    let mut resp = if owner {
-        client_api_reply()
-    } else {
-        st.auth.record_fail(&fwd.client_ip);
-        (StatusCode::UNAUTHORIZED, [(header::CONTENT_TYPE, "application/json")], r#"{"detail":"unauthorized"}"#).into_response()
-    };
+    let mut resp = if owner { client_api_reply() } else { crate::share_reach::unauthorized(&st, &fwd.client_ip) };
     cors(req.headers(), resp.headers_mut());
     resp
 }

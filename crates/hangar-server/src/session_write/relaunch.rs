@@ -35,6 +35,9 @@ fn terminal_field(headers: &axum::http::HeaderMap, bytes: &[u8]) -> Option<bool>
     }
 }
 
+/// O app mostra só `params.erro`: sem o código junto, as falhas de terminal são todas a mesma frase genérica.
+fn with_code(error: &RuntimeError) -> String { format!("{} ({})", error.message, error.code) }
+
 /// O `HTTPException` do `_trocar_modo`: recusa e falha de troca são 409 `erro_troca_modo`, como no Python,
 /// inclusive terminal que não fechou ou processo que não saiu (o código de origem vai em `params.code`); só
 /// a troca interrompida por pânico, sem fase conhecida, é 500 com o código.
@@ -44,7 +47,7 @@ pub fn mode_refusal(error: &RuntimeError) -> (StatusCode, Value) {
         return (StatusCode::INTERNAL_SERVER_ERROR, super::detail_body(&error.code, &error.message, json!({})));
     }
     // A recusa que já é a frase da troca (`erro_troca_modo`) dispensa o código; as outras o levam à vista.
-    let shown = if error.code == "erro_troca_modo" { error.message.clone() } else { format!("{} ({})", error.message, error.code) };
+    let shown = if error.code == "erro_troca_modo" { error.message.clone() } else { with_code(error) };
     let mut params = json!({"erro": shown});
     if crate::runtime::codex_relaunch::kill_phase(error) || error.code == crate::runtime::codex_relaunch::STARTING { params["code"] = json!(error.code); }
     (StatusCode::CONFLICT, super::detail_body("erro_troca_modo", &format!("não troquei de modo: {shown}"), params))
@@ -171,7 +174,7 @@ pub(crate) async fn during_life_change<T>(st:&AppState,name:&str,work:impl Futur
 /// O terminal não reabriu e a sessão seguiu sem ele: o aviso leva o código de origem, como as outras recusas.
 fn reload_ended_without_terminal(failure: &ReopenFailure) -> (StatusCode, Value) {
     let error = &failure.error;
-    let shown = format!("{} ({})", error.message, error.code);
+    let shown = with_code(error);
     (StatusCode::BAD_GATEWAY, super::detail_body("erro_recarregar_sem_terminal", &shown, json!({"erro": shown, "code": error.code})))
 }
 
@@ -187,8 +190,7 @@ pub fn claude_refusal(action: ClaudeAction, failure: &ReopenFailure) -> (StatusC
     let verb = action.1;
     let error = &failure.error;
     if let Some(busy) = super::busy_refusal(error) { return busy; }
-    // O app mostra só a frase: sem o código, as falhas de terminal são todas a mesma frase genérica.
-    let shown = format!("{} ({})", error.message, error.code);
+    let shown = with_code(error);
     (StatusCode::CONFLICT, super::detail_body(action.0, &format!("{verb}: {shown}"),
         json!({"erro": shown, "code": error.code})))
 }

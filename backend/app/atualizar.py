@@ -964,8 +964,7 @@ def _preparar(topologia: str, *, dist: bool = True, release: tuple | None = None
         baixados: list = []
         with ThreadPoolExecutor(2) as ex:
             tela = ex.submit(_atualizar_dist)
-            binario = ex.submit(lambda: rust_release.fetch(release=release, hold=baixados) if release
-                                else rust_release.fetch(hold=baixados))
+            binario = ex.submit(rust_release.fetch, release=release, hold=baixados)
         erros: list[Exception] = []
 
         def _resultado(f):
