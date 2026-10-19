@@ -75,18 +75,25 @@ jobs:
           path: *cache-check
           key: ${{ steps.cache-check.outputs.cache-primary-key }}
       # Chave nova não substitui a velha: sem apagar, cada mudança no vendor ou no Cargo.lock deixava outra cópia
-      # até o teto de 10 GB do repositório, e o GitHub despejava o cache que a main estava usando.
+      # até o teto de 10 GB do repositório, e o GitHub despejava o cache que a main estava usando. Por último e sem
+      # derrubar o job: falha aqui só deixa as cópias antigas, com aviso. Só apaga com a chave nova já gravada
+      # (o `cache/save` que falha só avisa, e apagar então deixaria o próximo push sem cache).
       - name: Apagar cópias antigas do cache
         if: *grava-check
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           PREFIXO: native-check-${{ runner.os }}-
           CHAVE: ${{ steps.cache-check.outputs.cache-primary-key }}
         run: &apagar-antigos |
-          gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$PREFIXO" --limit 100 --json key --jq '.[].key' |
-            while IFS= read -r k; do
-              [ -z "$k" ] || [ "$k" = "$CHAVE" ] || gh cache delete "$k" --repo "$GITHUB_REPOSITORY"
-            done
+          set -o pipefail
+          lista() { gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$1" --limit 100 --json key --jq '.[].key'; }
+          gravada=$(lista "$CHAVE") || { echo "::warning::não consegui listar o cache $CHAVE; as cópias antigas ficam"; exit 0; }
+          grep -qxF -- "$CHAVE" <<<"$gravada" || { echo "::warning::o cache $CHAVE não aparece gravado; as cópias antigas ficam"; exit 0; }
+          antigas=$(lista "$PREFIXO") || { echo "::warning::não consegui listar o cache $PREFIXO; as cópias antigas ficam"; exit 0; }
+          while IFS= read -r k; do
+            [ -z "$k" ] || [ "$k" = "$CHAVE" ] || gh cache delete "$k" --repo "$GITHUB_REPOSITORY" || echo "::warning::não apaguei o cache $k"
+          done <<<"$antigas"
 
   build:
     if: github.ref_name == 'main' || github.ref_name == 'beta' || github.event_name == 'workflow_dispatch'
@@ -190,18 +197,19 @@ jobs:
         with:
           path: *cache-native
           key: ${{ steps.cache-rust.outputs.cache-primary-key }}
-      - name: Apagar cópias antigas do cache
-        if: *grava-native
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PREFIXO: native-${{ runner.os }}-${{ env.PERFIL }}-
-          CHAVE: ${{ steps.cache-rust.outputs.cache-primary-key }}
-        run: *apagar-antigos
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.platform }}
           path: desktop-native/out/*
           retention-days: 1
+      - name: Apagar cópias antigas do cache
+        if: *grava-native
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFIXO: native-${{ runner.os }}-${{ env.PERFIL }}-
+          CHAVE: ${{ steps.cache-rust.outputs.cache-primary-key }}
+        run: *apagar-antigos
 
   # O cache de release que a pré-release de branch lê. Só a main grava, e só quando as dependências, o
   # toolchain ou o vendor mudam (a chave não existe ainda); nos outros pushes o job termina na consulta.
@@ -253,6 +261,7 @@ jobs:
           key: ${{ steps.consulta.outputs.cache-primary-key }}
       - name: Apagar cópias antigas do cache
         if: *falta-native
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           PREFIXO: native-${{ runner.os }}-${{ env.PERFIL }}-

@@ -136,19 +136,6 @@ jobs:
         with:
           path: *cache-dev
           key: ${{ steps.cache-dev.outputs.cache-primary-key }}
-      # Chave nova não substitui a velha: sem apagar, cada mudança no Cargo.lock deixava outra cópia até o teto
-      # de 10 GB do repositório, e o GitHub despejava o cache que a main estava usando.
-      - name: Apagar cópias antigas do cache
-        if: *grava-dev
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PREFIXO: server-v3-${{ runner.os }}-dev-
-          CHAVE: ${{ steps.cache-dev.outputs.cache-primary-key }}
-        run: &apagar-antigos |
-          gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$PREFIXO" --limit 100 --json key --jq '.[].key' |
-            while IFS= read -r k; do
-              [ -z "$k" ] || [ "$k" = "$CHAVE" ] || gh cache delete "$k" --repo "$GITHUB_REPOSITORY"
-            done
       # A suíte das regressões da entrega terminal não depende do binário de release.
       - uses: astral-sh/setup-uv@v5
         with:
@@ -167,6 +154,26 @@ jobs:
           name: testes-ok-${{ matrix.platform }}
           path: ${{ runner.temp }}/testes-ok
           retention-days: 1
+      # Chave nova não substitui a velha: sem apagar, cada mudança no Cargo.lock deixava outra cópia até o teto
+      # de 10 GB do repositório, e o GitHub despejava o cache que a main estava usando. Por último e sem
+      # derrubar o job: falha aqui só deixa as cópias antigas, com aviso. Só apaga com a chave nova já gravada
+      # (o `cache/save` que falha só avisa, e apagar então deixaria o próximo push sem cache).
+      - name: Apagar cópias antigas do cache
+        if: *grava-dev
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFIXO: server-v3-${{ runner.os }}-dev-
+          CHAVE: ${{ steps.cache-dev.outputs.cache-primary-key }}
+        run: &apagar-antigos |
+          set -o pipefail
+          lista() { gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$1" --limit 100 --json key --jq '.[].key'; }
+          gravada=$(lista "$CHAVE") || { echo "::warning::não consegui listar o cache $CHAVE; as cópias antigas ficam"; exit 0; }
+          grep -qxF -- "$CHAVE" <<<"$gravada" || { echo "::warning::o cache $CHAVE não aparece gravado; as cópias antigas ficam"; exit 0; }
+          antigas=$(lista "$PREFIXO") || { echo "::warning::não consegui listar o cache $PREFIXO; as cópias antigas ficam"; exit 0; }
+          while IFS= read -r k; do
+            [ -z "$k" ] || [ "$k" = "$CHAVE" ] || gh cache delete "$k" --repo "$GITHUB_REPOSITORY" || echo "::warning::não apaguei o cache $k"
+          done <<<"$antigas"
 
   # PERFIL: a main publica com o `dist` (LTO completo, uma unidade de código); a pré-release de branch, com o
   # `release` comum, que lê o cache do job `cache-release`. Só na main, no canal e no workflow_dispatch.
@@ -254,18 +261,19 @@ jobs:
         with:
           path: *cache-perfil
           key: ${{ steps.cache-perfil.outputs.cache-primary-key }}
-      - name: Apagar cópias antigas do cache
-        if: *grava-perfil
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PREFIXO: server-v3-${{ runner.os }}-${{ env.PERFIL }}-
-          CHAVE: ${{ steps.cache-perfil.outputs.cache-primary-key }}
-        run: *apagar-antigos
       - uses: actions/upload-artifact@v4
         with:
           name: server-${{ matrix.platform }}
           path: crates/out/*
           retention-days: 1
+      - name: Apagar cópias antigas do cache
+        if: *grava-perfil
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREFIXO: server-v3-${{ runner.os }}-${{ env.PERFIL }}-
+          CHAVE: ${{ steps.cache-perfil.outputs.cache-primary-key }}
+        run: *apagar-antigos
 
   # Cada sistema publica assim que o PRÓPRIO build e os PRÓPRIOS testes passam (os dois artefatos dele): sistema
   # que falhou ou foi cancelado não publica nada, e a release segue com o binário e a entrada anteriores dele.
@@ -282,8 +290,10 @@ jobs:
     concurrency:
       group: server-publish-${{ github.ref_name }}-${{ matrix.platform }}
       cancel-in-progress: false
+    # `actions: read` confere os artefatos do run quando um download falha.
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -300,8 +310,30 @@ jobs:
         with:
           name: testes-ok-${{ matrix.platform }}
           path: ${{ runner.temp }}/testes-ok
-      - if: steps.binarios.outcome != 'success' || steps.testes.outcome != 'success'
-        run: echo "::notice::${{ matrix.platform }} sem build ou sem testes aprovados neste run; a release segue com a entrada anterior."
+      # Artefato ausente = build ou testes daquele sistema falharam ou foram cancelados: nada a publicar. Artefato
+      # que existe e não baixou é falha de transporte: o job fica vermelho, nunca a release velha calada.
+      - name: Conferir o que faltou
+        if: steps.binarios.outcome != 'success' || steps.testes.outcome != 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PLATFORM: ${{ matrix.platform }}
+          BINARIOS: ${{ steps.binarios.outcome }}
+          TESTES: ${{ steps.testes.outcome }}
+        run: |
+          set -o pipefail
+          nomes=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --paginate --jq '.artifacts[].name') \
+            || { echo "::error::não consegui conferir os artefatos deste run"; exit 1; }
+          faltou=()
+          [ "$BINARIOS" = success ] || faltou+=("server-$PLATFORM")
+          [ "$TESTES" = success ] || faltou+=("testes-ok-$PLATFORM")
+          for a in "${faltou[@]}"; do
+            if grep -qxF -- "$a" <<<"$nomes"; then
+              echo "::error::o artefato $a existe neste run e não baixou; a release não foi atualizada"
+              exit 1
+            fi
+          done
+          echo "::notice::$PLATFORM sem build ou sem testes aprovados neste run; a release segue com a entrada anterior."
       - name: Publicar na release
         if: steps.binarios.outcome == 'success' && steps.testes.outcome == 'success'
         working-directory: crates/out
@@ -473,6 +505,7 @@ jobs:
           key: ${{ steps.consulta.outputs.cache-primary-key }}
       - name: Apagar cópias antigas do cache
         if: *falta-perfil
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           PREFIXO: server-v3-${{ runner.os }}-${{ env.PERFIL }}-
