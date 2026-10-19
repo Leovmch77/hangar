@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { configureApi, type ChatEvent } from '@hangar/core';
-import { queueSendMode, readQueueJev, sendWithDelivery, timingFeedback } from './queueDelivery';
+import { deliveryOptions, queueSendMode, readQueueJev, sendWithDelivery, timingFeedback } from './queueDelivery';
 import * as m from '../paraglide/messages';
 
 const server = { id: 'owner', label: 'fixture', baseUrl: 'https://owner.test', token: 'owner-token' };
@@ -80,4 +80,13 @@ it('Direto no Codex usa steer sem prazo local ou outro envio', async () => {
   expect(JSON.parse(init!.body as string)).toEqual({ text: 'oi' });
   expect(init!.signal).toBeUndefined();
   expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it('opções do modo: a salva vem marcada; Jev indisponível fica desativado e marca a Fila', () => {
+  const pick = (mode: 'queued' | 'direct' | 'jev', status: 'loading' | 'ready' | 'setup' | 'unsupported' | 'error') =>
+    deliveryOptions({ mode, status, help: 'h' }).map((o) => `${o.mode}:${o.checked ? 'on' : 'off'}:${o.disabled ? 'dis' : 'ok'}`);
+  expect(pick('direct', 'ready')).toEqual(['queued:off:ok', 'direct:on:ok', 'jev:off:ok']);
+  expect(pick('jev', 'ready')).toEqual(['queued:off:ok', 'direct:off:ok', 'jev:on:ok']);
+  expect(pick('jev', 'setup')).toEqual(['queued:on:ok', 'direct:off:ok', 'jev:off:dis']);
+  expect(pick('direct', 'loading')).toEqual(['queued:off:ok', 'direct:on:ok', 'jev:off:dis']);
 });

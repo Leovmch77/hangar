@@ -469,9 +469,10 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
   const [styleMenuOpen, setStyleMenuOpen] = useState(false);
   const styleServer = useServers((s) => s.servers.find((x) => x.id === origin.serverId) ?? null);
   const supportsDelivery = provider === 'claude' || provider === 'codex';
-  // Segue lendo o Jev com a fila vazia: o modo salvo vale para o envio mesmo sem painel à vista.
-  const deliveryActive = supportsDelivery && (state === 'working' || queueList.entries.length > 0);
-  const delivery = useQueueDelivery(styleServer ?? undefined, deliveryActive);
+  // Lê o Jev mesmo parado e sem fila: o toque longo no Enviar escolhe o modo a qualquer momento.
+  const delivery = useQueueDelivery(styleServer ?? undefined, supportsDelivery);
+  const modeMenu = useMemo(() => supportsDelivery && !editing ? { delivery: { mode: delivery.mode, status: delivery.status, help: delivery.help },
+    onPick: useDeliveryMode.getState().setMode } : undefined, [supportsDelivery, editing, delivery.mode, delivery.status, delivery.help]);
   const deliveryTiming = useCallback((message: string) => {
     const live = chat.use.getState();
     return queueSendMode(delivery.mode, delivery.status === 'ready', live.stateEvent?.state ?? 'idle', provider,
@@ -1679,6 +1680,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
             busy: editing ? queueBusy : waitingVoiceSend || sending || uploading, editing, count: filaCount,
             label: editing ? m.queue_panel_update_aria() : m.composer_enviar_mensagem(),
             hint: filaCount > 0 ? m.composer_fila_contagem({ n: filaCount }) : undefined }}
+          modeMenu={modeMenu}
         />
 
         {bar && barVersions ? (

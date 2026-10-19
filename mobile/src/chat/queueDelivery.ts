@@ -10,6 +10,17 @@ export type DeliveryFeedback = { text: string; warning: boolean };
 export type JevStatus = 'loading' | 'ready' | 'setup' | 'unsupported' | 'error';
 export type DeliveryControls = { mode: DeliveryMode; status: JevStatus; help: string };
 
+// Lido na hora do uso: quem só importa o módulo (telas e testes com mensagens simuladas) não depende destas chaves.
+export const deliveryModeLabel = (mode: DeliveryMode) =>
+  mode === 'queued' ? m.mobile_queue_mode_queued() : mode === 'direct' ? m.mobile_queue_mode_direct() : m.mobile_queue_mode_jev();
+export type DeliveryOption = { mode: DeliveryMode; checked: boolean; disabled: boolean };
+// Jev salvo e indisponível envia pela fila (queueSendMode), então é a Fila que aparece marcada.
+export function deliveryOptions(d: DeliveryControls): DeliveryOption[] {
+  const ready = d.status === 'ready';
+  const effective = d.mode === 'jev' && !ready ? 'queued' : d.mode;
+  return (['queued', 'direct', 'jev'] as const).map((mode) => ({ mode, checked: effective === mode, disabled: mode === 'jev' && !ready }));
+}
+
 const chars = (value: string, count: number) => Array.from(value).slice(0, count).join('');
 const caption = (value: string) => {
   const body = parseImageMessage(value)?.caption ?? value;

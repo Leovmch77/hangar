@@ -4770,6 +4770,8 @@
   "native_queue_jev_unavailable": "Could not consult Jev; message sent through the normal queue.",
   "native_queue_panel_steered": "Message sent to the current turn.",
   "mobile_queue_mode_label": "Delivery mode",
+  "mobile_queue_mode_current": "Now: {mode}",
+  "mobile_queue_mode_selected": "{mode} (current)",
   "mobile_queue_mode_queued": "Queue",
   "mobile_queue_mode_direct": "Direct",
   "mobile_queue_mode_jev": "Jev",

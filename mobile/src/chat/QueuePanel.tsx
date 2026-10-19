@@ -11,7 +11,7 @@ import { contextRefsPlainText } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { Icon } from '../ui/Icon';
 import { haptic } from '../ui/haptics';
-import type { DeliveryControls, DeliveryMode } from './queueDelivery';
+import { deliveryModeLabel, deliveryOptions, type DeliveryControls, type DeliveryMode } from './queueDelivery';
 
 type MenuId = 'up' | 'down' | 'steer' | 'edit' | 'remove';
 interface MenuAction { id: MenuId; title: string; disabled: boolean; destructive?: boolean }
@@ -49,8 +49,6 @@ interface Props {
 // ponytail: a linha nasce e é despachada em escritas separadas, e entre as duas ela aparece como "esperando"
 // por um instante; o painel só surge se ela continuar esperando, para a mensagem que já está indo não piscar.
 export const QUEUE_PANEL_APPEAR_MS = 600;
-const MODES = ['queued', 'direct', 'jev'] as const;
-const modeLabel = { queued: m.mobile_queue_mode_queued, direct: m.mobile_queue_mode_direct, jev: m.mobile_queue_mode_jev };
 
 export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSteer, onRemove, onMove, delivery, onModeChange }: Props) {
   const { theme } = useUnistyles();
@@ -74,8 +72,6 @@ export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSte
   };
   const muted = theme.tokens.text.muted;
   const jevReady = delivery?.status === 'ready';
-  // Jev salvo e indisponível: o envio vai pela fila, e é ela que aparece marcada.
-  const effective = delivery && (delivery.mode !== 'jev' || jevReady) ? delivery.mode : 'queued';
   const jevWarning = delivery?.status === 'setup' || delivery?.status === 'error';
   return (
     <View style={styles.band}>
@@ -96,18 +92,16 @@ export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSte
         {delivery ? (
           <View accessibilityRole="radiogroup" accessibilityLabel={m.mobile_queue_mode_label()}
             style={[styles.segments, { backgroundColor: theme.tokens.fillSubtle, borderColor: theme.tokens.border.subtle }]}>
-            {MODES.map((mode) => {
-              const disabled = mode === 'jev' && !jevReady;
-              const checked = effective === mode;
+            {deliveryOptions(delivery).map(({ mode, checked, disabled }) => {
               return (
-                <Pressable key={mode} accessibilityRole="radio" accessibilityLabel={modeLabel[mode]()}
+                <Pressable key={mode} accessibilityRole="radio" accessibilityLabel={deliveryModeLabel(mode)}
                   accessibilityHint={mode === 'jev' ? delivery.help : undefined}
                   aria-checked={checked} aria-disabled={disabled} aria-busy={mode === 'jev' && delivery.status === 'loading'}
                   disabled={disabled} hitSlop={{ top: 8, bottom: 8 }}
                   onPress={() => { if (delivery.mode === mode) return; haptic.selection(); onModeChange?.(mode); }}
                   style={[styles.segment, checked && { backgroundColor: theme.tokens.bg.elevated }, disabled && styles.disabled]}>
                   <Text style={[styles.segmentText, { color: checked ? (mode === 'queued' ? theme.tokens.text.primary : theme.tokens.accent.base) : theme.tokens.text.secondary }]}>
-                    {modeLabel[mode]()}
+                    {deliveryModeLabel(mode)}
                   </Text>
                   {mode === 'jev' && jevWarning ? <Icon name="CircleAlert" size={12} color={theme.tokens.status.warning} /> : null}
                 </Pressable>
