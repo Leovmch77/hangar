@@ -42,7 +42,8 @@ const mensagemDe = (e: unknown): string => (e instanceof Error ? e.message : Str
 // O formulário remonta a home ao trocar de máquina; a memória pertence à vista, não à gaveta.
 const homeView = { collapsedGroups: new Set<string>() as ReadonlySet<string>, contentOffset: { x: 0, y: 0 } };
 
-const ANIMACAO_SECAO = LayoutAnimation.create(220, LayoutAnimation.Types.easeInEaseOut, LayoutAnimation.Properties.opacity);
+const animarSecao = () =>
+  LayoutAnimation.configureNext(LayoutAnimation.create(220, LayoutAnimation.Types.easeInEaseOut, LayoutAnimation.Properties.opacity));
 
 interface Props {
   onClose: () => void;
@@ -253,7 +254,7 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
   const ultimoTopo = useRef(topoKey);
   if (ultimoTopo.current !== topoKey) {
     ultimoTopo.current = topoKey;
-    if (!reduced) LayoutAnimation.configureNext(ANIMACAO_SECAO);
+    if (!reduced) animarSecao();
   }
 
   const alternarGrupo = useCallback(
