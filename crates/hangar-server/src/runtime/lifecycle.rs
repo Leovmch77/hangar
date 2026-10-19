@@ -131,7 +131,12 @@ pub async fn kill_terminal(io:&dyn TerminalIo,procs:&dyn ProcessView,binding:&Te
     let target=if binding.windows {binding.name.clone()} else {format!("={}",binding.name)};
     let output=mux(io,binding,vec!["kill-session".into(),"-t".into(),target]).await?;
     if !output.success {return Err(failure("lifecycle_kill"));}
-    if !process_absent(procs,agent_pid,birth)? {return Err(failure("lifecycle_still_alive"));}
+    // O `kill-session` só avisa o agente (SIGHUP): ele leva um instante para sair.
+    let deadline=std::time::Instant::now()+Duration::from_secs(5);
+    while !process_absent(procs,agent_pid,birth)? {
+        if std::time::Instant::now()>=deadline {return Err(failure("lifecycle_still_alive"));}
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     Ok(())
 }
 
@@ -302,6 +307,27 @@ mod tests {
         let tail=&args[args.len()-3..];
         assert_eq!((tail[0].as_str(),tail[1].as_str()),("/bin/sh","-c"),"{args:?}");
         assert!(tail[2].starts_with("exec ")&&tail[2].contains(super::super::claude_relaunch::RELAUNCH_FLAG),"{args:?}");
+    }
+    /// O `kill-session` só avisa o agente: ele leva um instante para sair, e a leitura logo depois ainda o vê
+    /// vivo. Isso não é sobreviver ao fechamento.
+    #[tokio::test]
+    async fn an_agent_that_takes_a_moment_to_exit_after_kill_session_is_closed() {
+        struct Procs {calls:std::sync::atomic::AtomicU32}
+        impl ProcessView for Procs {
+            fn children(&self,_:Duration)->std::io::Result<std::sync::Arc<crate::list::procs::ChildrenMap>> {Ok(std::sync::Arc::new([(10,vec![11])].into()))}
+            fn cwd(&self,_:i64)->Option<std::path::PathBuf> {None}
+            fn env_var(&self,_:i64,_:&str)->std::io::Result<Option<std::ffi::OsString>> {Ok(None)}
+            fn start_time(&self,_:i64)->Option<f64> {None}
+            fn recipe(&self,pid:i64)->std::io::Result<crate::list::procs::ProcessRecipe> {
+                // Duas leituras antes do kill, mais duas logo depois com o agente ainda saindo.
+                let alive=self.calls.fetch_add(1,std::sync::atomic::Ordering::SeqCst)<4;
+                Ok(crate::list::procs::ProcessRecipe {pid,birth:if alive {7.0} else {8.0},executable:"claude".into(),cwd:"/".into(),argv:vec![],environ:vec![],cgroup:None})
+            }
+        }
+        let line=|| CommandOutput {success:true,stdout:b"session\t%2\t1000\t10\t0\t0\t0".to_vec()};
+        let io=Io {lines:std::sync::Mutex::new([line(),line(),CommandOutput {success:true,stdout:vec![]}].into())};
+        let procs=Procs {calls:Default::default()};
+        assert_eq!(kill_terminal(&io,&procs,&binding(),11,7.0).await.map_err(|e|e.code),Ok(()));
     }
     #[tokio::test]
     async fn missing_capture_is_not_definitive_death() {
