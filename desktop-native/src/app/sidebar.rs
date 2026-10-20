@@ -90,6 +90,7 @@ pub(super) struct BranchList { #[serde(default)] branches: Vec<String>, current:
 pub(super) enum Accounts { Loading, Known(Vec<AccountTarget>, Option<String>), Failed(String) }
 
 /// `pct` é a janela de cota mais cheia (None = sem leitura); `full` é conta perto demais do limite para continuar nela.
+/// `login: Some(false)` é conta sem login, onde o Claude não sobe; servidor antigo não manda o campo.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize)]
 pub(super) struct AccountTarget {
     pub(super) path: String,
@@ -98,6 +99,12 @@ pub(super) struct AccountTarget {
     #[serde(default)] pub(super) low: bool,
     #[serde(default)] pub(super) full: bool,
     pub(super) engine_account: Option<String>,
+    #[serde(default)] pub(super) login: Option<bool>,
+}
+
+impl AccountTarget {
+    /// Conta que não aceita a conversa: esgotada ou sem login.
+    fn unusable(&self) -> bool { self.full || self.login == Some(false) }
 }
 
 struct MenuRead { target: Target, seq: u64, mute: Mute, branches: Option<Branches>, accounts: Option<Accounts> }
@@ -1548,15 +1555,18 @@ fn fill_accounts(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, 
     if list.is_empty() { return menu.item(PopupMenuItem::new(tr("sidebar_no_accounts")).disabled(true)); }
     let returning = hangar.upgrade().is_some_and(|entity| entity.read(cx).target_session(target)
         .is_some_and(|s| s.engine.as_deref().is_some_and(|e| !e.is_empty())));
-    list.into_iter().fold(menu.max_h(px(260.)).scrollable(true), |menu, AccountTarget { path, label, pct, low, full, engine_account }| {
+    list.into_iter().fold(menu.max_h(px(260.)).scrollable(true), |menu, target_row| {
+        let disabled = target_row.unusable();
+        let AccountTarget { path, label, pct, low, full, engine_account, login } = target_row;
         let (hangar, target) = (hangar.clone(), target.clone());
         // O % da janela mais cheia ao lado do nome; esgotada não aceita a conversa, acabando aceita com aviso na confirmação.
         let name = if returning && engine_account.is_none() { tr("sidebar_return_claude_account").replace("{n}", &label) }
             else if engine_account.is_some() { format!("ChatGPT · {label}") } else { label.clone() };
         let text = match pct { Some(pct) => format!("{name} · {pct:.0}%"), None => name };
-        let text = if full { format!("{text} · {}", tr("sidebar_account_full")) } else if low { format!("{text} · {}", tr("sidebar_account_low")) } else { text };
+        let text = if login == Some(false) { format!("{text} · {}", web("conta_sem_login_rotulo")) }
+            else if full { format!("{text} · {}", tr("sidebar_account_full")) } else if low { format!("{text} · {}", tr("sidebar_account_low")) } else { text };
         let warn = pct.filter(|_| low);
-        menu.item(PopupMenuItem::new(text).disabled(full).on_click(move |_, window, cx| {
+        menu.item(PopupMenuItem::new(text).disabled(disabled).on_click(move |_, window, cx| {
             let _ = hangar.update(cx, |this, cx| match &engine_account {
                 Some(account) => this.confirm_engine_account(target.clone(), account.clone(), label.clone(), warn, window, cx),
                 None => this.confirm_account(target.clone(), path.clone(), label.clone(), warn, window, cx),
@@ -1880,6 +1890,15 @@ mod tests {
         let (generic, notice) = super::merge_account_targets(legacy.clone(), Ok(None), false).unwrap();
         assert!(generic.is_empty() && notice.is_none());
         assert!(super::merge_account_targets(legacy, Err("invalid engine response".into()), false).is_err());
+    }
+
+    /// Conta sem login fica no menu, mas não aceita a conversa; servidor antigo, sem o campo, vale como logada.
+    #[test]
+    fn account_without_login_is_disabled_and_missing_field_is_logged_in() {
+        let targets: Vec<super::AccountTarget> = serde_json::from_value(serde_json::json!([
+            {"path":"/a", "label":"a", "pct":10.0, "login":false}, {"path":"/b", "label":"b", "pct":10.0},
+            {"path":"/c", "label":"c", "pct":99.5, "full":true, "login":true}])).unwrap();
+        assert_eq!(targets.iter().map(super::AccountTarget::unusable).collect::<Vec<_>>(), [true, false, true]);
     }
 
     #[test]

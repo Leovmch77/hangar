@@ -112,6 +112,19 @@ fn oauth(path: &Path) -> Value {
         .map(|v| v["claudeAiOauth"].clone())
         .unwrap_or(Value::Null)
 }
+/// A conta tem com o que subir o Claude: token de acesso no prazo, ou de renovação ainda válido. No
+/// macOS a credencial mora no Keychain, fora do arquivo: lá não dá para afirmar a falta.
+pub fn has_login(home: &Path) -> bool {
+    if cfg!(target_os = "macos") {
+        return true;
+    }
+    let auth = oauth(home);
+    let live = |field: &str| auth[field].as_f64().is_none_or(|ms| ms / 1000.0 > now());
+    let present = |field: &str| auth[field].as_str().is_some_and(|s| !s.is_empty());
+    (present("accessToken") && auth["expiresAt"].is_number() && live("expiresAt"))
+        || (present("refreshToken") && live("refreshTokenExpiresAt"))
+}
+
 pub fn renewed(before: &Value, after: &Value) -> bool {
     let Some(expiry) = after["expiresAt"].as_f64() else {
         return false;

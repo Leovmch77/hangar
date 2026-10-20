@@ -52,8 +52,8 @@ pub(in crate::app) enum ActionReply {
     Step(u64, Result<Value, Failure>),
     Code(u64, Result<Value, Failure>, oneshot::Sender<bool>),
     Stopped(u64, bool, Result<Value, Failure>),
-    /// O `bool` diz se a exclusão pediu para guardar as conversas.
-    Changed(String, String, ChangeKind, bool, Result<Value, Failure>),
+    /// O `Option<bool>` é a escolha de guardar as conversas que a exclusão levou, para repeti-la ao liberar.
+    Changed(String, String, ChangeKind, Option<bool>, Result<crate::api::Removed, Failure>),
     Created(String, Result<Value, Failure>),
 }
 
@@ -379,12 +379,13 @@ impl Hangar {
         let this = cx.entity().downgrade();
         chrome::confirm_alert_with(window, cx, title, description, check, ok, ButtonVariant::Danger, move |_, cx| {
             let keep = keep.as_ref().map(|keep| keep.get());
-            let _ = this.update(cx, |this, cx| this.start_change(id.clone(), kind, keep, cx));
+            let _ = this.update(cx, |this, cx| this.start_change(id.clone(), kind, keep, false, cx));
             true
         });
     }
 
-    fn start_change(&mut self, id: String, kind: ChangeKind, keep: Option<bool>, cx: &mut Context<Self>) {
+    /// `release`: o servidor leva as sessões para outra conta e encerra os processos presos antes de apagar.
+    fn start_change(&mut self, id: String, kind: ChangeKind, keep: Option<bool>, release: bool, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
         if self.accounts_busy() { return; }
         // A linha pode ter sumido entre a pergunta e o sim: nada a fazer.
@@ -400,14 +401,15 @@ impl Hangar {
         self.runtime.spawn(async move {
             let path: Vec<&str> = path.iter().map(String::as_str).collect();
             let result = match kind {
-                ChangeKind::SignOut => api.server_post(&path, seconds).await,
+                ChangeKind::SignOut => api.server_post(&path, seconds).await.map(crate::api::Removed::Done),
                 ChangeKind::Remove => {
-                    let query: &[(&str, &str)] = match keep { Some(true) => &[("keep_transcripts", "1")],
-                        Some(false) => &[("keep_transcripts", "0")], None => &[] };
-                    api.server_send_query(reqwest::Method::DELETE, &path, query, None, seconds).await
+                    let mut query = match keep { Some(true) => vec![("keep_transcripts", "1")],
+                        Some(false) => vec![("keep_transcripts", "0")], None => vec![] };
+                    if release { query.push(("release", "1")); }
+                    api.remove_account(&path, &query, seconds).await
                 }
             };
-            done(AccountsReply::Action(ActionReply::Changed(id, name, kind, keep == Some(true), result))).await
+            done(AccountsReply::Action(ActionReply::Changed(id, name, kind, keep, result))).await
         });
         cx.notify();
     }
@@ -522,6 +524,20 @@ impl Hangar {
             }
             ActionReply::Changed(id, name, kind, keep, result) => {
                 self.accounts.change = None;
+                let result = match result {
+                    // A conta está presa: pergunta se libera, e o sim repete o pedido com `release=1`.
+                    Ok(crate::api::Removed::Held(holders)) => {
+                        let (title, lines) = super::release_prompt(&name, &holders);
+                        let this = cx.entity().downgrade();
+                        chrome::confirm_alert(window, cx, title, lines.join("\n"), tr_shared("contas_liberar_confirmar", &[]), ButtonVariant::Danger,
+                            move |_, cx| { let _ = this.update(cx, |this, cx| this.start_change(id.clone(), kind, keep, true, cx)); true });
+                        cx.notify();
+                        return;
+                    }
+                    Ok(crate::api::Removed::Done(body)) => Ok(body),
+                    Err(error) => Err(error),
+                };
+                let keep = keep == Some(true);
                 let ok = result.is_ok();
                 let kept = result.as_ref().ok().filter(|_| kind == ChangeKind::Remove)
                     .and_then(|body| super::kept_transcripts_notice(&name, keep, body));

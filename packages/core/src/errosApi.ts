@@ -167,6 +167,10 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_sessao_usa_conta: (p) => m.erro_sessao_usa_conta({ nome: String(p.nome) }),
   erro_varredura_processos: () => m.erro_varredura_processos(),
   erro_processos_usam_conta: (p) => m.erro_processos_usam_conta({ pids: String(p.pids) }),
+  erro_conta_sem_login: (p) => m.erro_conta_sem_login({ conta: String(p.conta) }),
+  erro_sem_conta_destino: () => m.erro_sem_conta_destino(),
+  erro_liberar_sessao: (p) => m.erro_liberar_sessao({ sessao: String(p.sessao), erro: fmtParam(p.erro) }),
+  erro_liberar_conta: () => m.erro_liberar_conta(),
 
   // /api/desktop — a paleta e o papel de parede sao resposta de negocio, nao erro
   erro_sem_paleta: () => m.erro_sem_paleta(),

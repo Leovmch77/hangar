@@ -45,7 +45,9 @@ _OWNED_SETTINGS = frozenset({"hooks", "statusLine", "enabledPlugins", "extraKnow
 # Preferências que descrevem ESTA máquina: cofre da lista de servidores, origens do terminal e
 # pastas do seletor.
 _MACHINE_PREFS = frozenset({"sync", "term_origins", "scan_roots"})
-_HANGAR_MCP = "hangar"
+# MCPs que o Hangar monta para ESTA máquina: o computer-control aponta para binário e alvos do
+# sistema dela, e copiado de outro sistema vira um comando que não existe.
+_MACHINE_MCP = frozenset({"hangar", "hangar-computer-control"})
 
 
 @dataclass
@@ -428,7 +430,7 @@ def _export_plugins(roots: Roots, bundle: Bundle, keep: set[str] | None = None) 
 def _export_mcp(roots: Roots, bundle: Bundle, keep: set[str] | None = None) -> dict:
     data = _read_json(Path(roots.home) / ".claude.json")
     servers = data.get("mcpServers") if isinstance(data.get("mcpServers"), dict) else {}
-    every = _canon({k: v for k, v in servers.items() if k != _HANGAR_MCP}, roots)
+    every = _canon({k: v for k, v in servers.items() if k not in _MACHINE_MCP}, roots)
     servers = _pick(every, keep)
 
     def commands_of(chosen: dict) -> list[str]:
@@ -499,7 +501,7 @@ def _export_codex(roots: Roots, bundle: Bundle, keep: set[str] | None = None) ->
         if key not in codex_contas_sync.PREFERENCE_KEYS:
             continue
         if key == "mcp_servers" and isinstance(value, dict):
-            value = {k: v for k, v in value.items() if k != _HANGAR_MCP}
+            value = {k: v for k, v in value.items() if k not in _MACHINE_MCP}
         if not _jsonable(value):   # data do TOML não tem forma em JSON
             warnings.append(_warn("config_sync_unsupported_value", key=key))
             continue
@@ -1048,7 +1050,7 @@ def _apply_mcp(ctx: _Apply) -> None:
     res = _result(ctx, item)
     _apply_refs(ctx, item)
     servers = {k: v for k, v in _uncanon(ctx.bundle.items[item].get("servers") or {},
-                                         ctx.roots).items() if k != _HANGAR_MCP}
+                                         ctx.roots).items() if k not in _MACHINE_MCP}
     for name, server in servers.items():
         if isinstance(server, dict):
             _fix_commands(server, res, name)

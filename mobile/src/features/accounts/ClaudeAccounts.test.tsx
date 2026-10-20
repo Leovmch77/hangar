@@ -125,7 +125,7 @@ describe('ClaudeAccountActions', () => {
     expect(alertButtons().map(b => b.text)).toEqual([m.comum_cancelar(), m.contas_apagar_com_conversas(), m.contas_apagar_juntando()]);
     expect(alertButtons()[2].isPreferred).toBe(true);
     await confirm(keep ? m.contas_apagar_juntando() : m.contas_apagar_com_conversas(), true);
-    expect(calls.delete).toHaveBeenCalledExactlyOnceWith(server, 'work', keep);
+    expect(calls.delete).toHaveBeenCalledExactlyOnceWith(server, 'work', keep, false);
     expect(changed).toHaveBeenCalledTimes(1);
     expect(calls.alert).toHaveBeenLastCalledWith(accountDeletedNotice('Apelido', keep, { ok: true, merged: 2, renamed: 0, skipped: 1 }));
   });
@@ -197,6 +197,21 @@ describe('ClaudeAccountActions', () => {
     await act(async () => root.render(createElement(ClaudeAccountActions, { server, credential, onChanged: changed })));
     await click(container, m.comum_apagar()); await confirm(m.contas_apagar_juntando());
     expect(container.textContent).toContain('409: account in use'); expect(changed).not.toHaveBeenCalled();
+  });
+
+  it('conta presa pergunta se libera, lista o que prende e reapaga com release', async () => {
+    calls.delete.mockRejectedValueOnce(Object.assign(new Error('preso'), { status: 409, envelope: { code: 'erro_processos_usam_conta',
+      params: { sessoes: ['s1'], processos: [{ pid: 1572, nome: null, sessao: 'term-a' }] } } })).mockResolvedValue({ ok: true });
+    const { root, container } = mount(); const changed = vi.fn();
+    await act(async () => root.render(createElement(ClaudeAccountActions, { server, credential, onChanged: changed })));
+    await click(container, m.comum_apagar()); await confirm(m.contas_apagar_com_conversas());
+    expect(calls.alert.mock.calls.at(-1)![0]).toBe(m.contas_liberar_titulo({ nome: 'Apelido' }));
+    expect(calls.alert.mock.calls.at(-1)![1]).toBe([m.contas_liberar_sessoes({ lista: 's1' }), m.contas_liberar_processos({
+      lista: m.contas_liberar_processo({ nome: m.contas_liberar_processo_terminal({ sessao: 'term-a' }), pid: 1572 }) })].join('\n'));
+    expect(container.textContent).not.toContain('preso');
+    await confirm(m.contas_liberar_confirmar());
+    expect(calls.delete).toHaveBeenLastCalledWith(server, 'work', false, true);
+    expect(changed).toHaveBeenCalledTimes(1);
   });
 
   it('confirmação antiga não age na máquina nova e resposta antiga não atualiza a linha', async () => {
