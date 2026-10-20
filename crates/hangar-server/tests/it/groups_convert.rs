@@ -252,6 +252,28 @@ async fn conversion_retries_after_the_peer_upgrades() {
     assert_converted(&n);
 }
 
+/// `/pair` só com sessões daqui, uma delas ainda em par 1:1 antigo: converte o par antes e entra
+/// pelo grupo entre máquinas; com a outra máquina antiga, a recusa de hoje.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_pair_with_legacy_member_converts_then_joins() {
+    let n = net().await;
+    let upgraded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    peers(&n.casa, &[("lab", upgradable(n.lab.addr, upgraded.clone()).await)]);
+    legacy(&n.casa, "s0", "lab::s1");
+    legacy(&n.lab, "s1", "casa::s0");
+    let (status, body) = call(n.casa.addr, "POST", "/api/sessions/s2/pair", Some(&json!({"peers": ["s0"]}))).await;
+    assert_eq!((status, body["detail"]["code"].clone()), (400, json!("erro_pareamento_mistura_cross")), "{body}");
+    assert!(sidecar(&n.casa, "s2").is_none() && records(&n.casa).is_empty());
+    upgraded.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (status, body) = call(n.casa.addr, "POST", "/api/sessions/s2/pair", Some(&json!({"peers": ["s0"]}))).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["gid"], GID, "entra no grupo convertido");
+    assert_eq!(members(&record(&n.casa, GID).unwrap()["members"]), ["casa::s0", "casa::s2", "lab::s1"]);
+    let lab = n.lab.pair.clone();
+    fake::wait_until(move || std::fs::read(lab.join("s1.json")).ok().and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        .is_some_and(|s| s["peers"].as_array().unwrap().contains(&json!("casa::s2")))).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn outside_pair_is_never_converted() {
     let n = net().await;

@@ -214,7 +214,14 @@ async fn cross_routes_answer_like_python() {
         }).collect();
         delivered.sort();
         assert_eq!(json!(delivered), step["delivered"], "{name}: quem recebeu recado");
-        assert_eq!(Value::Array(calls.lock().unwrap().clone()), step["calls"], "{name}: o que saiu para outra máquina");
+        let mut sent = calls.lock().unwrap().clone();
+        // I-8B: antes da recusa de mistura, o Rust tenta converter o par antigo; lab não conhece casa
+        // no peers.json dela, recusa, e o par segue 1:1 com a resposta de sempre.
+        if name == "cross_local_mix" {
+            assert!(sent.iter().any(|c| c["body"]["convert_from_legacy"].is_string()), "{name}: a conversão foi tentada");
+            sent.retain(|c| c["path"] != "/api/sessions/s1/group" && !c["body"]["convert_from_legacy"].is_string());
+        }
+        assert_eq!(Value::Array(sent), step["calls"], "{name}: o que saiu para outra máquina");
     }
     // O par desfeito dos dois lados; o par direto de `lab` (s3 ↔ casa::s2) continua lá.
     assert!(!casa.pair.join("s0.json").exists() && !lab.pair.join("s1.json").exists());

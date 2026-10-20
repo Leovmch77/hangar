@@ -215,10 +215,25 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
     let everyone: Vec<String> = std::iter::once(name.clone()).chain(others.iter().cloned()).collect();
     if let Some(refused) = asked.orchestrator(&everyone).await { return refused; }
     let mut federated = others.iter().any(|o| is_remote(o));
+    let mut legacy = Vec::new();
     for n in &everyone {
         if federated { break; }
-        // Sessão daqui num grupo entre máquinas: entrar nele é pedir à dona dele.
-        federated = asked.groups.link(n).await.ok().flatten().is_some_and(|s| s.fed.is_some());
+        match asked.groups.link(n).await.ok().flatten() {
+            // Sessão daqui num grupo entre máquinas: entrar nele é pedir à dona dele.
+            Some(s) if s.fed.is_some() => federated = true,
+            Some(s) if s.peers.iter().any(|p| is_remote(p)) => legacy.push(n.clone()),
+            _ => {}
+        }
+    }
+    let mut held = held;
+    if !federated && !legacy.is_empty() {
+        // Par 1:1 antigo: converte antes, sem o passe (a conversão fala com a outra máquina).
+        drop(held);
+        super::convert::run(&asked.st, &asked.groups, &legacy).await;
+        held = match asked.enter().await { Ok(held) => held, Err(busy) => return busy };
+        for n in &legacy {
+            if asked.groups.link(n).await.ok().flatten().is_some_and(|s| s.fed.is_some()) { federated = true; break; }
+        }
     }
     if federated {
         if body.link {
