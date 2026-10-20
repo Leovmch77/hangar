@@ -288,6 +288,8 @@ pub struct PushBody {
     #[serde(default)] pub outside: Vec<OutsideRef>,
     #[serde(default)] pub joining: Vec<String>,
     #[serde(default)] pub dissolved: bool,
+    /// `srv::nome` do par 1:1 antigo que este envio converte (`convert.rs`).
+    #[serde(default)] pub convert_from_legacy: Option<String>,
 }
 
 /// `PUT /api/groups/{gid}`: a dona empurra o grupo. Nunca entra na porta das sessões: só sidecar
@@ -795,6 +797,7 @@ pub async fn local_apply(st: &Arc<AppState>, groups: &Arc<GroupService>, gid: &s
     let fed = of(st, groups).await?;
     // Leitura antecipada só para conferir as sessões na lista; quem vale é a da fila sob o lock.
     let (renamed, leaving) = pending_moves(&fed.outbox.pending(), &body.owner, gid);
+    if let Some(from) = body.convert_from_legacy.clone() { return super::convert::accept(groups, gid, body, from).await; }
     let joining = moved(&body.joining, &renamed, &leaving);
     let harness = if joining.is_empty() || body.dissolved { BTreeMap::new() } else {
         providers(st, &joining).await.map_err(|failed| Refusal(StatusCode::SERVICE_UNAVAILABLE, json!({"detail": failed})))?
@@ -1058,6 +1061,7 @@ pub(super) async fn pair(asked: Asked, held: Option<IngressPass>, others: Vec<St
     let harness = match providers(&asked.st, &locals).await {
         Ok(h) => h,
         Err(failed) => return asked.reply(StatusCode::SERVICE_UNAVAILABLE, json!({"detail": failed})),
+    super::convert::run(&asked.st, &asked.groups, &locals).await;
     };
     let missing = locals.iter().filter(|n| !harness.contains_key(*n)).cloned().collect::<Vec<_>>().join(", ");
     if !missing.is_empty() {
@@ -1138,7 +1142,7 @@ pub fn spawn(st: Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
             match st.peers.call_group(&owner, reqwest::Method::GET, &format!("/api/groups/{}", segment(&gid)), None).await {
                 Ok(record) => match serde_json::from_value::<GroupRecord>({ let mut r = record; if let Some(o) = r.as_object_mut() { o.remove("server_id"); } r }) {
                     Ok(r) => {
-                        let body = PushBody { protocol: PROTOCOL, owner: r.owner, version: r.version, task: r.task, members: r.members, outside: r.outside, joining: Vec::new(), dissolved: false };
+                        let body = PushBody { protocol: PROTOCOL, owner: r.owner, version: r.version, task: r.task, members: r.members, outside: r.outside, joining: Vec::new(), dissolved: false, convert_from_legacy: None };
                         if let Err(Refusal(status, _)) = local_apply(&st, &groups, &gid, body).await {
                             tracing::warn!(code = "groups_restart_apply_failed", %owner, %status, "groups: o grupo pedido à dona não foi aplicado");
                         }
@@ -1153,6 +1157,7 @@ pub fn spawn(st: Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
     }))
 }
 
+        super::convert::run(&st, &groups, &[]).await;
 // --- repasse da porta do Connect ---------------------------------------------------------------
 
 /// Rotas de grupo entre máquinas que o Python das portas dele (Connect) repassa a esta.

@@ -740,15 +740,15 @@ Revisão: risco — motivo: as duas máquinas decidem sem conversar; erro aqui c
 
 **Fecha:** I-8B, Review Focus 5.
 
-- [ ] **Step 1: Testes**: `both_sides_convert_to_the_same_group` (subida simultânea);
+- [x] **Step 1: Testes**: `both_sides_convert_to_the_same_group` (subida simultânea);
   `conversion_is_idempotent`; `old_version_peer_stays_legacy` (dona sem registro nem `fed` depois
   do `OldVersion`); `outside_pair_is_never_converted`; `alias_colliding_with_peer_is_not_converted`;
   `peers_key_differs_from_server_id_converts_once`; `old_peer_unpair_after_owner_converted`;
   `gid_is_deterministic` (valor literal esperado calculado à mão no teste a partir da regra acima).
-- [ ] **Step 2: Rodar e ver falhar.**
-- [ ] **Step 3: Implementar.**
-- [ ] **Step 4: Rodar.** Esperado: PASS.
-- [ ] **Step 5: Commit** — `feat(groups): convert old one-to-one pairs into groups across machines`.
+- [x] **Step 2: Rodar e ver falhar.**
+- [x] **Step 3: Implementar.**
+- [x] **Step 4: Rodar.** Esperado: PASS.
+- [x] **Step 5: Commit** — `feat(groups): convert old one-to-one pairs into groups across machines`.
 
 ---
 
