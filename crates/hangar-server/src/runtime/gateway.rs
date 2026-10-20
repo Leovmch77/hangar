@@ -2832,12 +2832,17 @@ mod tests {
         let hubs=crate::side::Hubs::default();registry.bind_hubs(hubs.downgrade());
         registry.open_claude_headless("cl-rebind",false).await.expect("é dela").expect("abriu");
         // Teto só contra travamento: no Windows do CI, com a bateria em paralelo, a troca passou de 5 s.
-        let binding=tokio::time::timeout(Duration::from_secs(60),async {
+        let waited=tokio::time::timeout(Duration::from_secs(60),async {
             loop {
                 if let Ok(binding)=registry.interaction_binding_readonly("cl-rebind").await && binding.conversation=="b" {break binding;}
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-        }).await.expect("a conversa nova chegou à entrada");
+        }).await;
+        let Ok(binding)=waited else {
+            let live=registry.live_sender("cl-rebind").borrow().as_ref().map(|s|(s.error.clone(),s.binding.as_ref().map(|b|(b.conversation.clone(),b.generation))));
+            let entry=registry.entries.lock().await.get(&key).map(|e|(e.generation,e.name.clone(),e.respawn_inflight));
+            panic!("a conversa nova não chegou à entrada: entrada {entry:?}, live {live:?}");
+        };
         assert!(plugin.facts(&binding,std::time::Instant::now()).is_ok(),"a loja do plugin segue a conversa nova");
         registry.close(&key,binding.generation).await.unwrap();server.abort();
     }
