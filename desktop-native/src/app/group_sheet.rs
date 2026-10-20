@@ -481,8 +481,8 @@ impl Hangar {
                         .when(this, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::accent_text()).child(tr_shared("worktree_esta_sessao", &[])))))
                     .children(missing.map(|text| div().truncate().text_xs().text_color(theme::muted()).child(text))))
                 .children(live.as_ref().and_then(|(_, state)| state_label(state)).map(|label| div().flex_shrink_0().text_xs().text_color(theme::muted()).child(label)))
-                // Só o membro numa máquina conectada aqui tem conversa para abrir.
-                .when_some(live.map(|(t, _)| t), |el, open| el.child(chrome::icon_button(SharedString::from(format!("group-open-{}", open.id())),
+                // Só o membro numa máquina conectada aqui tem conversa para abrir; a desta sessão já está aberta.
+                .when_some(live.filter(|_| !this).map(|(t, _)| t), |el, open| el.child(chrome::icon_button(SharedString::from(format!("group-open-{}", open.id())),
                     IconName::MessageCircle, tip, cx).on_click(cx.listener(move |this, _, window, cx| this.open_member(&open, window, cx))))))
         });
         // Acesso completo pendente de cada membro daqui, com o "Liberar" ao lado.
