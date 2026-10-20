@@ -57,6 +57,8 @@ pub trait OpenFacts {
     /// `Ok(None)` = não existe; registro da criadora ilegível é erro, nunca "não encontrada".
     fn creator(&self, name: &str) -> Result<Option<CreatorFacts>, OpenError>;
     fn defaults(&self) -> ServerDefaults;
+    /// Padrão de modelo, esforço e permissão marcado para provedor, motor e conta do motor.
+    fn saved_defaults(&self, provider: AgentProvider, engine: &str, engine_account: &str) -> Result<Option<crate::session_defaults::Defaults>, String>;
     /// Contas Codex com login conectado.
     fn codex_logins(&self) -> Result<Vec<CodexLogin>, OpenError>;
     /// Linhas Claude do cache de cotas, sem ler a rede.
@@ -161,6 +163,35 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
             }
         },
     };
+    // O padrão salvo pelo dono preenche o que o pedido não disse e vence a criadora; a permissão
+    // dela só vale quando o pedido traz `inherit: true`.
+    let saved = if guest { None } else {
+        match facts.saved_defaults(provider, request.engine.as_deref().unwrap_or_default(), request.engine_account.as_deref().unwrap_or_default()) {
+            Ok(saved) => saved,
+            Err(reason) => {
+                warnings.push(format!("não consegui ler o padrão salvo da abertura ({reason}); ele não foi aplicado"));
+                None
+            }
+        }
+    };
+    let saved_mode = saved.as_ref().filter(|_| request.permission_mode.is_none() && request.inherit != Some(true))
+        .map(|saved| saved.permission.as_str()).filter(|mode| !mode.is_empty());
+    // O Codex com terminal recusa modo pedido; o salvo segue como o herdado.
+    let saved_codex_mode = saved_mode.filter(|_| provider == AgentProvider::Codex).and_then(PermissionMode::codex);
+    let filled;
+    let request = match &saved {
+        Some(saved) => {
+            let pick = |asked: &Option<String>, value: &str| asked.clone().or_else(|| Some(value.to_owned()).filter(|v| !v.is_empty()));
+            filled = SessionOpenRequest {
+                model: pick(&request.model, &saved.model),
+                effort: pick(&request.effort, &saved.effort),
+                permission_mode: request.permission_mode.clone().or_else(|| saved_mode.filter(|_| provider != AgentProvider::Codex).map(str::to_owned)),
+                ..request.clone()
+            };
+            &filled
+        }
+        None => request,
+    };
     let explicit_account = request.config_dir.is_some();
     let mut config_dir = request.config_dir.clone();
     let mut codex_account = request.codex_account.clone();
@@ -202,7 +233,7 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
                         None => warnings.push(format!("não consegui ler o modo de permissão de '{creator}'; vale o padrão da conta")),
                     }
                 }
-                if permission.is_none() && provider == AgentProvider::Codex
+                if permission.is_none() && saved_codex_mode.is_none() && provider == AgentProvider::Codex
                     && matches!(info.provider, AgentProvider::Claude | AgentProvider::Codex)
                 {
                     inherited_codex_mode = creator_codex_mode(info);
@@ -213,6 +244,8 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
             }
         }
     }
+
+    let inherited_codex_mode = saved_codex_mode.or(inherited_codex_mode);
 
     // A padrão herdada é a mesma escolha de ninguém ter pedido conta: desconectada, troca igual.
     let unchosen = codex_account.is_none() || (source == AccountSource::Inherited && codex_account.as_deref() == Some("default"));

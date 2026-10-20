@@ -440,6 +440,10 @@ impl OpenFacts for LocalFacts {
         ServerDefaults { headless: field("headless_default", "CP_HEADLESS_DEFAULT", true), jev: field("jev_padrao", "CP_JEV_PADRAO", false) }
     }
 
+    fn saved_defaults(&self, provider: AgentProvider, engine: &str, engine_account: &str) -> Result<Option<crate::session_defaults::Defaults>, String> {
+        crate::session_defaults::saved(&self.env().home, provider.name(), engine, engine_account).map_err(|error| error.to_string())
+    }
+
     fn codex_logins(&self) -> Result<Vec<CodexLogin>, OpenError> {
         Ok(self.codex_states()?.into_iter().filter(|(_, state)| state == "connected")
             .map(|(account, _)| CodexLogin { id: account.id, is_default: account.is_default }).collect())

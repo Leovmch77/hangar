@@ -221,6 +221,13 @@ impl resolve::OpenFacts for FixtureFacts {
         resolve::ServerDefaults { headless: runtime["headless_default"].as_bool().unwrap_or(true), jev: runtime["jev_padrao"].as_bool().unwrap_or(false) }
     }
 
+    fn saved_defaults(&self, provider: AgentProvider, engine: &str, engine_account: &str) -> Result<Option<crate::session_defaults::Defaults>, String> {
+        let Some(file) = self.file(&format!("{HOME}/.hangar/session-defaults.json")) else { return Ok(None) };
+        if file.is_string() { return Err("session-defaults.json: JSON inválido".into()); }
+        let key = crate::session_defaults::scope_key(provider.name(), engine, engine_account).unwrap_or_default();
+        Ok(file.get(&key).cloned().and_then(|value| serde_json::from_value(value).ok()))
+    }
+
     // Sem serviço de contas Codex no harness: nenhuma conta conectada.
     fn codex_logins(&self) -> Result<Vec<resolve::CodexLogin>, OpenError> { Ok(self.connected.clone()) }
 
@@ -700,6 +707,83 @@ fn a_codex_session_inherits_the_creator_mode_never_more_permissive() {
     fixture["scenario"]["steps"][0]["json"]["provider"] = json!("codex");
     fixture["scenario"]["steps"][0]["json"]["headless"] = json!(false);
     assert_eq!(resolve_fixture(&fixture).unwrap().spec.permission_mode, Some(PermissionMode::ApproveForMe));
+}
+
+/// A filha da `mae` (Claude sem terminal em `acceptEdits`, conta `.claude-b`) com o padrão salvo de um provedor.
+fn with_saved_default(provider: &str, defaults: Value) -> Value {
+    let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_inherit_from_headless_creator").unwrap();
+    let key = crate::session_defaults::scope_key(provider, "", "").unwrap();
+    fixture["scenario"]["state"]["files"]["<ROOT>/home/.hangar/session-defaults.json"] = json!({ key: defaults });
+    fixture
+}
+
+fn choice(spec: &SessionSpec) -> (Option<&str>, Option<&str>, Option<PermissionMode>) {
+    (spec.model.as_deref(), spec.effort.as_deref(), spec.permission_mode)
+}
+
+/// O padrão salvo vale em toda abertura que não disse modelo, esforço ou permissão, inclusive na
+/// filha de outra sessão; a conta continua vindo da criadora.
+#[test]
+fn the_saved_default_beats_the_creator_and_fills_model_and_effort() {
+    let saved = with_saved_default("claude", json!({"model": "opus", "effort": "high", "permission": "bypassPermissions"}));
+    let spec = resolve_fixture(&saved).unwrap().spec;
+    assert_eq!(choice(&spec), (Some("opus"), Some("high"), Some(PermissionMode::BypassPermissions)));
+    let unsaved = resolve_fixture(&with_saved_default("claude", Value::Null)).unwrap().spec;
+    assert_eq!(choice(&unsaved), (None, None, Some(PermissionMode::AcceptEdits)), "sem padrão, a criadora como antes");
+    assert_eq!(spec.account, unsaved.account);
+}
+
+/// `inherit: true` é a sessão pedindo para a filha nascer no modo dela.
+#[test]
+fn inherit_true_takes_the_creator_permission_over_the_saved_default() {
+    let mut fixture = with_saved_default("claude", json!({"model": "opus", "effort": "high", "permission": "bypassPermissions"}));
+    fixture["scenario"]["steps"][0]["json"]["inherit"] = json!(true);
+    assert_eq!(choice(&resolve_fixture(&fixture).unwrap().spec), (Some("opus"), Some("high"), Some(PermissionMode::AcceptEdits)));
+}
+
+/// O que o pedido diz vence o padrão salvo; campo vazio no padrão não preenche nada.
+#[test]
+fn the_request_and_empty_saved_fields_keep_their_meaning() {
+    let mut fixture = with_saved_default("claude", json!({"model": "opus", "effort": "high", "permission": "bypassPermissions"}));
+    let body = &mut fixture["scenario"]["steps"][0]["json"];
+    body["model"] = json!("sonnet");
+    body["permission_mode"] = json!("manual");
+    assert_eq!(choice(&resolve_fixture(&fixture).unwrap().spec), (Some("sonnet"), Some("high"), Some(PermissionMode::Manual)));
+    let empty = with_saved_default("claude", json!({"model": "", "effort": "", "permission": ""}));
+    assert_eq!(choice(&resolve_fixture(&empty).unwrap().spec), (None, None, Some(PermissionMode::AcceptEdits)));
+}
+
+/// Codex com terminal recusa modo pedido, mas o salvo é padrão, não pedido: vale sem erro.
+#[test]
+fn a_codex_terminal_session_takes_the_saved_mode() {
+    for headless in [false, true] {
+        let mut fixture = with_saved_default("codex", json!({"model": "", "effort": "", "permission": "Ask for approval"}));
+        fixture["scenario"]["steps"][0]["json"]["provider"] = json!("codex");
+        fixture["scenario"]["steps"][0]["json"]["headless"] = json!(headless);
+        let resolved = resolve_fixture(&fixture).unwrap_or_else(|e| panic!("headless={headless}: {e}"));
+        assert_eq!(resolved.spec.permission_mode, Some(PermissionMode::AskForApproval), "headless={headless}");
+    }
+}
+
+/// O padrão é do dono: o convidado abre no modo da conta.
+#[test]
+fn a_guest_never_takes_the_owner_saved_default() {
+    let fixture = with_saved_default("claude", json!({"model": "opus", "effort": "high", "permission": "bypassPermissions"}));
+    let mut facts = FixtureFacts::of(&fixture);
+    facts.files.insert("<ROOT>/home/.claude/settings.json".into(), json!({"permissions": {"defaultMode": "default"}}));
+    let request = SessionOpenRequest::parse(&request_body(&fixture)).unwrap();
+    let spec = resolve::resolve_open(&request, &resolve::OpenCaller::Guest { root: "<ROOT>/work".into() }, &facts).unwrap().spec;
+    assert_eq!(choice(&spec), (None, None, Some(PermissionMode::Manual)));
+}
+
+/// Padrão ilegível não some calado: a abertura avisa e segue como sem padrão.
+#[test]
+fn an_unreadable_saved_default_warns_and_falls_back() {
+    let mut fixture = with_saved_default("claude", Value::Null);
+    fixture["scenario"]["state"]["files"]["<ROOT>/home/.hangar/session-defaults.json"] = json!("{quebrado");
+    let resolved = resolve_fixture(&fixture).unwrap();
+    assert_eq!(choice(&resolved.spec), (None, None, Some(PermissionMode::AcceptEdits)));
+    assert!(resolved.warnings.iter().any(|w| w.contains("padrão salvo")), "{:?}", resolved.warnings);
 }
 
 fn resolve_as(name: &str, caller: &resolve::OpenCaller, patch: impl FnOnce(&mut Value), facts: impl FnOnce(FixtureFacts) -> FixtureFacts)

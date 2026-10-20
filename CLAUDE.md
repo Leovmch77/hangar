@@ -638,7 +638,9 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   voz, `hangar-send`, MCP, `orq`, outro servidor, `claude`/`codex`/`pi`/`omp`/`kimi` digitados no
   terminal) manda um `SessionOpenRequest`; `resolve_open()` decide conta, modo, modelo, plugin e
   com/sem terminal (os padrões que as telas preenchiam moram aqui) e grava o `SessionSpec` da sessão
-  em `~/.hangar/session-specs/<chave>.json`. Reabrir é `reopen_session(spec ⊕ SessionChange)`;
+  em `~/.hangar/session-specs/<chave>.json`. Modelo, esforço e permissão omitidos vêm do padrão
+  salvo no servidor (`~/.hangar/session-defaults.json`), que vence a criadora; `inherit: true` traz
+  a permissão dela; convidado não recebe. Reabrir é `reopen_session(spec ⊕ SessionChange)`;
   retomar do Arquivo e `/resume` passam pelas mesmas guardas da criação. Com o servidor fora, o
   comando de terminal `hangar-server open` abre igual e o servidor adota depois; `-p`, pipe,
   `--resume` explícito, subcomando e flag desconhecida seguem com o CLI cru. Depois de reboot ou
