@@ -4,6 +4,65 @@ import socket
 import sys
 from pathlib import Path
 
+# O motivo de o log não ter aberto, para o diário quando ele existir.
+_LOG_FALHOU: str | None = None
+
+
+def _tirar_log(argv: list[str]) -> Path | None:
+    """`--log ARQUIVO` (a tarefa do Windows): tira o par do argv e devolve o caminho."""
+    if "--log" not in argv or argv.index("--log") + 1 >= len(argv):
+        return None
+    i = argv.index("--log")
+    alvo = Path(argv[i + 1])
+    del argv[i:i + 2]
+    return alvo
+
+
+def _abrir_log(alvo: Path):
+    """O log da saída do backend, aberto aqui e não pelo `>` do cmd: este `open` compartilha leitura e
+    escrita no Windows, e um neto que sobreviveu ao backend com a cópia herdada não impede a próxima
+    subida. Preso mesmo assim (o handle de um `cmd` antigo), vai para outro nome: nunca deixa de subir."""
+    erro: OSError | None = None
+    try:
+        alvo.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        erro = e
+    candidatos = [alvo] + [alvo.with_name(f"{alvo.stem}.{n}{alvo.suffix}") for n in range(1, 6)]
+    for caminho in candidatos:
+        try:
+            return open(caminho, "w", encoding="utf-8", errors="replace", buffering=1), caminho
+        except OSError as e:
+            erro = e
+    return None, erro
+
+
+def _saida_para_log(argv: list[str]) -> None:
+    global _LOG_FALHOU
+    alvo = _tirar_log(argv)
+    if alvo is None:
+        return
+    arquivo, usado = _abrir_log(alvo)
+    if arquivo is None:
+        _LOG_FALHOU = f"{alvo}: {usado}"   # sem log, mas no ar; o diário registra
+        return
+    # Os descritores 1 e 2 também: a saída do hangar-server e dos outros filhos continua no log.
+    falhas = []
+    for fd in (1, 2):
+        try:
+            os.dup2(arquivo.fileno(), fd)
+        except OSError as e:
+            falhas.append(f"fd {fd}: {e}")
+    sys.stdout = sys.stderr = arquivo
+    if usado != alvo:
+        print(f"[hangar] AVISO: {alvo} está preso por outro processo; a saída vai para {usado}")
+    if falhas:
+        print(f"[hangar] AVISO: a saída dos processos filhos não vem para este log ({'; '.join(falhas)})")
+
+
+# Antes dos outros imports: um erro de import ou de configuração na subida também vai para o log.
+if __name__ == "__main__":
+    _saida_para_log(sys.argv)
+
 import uvicorn
 import qrcode
 
@@ -36,48 +95,6 @@ def startup_guard(settings) -> None:
     if settings.auth_token == "change-me":
         print("WARNING: using the default 'change-me' token on loopback. "
               "Set CP_AUTH_TOKEN before exposing this on your LAN.")
-
-
-def _tirar_log(argv: list[str]) -> Path | None:
-    """`--log ARQUIVO` (a tarefa do Windows): tira o par do argv e devolve o caminho."""
-    if "--log" not in argv or argv.index("--log") + 1 >= len(argv):
-        return None
-    i = argv.index("--log")
-    alvo = Path(argv[i + 1])
-    del argv[i:i + 2]
-    return alvo
-
-
-def _abrir_log(alvo: Path):
-    """O log da saída do backend, aberto aqui e não pelo `>` do cmd: este `open` compartilha leitura e
-    escrita no Windows, e um neto que sobreviveu ao backend com a cópia herdada não impede a próxima
-    subida. Preso mesmo assim (o handle de um `cmd` antigo), vai para outro nome: nunca deixa de subir."""
-    alvo.parent.mkdir(parents=True, exist_ok=True)
-    candidatos = [alvo] + [alvo.with_name(f"{alvo.stem}.{n}{alvo.suffix}") for n in range(1, 6)]
-    for caminho in candidatos:
-        try:
-            return open(caminho, "w", encoding="utf-8", errors="replace", buffering=1), caminho
-        except OSError:
-            continue
-    return None, None
-
-
-def _saida_para_log(argv: list[str]) -> None:
-    alvo = _tirar_log(argv)
-    if alvo is None:
-        return
-    arquivo, usado = _abrir_log(alvo)
-    if arquivo is None:
-        return   # sem log, mas no ar
-    # Os descritores 1 e 2 também: a saída do hangar-server e dos outros filhos continua no log.
-    for fd in (1, 2):
-        try:
-            os.dup2(arquivo.fileno(), fd)
-        except OSError:
-            pass
-    sys.stdout = sys.stderr = arquivo
-    if usado != alvo:
-        print(f"[hangar] AVISO: {alvo} está preso por outro processo; a saída vai para {usado}")
 
 
 def _saida_utf8() -> None:
@@ -201,11 +218,13 @@ def _connect_socket() -> socket.socket | None:
 
 
 def main():
-    _saida_para_log(sys.argv)
     bind = resolve_bind_ip(settings)
     _saida_utf8()   # antes de qualquer print: o QR abaixo quebra em cp1252
     startup_guard(settings)
     _setup_diag_logging()
+    if _LOG_FALHOU:
+        from app import diag
+        diag.registrar("backend.log_indisponivel", "erro", detalhe=_LOG_FALHOU)
     _state_dirs = list({Path(c.path) for c in list_config_dirs(ordered=False)}
                        | {_backend_config_base().resolve(), Path.home() / ".claude"})
     # Renomeia os sidecars .hangar-* pra .hangar-* (link no caminho antigo). ANTES de tudo

@@ -1,8 +1,21 @@
 import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from app import main
+
+
+def test_erro_ao_importar_a_configuracao_vai_para_o_log(tmp_path):
+    log = tmp_path / "hangar-backend.log"
+    env = {**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path), "CP_PORT": "abc"}
+    r = subprocess.run([sys.executable, "-m", "app.main", "--log", str(log)], cwd=Path(__file__).parents[1],
+                       env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode != 0
+    assert "Traceback" in log.read_text(encoding="utf-8")
+    assert "Traceback" not in r.stderr + r.stdout
 
 
 def test_log_preso_abre_com_outro_nome(tmp_path):

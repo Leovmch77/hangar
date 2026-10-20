@@ -886,5 +886,8 @@ A tarefa agora roda `python -m app.main --log <arquivo>` sem o `cmd`, e o `app.m
 impede o próximo `open`. Os descritores 1 e 2 vão para o mesmo arquivo, então a saída do
 hangar-server e dos outros filhos continua lá. Preso mesmo assim (o handle de um `cmd` antigo, na
 primeira subida depois da atualização), a saída vai para `hangar-backend.1.log` … `.5.log`; sem
-nenhum, o backend sobe sem log. `test_main_log.py` prova as duas coisas no Windows: um segundo
+nenhum, o backend sobe sem log e o diário registra `backend.log_indisponivel`. O log abre antes dos
+imports do `app.main`, para um erro de importação ou de configuração na subida também cair nele (o
+`>` do cmd capturava isso). O instalador acompanha a escrita mais recente entre `hangar-backend*.log`
+(`Get-LogBackend`). `test_main_log.py` prova as duas coisas no Windows: um segundo
 `open` com o primeiro aberto, e o nome alternativo diante de um handle sem `FILE_SHARE_WRITE`.

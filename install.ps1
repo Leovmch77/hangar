@@ -290,6 +290,16 @@ function Restaurar-Recuperacao([string]$nome, [string]$blocoXml) {
     Register-ScheduledTask -TaskName $nome -Xml $doc.OuterXml -Force -ErrorAction Stop | Out-Null
 }
 
+# O log da saida do backend: hangar-backend.log, ou o hangar-backend.N.log mais recente quando aquele
+# estava preso por um processo que sobrou (`app.main --log`).
+function Get-LogBackend {
+    $pasta = Join-Path $env:LOCALAPPDATA 'hangar\logs\privado'
+    $log = Get-ChildItem $pasta -Filter 'hangar-backend*.log' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    if ($log) { return $log }
+    [pscustomobject]@{ FullName = (Join-Path $pasta 'hangar-backend.log'); LastWriteTimeUtc = [datetime]::MinValue }
+}
+
 function Symlink-Funciona {
     # `mklink`, e NAO `New-Item -ItemType SymbolicLink`: no Windows PowerShell 5.1 o New-Item nao
     # pede o flag de criacao sem privilegio, entao falha ("requer privilegio de administrador")
@@ -2207,15 +2217,16 @@ if ($registrou) {
         # 15s pra 40s.
         # Running comprova processo vivo, nao prontidao: acompanha o log enquanto a porta nao abre.
         if (-not $subiu) {
-            $logBack = Join-Path $env:LOCALAPPDATA 'hangar\logs\privado\hangar-backend.log'
             $ociosoMax = 30
             $extraMax = 180
-            $tamAnt = if (Test-Path $logBack) { (Get-Item $logBack).Length } else { -1 }
+            # A escrita mais recente entre hangar-backend.log e os .N.log que o backend usa quando
+            # aquele esta preso por um processo que sobrou: o tamanho de um nome so ficaria parado.
+            $tamAnt = (Get-LogBackend).LastWriteTimeUtc
             $ocioso = 0
             $avisou = $false
             foreach ($i in 1..$extraMax) {
                 if (Get-NetTCPConnection -State Listen -LocalPort $portaBack -ErrorAction SilentlyContinue) { $subiu = $true; break }
-                $tam = if (Test-Path $logBack) { (Get-Item $logBack).Length } else { -1 }
+                $tam = (Get-LogBackend).LastWriteTimeUtc
                 if ($tam -gt $tamAnt) {
                     if (-not $avisou) { Nota 'o backend ainda esta subindo (primeira subida faz uv sync e passos de atualizacao)'; $avisou = $true }
                     $tamAnt = $tam
@@ -2232,7 +2243,7 @@ if ($registrou) {
             Ok "backend respondendo em 127.0.0.1:$portaBack"
         } else {
             Falta "o backend NAO subiu em ${esperou}s (o log parou de crescer) - o app nao vai conectar"
-            Nota "veja o porque:  Get-Content `"$env:LOCALAPPDATA\hangar\logs\privado\hangar-backend.log`" -Tail 30"
+            Nota "veja o porque:  Get-Content `"$((Get-LogBackend).FullName)`" -Tail 30"
         }
     } else {
         # Nao chegou nem a iniciar (o catch acima disparou antes do Start-ScheduledTask). Nao se
@@ -2242,7 +2253,7 @@ if ($registrou) {
         Falta 'nenhuma tarefa chegou a ser iniciada - o que estiver na porta e a instancia ANTIGA'
     }
     Nota 'Log (inclui o QR de pareamento):'
-    Nota "  $env:LOCALAPPDATA\hangar\logs\privado\hangar-backend.log"
+    Nota "  $((Get-LogBackend).FullName)"
     Nota 'Remover depois: Unregister-ScheduledTask -TaskName hangar-backend'
 
     # Vigia registrada em try/catch PROPRIO, separado do de cima: achado IMPORTANTE da revisao
@@ -2781,7 +2792,7 @@ $vivo = $false
 if ($jaAgendado -or $registrou) {
     $vivo = $subiu
     if (-not $vivo) {
-        if ($iniciou) { Falha 'backend no ar' "a porta $portaBack nao abriu depois do reinicio (veja $env:LOCALAPPDATA\hangar\logs\privado\hangar-backend.log)" }
+        if ($iniciou) { Falha 'backend no ar' "a porta $portaBack nao abriu depois do reinicio (veja $((Get-LogBackend).FullName))" }
         else { Falha 'backend no ar' 'nenhuma tarefa chegou a ser reiniciada; o processo na porta e o ANTERIOR' }
     }
 }
