@@ -92,6 +92,70 @@ def test_call_sends_envelope_and_maps_errors(monkeypatch):
     assert e.value.code == "groups_bridge_off"
 
 
+def _pending_owner(outcome, on_settle=lambda: None):
+    """Dono em `pending` cujo `await_mode` decide `outcome` no laço do servidor (outra thread)."""
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+    owner = SimpleNamespace(mode="pending", loop=loop)
+
+    async def await_mode():
+        on_settle()
+        owner.mode = outcome
+        return outcome
+    owner.await_mode = await_mode
+    return owner
+
+
+def test_call_waits_for_pending_rust_then_uses_the_new_bridge(monkeypatch):
+    """O servidor limpa as pontes antes de (re)subir o Rust: no `pending` a chamada espera o filho
+    novo em vez de falhar na hora com `groups_bridge_off`."""
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.dumps({"ok": True, "result": {}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    groups_bridge.configure(None, None)
+    owner = _pending_owner("rust", lambda: groups_bridge.configure(f"127.0.0.1:{srv.server_port}", "s"))
+    monkeypatch.setattr(runtime_coordinator, "_current", owner)
+    try:
+        assert groups_bridge.call("group.rename", old="a", new="b") == {}
+    finally:
+        srv.shutdown()
+        groups_bridge.configure(None, None)
+        owner.loop.call_soon_threadsafe(owner.loop.stop)
+
+
+def test_call_after_pending_falls_to_python_never_touches_the_bridge(monkeypatch):
+    groups_bridge.configure("127.0.0.1:9", "s")
+    owner = _pending_owner("python")
+    monkeypatch.setattr(runtime_coordinator, "_current", owner)
+    try:
+        with pytest.raises(groups_bridge.GroupsBridgeError) as e:
+            groups_bridge.call("group.leave", name="a")
+        assert e.value.code == "groups_runtime_python"
+    finally:
+        groups_bridge.configure(None, None)
+        owner.loop.call_soon_threadsafe(owner.loop.stop)
+
+
+def test_close_of_a_session_without_group_never_asks_the_bridge(monkeypatch, client):
+    """Sem sidecar não há grupo a deixar: ponte fora do ar não vira aviso falso no fechamento."""
+    calls = _rust(monkeypatch, error="groups_bridge_off")
+    monkeypatch.setattr(api, "_recusa_orq", lambda n: None)
+    monkeypatch.setattr(api.registry, "kill", lambda n, closed_by_rust=False: [])
+    monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
+    monkeypatch.setattr(api.share_bridge, "revoke_session", lambda n: None)
+    r = client.delete("/api/sessions/solo", headers=H)
+    assert (r.status_code, r.json()["warning"], calls) == (200, None, [])
+
+
 def test_lone_surrogate_in_the_task_reaches_the_rust_instead_of_500(monkeypatch):
     # Parity B13 (`test_set_com_surrogate_solto_na_task_grava_e_le_de_volta`): texto colado com surrogate
     # solto não pode derrubar a rota; o Rust só aceita UTF-8 válido, então vai o caractere de troca.

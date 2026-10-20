@@ -2249,10 +2249,12 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
     # Fechamento que não passou pelo Rust (Connect, convidado): a saída do grupo vai pela ponte, com
     # a fase do `orq` lida aqui antes, para o Rust não perguntar de volta.
     skip_leave = closed or marked("x-hangar-rust-leaves")
-    phases = None if skip_leave or not groups_bridge.rust_owns_groups() \
-        else (await asyncio.to_thread(_route_facts, name, None))["phases"]
+    # Sem sidecar não há grupo a deixar: a ponte nem é chamada.
+    grouped = not skip_leave and await asyncio.to_thread(lambda: PairLink(name).get() is not None)
+    phases = (await asyncio.to_thread(_route_facts, name, None))["phases"] \
+        if grouped and groups_bridge.rust_owns_groups() else None
     # Sem o Rust a saída do grupo não acontece: fechar segue, e a falta vai no aviso e no diário.
-    orphan = phases is None and not skip_leave and await asyncio.to_thread(lambda: PairLink(name).get() is not None)
+    orphan = grouped and phases is None
     # Fechada pelo Rust a sessão já saiu da lista: o transcript vem no cabeçalho dele.
     if closed:
         jsonl = urllib.parse.unquote(request.headers.get("x-hangar-closed-transcript", "")) or None

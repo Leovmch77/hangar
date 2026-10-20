@@ -34,8 +34,26 @@ def rust_owns_groups() -> bool:
     return owner is not None and owner.mode != "python"
 
 
+def _await_rust() -> None:
+    """O servidor limpa as pontes antes de (re)subir o Rust: no `pending` espera o desfecho até
+    `PENDING_WAIT_S`; desfecho `python` não chama a ponte."""
+    from app import runtime_coordinator
+    owner = runtime_coordinator.current()
+    if owner is not None and owner.mode == "pending" and not runtime_coordinator._mode_bypass.get():
+        from app.runtime_adapter import run_sync
+        try:
+            run_sync(owner.await_mode, owner.loop)
+        except (runtime_coordinator.RuntimeStarting, TimeoutError) as e:
+            raise GroupsBridgeError("groups_runtime_starting") from e
+        except RuntimeError as e:
+            raise GroupsBridgeError("groups_wait_on_loop") from e
+    if owner is not None and owner.mode == "python":
+        raise GroupsBridgeError("groups_runtime_python")
+
+
 def call(op: str, **args) -> dict:
     """Bloqueia: quem está no laço chama por `to_thread`."""
+    _await_rust()
     config = _config
     if config is None:
         raise GroupsBridgeError("groups_bridge_off")
