@@ -261,6 +261,9 @@ pub enum Action {
     /// Resposta assíncrona reservada: a entrada e a operação de mesmo id nascem juntas, ou nenhuma.
     ReserveAsyncAnswer { entry_id:String, text:String, payload:Value },
     BindDispatch { id:String, cursor:Value },
+    /// O passo lógico de várias escritas: a primeira amarra o cursor; a que chega depois do despacho dele
+    /// segue sem trocar nada, conferido aqui dentro em vez de numa foto que outra escrita já mudou.
+    BindDispatchIfPrepared { id:String, cursor:Value },
     /// `staged`: o despacho começou sem efeito no terminal; `MarkWriting` avisa antes da primeira
     /// escrita. Interrompida antes disso, a tentativa volta à fila em vez de ficar incerta.
     BeginDispatch { id:String, wire_id:String, #[serde(default, skip_serializing_if = "std::ops::Not::not")] staged:bool },
@@ -436,7 +439,7 @@ impl Store {
     fn exec_validated(&mut self, generation:u64, call_id:&str, clock:ClockSample, action:Action, hold:bool, validate:Option<BatchValidator>) -> io::Result<Value> {
         // Lido sem zerar: ação que falha antes de gravar deixa a linha segurada para a próxima publicar.
         let was_held = self.held;
-        let binds = matches!(&action, Action::BindDispatch { .. });
+        let binds = matches!(&action, Action::BindDispatch { .. } | Action::BindDispatchIfPrepared { .. });
         self.unfence()?;
         if call_id.is_empty() { return Err(invalid("operação da fila sem identificador")); }
         let receipt_id = format!("{CALL_PREFIX}{call_id}");
@@ -459,7 +462,7 @@ impl Store {
         let readonly = matches!(&action, Action::Load | Action::EntryDelivered { .. } | Action::EnsureProjection);
         if readonly { self.ensure_projection()?; }
         let target = match &action {
-            Action::Prepare { id, .. } | Action::BindDispatch { id, .. } | Action::BeginDispatch { id, .. } | Action::MarkWriting { id, .. }
+            Action::Prepare { id, .. } | Action::BindDispatch { id, .. } | Action::BindDispatchIfPrepared { id, .. } | Action::BeginDispatch { id, .. } | Action::MarkWriting { id, .. }
             | Action::Finish { id, .. } | Action::LateRpcResolution { id, .. } | Action::ConfirmOccurrence { id, .. }
             | Action::ReserveAsyncAnswer { entry_id:id, .. } => Some(id.clone()),
             _ => None,
@@ -976,6 +979,11 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             let op = state.operations.get_mut(&id).ok_or_else(||invalid("operação não preparada"))?;
             if op.status != Status::Prepared { return Err(invalid("cursor precisa preceder o despacho")); }
             op.dispatch_cursor = cursor;
+            serde_json::to_value(op)?
+        }
+        Action::BindDispatchIfPrepared { id, cursor } => {
+            let op = state.operations.get_mut(&id).ok_or_else(||invalid("operação não preparada"))?;
+            if op.status == Status::Prepared { op.dispatch_cursor = cursor; }
             serde_json::to_value(op)?
         }
         Action::BeginDispatch { id, wire_id, staged } => {
@@ -1647,6 +1655,19 @@ mod panel_tests {
         store.exec(1,&format!("append:{id}"),clock(10.0),Action::Append { text:format!("texto {id}"),delivered:false,ts:Some(10.0),pre_transcript:false,entry_id:Some(id.into()) }).unwrap();
     }
     fn exec(store:&mut Store,call:&str,action:Action) -> Value { store.exec(1,call,clock(20.0),action).unwrap() }
+
+    /// Duas escritas do mesmo passo lógico: a segunda chega depois do despacho da primeira e não derruba o
+    /// ator; o cursor que vale é o da primeira. O amarrar estrito continua recusando.
+    #[test]
+    fn a_late_conditional_bind_keeps_the_first_cursor() {
+        let dir=tempfile::tempdir().unwrap();let mut store=store(&dir);
+        exec(&mut store,"prepare",Action::Prepare { id:"phase".into(),payload:json!({"kind":"phase"}),entry_id:None });
+        exec(&mut store,"bind-a",Action::BindDispatchIfPrepared { id:"phase".into(),cursor:json!({"from":"a"}) });
+        exec(&mut store,"dispatch-a",Action::BeginDispatch { id:"phase".into(),wire_id:"a".into(),staged:false });
+        let late=exec(&mut store,"bind-b",Action::BindDispatchIfPrepared { id:"phase".into(),cursor:json!({"from":"b"}) });
+        assert_eq!(late["dispatch_cursor"],json!({"from":"a"}),"o cursor da primeira escrita fica");
+        assert!(store.exec(1,"bind-c",clock(20.0),Action::BindDispatch { id:"phase".into(),cursor:json!({}) }).is_err(),"o estrito segue recusando");
+    }
 
     #[test]
     fn cancel_removes_only_a_waiting_entry() {
