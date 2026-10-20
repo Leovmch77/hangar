@@ -273,6 +273,19 @@ class ClaudeWindows:
         self.active = {}
         self.closed = set()
 
+    def _close_orphans(self):
+        """As janelas só são lembradas em memória: as de um backend anterior ficavam abertas para
+        sempre, segurando a conta. Chamar sob `self.lock`."""
+        from app import claude_window, diag
+        for session in claude_window.tmux.list_sessions():
+            name = session["name"]
+            operation = name.removeprefix("term-login-")
+            if operation != name and re.fullmatch("[a-f0-9]{32}", operation) and operation not in self.active:
+                try:
+                    claude_window.kill(name)
+                except RuntimeError as error:
+                    diag.registrar("conta.janela_orfa", "aviso", codigo="nao_fechou", detalhe=type(error).__name__)
+
     def run(self, body):
         from app import claude_window, runtime_coordinator
         if not isinstance(body, dict) or set(body) != {"instance", "key", "operation", "action", "code"}:
@@ -320,6 +333,7 @@ class ClaudeWindows:
                 if previous is not None and previous != (key, body["instance"]):
                     raise ValueError("operação divergente")
                 if previous is None:
+                    self._close_orphans()
                     created = claude_window.spawn(name, str(key.canonical_home), str(key.canonical_home))
                     if created != target:
                         claude_window.kill(target)
@@ -336,6 +350,7 @@ class ClaudeWindows:
                 if cwd is None:
                     return {"ok": False, "motivo": "sem-pasta-confiada"}
                 if previous is None:
+                    self._close_orphans()
                     created = claude_window.spawn(name, str(cwd), str(key.canonical_home))
                     if created != target:
                         if created is not None:
