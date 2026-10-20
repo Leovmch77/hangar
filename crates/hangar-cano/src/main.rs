@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdin, Command};
-use tokio::sync::{Notify, mpsc, oneshot, watch};
+use tokio::sync::{Notify, mpsc, watch};
 
 use protocol::Tracker;
 
@@ -226,7 +226,6 @@ async fn pump_stdout<R: AsyncRead + Unpin>(
     out: R,
     stderr_task: tokio::task::JoinHandle<()>,
     mut rc: watch::Receiver<Option<i64>>,
-    kill: oneshot::Sender<()>,
 ) {
     let mut r = BufReader::new(out);
     loop {
@@ -239,12 +238,10 @@ async fn pump_stdout<R: AsyncRead + Unpin>(
                 continue;
             }
             Err(e) => {
-                // Sem leitor o filho trava no pipe cheio e a sessão fica em `working`: derrubá-lo faz o
-                // `cano_saiu` chegar com o motivo na cauda do stderr.
+                // A falha é da ponte, não da sessão: o Claude segue vivo; o motivo vai ao log e ao servidor.
                 let reason = format!("leitura do stdout do claude falhou: {e}");
                 log(&reason);
                 push_stderr(&mut inner.state(), &reason);
-                let _ = kill.send(());
                 break;
             }
         };
@@ -596,19 +593,8 @@ async fn run(args: Args) -> i32 {
         pid,
     });
     let (rc_tx, rc_rx) = watch::channel(None);
-    let (kill_tx, mut kill_rx) = oneshot::channel();
     tokio::spawn(async move {
-        // Só um pedido explícito mata: o remetente caído (stdout em EOF) não conta.
-        let status = tokio::select! {
-            status = child.wait() => status,
-            Ok(()) = &mut kill_rx => {
-                if let Err(e) = child.start_kill() {
-                    log(&format!("derrubar o claude falhou: {e}"));
-                }
-                child.wait().await
-            }
-        };
-        let code = match status {
+        let code = match child.wait().await {
             Ok(status) => exit_code(status),
             Err(e) => {
                 log(&format!("espera do claude falhou: {e}"));
@@ -618,7 +604,7 @@ async fn run(args: Args) -> i32 {
         let _ = rc_tx.send(Some(code));
     });
     let stderr_task = tokio::spawn(pump_stderr(inner.clone(), stderr));
-    tokio::spawn(pump_stdout(inner.clone(), stdout, stderr_task, rc_rx.clone(), kill_tx));
+    tokio::spawn(pump_stdout(inner.clone(), stdout, stderr_task, rc_rx.clone()));
     log(&format!("claude pid={pid}"));
     tokio::spawn(accept_loop(listener, inner.clone()));
     #[cfg(unix)]
@@ -694,7 +680,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stdout_read_error_kills_the_child_and_the_reason_reaches_the_server() {
+    async fn a_stdout_read_error_reaches_the_server_without_killing_the_child() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (alive, _) = watch::channel(());
         let mut state = State::default();
@@ -702,10 +688,8 @@ mod tests {
         let inner = Arc::new(Inner { state: Mutex::new(state), stdin: tokio::sync::Mutex::new(None),
             delivered: Notify::new(), token: None, pid: 0 });
         let (rc_tx, rc_rx) = watch::channel(None);
-        let (kill_tx, kill_rx) = oneshot::channel();
-        tokio::spawn(pump_stdout(inner, Broken, tokio::spawn(async {}), rc_rx, kill_tx));
+        tokio::spawn(pump_stdout(inner, Broken, tokio::spawn(async {}), rc_rx));
         let wait = Duration::from_secs(5);
-        assert!(tokio::time::timeout(wait, kill_rx).await.unwrap().is_ok(), "o filho preso no pipe cheio é derrubado");
         let Some(Out::Line(line)) = tokio::time::timeout(wait, rx.recv()).await.unwrap() else { panic!("sem aviso") };
         let line: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(line["type"], "cano_stderr");
