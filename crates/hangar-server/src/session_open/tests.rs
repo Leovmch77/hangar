@@ -741,6 +741,26 @@ fn inherit_true_takes_the_creator_permission_over_the_saved_default() {
     assert_eq!(choice(&resolve_fixture(&fixture).unwrap().spec), (Some("opus"), Some("high"), Some(PermissionMode::AcceptEdits)));
 }
 
+/// `inherit: true` sem modo da criadora (fora de uma sessão) cai no salvo, não no da conta.
+#[test]
+fn inherit_true_without_a_creator_mode_falls_back_to_the_saved_one() {
+    let mut fixture = with_saved_default("claude", json!({"model": "", "effort": "", "permission": "bypassPermissions"}));
+    let body = fixture["scenario"]["steps"][0]["json"].as_object_mut().unwrap();
+    body.remove("creator");
+    body.insert("inherit".into(), json!(true));
+    fixture["scenario"]["state"]["files"]["<ROOT>/home/.claude/settings.json"] = json!({"permissions": {"defaultMode": "default"}});
+    assert_eq!(resolve_fixture(&fixture).unwrap().spec.permission_mode, Some(PermissionMode::BypassPermissions));
+}
+
+/// Modelo ou esforço salvos que o provedor não aceita mais não travam a abertura: ela segue sem eles e avisa.
+#[test]
+fn a_stale_saved_choice_opens_without_it_and_warns() {
+    let fixture = with_saved_default("claude", json!({"model": "opus", "effort": "ultra", "permission": "bypassPermissions"}));
+    let resolved = resolve_fixture(&fixture).unwrap();
+    assert_eq!(choice(&resolved.spec), (None, None, Some(PermissionMode::BypassPermissions)));
+    assert!(resolved.warnings.iter().any(|w| w.contains("padrão salvo")), "{:?}", resolved.warnings);
+}
+
 /// O que o pedido diz vence o padrão salvo; campo vazio no padrão não preenche nada.
 #[test]
 fn the_request_and_empty_saved_fields_keep_their_meaning() {

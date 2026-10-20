@@ -471,9 +471,10 @@ if [[ "$1" == "--new" ]]; then
     while [[ $# -gt 0 ]]; do
         case "$1" in
             # --no-inherit: o omitido cai no padrão da conta em vez de herdar desta sessão (D-001).
-            --no-inherit) once no_inherit "$1" true; shift ;;
-            # --inherit: a permissão desta sessão vence o padrão salvo no servidor.
-            --inherit) once no_inherit "$1" mode; shift ;;
+            --no-inherit|--inherit)
+                [[ -n "$no_inherit" ]] && { echo "erro: use só um entre --inherit e --no-inherit" >&2; exit 2; }
+                # --inherit: a permissão desta sessão vence o padrão salvo no servidor.
+                if [[ "$1" == --inherit ]]; then no_inherit=mode; else no_inherit=true; fi; shift ;;
             --engine-account) once engine_account "$1" "${2:?uso: --engine-account <id>}"; shift 2 ;;
             --branch) once branch "$1" "${2:?uso: --branch <nome>}"; shift 2 ;;
             --new-branch) once new_branch "$1" true; shift ;;
