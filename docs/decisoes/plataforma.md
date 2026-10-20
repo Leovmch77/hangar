@@ -2364,11 +2364,11 @@ Antes, parear com `servidor::sessao` fazia um par 1:1 que não crescia, e `--gro
 - **Aviso de grupo passa pela dona e não espera ninguém.** A dona aplica o limite de 5 por minuto
   por `gid` (limite aceito: aviso vindo de fora conta) e entrega; máquina que não respondeu volta em
   `pulados`. Dona fora: os membros daqui recebem e a resposta avisa `erro_grupo_dono_indisponivel`.
-- **Contrato só na dona.** Membro dela edita o arquivo; de outra máquina,
-  `GET|PUT /api/sessions/{nome}/pair/contract` repassa à dona. `mtime` é texto com nanossegundos;
+- **Contrato só na dona.** `GET|PUT /api/sessions/{nome}/pair/contract` vale em grupo desta máquina
+  e entre máquinas; de outra máquina repassa à dona. O `GET` traz `content`, `mtime` e `owner`
+  (`path` só na dona). `mtime` é texto com nanossegundos;
   `PUT` com `mtime` diferente é 409 `erro_contrato_mudou`, e com `mtime` nulo só cria. Dona fora =
-  503, sem réplica. Limite: em grupo só desta máquina o `GET` não traz `mtime` (a resposta é a
-  mesma do Python), então ali se edita o arquivo do `path`. CLI: `hangar-send --contrato
+  503, sem réplica. CLI: `hangar-send --contrato
   [--gravar <arquivo> --mtime <valor>]`; MCP: tool `contract`.
 - **Par 1:1 antigo vira grupo sozinho.** Dona = a máquina de menor `server_id` (ordem de bytes) e
   `gid` derivado do par ordenado `srvA::a`/`srvB::b`: os dois lados chegam ao mesmo grupo sem

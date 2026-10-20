@@ -491,7 +491,7 @@
  },
  {
   "name": "contract",
-  "description": "Lê ou grava o contrato do grupo desta sessão (as decisões que o grupo consulta), como `hangar-send --contrato`. Sem `conteudo`, lê: volta `content`, `mtime` e `owner` (a máquina que guarda o arquivo; `path` só vem preenchido nela). Com `conteudo`, grava o texto inteiro no lugar do atual e volta o `mtime` novo; passe o `mtime` da sua última leitura (nulo só quando o contrato ainda não existe). `erro_contrato_mudou` = alguém gravou depois da sua leitura: leia de novo, junte e grave. Membro de outra máquina lê e grava por aqui; quem está na máquina dona também pode editar o arquivo do `path`. `sessao`: só para a assistente de voz, que não é sessão: a sessão em nome de quem agir; quem é sessão age sempre como ela mesma.",
+  "description": "Lê ou grava o contrato do grupo desta sessão (as decisões que o grupo consulta), como `hangar-send --contrato`. Vale para grupo desta máquina e para grupo entre máquinas. Sem `conteudo`, lê: volta `content`, `mtime` e `owner` (a máquina que guarda o arquivo; `path` só vem preenchido nela). Com `conteudo`, grava o texto inteiro no lugar do atual e volta o `mtime` novo; passe o `mtime` da sua última leitura (nulo só cria, quando o contrato ainda não existe). `erro_contrato_mudou` (409) = alguém gravou depois da sua leitura: leia de novo, junte e grave. `sessao`: só para a assistente de voz, que não é sessão: a sessão em nome de quem agir; quem é sessão age sempre como ela mesma.",
   "inputSchema": {
    "properties": {
     "conteudo": {

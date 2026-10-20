@@ -34,8 +34,9 @@
 #                                  [grupo: servidor::X]).
 #   hangar-send --contrato             imprime o contrato do grupo (decisões que o grupo consulta) no
 #                                  stdout; no stderr, a máquina que o guarda e o comando de gravar
-#                                  com o mtime desta leitura. Membro de outra máquina lê e grava
-#                                  por aqui; na máquina que guarda, o arquivo também pode ser editado.
+#                                  com o mtime desta leitura. Vale para grupo desta máquina e para
+#                                  grupo entre máquinas; o caminho do arquivo só aparece na
+#                                  máquina que o guarda.
 #   hangar-send --contrato --gravar <arquivo> [--mtime <valor>]  troca o contrato INTEIRO pelo
 #                                  arquivo. --mtime é o da sua leitura; sem ele, só cria contrato
 #                                  que ainda não existe. erro_contrato_mudou = alguém gravou depois

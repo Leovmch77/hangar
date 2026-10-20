@@ -10,3 +10,5 @@ destrutivo: false
 Parear com uma sessão de outra máquina passa a formar um grupo que junta as duas, e o aviso de
 grupo chega a todas. As instruções que as sessões leem dizem isso, e o contrato do grupo pode ser
 lido e gravado de qualquer máquina com `hangar-send --contrato` ou pela ferramenta `contract`.
+Recado de uma pessoa de fora que chega por outra máquina do grupo é respondido uma vez só, por
+aviso de grupo.

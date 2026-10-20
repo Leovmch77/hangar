@@ -87,7 +87,7 @@ pub struct AppState {
     pub btw_programs: crate::session_write::btw::Programs,
     /// Grupos de sessões em `.hangar-pair`; `None` sem as pastas da lista (as rotas seguem ao Python).
     pub groups: Option<Arc<crate::groups::service::GroupService>>,
-    /// Outras máquinas do dono (`peers.json`), para o par 1:1 entre máquinas.
+    /// Outras máquinas do dono (`peers.json`), para os grupos entre máquinas.
     pub peers: Arc<crate::groups::peers::PeerClient>,
     /// Voz ao vivo; o teste troca por um hub com pastas temporárias.
     pub voice: Arc<crate::voice::hub::VoiceHub>,
