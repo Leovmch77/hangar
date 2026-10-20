@@ -315,14 +315,10 @@ def test_pedido_jsonrpc_do_servidor_fica_pendente_no_snapshot(tmp_path, cano_cmd
 def test_token_errado_e_recusado(tmp_path, cano_cmd):
     if os.name == "nt":
         pytest.skip("socket unix")
-    falso = tmp_path / "claude_falso.py"
-    falso.write_text(_CLAUDE_FALSO, encoding="utf-8")
-    porta = _porta_livre()
     token = uuid.uuid4().hex
-    p = subprocess.Popen([*cano_cmd, "--escuta", f"tcp:127.0.0.1:{porta}", "--token", token,
-                          "--cwd", str(tmp_path), "--", sys.executable, str(falso)],
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    p, porta, s, _ = _cano_tcp(cano_cmd, tmp_path, token)
     try:
+        s.close()
         s = _conectar_tcp(porta)
         s.sendall(b"errado\n")
         assert s.makefile("rb").readline() == b""     # fechado sem snapshot
@@ -335,20 +331,31 @@ def test_token_errado_e_recusado(tmp_path, cano_cmd):
         p.wait()
 
 
+def test_porta_tomada_por_outro_servidor_sobe_o_cano_noutra(tmp_path, cano_cmd, monkeypatch):
+    import http.server
+    import threading
+    alheio = http.server.HTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+    threading.Thread(target=alheio.serve_forever, daemon=True).start()
+    real = _porta_livre
+    portas = iter([alheio.server_address[1]])
+    monkeypatch.setattr(sys.modules[__name__], "_porta_livre", lambda: next(portas, None) or real())
+    try:
+        p, porta, s, _ = _cano_tcp(cano_cmd, tmp_path, uuid.uuid4().hex)
+        assert porta != alheio.server_address[1]
+        s.close()
+        p.kill()
+        p.wait()
+    finally:
+        alheio.shutdown()
+        alheio.server_close()
+
+
 def test_cliente_novo_substitui_o_ligado_em_tcp(tmp_path, cano_cmd):
     # Roda também no Windows (TCP + token). Com o accept em série, o segundo cliente não recebia
     # snapshot enquanto o primeiro seguia ligado — e quem conecta sem snapshot mata o cano.
-    falso = tmp_path / "claude_falso.py"
-    falso.write_text(_CLAUDE_FALSO, encoding="utf-8")
-    porta, token = _porta_livre(), uuid.uuid4().hex
-    p = subprocess.Popen([*cano_cmd, "--escuta", f"tcp:127.0.0.1:{porta}", "--token", token,
-                          "--cwd", str(tmp_path), "--", sys.executable, str(falso)],
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    token = uuid.uuid4().hex
+    p, porta, a, arq_a = _cano_tcp(cano_cmd, tmp_path, token)
     try:
-        a = _conectar_tcp(porta)
-        a.sendall((token + "\n").encode())
-        arq_a = a.makefile("rb")
-        assert json.loads(arq_a.readline())["type"] == "cano_snapshot"
         b = _conectar_tcp(porta)
         b.settimeout(3)
         b.sendall((token + "\n").encode())
@@ -417,6 +424,30 @@ def _porta_livre() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def _cano_tcp(cano_cmd, tmp_path, token):
+    """Sobe o cano em TCP e devolve (processo, porta, socket, arquivo) com o snapshot já lido.
+    A porta é escolhida antes de o cano subir, e outro teste em paralelo pode tomá-la nesse
+    intervalo: a conexão cairia no servidor dele. O snapshot prova que é o cano; sem ele, outra porta."""
+    falso = tmp_path / "claude_falso.py"
+    falso.write_text(_CLAUDE_FALSO, encoding="utf-8")
+    for _ in range(5):
+        porta = _porta_livre()
+        p = subprocess.Popen([*cano_cmd, "--escuta", f"tcp:127.0.0.1:{porta}", "--token", token,
+                              "--cwd", str(tmp_path), "--", sys.executable, str(falso)],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            s = _conectar_tcp(porta)
+            s.sendall((token + "\n").encode())
+            arq = s.makefile("rb")
+            if json.loads(arq.readline() or b"{}").get("type") == "cano_snapshot":
+                return p, porta, s, arq
+        except (OSError, ValueError, AssertionError):
+            pass
+        p.kill()
+        p.wait()
+    raise AssertionError("o cano não subiu em nenhuma porta livre")
 
 
 def _conectar_tcp(porta: int) -> socket.socket:
