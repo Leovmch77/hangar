@@ -10,8 +10,57 @@ use std::{fs, path::Path, sync::Arc, time::Duration};
 
 #[derive(Clone, Default)]
 pub struct PendingCleanup(
-    Arc<tokio::sync::Mutex<std::collections::HashMap<AccountKey, (String, super::AccountGuard)>>>,
+    Arc<tokio::sync::Mutex<std::collections::HashMap<AccountKey, (String, Option<super::AccountGuard>)>>>,
 );
+
+/// Renovações em curso, por conta. A sessão que vai abrir numa delas manda parar
+/// (`yield_to_session`): a sessão renova o token sozinha, e abrir sessão nunca espera a renovação.
+static RENEWALS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<AccountKey, Arc<tokio::sync::Notify>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+struct Renewal {
+    key: AccountKey,
+    stop: Arc<tokio::sync::Notify>,
+}
+impl Renewal {
+    fn start(key: &AccountKey) -> Self {
+        let stop = Arc::new(tokio::sync::Notify::new());
+        RENEWALS.lock().unwrap_or_else(|p| p.into_inner()).insert(key.clone(), stop.clone());
+        Self { key: key.clone(), stop }
+    }
+}
+impl Drop for Renewal {
+    fn drop(&mut self) {
+        let mut map = RENEWALS.lock().unwrap_or_else(|p| p.into_inner());
+        if map.get(&self.key).is_some_and(|stop| Arc::ptr_eq(stop, &self.stop)) {
+            map.remove(&self.key);
+        }
+    }
+}
+
+/// Manda a renovação desta conta, se houver, soltar a trava agora.
+pub fn yield_to_session(key: &AccountKey) {
+    if let Some(stop) = RENEWALS.lock().unwrap_or_else(|p| p.into_inner()).get(key) {
+        stop.notify_one();
+    }
+}
+
+/// A guarda compartilhada de quem vai subir uma sessão na conta: a renovação cede a cada tentativa.
+pub async fn acquire_for_session(
+    locks: &super::AccountLocks,
+    key: &AccountKey,
+    deadline: std::time::Instant,
+) -> Result<super::AccountGuard, super::LockError> {
+    loop {
+        yield_to_session(key);
+        match locks.try_acquire(key, GuardMode::Shared) {
+            Err(super::LockError::Busy) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            result => return result,
+        }
+    }
+}
 
 /// Renovação rápida cujo CLI rodou e não renovou espera antes de rodar de novo: ele sobe o
 /// Claude com todos os MCPs (segundos no Windows) e a lista de credenciais esperava por ele.
@@ -134,10 +183,53 @@ impl AccountService {
                 }
             }
         }
-        let _guard = self
+        // Registrada antes da guarda: a sessão que pedir a conta no meio do caminho já é ouvida.
+        let renewal = Renewal::start(&key);
+        let guard = self
             .locks
             .try_acquire(&key, GuardMode::Exclusive)
             .map_err(|_| "sessao-viva")?;
+        let window = Arc::new(std::sync::Mutex::new(None::<String>));
+        let work = self.renew_locked(account, key.clone(), guard, client.clone(), quick, runtime, window.clone());
+        tokio::select! { biased;
+            result = work => result,
+            _ = renewal.stop.notified() => {
+                tracing::info!(code = "refresh_yielded", "renovação cedeu a conta para uma sessão; a sessão renova o token");
+                let operation = window.lock().unwrap_or_else(|p| p.into_inner()).take();
+                if let Some(operation) = operation {
+                    self.close_yielded(client, key, operation);
+                }
+                Err("cedeu-sessao")
+            }
+        }
+    }
+
+    /// Fecha a janela de uma renovação interrompida sem segurar a conta; falhando, a próxima
+    /// renovação fecha antes de começar.
+    fn close_yielded(&self, client: WindowClient, key: AccountKey, operation: String) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            if client.call(&key, &operation, "close", None).await.is_ok() {
+                if let Ok(record) = service.login_record(&key) {
+                    let _ = fs::remove_file(record);
+                }
+            } else {
+                service.refresh_cleanup.0.lock().await.insert(key, (operation, None));
+            }
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn renew_locked(
+        &self,
+        account: Account,
+        key: AccountKey,
+        _guard: super::AccountGuard,
+        client: WindowClient,
+        quick: bool,
+        runtime: Option<Arc<crate::runtime::gateway::RuntimeRegistry>>,
+        window: Arc<std::sync::Mutex<Option<String>>>,
+    ) -> Result<(), &'static str> {
         self.validate_claude(&account, &key)
             .map_err(|_| "renovacao-falhou")?;
         self.usage(runtime.as_deref(), &key)
@@ -174,6 +266,7 @@ impl AccountService {
                 .as_bytes(),
         )
         .map_err(|_| "renovacao-falhou")?;
+        *window.lock().unwrap_or_else(|p| p.into_inner()) = Some(operation.clone());
         if client
             .call(&key, &operation, "refresh", None)
             .await
@@ -229,12 +322,22 @@ impl AccountService {
         pending
             .lock()
             .await
-            .insert(key.clone(), (operation.clone(), guard));
+            .insert(key.clone(), (operation.clone(), Some(guard)));
         let service = self.clone();
         tokio::spawn(async move {
+            let renewal = Renewal::start(&key);
             for (attempt, wait) in [5, 15, 30, 60].into_iter().chain(std::iter::repeat(300)).enumerate() {
-                tokio::time::sleep(Duration::from_secs(wait)).await;
-                let still_parked = |map: &std::collections::HashMap<AccountKey, (String, super::AccountGuard)>| {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(wait)) => {},
+                    _ = renewal.stop.notified() => {
+                        if let Some(entry) = pending.lock().await.get_mut(&key).filter(|entry| entry.0 == operation) {
+                            entry.1 = None;
+                            tracing::info!(code = "refresh_cleanup_yielded", "conta liberada para uma sessão; a janela segue sendo fechada sem a trava");
+                        }
+                        tokio::time::sleep(Duration::from_secs(wait)).await;
+                    }
+                }
+                let still_parked = |map: &std::collections::HashMap<AccountKey, (String, Option<super::AccountGuard>)>| {
                     map.get(&key).is_some_and(|(op, _)| *op == operation)
                 };
                 if !still_parked(&*pending.lock().await) {
@@ -349,6 +452,76 @@ mod tests {
         backoff.clear(&key);
         assert!(!backoff.pending(&key, &old, 3000.0));
         assert_eq!(backoff.failed(&key, old, 3000.0), 1800.0);
+    }
+
+    /// A sessão que pede a conta faz a renovação soltar a trava na hora; sem renovação, outra
+    /// trava exclusiva (exclusão, login) continua valendo.
+    #[tokio::test]
+    async fn a_session_takes_the_account_from_a_renewal_at_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let locks = super::super::AccountLocks::new(temp.path().join("locks"));
+        let key = AccountKey::new(Provider::Claude, temp.path()).unwrap();
+        let renewal = Renewal::start(&key);
+        let guard = locks.try_acquire(&key, GuardMode::Exclusive).unwrap();
+        let task = tokio::spawn(async move {
+            renewal.stop.notified().await;
+            drop(guard);
+        });
+        let started = std::time::Instant::now();
+        acquire_for_session(&locks, &key, started + Duration::from_secs(5)).await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+        task.await.unwrap();
+        assert!(!RENEWALS.lock().unwrap().contains_key(&key), "a renovação encerrada sai do registro");
+
+        let other = locks.try_acquire(&key, GuardMode::Exclusive);
+        let other = other.unwrap();
+        assert!(matches!(
+            acquire_for_session(&locks, &key, std::time::Instant::now() + Duration::from_millis(100)).await,
+            Err(super::super::LockError::Busy)
+        ));
+        drop(other);
+    }
+
+    /// Renovação de verdade, presa no CLI: a sessão leva a conta e a renovação responde que cedeu.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_running_renewal_yields_to_a_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let account_home = temp.path().join(".claude-test");
+        let bin = temp.path().join("bin");
+        fs::create_dir(&account_home).unwrap();
+        fs::create_dir(&bin).unwrap();
+        fs::write(account_home.join(".credentials.json"),
+            json!({"claudeAiOauth":{"accessToken":"before","refreshToken":"refresh","expiresAt":1000}}).to_string()).unwrap();
+        crate::write_test_executable(&bin.join("claude"), b"#!/bin/sh\nexec sleep 30\n");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, axum::Router::new()).await.unwrap(); });
+        let mut env = super::super::environment::AccountEnvironment::from_map(Default::default());
+        env.home = temp.path().into();
+        env.claude_base = temp.path().join(".claude");
+        env.codex_default = temp.path().join(".codex");
+        env.claude_fixed = format!("test:{}", account_home.display());
+        env.base.insert("PATH".into(), bin.to_string_lossy().into_owned());
+        let service = AccountService::new(env);
+        let account = service.claude_by_label("test").unwrap();
+        let bridge = AccountsBridge::new(address, "synthetic".into(), "synthetic".into()).unwrap();
+        let runtime = Arc::new(crate::runtime::gateway::RuntimeRegistry::new(address, "synthetic".into(), "synthetic".into()));
+        let key = AccountKey::new(Provider::Claude, &account_home).unwrap();
+        let locks = service.locks.clone();
+        let renewing = {
+            let service = service.clone();
+            tokio::spawn(async move { service.refresh_claude(&account, bridge, Some(runtime), true).await })
+        };
+        while locks.try_acquire(&key, GuardMode::Shared).is_ok() {
+            assert!(!renewing.is_finished(), "a renovação acabou sem segurar a conta");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let started = std::time::Instant::now();
+        acquire_for_session(&locks, &key, started + Duration::from_secs(5)).await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+        assert_eq!(renewing.await.unwrap(), Err("cedeu-sessao"));
+        server.abort();
     }
 
     #[cfg(unix)]

@@ -37,7 +37,7 @@ impl EntryHandle {
 struct Entry { generation:u64,handle:EntryHandle,lease_path:std::path::PathBuf,name:String,mods_life:u64,provider:String,account_key:Option<crate::accounts::AccountKey>,relaunch:Option<Arc<super::claude_relaunch::Recipe>>,settings_owner:Option<Arc<super::claude_relaunch::Recipe>>,mode_source:crate::terminal_facts::ModeSource,live:LiveSender,runtime_target:Option<RuntimeTarget>,cano_birth:Option<f64>,auto_respawn:Option<Duration>,respawn_inflight:bool }
 
 async fn runtime_account_guard(provider: &str, metadata: &Value) -> Result<crate::accounts::AccountGuard, RuntimeError> {
-    use crate::accounts::{AccountKey, AccountLocks, GuardMode, Provider};
+    use crate::accounts::{AccountKey, AccountLocks, Provider};
     let provider = if provider == "codex" { Provider::Codex } else { Provider::Claude };
     let field = if provider == Provider::Codex { "codex_home" } else { "config_dir" };
     let home = metadata[field].as_str().map(std::path::PathBuf::from).or_else(|| {
@@ -46,8 +46,8 @@ async fn runtime_account_guard(provider: &str, metadata: &Value) -> Result<crate
     }).ok_or_else(|| failure("account_home_unknown"))?;
     let key = tokio::task::spawn_blocking(move || AccountKey::new(provider, &home)).await
         .map_err(|_| failure("account_lock_worker"))?.map_err(|_| failure("account_key_invalid"))?;
-    AccountLocks::system().map_err(|_| failure("account_locks_unavailable"))?
-        .acquire(&key, GuardMode::Shared, std::time::Instant::now() + Duration::from_secs(5)).await
+    let locks = AccountLocks::system().map_err(|_| failure("account_locks_unavailable"))?;
+    crate::accounts::claude_refresh::acquire_for_session(&locks, &key, std::time::Instant::now() + Duration::from_secs(5)).await
         .map_err(|_| failure("account_busy"))
 }
 

@@ -424,7 +424,7 @@ async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: Option<V
     let reads_account = spec.provider != AgentProvider::Kimi;
     let hangar_account = hangar_account.filter(|_| reads_account);
     let _guard = match reads_account {
-        true => Some(locks.acquire(&key, crate::accounts::GuardMode::Shared, Instant::now() + Duration::from_secs(5)).await
+        true => Some(crate::accounts::claude_refresh::acquire_for_session(&locks, &key, Instant::now() + Duration::from_secs(5)).await
             .map_err(|e| match e {
                 crate::accounts::LockError::Busy => OpenError::new(409, "account_busy", "a conta está ocupada por outra operação"),
                 crate::accounts::LockError::Io(e) => creation(format!("trava da conta: {e}")),
