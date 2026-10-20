@@ -10,11 +10,28 @@ fn parent(map: &ChildrenMap, pid: i64) -> Option<i64> {
     map.iter().find(|(_, children)| children.contains(&pid)).map(|(parent, _)| *parent)
 }
 
-/// A sessão do multiplexador que hospeda `pid`: o `-s <nome>` do servidor psmux/tmux acima dele.
-fn mux_session(procs: &dyn ProcessView, map: &ChildrenMap, pid: i64) -> Option<String> {
+/// Pid do processo de cada pane → sessão do multiplexador (`list-panes -a`).
+pub(crate) type Panes = std::collections::HashMap<i64, String>;
+
+pub(crate) async fn panes(program: &std::ffi::OsStr) -> Panes {
+    let mut command = tokio::process::Command::new(program);
+    command.args(["list-panes", "-a", "-F", "#{pane_pid}\t#{session_name}"]).stdin(std::process::Stdio::null()).kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(5), command.output()).await else { return Panes::new() };
+    String::from_utf8_lossy(&out.stdout).lines()
+        .filter_map(|line| line.split_once('\t').and_then(|(pid, name)| Some((pid.parse().ok()?, name.to_owned()))))
+        .collect()
+}
+
+/// A sessão do multiplexador que hospeda `pid`: o pane acima dele, ou o `-s <nome>` do servidor psmux.
+fn mux_session(procs: &dyn ProcessView, map: &ChildrenMap, panes: &Panes, pid: i64) -> Option<String> {
     let mut current = Some(pid);
     for _ in 0..8 {
         let at = current?;
+        if let Some(name) = panes.get(&at) {
+            return Some(name.clone());
+        }
         let argv = procs.argv_checked(at).unwrap_or_default();
         let server = argv.iter().any(|a| a == "server");
         if let Some(name) = argv.windows(2).find(|w| w[0] == "-s").map(|w| w[1].clone()).filter(|_| server) {
@@ -41,21 +58,24 @@ struct Holder {
     session: Option<String>,
 }
 
-fn holders(facts: &UsageFacts) -> Vec<Holder> {
+/// Fora da lista: a linha do próprio Hangar e o terminal que o hospeda (`own`), e as sessões do Hangar
+/// (`spared`), que trocam de conta e nunca são encerradas.
+fn holders(facts: &UsageFacts, panes: &Panes, spared: &BTreeSet<String>) -> Vec<Holder> {
     let procs = crate::list::procs::SystemProcs::whole_machine();
     let map = procs.children(Duration::ZERO).unwrap_or_default();
     let own = own_line(&map);
+    let own_session = mux_session(&procs, &map, panes, i64::from(std::process::id()));
     let pids: BTreeSet<u32> = facts.pids.iter().chain(&facts.holders).copied().collect();
     pids.into_iter().filter(|pid| !own.contains(&i64::from(*pid))).map(|pid| Holder {
         pid,
         name: procs.name(i64::from(pid)).ok(),
-        session: mux_session(&procs, &map, i64::from(pid)),
-    }).collect()
+        session: mux_session(&procs, &map, panes, i64::from(pid)),
+    }).filter(|h| h.session.as_ref().is_none_or(|s| !spared.contains(s) && Some(s) != own_session.as_ref())).collect()
 }
 
 /// O que segura a conta, para a tela perguntar antes de liberar. E/S bloqueante.
-pub(crate) fn describe(facts: &UsageFacts) -> Value {
-    let processes: Vec<Value> = holders(facts).into_iter()
+pub(crate) fn describe(facts: &UsageFacts, panes: &Panes) -> Value {
+    let processes: Vec<Value> = holders(facts, panes, &facts.sessions.iter().cloned().collect()).into_iter()
         .map(|h| json!({"pid": h.pid, "nome": h.name, "sessao": h.session})).collect();
     json!({"sessoes": facts.sessions, "processos": processes})
 }
@@ -100,9 +120,12 @@ pub(crate) async fn release(state: &Arc<crate::routes::AppState>, account: &Acco
             }
         }
     }
+    let moved: BTreeSet<String> = facts.sessions.iter().cloned().collect();
     let facts = read().await;
-    let found = tokio::task::spawn_blocking(move || holders(&facts)).await.unwrap_or_default();
-    let mux = crate::state::capture::MuxProcess::new("tmux", Duration::from_secs(5));
+    let program = state.list.env().capture_program.clone();
+    let panes = panes(&program).await;
+    let found = tokio::task::spawn_blocking(move || holders(&facts, &panes, &moved)).await.unwrap_or_default();
+    let mux = crate::state::capture::MuxProcess::new(program, Duration::from_secs(5));
     let sessions: BTreeSet<&str> = found.iter().filter_map(|h| h.session.as_deref()).collect();
     for session in sessions {
         let closed = mux.kill_session(session).await;
@@ -114,10 +137,12 @@ pub(crate) async fn release(state: &Arc<crate::routes::AppState>, account: &Acco
         }
     }
     // A exclusão relê os fatos sob a guarda: o que não saiu aparece lá como uso.
-    for _ in 0..20 {
-        let facts = read().await;
-        if facts.pids.is_empty() && facts.holders.is_empty() { break; }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    let _ = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let facts = read().await;
+            if facts.pids.is_empty() && facts.holders.is_empty() { break; }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }).await;
     Ok(())
 }

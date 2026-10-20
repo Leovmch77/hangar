@@ -356,12 +356,17 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
         std::time::Duration::from_secs(10),
     )
     .await;
+    let panes = if provider == Provider::Claude {
+        super::release::panes(&state.list.env().capture_program).await
+    } else {
+        Default::default()
+    };
     match tokio::task::spawn_blocking(move || {
         service.delete(provider, &account, &guard, &facts, keep).map_err(|mut err| {
             // A tela mostra o que prende a conta e pergunta se libera (`release=1`).
             if provider == Provider::Claude && matches!(err.code, "erro_processos_usam_conta" | "erro_sessao_usa_conta")
                 && let Value::Object(params) = &mut err.params
-                && let Value::Object(held) = super::release::describe(&facts)
+                && let Value::Object(held) = super::release::describe(&facts, &panes)
             {
                 params.extend(held);
             }

@@ -277,7 +277,13 @@ class ClaudeWindows:
         """As janelas só são lembradas em memória: as de um backend anterior ficavam abertas para
         sempre, segurando a conta. Chamar sob `self.lock`."""
         from app import claude_window, diag
-        for session in claude_window.tmux.list_sessions():
+        try:
+            sessions = claude_window.tmux.list_sessions()
+        except Exception as error:
+            # A varredura é limpeza: falhar nela não impede a janela nova de abrir.
+            diag.registrar("conta.janela_orfa", "aviso", codigo="lista_indisponivel", detalhe=type(error).__name__)
+            return
+        for session in sessions:
             name = session["name"]
             operation = name.removeprefix("term-login-")
             if operation != name and re.fullmatch("[a-f0-9]{32}", operation) and operation not in self.active:

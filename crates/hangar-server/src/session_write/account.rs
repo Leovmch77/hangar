@@ -318,6 +318,7 @@ mod tests {
     }
 
     /// Login vale com o token de acesso no prazo ou com o de renovação; sem arquivo, não.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn login_needs_a_live_credential() {
         let dir=tempfile::tempdir().unwrap();
