@@ -219,9 +219,10 @@ async fn orq_associate_never_calls_python() {
 
     // O lock de grupo segura a associação: uma saída ou um join concorrente não a vê pela metade.
     let (release, held) = tokio::sync::oneshot::channel::<()>();
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
     let groups = srv.groups.clone();
-    let holder = tokio::spawn(async move { groups.locked(async { held.await.ok() }).await });
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let holder = tokio::spawn(async move { groups.locked(async { let _ = locked_tx.send(()); held.await.ok() }).await });
+    locked_rx.await.unwrap();
     let private = srv.private;
     let ask = args("real", mtime(&draft));
     let mut associating = tokio::spawn(async move { bridge(private, "group.orq_associate", ask, Some(SECRET)).await });
