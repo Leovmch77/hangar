@@ -1955,6 +1955,50 @@ for line in sys.stdin:
         cleanup(&registry,&key,dir.path()).await;
     }
 
+    /// Codex sem terminal com o cano vivo e surdo (socket tomado por outro cliente e arquivo da escuta apagado)
+    /// e a mensagem presa com `headless_delivery_stalled`: o reinício que o `/recarregar` pede encerra o cano
+    /// surdo, sobe outro pela mesma conversa e entrega a mensagem nele, uma vez.
+    #[tokio::test]
+    async fn reload_with_stalled_delivery_delivers_on_new_life_codex() {
+        use_cano_bin();
+        let dir = tempfile::tempdir().unwrap();
+        let key = unique_key();
+        let hour = std::time::Duration::from_secs(3600);
+        lifecycle_codex(dir.path());
+        write_sidecar(dir.path(),&key,json!({}));
+        let registry = Arc::new(RuntimeRegistry::new(crate::refused_address(),"secret".into(),"instance".into())
+            .with_reconnect_waits(vec![hour],vec![hour],std::time::Duration::from_millis(300)).with_codex_environment(codex_env(dir.path())));
+        let mut opening = target(dir.path(),&key,no_cano());
+        opening.metadata["permission_mode"] = json!("Full Access");
+        registry.open_with_launch(opening,dir.path().into()).await.unwrap();
+        until_ready(&registry,&key).await;
+        let first = recorded(dir.path())[0].clone();
+        let cano = sidecar(dir.path())["cano"].clone();
+        let escuta = cano["escuta"].as_str().unwrap().to_owned();
+        let _thief = cano::connect(&CanoBinding { pid:first.pid,escuta:escuta.clone(),token:cano["token"].as_str().unwrap().into(),versao:2 }).await.unwrap();
+        let handle = registry.handle(&key,1).await.unwrap();
+        until_view(&handle,"o ator perde o socket",|view|view["ready"] == false).await;
+        // Sem o arquivo da escuta, a religação não chega ao cano, que segue vivo.
+        std::fs::remove_file(escuta.strip_prefix("unix:").expect("escuta por arquivo")).unwrap();
+        let reply = handle.command(control("preso",OperationKind::Input,json!({"text":"oi-preso","entry_id":"preso"}))).await.unwrap();
+        assert_eq!(reply.disposition,Disposition::Deferred,"sem socket, a mensagem fica na fila: {reply:?}");
+        until_view(&handle,"o aviso de entrega parada aparece",|view|view["public_state"]["problema"] == "headless_delivery_stalled").await;
+        let restarted = handle.command(control("reabrir",OperationKind::Restart,json!({}))).await.unwrap();
+        assert_eq!(restarted.disposition,Disposition::Accepted,"{restarted:?}");
+        assert!(process::liveness(first.pid,&key) != process::Liveness::Ours,"o cano surdo saiu");
+        let said = ||calls(dir.path()).iter().filter(|call|call["method"] == "turn/start" && call.to_string().contains("oi-preso")).count();
+        until("a mensagem presa chega à vida nova",||said() > 0).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(said(),1,"entregue uma vez");
+        assert_eq!(starts(dir.path()).len(),2,"uma vida nova só");
+        cleanup(&registry,&key,dir.path()).await;
+    }
+
+    async fn until_view(handle:&RuntimeHandle,what:&str,check:impl Fn(&Value)->bool) {
+        tokio::time::timeout(std::time::Duration::from_secs(20),async { while !check(&handle.view().await.unwrap()) { tokio::time::sleep(std::time::Duration::from_millis(20)).await; } })
+            .await.unwrap_or_else(|_|panic!("{what}"));
+    }
+
     #[tokio::test]
     async fn registry_live_follows_open_respawn_and_close() {
         // O canal do hub nasce com a sessão aberta no Rust, passa pela religação e esvazia no `close`.

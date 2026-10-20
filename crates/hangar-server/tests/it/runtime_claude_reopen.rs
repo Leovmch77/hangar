@@ -807,3 +807,120 @@ fn a_switch_cut_in_the_middle_settles_on_the_account_holding_the_conversation() 
     assert_eq!(read(specs.join(format!("{key}.json")))["account"],json!({"kind":"default"}));
     assert!(!specs.join(format!("{key}.switching")).exists());
 }
+
+/// Até `check` valer, com teto generoso: o teto só estoura se o código travar.
+async fn until<F:std::future::Future<Output=bool>>(what:&str,mut check:impl FnMut()->F) {
+    let deadline = std::time::Instant::now()+Duration::from_secs(30);
+    while !check().await {
+        assert!(std::time::Instant::now()<deadline,"{what}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Claude sem terminal de verdade (o cano desta compilação e um `claude` falso que responde aos pedidos de
+/// controle e anota cada `user` em `users.log`), aberto no Rust, com o socket tomado por outro cliente e o
+/// arquivo da escuta apagado: o cano segue vivo e surdo para o ator, e a mensagem enviada fica na fila.
+/// `stall`: o prazo do aviso; `turn_open`: antes da queda a primeira vida recebeu uma mensagem e o turno dela
+/// ficou aberto (o `claude` falso nunca responde); `never_initialized`: o `claude` da primeira vida não
+/// responde ao `initialize`, e a sessão cai ainda subindo.
+struct Deaf { fx:Fixture, key:String, registry:Arc<RuntimeRegistry>, first:u32, _thief:hangar_server::runtime::cano::CanoConnection }
+async fn deaf_headless_with_a_waiting_message(stall:Duration,turn_open:bool,never_initialized:bool) -> Deaf {
+    use hangar_server::runtime::protocol::{CanoBinding,Disposition,OperationKind,RuntimeCommand};
+    crate::use_cano_bin();
+    let fx = fixture();
+    let key = "5a".repeat(16);
+    fx.transcript();
+    let bin = fx.home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let (fake,log,mute) = (fx.home.join("fake-claude.sh"),fx.home.join("users.log"),fx.home.join("mute-init"));
+    if never_initialized { std::fs::write(&mute,"").unwrap(); }
+    // Sai sozinho depois de 120 s parado: nenhum processo do teste sobra. `mute-init` vale para uma subida só.
+    crate::write_executable(&fake,format!(r#"#!/bin/bash
+mute=0; [ -f '{mute}' ] && rm -f '{mute}' && mute=1
+while IFS= read -r -t 120 line; do
+  case "$line" in
+    *'"type":"control_request"'*)
+      [ $mute = 1 ] && grep -q '"subtype":"initialize"' <<<"$line" && continue
+      rid=$(sed -E 's/^.*"request_id":"([^"]*)".*$/\1/' <<<"$line")
+      printf '{{"type":"control_response","response":{{"subtype":"success","request_id":"%s","response":{{"commands":[]}}}}}}\n' "$rid";;
+    *'"type":"user"'*) echo "$line" >> '{log}';;
+  esac
+done
+"#,mute=mute.display(),log=log.display()));
+    // O `argv[0]` é `claude`: é por ele que a abertura reconhece o filho do cano.
+    crate::write_executable(&bin.join("claude"),format!("#!/bin/bash\nexec -a claude /bin/bash '{}' \"$@\"\n",fake.display()));
+    fx.put_sidecar(json!({"name":"s1","provider":"claude","headless":true,"key":key,"cwd":fx.cwd,"session_id":SID,
+        "permission_mode":"acceptEdits","cano":null}));
+    let path = format!("{}:{}",bin.display(),std::env::var("PATH").unwrap());
+    let env = AccountEnvironment::from_map([("HOME".to_owned(),fx.home.to_string_lossy().into_owned()),("PATH".to_owned(),path)].into());
+    let hour = Duration::from_secs(3600);
+    let registry = crate::runtime_open::registry_with(|registry|registry.with_codex_environment(env)
+        .with_processes(Arc::new(hangar_server::list::procs::SystemProcs::default()))
+        .with_reconnect_waits(vec![hour],vec![hour],stall)).await;
+    registry.open_claude_headless("s1",true).await.expect("é Claude sem terminal daqui").map_err(|e|(e.code,e.message)).unwrap();
+    let handle = registry.handle(&key,1).await.unwrap();
+    if !never_initialized {
+        until("a primeira vida inicializa",||{let handle=handle.clone();async move {handle.view().await.unwrap()["initialized"]==true}}).await;
+    }
+    if turn_open {
+        handle.command(RuntimeCommand { operation_id:"em-curso".into(),kind:OperationKind::Input,payload:json!({"text":"em-curso","entry_id":"em-curso"}) }).await.unwrap();
+        until("o turno da primeira vida abre",||{let handle=handle.clone();async move {handle.view().await.unwrap()["in_progress"]==true}}).await;
+    }
+    let cano:Value = serde_json::from_slice::<Value>(&std::fs::read(fx.sidecar_path("s1")).unwrap()).unwrap()["cano"].clone();
+    let first = cano["pid"].as_u64().unwrap() as u32;
+    let thief = hangar_server::runtime::cano::connect(&CanoBinding { pid:first,escuta:cano["escuta"].as_str().unwrap().into(),
+        token:cano["token"].as_str().unwrap().into(),versao:2 }).await.unwrap();
+    until("o ator perde o socket",||{let handle=handle.clone();async move {handle.view().await.unwrap()["deliverable"]==false}}).await;
+    // Sem o arquivo da escuta, a religação não chega ao cano, que segue vivo.
+    let socket = cano["escuta"].as_str().unwrap().strip_prefix("unix:").expect("escuta por arquivo").to_owned();
+    std::fs::remove_file(socket).unwrap();
+    let reply = handle.command(RuntimeCommand { operation_id:"preso".into(),kind:OperationKind::Input,
+        payload:json!({"text":"oi-preso","entry_id":"preso"}) }).await.unwrap();
+    assert_eq!(reply.disposition,Disposition::Deferred,"sem socket, a mensagem fica na fila: {reply:?}");
+    Deaf { fx,key,registry,first,_thief:thief }
+}
+
+/// Mensagem presa com o cano vivo e surdo e o aviso `headless_delivery_stalled` na tela: Reabrir encerra o
+/// cano surdo e o `claude` dele, sobe a vida nova pela mesma conversa e entrega a mensagem nela, uma vez. O
+/// turno que ficou aberto na queda não segura o Reabrir.
+#[tokio::test]
+async fn reload_with_stalled_delivery_delivers_on_new_life() {
+    reload_stalled_and_check_delivery(true,false).await;
+}
+
+/// O mesmo com a sessão que caiu antes de terminar de subir (`initialize` sem resposta).
+#[tokio::test]
+async fn reload_with_stalled_delivery_before_initialization_delivers_on_new_life() {
+    reload_stalled_and_check_delivery(false,true).await;
+}
+
+async fn reload_stalled_and_check_delivery(turn_open:bool,never_initialized:bool) {
+    let deaf = deaf_headless_with_a_waiting_message(Duration::from_millis(300),turn_open,never_initialized).await;
+    let (fx,key,registry) = (&deaf.fx,&deaf.key,deaf.registry.clone());
+    let handle = registry.handle(key,1).await.unwrap();
+    until("o aviso de entrega parada aparece",||{let handle=handle.clone();async move {
+        let view=handle.view().await.unwrap();
+        view["public_state"]["problema"]=="headless_delivery_stalled" && view["in_progress"]==turn_open && view["initialized"]!=never_initialized}}).await;
+    let (_python,server) = crate::runtime_codex_watch::serve_owner(registry.clone()).await;
+    let (status,body) = post(server,"recarregar",json!({})).await;
+    assert_eq!((status,&body),(200,&json!({"ok":true})),"{body}");
+    assert!(hangar_server::runtime::process::liveness(deaf.first,key)!=hangar_server::runtime::process::Liveness::Ours,"o cano surdo saiu");
+    let cano:Value = serde_json::from_slice::<Value>(&std::fs::read(fx.sidecar_path("s1")).unwrap()).unwrap()["cano"].clone();
+    assert_ne!(cano["pid"].as_u64(),Some(u64::from(deaf.first)),"a vida nova tem outro cano");
+    let stuck = ||std::fs::read_to_string(fx.home.join("users.log")).unwrap_or_default().lines().filter(|line|line.contains("oi-preso")).count();
+    until("a mensagem presa chega à vida nova",||{let n=stuck();async move {n>0}}).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(stuck(),1,"entregue uma vez");
+    registry.close_with_kill(key,2).await.unwrap();
+}
+
+/// Sem o aviso (o prazo ainda não passou), a mensagem esperando segura o Reabrir como antes, e o cano fica.
+#[tokio::test]
+async fn reload_without_stalled_delivery_still_refuses_a_waiting_queue() {
+    let deaf = deaf_headless_with_a_waiting_message(Duration::from_secs(3600),false,false).await;
+    let (_python,server) = crate::runtime_codex_watch::serve_owner(deaf.registry.clone()).await;
+    let (status,body) = post(server,"recarregar",json!({})).await;
+    assert_eq!((status,body["detail"]["code"].as_str()),(409,Some("erro_fila_pendente")),"{body}");
+    assert!(hangar_server::runtime::process::liveness(deaf.first,&deaf.key)==hangar_server::runtime::process::Liveness::Ours,"nada foi encerrado");
+    deaf.registry.close_with_kill(&deaf.key,1).await.unwrap();
+}
