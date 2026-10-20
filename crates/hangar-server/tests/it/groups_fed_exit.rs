@@ -142,8 +142,9 @@ async fn dissolve_leaves_a_local_group_on_the_remaining_machine() {
     unpair(&n.casa, "s0").await;
     assert!(record(&n.casa, &gid).is_none(), "a dona dissolve no mesmo passo");
     sidecar_becomes(&n.lab, "s1", |s| s.is_some_and(|s| s.get("fed").is_none() && peers_of(&s) == ["s2"])).await;
+    // Cada sidecar é um arquivo: o de `s2` pode chegar depois do de `s1`.
+    sidecar_becomes(&n.lab, "s2", |s| s.is_some_and(|s| s.get("fed").is_none())).await;
     let s2 = sidecar(&n.lab, "s2").unwrap();
-    assert!(s2.get("fed").is_none());
     assert_eq!((s2["gid"].clone(), peers_of(&s2)), (json!(gid), vec!["s1".to_owned()]));
 }
 
