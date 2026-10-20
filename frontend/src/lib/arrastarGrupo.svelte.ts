@@ -64,7 +64,7 @@ export function mensagemRecusa(reason: DropReason): string {
     case 'dead': return m.grupo_recusa_dead();
     case 'same_group': return m.grupo_recusa_same_group();
     case 'orq': return m.grupo_recusa_orq();
-    case 'invite': return m.native_group_refusal_invite();
+    case 'invite': return m.grupo_recusa_convite();
     case 'no_identity': return m.grupo_recusa_sem_identificador();
     case 'other_owner': return m.grupo_recusa_outra_dona();
   }

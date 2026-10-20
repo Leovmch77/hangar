@@ -17,8 +17,7 @@ pub(super) enum Refusal { Same, Orq, Dead, Invite, SameGroup, NoIdentity, OtherO
 impl Refusal {
     pub(super) fn text(self) -> String {
         web(match self {
-            // O web nem deixa arrastar a linha do convite, então não tem frase para isto.
-            Refusal::Invite => return tr("group_refusal_invite"),
+            Refusal::Invite => "grupo_recusa_convite",
             Refusal::Same => "grupo_recusa_same",
             Refusal::Orq => "grupo_recusa_orq",
             Refusal::Dead => "grupo_recusa_dead",
