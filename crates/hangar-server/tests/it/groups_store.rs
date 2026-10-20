@@ -114,6 +114,30 @@ fn parse_edge_values_like_python() {
     assert_eq!(st.harness.into_iter().collect::<Vec<_>>(), [("a".to_owned(), "claude".to_owned())]);
 }
 
+/// PAIR-05: nome vazio na lista de peers some; o resto fica.
+#[test]
+fn empty_peer_names_are_dropped() {
+    let st = Sidecar::parse("a", serde_json::json!({"peers": ["", "b"]}).as_object().unwrap()).unwrap();
+    assert_eq!(st.peers, ["b"]);
+}
+
+/// PAIR-06: os dois lados de um par legado derivam o mesmo gid, e ler não regrava o arquivo.
+#[test]
+fn legacy_pair_derives_one_gid_and_reading_never_writes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = fresh_dir(&tmp);
+    std::fs::write(tmp.path().join("a.json"), r#"{"peer": "b"}"#).unwrap();
+    std::fs::write(tmp.path().join("b.json"), r#"{"peer": "a"}"#).unwrap();
+    let stamp = |n: &str| { let p = tmp.path().join(n); (std::fs::read(&p).unwrap(), std::fs::metadata(&p).unwrap().modified().unwrap()) };
+    let before = (stamp("a.json"), stamp("b.json"));
+    let (a, b) = (dir.sidecar("a").unwrap().unwrap(), dir.sidecar("b").unwrap().unwrap());
+    assert_eq!(a.gid, b.gid);
+    assert_eq!(a.gid.len(), 8);
+    let listed = dir.sidecars().unwrap();
+    assert!(listed.iter().all(|(_, s)| s.gid == a.gid), "{listed:?}");
+    assert_eq!((stamp("a.json"), stamp("b.json")), before);
+}
+
 /// PAIR-11 no Windows: um leitor com o sidecar aberto (só FILE_SHARE_READ) não derruba a troca.
 #[cfg(windows)]
 #[test]

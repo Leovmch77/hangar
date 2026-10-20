@@ -460,6 +460,58 @@ async fn concurrent_join_waits_for_the_undo_of_the_first() {
     assert!(dir.sidecar("arb").unwrap().is_none());
 }
 
+/// PAIR-03: sidecar torto vale "sem grupo" para quem opera, nunca erro.
+#[tokio::test]
+async fn unreadable_sidecar_counts_as_no_group() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (svc, dir) = service(&tmp, FakeOrq::new(OrqPhase::Ended, None));
+    std::fs::create_dir_all(dir.root()).unwrap();
+    std::fs::write(dir.root().join("a.json"), "{").unwrap();
+    assert!(svc.leave("a").await.unwrap().is_empty());
+    let out = svc.join(owned("a", &["b"], false)).await.unwrap();
+    assert_eq!((out.members.as_slice(), out.newcomers.as_slice()), (&["a".to_owned(), "b".into()][..], &["a".to_owned(), "b".into()][..]));
+    assert_eq!(dir.sidecar("a").unwrap().unwrap().peers, ["b"]);
+}
+
+/// PAIR-15: saída e dissolução concorrentes com um join esperam a mesma trava.
+#[tokio::test]
+async fn leave_and_dissolve_wait_for_a_join_in_flight() {
+    let tmp = tempfile::tempdir().unwrap();
+    let orq = Arc::new(GatedOrq { entered: tokio::sync::Notify::new(), release: tokio::sync::Notify::new() });
+    let make = || PairDir::new(tmp.path().join("pair"), tmp.path().join("arquivo"));
+    let svc = Arc::new(GroupService::new(make(), orq.clone(), "srv".into()));
+    // Join de dois, preso na promoção: sem a trava, a saída de `exec` acharia o grupo e devolveria `arb`.
+    let first = tokio::spawn({ let svc = svc.clone(); async move { svc.join(owned("arb", &["exec"], true)).await } });
+    orq.entered.notified().await;
+    let mut leave = tokio::spawn({ let svc = svc.clone(); async move { svc.leave("exec").await } });
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(300), &mut leave).await.is_err(), "a saída espera a trava");
+    orq.release.notify_one();
+    assert!(first.await.unwrap().is_err());
+    assert!(leave.await.unwrap().unwrap().is_empty(), "a saída rodou depois do desfazer");
+    // Grupo `orq` de um, preso na promoção: sem a trava, a dissolução o apagaria.
+    let first = tokio::spawn({ let svc = svc.clone(); async move { svc.join(owned("solo", &[], true)).await } });
+    orq.entered.notified().await;
+    let mut dissolve = tokio::spawn({ let svc = svc.clone(); async move { svc.dissolve_lone_orq(std::time::Duration::ZERO).await } });
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(300), &mut dissolve).await.is_err(), "a dissolução espera a trava");
+    orq.release.notify_one();
+    assert!(first.await.unwrap().is_err());
+    assert!(dissolve.await.unwrap().unwrap().is_empty(), "a dissolução rodou depois do desfazer");
+}
+
+/// PAIR-36: o rename leva a chave do `harness` nos dois sidecars.
+#[tokio::test]
+async fn rename_moves_the_harness_key_in_every_sidecar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (svc, dir) = service(&tmp, FakeOrq::new(OrqPhase::Ended, None));
+    let harness: BTreeMap<String, String> = [("a".into(), "claude".into()), ("b".into(), "codex".into())].into();
+    svc.join(JoinOwned { harness, ..owned("a", &["b"], false) }).await.unwrap();
+    svc.rename("a", "a2").await.unwrap();
+    for name in ["a2", "b"] {
+        let h = dir.sidecar(name).unwrap().unwrap().harness;
+        assert_eq!((h.get("a2").map(String::as_str), h.contains_key("a")), (Some("claude"), false), "{name}");
+    }
+}
+
 #[tokio::test]
 async fn orq_join_promotes_once_and_restores_on_conflict() {
     let tmp = tempfile::tempdir().unwrap();
