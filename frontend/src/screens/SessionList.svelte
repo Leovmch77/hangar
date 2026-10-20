@@ -88,6 +88,11 @@ import * as m from '../paraglide/messages';
   let pairAlvo = $state<{ name: string; serverId: string } | null>(null);
   // Painel do grupo aberto pelo selo da linha, na máquina da sessão tocada.
   let grupoAlvo = $state<{ name: string; serverId: string } | null>(null);
+  // A sessão do painel sumiu da lista (fechada): o painel fecha, em vez de mostrar um grupo sem dono.
+  $effect(() => {
+    const alvo = grupoAlvo;
+    if (alvo && !loading && !sessions.some((x) => x.serverId === alvo.serverId && x.name === alvo.name)) grupoAlvo = null;
+  });
   function selo(s: AggSession) {
     const label = model.groupBadge(s);
     return label ? { label, onOpen: () => (grupoAlvo = { name: s.name, serverId: s.serverId }) } : null;

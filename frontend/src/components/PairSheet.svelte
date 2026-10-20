@@ -60,7 +60,10 @@
   const machineLabel = (id: string) => sessionsStore.servers.find((x) => x.id === id)?.label ?? id;
   // Par `srv::`: a lista do grupo espera a leitura em voo das máquinas conectadas e, se alguma falhou, diz qual.
   const entreMaquinas = $derived(peers.some((p) => p.includes('::')));
-  const lendoIdentidades = $derived(entreMaquinas && [...sessionsStore.identityStatus.values()].includes('reading'));
+  // Máquina que já mandou a lista mas cuja leitura ainda não começou também conta como em voo.
+  const semLeitura = $derived(sessionsStore.servers.some((s) => !s.invite && !identities.has(s.id)
+    && !sessionsStore.identityStatus.has(s.id) && sessionsStore.rows.some((r) => !r.outside && r.serverId === s.id)));
+  const lendoIdentidades = $derived(entreMaquinas && ([...sessionsStore.identityStatus.values()].includes('reading') || semLeitura));
   const semIdentificador = $derived([...sessionsStore.identityStatus].filter(([, st]) => st === 'failed')
     .map(([id]) => `⚠ ${machineLabel(id)}: ${m.grupo_recusa_sem_identificador()}`));
   type Membro = { key: string; name: string; server: string | null; machine: string | null; note: string | null };

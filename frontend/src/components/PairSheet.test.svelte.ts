@@ -70,6 +70,15 @@ describe('PairSheet — grupo entre máquinas', () => {
     unmount(c);
   });
 
+  it('máquina conectada antes de a leitura do identificador começar: carregando, como a leitura em voo', async () => {
+    store.rows = [...store.rows, row({ serverId: 'srv-b', serverLabel: 'Lab', name: 'z' })];
+    const c = montar();
+    await settle();
+    expect(document.body.textContent).toContain(m.comum_carregando());
+    expect(conversaDe('lab::x')).toBeNull();
+    unmount(c);
+  });
+
   it('identificador que some depois da escolha: não pede `undefined::nome`, tira a escolha e diz o motivo', async () => {
     store.rows = [...store.rows, row({ serverId: 'srv-b', serverLabel: 'Lab', name: 'z' })];
     store.identities = new Map([['srv-a', 'casa'], ['srv-b', 'lab']]);

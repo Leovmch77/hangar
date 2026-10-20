@@ -174,7 +174,7 @@ function createSessionsStore() {
     for (const id of identityStatus.keys()) if (!list.some(s => s.id === id)) setIdentityStatus(id, null);
     for (const [id, es] of streams) {
       if (!list.some((s) => s.id === id)) {
-        es.close(); streams.delete(id); slots.delete(id); slotsNeedingIdentity.delete(id); ultimoSinal.delete(id); forgetServer(id);
+        es.close(); streams.delete(id); slots.delete(id); slotsNeedingIdentity.delete(id); identityLoaders.delete(id); ultimoSinal.delete(id); forgetServer(id);
         clearTimeout(watchdogs.get(id)); watchdogs.delete(id);
         clearTimeout(primeiros.get(id)); primeiros.delete(id);
         clearTimeout(retryTimers.get(id)); retryTimers.delete(id);
