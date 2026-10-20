@@ -98,6 +98,42 @@ fn missing_is_none_and_broken_syntax_is_an_error_for_the_caller_to_log() {
     assert!(dir.sidecar("torto").is_err(), "JSON torto chega ao chamador, que o trata como sem grupo");
 }
 
+/// PAIR-07/08/09: harness que não é objeto vale vazio, `task: null` fica nulo, `orq` só com `true` literal.
+#[test]
+fn parse_edge_values_like_python() {
+    let parse = |v: Value| Sidecar::parse("a", v.as_object().unwrap());
+    let st = parse(serde_json::json!({"peers": ["b"], "task": null, "harness": "claude"})).unwrap();
+    assert_eq!((st.task, st.harness.len()), (None, 0));
+    assert_eq!(parse(serde_json::json!({"peers": ["b"]})).unwrap().task.as_deref(), Some(""));
+    for orq in [serde_json::json!("true"), serde_json::json!(1)] {
+        assert!(parse(serde_json::json!({"peers": [], "orq": orq})).is_none(), "{orq}");
+    }
+    assert!(parse(serde_json::json!({"peers": [], "orq": true})).unwrap().orq);
+    // Diferença aceita (I-1A): valor de harness que não é texto sai.
+    let st = parse(serde_json::json!({"peers": ["b"], "harness": {"a": "claude", "b": 1}})).unwrap();
+    assert_eq!(st.harness.into_iter().collect::<Vec<_>>(), [("a".to_owned(), "claude".to_owned())]);
+}
+
+/// PAIR-11 no Windows: um leitor com o sidecar aberto (só FILE_SHARE_READ) não derruba a troca.
+#[cfg(windows)]
+#[test]
+fn write_waits_for_a_reader_holding_the_sidecar_on_windows() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = fresh_dir(&tmp);
+    let mut s = Sidecar { peers: vec!["b".into()], task: Some("um".into()), gid: "ab12cd34".into(), ..Default::default() };
+    dir.write_sidecar("a", &s).unwrap();
+    let reader = std::fs::OpenOptions::new().read(true).share_mode(0x1).open(tmp.path().join("a.json")).unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        drop(reader);
+    });
+    s.task = Some("dois".into());
+    dir.write_sidecar("a", &s).unwrap();
+    release.join().unwrap();
+    assert_eq!(dir.sidecar("a").unwrap().unwrap().task.as_deref(), Some("dois"));
+}
+
 #[test]
 fn file_stem_matches_python_sanitize() {
     assert_eq!(file_stem("nome com espaço"), "nome-com-espa-o");

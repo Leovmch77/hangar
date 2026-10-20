@@ -446,3 +446,19 @@ async fn repassed_close_leaves_the_group() {
     assert_eq!(srv.groups.link("s1").await.unwrap().unwrap().peers, ["s2"]);
     assert_eq!(srv.groups.link("s2").await.unwrap().unwrap().peers, ["s1"]);
 }
+
+/// PAIR-24/47: `orq` sem companheiro cria o grupo de um; quem entra depois herda a marca e o grupo
+/// `orq` não recebe protocolo.
+#[tokio::test(flavor = "multi_thread")]
+async fn orq_pair_without_peer_creates_a_group_of_one_without_protocol() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    let (status, body) = call(srv.addr, "POST", "s0/pair", Some(&json!({"orq": true})), OWNER).await;
+    assert_eq!(status, 200, "{body}");
+    let arb = srv.groups.link("s0").await.unwrap().unwrap();
+    assert!(arb.orq && arb.peers.is_empty());
+    let (status, body) = call(srv.addr, "POST", "s1/pair", Some(&json!({"peer": "s0"})), OWNER).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(srv.groups.link("s1").await.unwrap().unwrap().orq);
+    assert_eq!(input_hits(&srv.python, &["s0", "s1"]), [0, 0]);
+}

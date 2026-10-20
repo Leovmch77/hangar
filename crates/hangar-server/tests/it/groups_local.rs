@@ -286,6 +286,34 @@ fn lone_orq_arbiter_refuses_an_external_pair() {
     assert_eq!(d.read()("arb"), Some(arbiter));
 }
 
+/// PAIR-34/35 (I-1A): sair do par com máquina própria não lê nem apaga o sidecar de uma sessão
+/// local cujo nome saneado coincide com o do remoto.
+#[test]
+fn leave_of_cross_pair_touches_only_the_local_side() {
+    let (d, h) = (Disk::new(), none());
+    let p = plan_join(&d.read(), &input("a", &["srv::x".into()], "", &h), &gid("g1")).ok().unwrap();
+    d.apply(&p.writes, &[]);
+    let homonym = Sidecar { peers: vec!["z".into()], task: Some(String::new()), gid: "h1".into(), ..Default::default() };
+    d.apply(&[("srv::x".into(), homonym.clone())], &[]);
+    let l = plan_leave(&d.read(), "a", false).unwrap();
+    assert_eq!((l.clears.as_slice(), l.writes.len()), (&["a".to_owned()][..], 0));
+    assert_eq!(l.before.keys().collect::<Vec<_>>(), ["a"]);
+    d.apply(&l.writes, &l.clears);
+    assert_eq!(d.read()("srv::x"), Some(homonym));
+}
+
+/// PAIR-36/37: sem grupo o rename só apaga o antigo; companheiro remoto não é regravado aqui.
+#[test]
+fn rename_skips_remote_companion_and_without_group_only_clears() {
+    let (d, h) = (Disk::new(), none());
+    assert_eq!(plan_rename(&d.read(), "solta", "nova"), (vec!["solta".to_owned()], Vec::new()));
+    let p = plan_join(&d.read(), &input("a", &["srv::x".into()], "", &h), &gid("g1")).ok().unwrap();
+    d.apply(&p.writes, &[]);
+    let (clears, writes) = plan_rename(&d.read(), "a", "a2");
+    assert_eq!(clears, ["a"]);
+    assert_eq!(writes.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["a2"]);
+}
+
 // ---- GroupService: disco real num tempdir e orquestração falsa ----
 
 struct FakeOrq { phase: OrqPhase, conflict: Option<String>, promotes: AtomicUsize }
@@ -326,6 +354,106 @@ async fn join_restores_on_partial_write_failure() {
     assert_eq!(dir.sidecar("a").unwrap(), a_before);
     assert_eq!(dir.sidecar("z").unwrap(), z_before);
     assert!(dir.sidecar("b").unwrap().is_none(), "sem grupo assimétrico");
+}
+
+/// PAIR-32: a saída que falha no meio volta todos ao retrato e devolve o erro.
+#[tokio::test]
+async fn leave_write_failure_restores_snapshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (svc, dir) = service(&tmp, FakeOrq::new(OrqPhase::Ended, None));
+    svc.join(owned("a", &["b", "c"], false)).await.unwrap();
+    let before: Vec<_> = ["a", "b", "c"].iter().map(|n| dir.sidecar(n).unwrap()).collect();
+    // `a` sai e `b` é regravado; a escrita de `c` falha porque o temporário dele é uma pasta.
+    std::fs::create_dir(dir.root().join("c.json.tmp")).unwrap();
+    let err = svc.leave("a").await.err().expect("a escrita de c precisa falhar");
+    assert!(matches!(err, GroupError::Store(_)), "{err:?}");
+    let after: Vec<_> = ["a", "b", "c"].iter().map(|n| dir.sidecar(n).unwrap()).collect();
+    assert_eq!(after, before, "sem saída pela metade");
+}
+
+/// PAIR-24: o grupo `orq` continua `orq` quando o join seguinte não repete a marca.
+#[test]
+fn orq_mark_survives_a_join_without_it() {
+    let (d, h) = (Disk::new(), none());
+    let p = plan_join(&d.read(), &JoinInput { orq: true, ..input("arb", &["exec".to_owned()], "", &h) }, &gid("o1")).ok().unwrap();
+    d.apply(&p.writes, &[]);
+    let p = plan_join(&d.read(), &input("exec2", &["arb".to_owned()], "", &h), &gid("g")).ok().unwrap();
+    assert!(p.orq);
+    d.apply(&p.writes, &[]);
+    assert!(["arb", "exec", "exec2"].iter().all(|m| d.read()(m).unwrap().orq));
+}
+
+/// O árbitro do orquestrar-auto nasce sozinho: `orq` sem companheiro cria o grupo de um.
+#[tokio::test]
+async fn orq_group_of_one_member_is_created() {
+    let tmp = tempfile::tempdir().unwrap();
+    let orq = FakeOrq::new(OrqPhase::Ended, None);
+    let (svc, dir) = service(&tmp, orq.clone());
+    let out = svc.join(owned("arb", &[], true)).await.unwrap();
+    assert_eq!((out.members.as_slice(), out.orq), (&["arb".to_owned()][..], true));
+    let st = dir.sidecar("arb").unwrap().unwrap();
+    assert!(st.peers.is_empty() && st.orq && st.gid == out.gid);
+    assert_eq!(orq.promotes.load(Ordering::SeqCst), 1);
+}
+
+/// PAIR-38 (I-1A): rename que falha no meio volta o grupo ao que era.
+#[tokio::test]
+async fn rename_failure_restores_the_group() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (svc, dir) = service(&tmp, FakeOrq::new(OrqPhase::Ended, None));
+    svc.join(owned("a", &["b"], false)).await.unwrap();
+    let (a, b) = (dir.sidecar("a").unwrap(), dir.sidecar("b").unwrap());
+    std::fs::create_dir(dir.root().join("b.json.tmp")).unwrap();
+    assert!(matches!(svc.rename("a", "a2").await, Err(GroupError::Store(_))));
+    assert_eq!((dir.sidecar("a").unwrap(), dir.sidecar("b").unwrap()), (a, b));
+    assert!(dir.sidecar("a2").unwrap().is_none());
+}
+
+/// PAIR-22 (I-1A): contrato do perdedor com UTF-8 inválido não derruba a fusão; o arquivo fica.
+#[tokio::test]
+async fn fusion_with_unreadable_loser_contract_still_joins() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (svc, dir) = service(&tmp, FakeOrq::new(OrqPhase::Ended, None));
+    let first = svc.join(owned("a", &["b"], false)).await.unwrap();
+    let loser = svc.join(owned("c", &["d"], false)).await.unwrap();
+    std::fs::write(dir.contract_path(&loser.gid), b"\xff\xfe quebrado").unwrap();
+    let merged = svc.join(owned("a", &["c"], false)).await.unwrap();
+    assert_eq!(merged.gid, first.gid);
+    assert_eq!(dir.sidecar("d").unwrap().unwrap().gid, first.gid);
+    assert!(dir.contract_path(&loser.gid).exists());
+}
+
+/// Promoção que espera um sinal e então recusa: segura a trava do grupo enquanto espera.
+struct GatedOrq { entered: tokio::sync::Notify, release: tokio::sync::Notify }
+impl OrqFacts for GatedOrq {
+    fn phase<'a>(&'a self, _gid: &'a str) -> BoxFuture<'a, OrqPhase> { Box::pin(async { OrqPhase::Ended }) }
+    fn promote<'a>(&'a self, _name: &'a str, _gid: &'a str) -> BoxFuture<'a, Result<(), PromoteError>> {
+        Box::pin(async move {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Err(PromoteError::Conflict("mudou".into()))
+        })
+    }
+}
+
+/// PAIR-15/18: join concorrente espera o primeiro desfazer; o desfazer não apaga o que o segundo gravou.
+#[tokio::test]
+async fn concurrent_join_waits_for_the_undo_of_the_first() {
+    let tmp = tempfile::tempdir().unwrap();
+    let orq = Arc::new(GatedOrq { entered: tokio::sync::Notify::new(), release: tokio::sync::Notify::new() });
+    let make = || PairDir::new(tmp.path().join("pair"), tmp.path().join("arquivo"));
+    let (svc, dir) = (Arc::new(GroupService::new(make(), orq.clone(), "srv".into())), make());
+    let first = tokio::spawn({ let svc = svc.clone(); async move { svc.join(owned("arb", &["exec"], true)).await } });
+    orq.entered.notified().await;
+    let second = tokio::spawn({ let svc = svc.clone(); async move { svc.join(owned("c", &["exec"], false)).await } });
+    tokio::task::yield_now().await;
+    assert!(dir.sidecar("c").unwrap().is_none(), "o segundo join espera a trava");
+    orq.release.notify_one();
+    assert!(matches!(first.await.unwrap(), Err(GroupError::Orq(_))));
+    second.await.unwrap().unwrap();
+    let exec = dir.sidecar("exec").unwrap().unwrap();
+    assert_eq!((exec.peers.as_slice(), exec.orq), (&["c".to_owned()][..], false));
+    assert!(dir.sidecar("arb").unwrap().is_none());
 }
 
 #[tokio::test]

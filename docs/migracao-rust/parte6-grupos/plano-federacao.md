@@ -419,19 +419,19 @@ Revisão: base — motivo: fecha a migração; nenhum item do inventário pode f
 - Modify: `.superpowers/sdd/2026-10-19-grupos-federacao/conferencia.md` (criada na Task 1)
 - Create: `.superpowers/sdd/2026-10-19-grupos-federacao/medicao.md`
 
-- [ ] **Step 1: Conferência item a item** (fechar a que as Tasks 2–5 preencheram): todo ID (PAIR-01..47, TXT-01..14, HOOK-01..14,
+- [x] **Step 1: Conferência item a item** (fechar a que as Tasks 2–5 preencheram): todo ID (PAIR-01..47, TXT-01..14, HOOK-01..14,
   BRG-01..35) com situação `igual` + teste Rust que reproduz o caso, `muda` + linha da `decisoes.md`,
   ou `sai` + prova de que ninguém depende. PAIR-32 ganha o teste Rust que faltava
   (`leave_write_failure_restores_snapshot`). Revisor de contexto limpo confere que cada `igual`
   aponta um teste daquele caso.
 - [ ] **Step 2: Falhas caladas**: `ecc:silent-failure-hunter` sobre o diff das Tasks 1–5; correção
   volta ao Step 1.
-- [ ] **Step 3: Caminho inteiro**: `grep` nos dois lados por todo chamador do `escopo.md`; nenhum
+- [x] **Step 3: Caminho inteiro**: `grep` nos dois lados por todo chamador do `escopo.md`; nenhum
   aponta para código Python de grupo, nenhuma volta Rust↔Python.
 - [ ] **Step 4: Medição** (`medicao.md`): p50/p95 de `/pair`, `/group-message`, `DELETE /pair` e do
   `pair-context` antes (main) e depois, no Linux e na DELPHI-02; marcadores do diário
   (`pool.espera`, `loop.atraso`, rotas ≥ 1 s). Mais lento sem motivo registrado não fecha.
-- [ ] **Step 5: Commit** dos ajustes de teste que os portões pedirem —
+- [x] **Step 5: Commit** dos ajustes de teste que os portões pedirem —
   `test(groups): close the migration gates`.
 
 ---
