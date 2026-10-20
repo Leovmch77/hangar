@@ -813,6 +813,17 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn a_short_preview_that_diverges_from_the_committed_answer_goes_out() {
+        let f = fixture();
+        let mut rx = f.lease.hub.tx.subscribe();
+        f.lease.hub.set_committed(0, crate::state::preview::norm("Vou medir o `hangar-server` desta máquina."), false);
+        let (_tx, live_rx) = channel(Some(LiveState { preview: "Vou ver".into(), ..live("working") }));
+        let _feed = spawn(&f, Some(live_rx));
+        let got = collect(&mut rx, Duration::from_millis(50)).await;
+        assert_eq!(of(&got, "preview")[0].2["text"], "Vou ver", "resposta nova que diverge da gravada aparece");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn never_publishes_suggest() {
         let f = fixture();
         let mut rx = f.lease.hub.tx.subscribe();
