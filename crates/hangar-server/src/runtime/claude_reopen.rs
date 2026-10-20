@@ -342,10 +342,12 @@ fn spec_of(procs:&dyn ProcessView,pid:i64,key:&str,name:&str,cwd:String,created:
 /// A marca da troca de conta em curso; sai quando a reabertura termina, de qualquer jeito.
 struct SwitchMark(PathBuf);
 impl SwitchMark {
-    fn write(home:&std::path::Path,next:&SessionSpec) -> Result<Self,RuntimeError> {
+    fn write(home:&std::path::Path,next:&SessionSpec) -> Result<Option<Self>,RuntimeError> {
+        // Sessão adotada do terminal não tem registro: a subida não teria o que acertar.
+        if crate::session_open::record::path(home,&next.key).is_err() {return Ok(None);}
         let unmarked=|_|refused("reopen_switch_mark","a troca não pôde ser marcada; nada foi reaberto");
         crate::session_open::record::write_switching(home,next).map_err(unmarked)?;
-        crate::session_open::record::switching_path(home,&next.key).map(SwitchMark).map_err(unmarked)
+        crate::session_open::record::switching_path(home,&next.key).map(|path|Some(SwitchMark(path))).map_err(unmarked)
     }
 }
 impl Drop for SwitchMark {
@@ -546,7 +548,7 @@ impl RuntimeRegistry {
         // A conversa que muda de conta fica marcada até a vida nova estar gravada: o Rust que cair no meio
         // sobe pela conta em que ela estiver (`settle_switches`).
         let _switching=match between {
-            Some(_)=>Some(SwitchMark::write(&self.codex_environment().home,&next).map_err(ReopenFailure::refused)?),
+            Some(_)=>SwitchMark::write(&self.codex_environment().home,&next).map_err(ReopenFailure::refused)?,
             None=>None,
         };
         match self.stop_claude(name,&current,next.surface).await {
@@ -1017,6 +1019,25 @@ impl RuntimeRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sessão adotada do terminal (`terminal_<hex>`) não tem registro: a troca de conta segue sem marca;
+    /// a do lançador fica marcada até a vida nova ser gravada.
+    #[test]
+    fn only_a_recorded_session_is_marked_while_switching_accounts() {
+        let home = tempfile::tempdir().unwrap();
+        let spec = |key:&str| SessionSpec { version:crate::session_open::SPEC_VERSION,key:key.into(),name:"s".into(),cwd:"/w".into(),
+            provider:crate::session_open::AgentProvider::Claude,surface:Surface::Terminal,account:Account::Default,
+            account_source:crate::session_open::AccountSource::Explicit,model:None,effort:None,service_tier:None,permission_mode:None,
+            subagent_model:None,customizations:None,jev:false,read_only:false,worktree:None,creator:None,created_at:0.0,conversation:None };
+        let adopted = format!("terminal_{}", "e6".repeat(32));
+        assert!(SwitchMark::write(home.path(),&spec(&adopted)).unwrap().is_none());
+        let key = "0123456789abcdef0123456789abcdef";
+        let mark = SwitchMark::write(home.path(),&spec(key)).unwrap().expect("sessão do lançador marcada");
+        let path = crate::session_open::record::switching_path(home.path(),key).unwrap();
+        assert!(path.is_file());
+        drop(mark);
+        assert!(!path.exists());
+    }
 
     /// O Python repassa o ambiente com o nome em maiúsculas (`PROGRAMFILES`); no Windows o nome não tem caixa.
     #[cfg(windows)]
