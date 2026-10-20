@@ -104,6 +104,19 @@ it('descobre a identidade apenas após quadro válido com pareamento remoto, uma
   expect(estaDesligado('vpn')).toBe(true);
 });
 
+it('pedido de identidades lê cada máquina conectada mesmo sem pareamento remoto', async () => {
+  vi.mocked(getIdentificador).mockClear();
+  sessionsStore.retain();
+  streams.get('lan')!.get('sessions')!({ data: '[]' });
+  streams.get('vpn')!.get('sessions')!({ data: '[]' });
+  expect(getIdentificador).not.toHaveBeenCalled();
+  sessionsStore.requestIdentities();
+  await vi.waitFor(() => expect(sessionsStore.identities.get('vpn')).toBe('backend-vpn'));
+  expect(sessionsStore.identities.get('lan')).toBe('backend-lan');
+  sessionsStore.requestIdentities();
+  expect(getIdentificador).toHaveBeenCalledTimes(2);
+});
+
 it('repete a identidade após falha transitória, com intervalo e sem reabrir o stream', async () => {
   vi.useFakeTimers();
   vi.mocked(getIdentificador).mockClear();

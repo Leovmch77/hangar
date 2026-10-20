@@ -565,14 +565,13 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     const offline = sessionsStore.byServer.filter(b => b.error && !b.server.inviteEnded);
     const offlineIds = new Set(offline.map(b => b.server.id));
     const key = (s: AggSession) => `${s.serverId}::${s.name}`;
-    const paired = new Set(model.groups.filter(g => g.pair).flatMap(g => g.sessions.map(key)));
     const visible = new Set(model.flatRows.map(key));
-    const onlineGroups = model.groups.map(g => g.pair ? g : {
+    const onlineGroups = model.groups.map(g => ({
       ...g, sessions: g.sessions.filter(s => !offlineIds.has(s.serverId)),
-    }).filter(g => !g.error && g.sessions.length > 0);
+    })).filter(g => !g.error && g.sessions.length > 0);
     const offlineGroups: Group[] = offline.map(b => ({
       id: b.server.id, label: b.server.label, color: serverColor(b.server.id), error: b.error,
-      sessions: b.sessions.filter(s => visible.has(key(s)) && !paired.has(key(s))),
+      sessions: b.sessions.filter(s => visible.has(key(s))),
     }));
     return { onlineGroups, offlineGroups };
   });
@@ -934,12 +933,6 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                       </span>
                     {/if}
                   </span>
-                  {#if g.pair}
-                    <span class="pair-server" style:color={s.serverColor}>
-                      {sessionsStore.byServer.find(b => b.server.id === s.serverId)?.error === 'offline'
-                        ? m.lista_servidor_offline({ label: s.serverLabel }) : s.serverLabel}
-                    </span>
-                  {/if}
                   {#if s.state === 'idle' && s.last_reply}
                     <span class="status-sub reply" title={s.last_reply}>
                       <span class="reply-mark" aria-hidden="true">◆</span>
@@ -1697,7 +1690,6 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   .pair-head-resto {
     font-weight: 400; color: var(--text-muted);
   }
-  .pair-server { font-size: var(--text-xs); overflow-wrap: anywhere; }
   .pair-head .grp-await, .pair-head .grp-count { margin-left: auto; }
   .pair-head .grp-await + .grp-count { margin-left: 0; }
   @media (hover: hover) { .pair-head:hover { color: var(--text-primary); } }

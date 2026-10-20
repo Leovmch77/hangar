@@ -892,12 +892,12 @@ Status: ready-for-agent
 **Invariante:** a agregação continua uma SSE por servidor (`sessionsStore`); a vista desktop web
 não ganha recurso (só o que é compartilhado com o celular).
 
-- [ ] **Step 1: Testes**: posição do grupo no modo escolhido; diálogo com origem qualificada.
-- [ ] **Step 2: Rodar e ver falhar.**
-- [ ] **Step 3: Implementar.**
-- [ ] **Step 4: Rodar.** Esperado: `npm --prefix frontend run check` e os vitest tocados verdes.
+- [x] **Step 1: Testes**: posição do grupo no modo escolhido; diálogo com origem qualificada.
+- [x] **Step 2: Rodar e ver falhar.**
+- [x] **Step 3: Implementar.**
+- [x] **Step 4: Rodar.** Esperado: `npm --prefix frontend run check` e os vitest tocados verdes.
 - [ ] **Step 5: verificação manual na tela** na vista celular (820 px ou menos) com duas máquinas.
-- [ ] **Step 6: Commit** — `feat(pwa): groups across machines inside the session list`.
+- [x] **Step 6: Commit** — `feat(pwa): groups across machines inside the session list`.
 
 ---
 

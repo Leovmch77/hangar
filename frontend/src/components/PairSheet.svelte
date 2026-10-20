@@ -3,12 +3,13 @@
   import { desktop } from '../lib/desktop.svelte';
   import { renderMarkdown } from '../lib/markdown';
   import { getSessions, pairSession, unpairSession, getHistory, getPairContract } from '@hangar/core';
-  import { fullPairsByAlias, grantFull, pairExternals, pairHeaderLabel } from '@hangar/core';
-  import { useSessionServer } from '../lib/sessionServer';
+  import { fullPairsByAlias, grantFull, pairExternals, pairHeaderLabel, groupGlobal, canPair, identityOf } from '@hangar/core';
+  import { sessionServerFor, useSessionServer } from '../lib/sessionServer';
+  import { mensagemRecusa } from '../lib/arrastarGrupo.svelte';
   import { formataErro } from '@hangar/core';
   import { rotuloEstado, stateColors, parsePeerMessage, relativeTime, encodeCompareIds } from '@hangar/core';
   import { getActiveId } from '../lib/auth';
-  import type { SessionInfo, State } from '@hangar/core';
+  import type { AggSession, SessionInfo, State } from '@hangar/core';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import * as m from '../paraglide/messages';
   import GroupGlyph from './icons/GroupGlyph.svelte';
@@ -21,9 +22,12 @@
     onChanged: () => void;            // grupo mudou -> pai recarrega a lista (badge/chip)
     onOpenSplit?: (peer: string) => void; // desktop: abre o chat do membro lado a lado (split view)
     onOpenPeerChat?: (peer: string) => void; // abre o chat do membro num MODAL (as duas views)
+    serverId?: string;                // aberto pela lista: a máquina da sessão, não a do chat
   }
-  let { open, sessionName, pairPeers, onClose, onChanged, onOpenSplit, onOpenPeerChat }: Props = $props();
-  const sessionServer = useSessionServer();
+  let { open, sessionName, pairPeers, onClose, onChanged, onOpenSplit, onOpenPeerChat, serverId }: Props = $props();
+  const ctxServer = useSessionServer();
+  const sessionServer = () => (serverId ? sessionServerFor(serverId)() : ctxServer());
+  const sid = $derived(sessionServer()?.id ?? getActiveId() ?? '');
 
   const peers = $derived(pairPeers ?? []);
   // Chave PRIMITIVA: a prop pairPeers é um array novo por referência a cada poll de 5s do pai —
@@ -41,12 +45,40 @@
   let liberar = $state<string[]>([]);
   // Esta sessão é a ponta de algum par: sair do grupo desfaz o par para todos.
   const pontaDe = $derived(sessionsStore.anchoredPairs(sessionServer()?.id ?? getActiveId() ?? '', sessionName));
-  let picked = $state<string[]>([]);   // MULTI-select: marca N sessões e pareia de uma vez
+  let picked = $state<string[]>([]);   // MULTI-select: chaves "<servidor>:<nome>", de qualquer máquina
   let task = $state('');
 
-  function togglePick(name: string) {
-    picked = picked.includes(name) ? picked.filter((n) => n !== name) : [...picked, name];
+  function togglePick(key: string) {
+    picked = picked.includes(key) ? picked.filter((n) => n !== key) : [...picked, key];
   }
+
+  // Grupo entre máquinas: membros e candidatas saem das listas já abertas (uma SSE por servidor).
+  const identities = $derived(sessionsStore.identities);
+  const selfRow = $derived(sessionsStore.rows.find((r) => !r.outside && r.serverId === sid && r.name === sessionName) ?? null);
+  const grupo = $derived(selfRow ? groupGlobal(sessionsStore.rows, identities).find((g) =>
+    g.members.some((x) => x.kind === 'here' && x.server === sid && x.name === sessionName)) ?? null : null);
+  const machineLabel = (id: string) => sessionsStore.servers.find((x) => x.id === id)?.label ?? id;
+  // Par `srv::` com identificador ainda em leitura: a lista do grupo espera em vez de chutar.
+  const lendoIdentidades = $derived(peers.some((p) => p.includes('::'))
+    && sessionsStore.servers.some((x) => !x.invite && !x.ephemeral && !identities.has(x.id)));
+  type Membro = { key: string; name: string; server: string | null; machine: string | null; note: string | null };
+  const membros = $derived.by((): Membro[] => {
+    if (!grupo || lendoIdentidades) return peers.map((p) => ({ key: p, name: p, server: sid, machine: null, note: null }));
+    return grupo.members.flatMap((x): Membro[] => {
+      if (x.kind === 'here') {
+        if (x.server === sid && x.name === sessionName) return [];
+        return [{ key: `${x.server}:${x.name}`, name: x.name, server: x.server, machine: x.server === sid ? null : machineLabel(x.server), note: null }];
+      }
+      if (x.kind === 'missing') {
+        return [{ key: `${x.server_id}::${x.name}`, name: x.name, server: null, machine: x.server_id,
+          note: m.grupo_membro_maquina_desconectada({ maquina: x.server_id }) }];
+      }
+      return [{ key: `${x.alias}::${x.session}`, name: `${x.alias}::${x.session}`, server: null, machine: null, note: null }];
+    });
+  });
+  const keyOf = (s: { serverId: string; name: string }) => `${s.serverId}:${s.name}`;
+  const nameOf = (key: string) => key.slice(key.indexOf(':') + 1);
+  const serverOf = (key: string) => key.slice(0, key.indexOf(':'));
   let busy = $state(false);
   let error = $state<string | null>(null);
   let adding = $state(false);   // grupo existente: mostrando o picker de "adicionar membro"
@@ -102,8 +134,10 @@
     if (!open) return;
     // Depende de open + peersKey (primitivos) — NUNCA do array peers: re-rodar por identidade
     // (poll de 5s) apagava seleção/task e refazia os fetches com o sheet aberto.
-    const members = peersKey ? peersKey.split(',') : [];
+    // Membro de outra máquina ou de fora não tem histórico neste servidor.
+    const members = peersKey ? peersKey.split(',').filter((p) => !p.includes('::')) : [];
     const my = ++epoch;
+    sessionsStore.requestIdentities();
     picked = [];
     task = '';
     busy = false;
@@ -114,7 +148,7 @@
     contract = null;
     contractError = null;
     liberar = [];
-    if (members.length) {
+    if (peersKey) {
       loadFeed(members, my);
       getPairContract(sessionName, sessionServer())
         .then((c) => { if (my === epoch) { contract = { path: c.path, content: c.content }; } })
@@ -133,8 +167,26 @@
       .catch(() => { if (my === epoch) error = m.forward_nao_listou(); });
   });
 
-  // Candidatas a ENTRAR no grupo: vivas, fora do grupo atual (sessions completa fica pra stateOf).
-  const candidates = $derived(sessions.filter((s) => !peers.includes(s.name)));
+  // Candidatas a ENTRAR no grupo: vivas, de todas as máquinas, fora do grupo atual. Recusa por
+  // identificador ou dona aparece com o motivo, sem deixar marcar.
+  type Candidata = AggSession & { recusa: string | null };
+  const candidates = $derived.by((): Candidata[] => {
+    const eu = selfRow ?? (self ? { ...self, serverId: sid } as AggSession : null);
+    const fonte: AggSession[] = selfRow ? sessionsStore.rows
+      : sessions.map((s) => ({ ...s, serverId: sid }) as AggSession);
+    const noGrupo = new Set(membros.map((x) => x.key));
+    return fonte
+      .filter((s) => !s.outside && !s.serverInvite && s.state !== 'dead' && !(s.serverId === sid && s.name === sessionName)
+        && !noGrupo.has(keyOf(s)) && !(s.serverId === sid && peers.includes(s.name)))
+      .flatMap((s) => {
+        const r = eu ? canPair(eu, s, identities) : { ok: true as const };
+        if (!r.ok && (r.reason === 'same_group' || r.reason === 'same' || r.reason === 'dead')) return [];
+        return [{ ...s, recusa: r.ok ? null : mensagemRecusa(r.reason) }];
+      })
+      .sort((a, b) => Number(a.serverId !== sid) - Number(b.serverId !== sid)
+        || machineLabel(a.serverId).localeCompare(machineLabel(b.serverId)) || a.name.localeCompare(b.name));
+  });
+  const pickedNames = $derived(picked.map(nameOf));
 
   async function doPair() {
     if (!picked.length || busy) return;
@@ -142,8 +194,11 @@
     error = null;
     try {
       // Mesmo endpoint pra criar grupo e pra ADICIONAR membro (o backend une os grupos).
-      const res = await pairSession(sessionName, picked, task.trim(), false, sessionServer());
-      const falhas = await grantFull(liberar.flatMap((alias) => picked.map((name) => ({ name, alias }))), sessionServer());
+      // De outra máquina, o nome vai qualificado; o servidor desta sessão leva o pedido até a dona.
+      const nomes = picked.map((k) => serverOf(k) === sid ? nameOf(k) : `${identityOf(serverOf(k), identities)}::${nameOf(k)}`);
+      const daqui = picked.filter((k) => serverOf(k) === sid).map(nameOf);
+      const res = await pairSession(sessionName, nomes, task.trim(), false, sessionServer());
+      const falhas = await grantFull(liberar.flatMap((alias) => daqui.map((name) => ({ name, alias }))), sessionServer());
       onChanged();
       if (falhas.length) {
         error = falhas.join('\n');
@@ -158,7 +213,7 @@
       // O motivo vem do backend já traduzido (sessão sumida, aviso não entregue em ninguém, tarefa
       // em conflito) e o `catch` sem variável o jogava fora: a tela dizia só "falhou" e não havia
       // como saber o que consertar.
-      const base = m.par_falhou_pareamento({ nomes: picked.join(', ') });
+      const base = m.par_falhou_pareamento({ nomes: pickedNames.join(', ') });
       error = e instanceof Error && e.message ? `${base} ${e.message}` : base;
     } finally {
       busy = false;
@@ -187,18 +242,19 @@
     }
   }
 
-  // Estado vivo de um membro (bolinha na linha), da lista já carregada pro picker.
-  function stateOf(name: string): string | null {
-    return sessions.find((s) => s.name === name)?.state ?? null;
+  // Estado vivo de um membro (bolinha na linha), da lista da máquina dele.
+  function stateOf(x: Membro): string | null {
+    if (!x.server) return null;
+    return sessionsStore.rows.find((s) => s.serverId === x.server && s.name === x.name)?.state
+      ?? (x.server === sid ? sessions.find((s) => s.name === x.name)?.state : null) ?? null;
   }
 
   // "Ver em grade": abre o GRUPO inteiro (eu + membros) na grade de comparação existente —
-  // cards ao vivo (transcript/preview/estado), 1 clique entra na sessão. Grupo é sempre do
-  // servidor ativo (pareamento é por servidor).
+  // cards ao vivo (transcript/preview/estado), 1 clique entra na sessão, cada uma na máquina dela.
   function openGrid() {
-    const sid = sessionServer()?.id ?? getActiveId();
     if (!sid) return;
-    const ids = [sessionName, ...peers].map((name) => ({ serverId: sid, name }));
+    const ids = [{ serverId: sid, name: sessionName },
+      ...membros.flatMap((x) => (x.server ? [{ serverId: x.server, name: x.name }] : []))];
     onClose();
     window.location.hash = '#/compare/' + encodeCompareIds(ids);
   }
@@ -206,7 +262,7 @@
   // "Abrir todas lado a lado" (desktop): fixa cada membro num painel próprio do split.
   function openAllSplit() {
     if (!onOpenSplit) return;
-    for (const p of peers) onOpenSplit(p);
+    for (const x of membros) if (x.server === sid) onOpenSplit(x.name);
     onClose();
   }
 </script>
@@ -219,7 +275,7 @@
     {#if peers.length}
       <!-- Tudo que ROLA fica aqui; o rodape com "Sair do grupo" fica preso embaixo. -->
       <div class="pair-scroll">
-      <h2 class="title"><GroupGlyph size={18} /> {m.par_grupo_titulo({ n: peers.length + 1 })}</h2>
+      <h2 class="title"><GroupGlyph size={18} /> {m.par_grupo_titulo({ n: membros.length + 1 })}</h2>
       {#if parCabecalho}<p class="pair-fora">{parCabecalho}</p>{/if}
       <p class="hint">
         {m.par_membros_hint()}
@@ -228,13 +284,19 @@
 
       <!-- Membros: estado vivo + abrir lado a lado (desktop) por membro. -->
       <div class="list">
-        {#each peers as p (p)}
-          {@const st = stateOf(p)}
+        {#if lendoIdentidades}<p class="empty">{m.comum_carregando()}</p>{/if}
+        {#each membros as x (x.key)}
+          {@const st = stateOf(x)}
+          {@const p = x.name}
+          {@const local = x.server === sid}
           <div class="row row--member">
             {#if st}<span class="dot" style="background: {stateColors[st as keyof typeof stateColors]};" aria-hidden="true"></span>{/if}
-            <span class="row-main"><span class="row-name">{p}</span></span>
+            <span class="row-main">
+              <span class="row-name">{p}</span>
+              {#if x.note}<span class="row-cwd">{x.note}</span>{:else if x.machine}<span class="row-cwd">{x.machine}</span>{/if}
+            </span>
             {#if st}<span class="row-paired">{rotuloEstado(st as State)}</span>{/if}
-            {#if onOpenPeerChat}
+            {#if onOpenPeerChat && local}
               <!-- Ícones em vez de glifos: `⤢` (expandir) e `⫽` (paralelas) não diziam o que fazem.
                    Aqui: um balão de conversa = abrir a conversa dele; duas colunas = lado a lado. -->
               <button class="split-btn" onclick={() => onOpenPeerChat?.(p)}
@@ -245,7 +307,7 @@
                 </svg>
               </button>
             {/if}
-            {#if onOpenSplit}
+            {#if onOpenSplit && local}
               <button class="split-btn" onclick={() => onOpenSplit?.(p)}
                       title={m.par_abrir_lado({ nome: p })} aria-label={m.par_abrir_lado({ nome: p })}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -262,7 +324,7 @@
       <!-- Visualizar o grupo inteiro: grade (cards ao vivo, 1 clique abre) ou split (N chats fixos). -->
       <div class="view-row">
         <button class="view-btn" onclick={openGrid} title={m.par_grade_title()}>{m.par_ver_grade()}</button>
-        {#if onOpenSplit && peers.length > 0}
+        {#if onOpenSplit && membros.some((x) => x.server === sid)}
           <button class="view-btn" onclick={openAllSplit} title={m.par_fixa_title()}>{m.par_todas_lado()}</button>
         {/if}
       </div>
@@ -274,14 +336,16 @@
           {#if candidates.length === 0}
             <p class="empty">{m.par_vazio_fora_grupo()}</p>
           {:else}
-            {#each candidates as s (s.name)}
-              <button class="row" class:row--picked={picked.includes(s.name)}
-                      onclick={() => togglePick(s.name)}
+            {#each candidates as s (keyOf(s))}
+              <button class="row" class:row--picked={picked.includes(keyOf(s))}
+                      onclick={() => togglePick(keyOf(s))} disabled={s.recusa !== null} title={s.recusa ?? undefined}
                       aria-label={m.par_adicionar_aria({ nome: s.name, estado: rotuloEstado(s.state) })}>
                 <span class="dot" style="background: {stateColors[s.state]};" aria-hidden="true"></span>
                 <span class="row-main">
                   <span class="row-name">{s.name}</span>
-                  {#if s.cwd}<span class="row-cwd">{s.cwd}</span>{/if}
+                  {#if s.recusa}<span class="row-cwd">{s.recusa}</span>
+                  {:else if s.serverId !== sid}<span class="row-cwd">{machineLabel(s.serverId)}</span>
+                  {:else if s.cwd}<span class="row-cwd">{s.cwd}</span>{/if}
                 </span>
                 {#if s.pair_peers?.length}
                   <span class="row-paired" title={m.par_ja_agrupada({ nomes: s.pair_peers.join(', ') })}><GroupGlyph size={12} /> {s.pair_peers.length}</span>
@@ -295,12 +359,12 @@
             <label class="liberar">
               <input type="checkbox" checked={liberar.includes(l.alias)} disabled={busy}
                      onchange={(e) => { liberar = e.currentTarget.checked ? [...liberar, l.alias] : liberar.filter((x) => x !== l.alias); }} />
-              <span><b>{m.pair_release({ dono: l.owner })}</b> {m.pair_full_confirm({ sessao: picked.join(', '), dono: l.owner })}</span>
+              <span><b>{m.pair_release({ dono: l.owner })}</b> {m.pair_full_confirm({ sessao: pickedNames.join(', '), dono: l.owner })}</span>
             </label>
           {/each}
         {/if}
         <button class="primary-btn" onclick={doPair} disabled={!picked.length || busy}>
-          {busy ? m.par_adicionando() : picked.length ? m.par_adicionar_nomes({ nomes: picked.join(', ') }) : m.par_escolha_sessoes()}
+          {busy ? m.par_adicionando() : picked.length ? m.par_adicionar_nomes({ nomes: pickedNames.join(', ') }) : m.par_escolha_sessoes()}
         </button>
       {/if}
 
@@ -360,14 +424,16 @@
         {#if candidates.length === 0 && !error}
           <p class="empty">{m.forward_nenhuma_viva()}</p>
         {:else}
-          {#each candidates as s (s.name)}
-            <button class="row" class:row--picked={picked.includes(s.name)}
-                    onclick={() => togglePick(s.name)}
+          {#each candidates as s (keyOf(s))}
+            <button class="row" class:row--picked={picked.includes(keyOf(s))}
+                    onclick={() => togglePick(keyOf(s))} disabled={s.recusa !== null} title={s.recusa ?? undefined}
                     aria-label={m.par_parear_aria({ nome: s.name, estado: rotuloEstado(s.state) })}>
               <span class="dot" style="background: {stateColors[s.state]};" aria-hidden="true"></span>
               <span class="row-main">
                 <span class="row-name">{s.name}</span>
-                {#if s.cwd}<span class="row-cwd">{s.cwd}</span>{/if}
+                {#if s.recusa}<span class="row-cwd">{s.recusa}</span>
+                {:else if s.serverId !== sid}<span class="row-cwd">{machineLabel(s.serverId)}</span>
+                {:else if s.cwd}<span class="row-cwd">{s.cwd}</span>{/if}
               </span>
               {#if s.pair_peers?.length}
                 <span class="row-paired" title={m.par_ja_agrupada({ nomes: s.pair_peers.join(', ') })}><GroupGlyph size={12} /> {s.pair_peers.length}</span>
@@ -385,7 +451,7 @@
       />
 
       <button class="primary-btn" onclick={doPair} disabled={!picked.length || busy}>
-        {busy ? m.par_pareando() : picked.length ? m.par_parear_nomes({ nomes: picked.join(', ') }) : m.par_escolha_varias()}
+        {busy ? m.par_pareando() : picked.length ? m.par_parear_nomes({ nomes: pickedNames.join(', ') }) : m.par_escolha_varias()}
       </button>
     {/if}
   </div>
@@ -414,6 +480,7 @@
   }
   .row:hover { background: var(--bg-hover); }
   .row--picked { border-color: var(--accent); background: var(--accent-dim); }
+  .row:disabled { opacity: 0.6; cursor: default; }
 
   .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 

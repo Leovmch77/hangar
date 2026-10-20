@@ -7,7 +7,7 @@ import { getActiveId, selectServer, serverColor } from './auth';
 import { formataErro } from '@hangar/core';
 import { sessionsStore } from './sessionsStore.svelte';
 import {
-  clusterByPair, countAwaiting, effectiveGroupBy, groupRemotePairs, groupSelectedByServer, projectKey, projectLabel, providerName,
+  clusterByPair, countAwaiting, effectiveGroupBy, groupGlobal, groupSelectedByServer, projectKey, projectLabel, providerName,
   isOrq, sortSessions, type GroupBy, type PairRow, placeExternalRows, pairExternals, pairHeaderLabel,
 } from '@hangar/core';
 import type { AggSession, ResumeCandidate, State } from '@hangar/core';
@@ -36,18 +36,10 @@ export interface Group {
   color: string | null;
   error: string | null;
   sessions: AggSession[];
-  pair?: { id: string; label: string };
 }
 
 export function groupItems(group: Group): PairRow<AggSession>[] {
-  if (!group.pair) return clusterByPair(group.sessions);
-  const { id: gid, label } = group.pair;
-  return [
-    { kind: 'header', gid, label, count: group.sessions.length },
-    ...group.sessions.map((session, i): PairRow<AggSession> => ({
-      kind: 'session', session, gid, label, ultimo: i === group.sessions.length - 1,
-    })),
-  ];
+  return clusterByPair(group.sessions);
 }
 
 export interface SessionListModelOptions {
@@ -129,34 +121,29 @@ export function createSessionListModel(opts: SessionListModelOptions) {
 
   const allGroups = $derived.by<Group[]>(() => {
     if (servers.length === 0) return [];
-    const remote = groupRemotePairs(rows, sessionsStore.identities ?? new Map());
-    const paired: Group[] = remote.groups.map(({ id, label, sessions }) => ({
-      id, label: '', color: null, error: null, sessions: sortSessions(sessions), pair: { id, label },
-    }));
     if (groupMode === 'none') {
-      return [...paired, { id: '*', label: '', color: null, error: null, sessions: sortSessions(remote.unpaired) }];
+      return [{ id: '*', label: '', color: null, error: null, sessions: sortSessions(rows) }];
     }
     if (groupMode === 'project') {
       const byKey = new Map<string, AggSession[]>();
-      for (const s of remote.unpaired) {
+      for (const s of rows) {
         const k = projectKey(s.cwd);
         const arr = byKey.get(k);
         if (arr) arr.push(s); else byKey.set(k, [s]);
       }
-      return [...paired, ...[...byKey.entries()]
+      return [...byKey.entries()]
         .map(([id, list]) => ({ id, label: projectLabel(list[0]?.cwd), color: null, error: null, sessions: sortSessions(list) }))
-        .sort((a, b) => a.label.localeCompare(b.label))];
+        .sort((a, b) => a.label.localeCompare(b.label));
     }
-    const pairedKeys = new Set(paired.flatMap(g => g.sessions.map(selectionKey)));
     const byServer: Group[] = placed.byServer.map((b) => ({
       id: b.server.id,
       label: b.server.label,
       color: serverColor(b.server.id),
       error: b.error,
-      sessions: sortSessions(b.sessions.filter(s => !pairedKeys.has(selectionKey(s)))),
+      sessions: sortSessions(b.sessions),
     }));
-    if (rules.serverGroups === 'store-order') return [...paired, ...byServer];
-    return [...paired, ...byServer.filter((g) => g.sessions.length > 0).sort((a, b) => a.label.localeCompare(b.label))];
+    if (rules.serverGroups === 'store-order') return byServer;
+    return [...byServer.filter((g) => g.sessions.length > 0).sort((a, b) => a.label.localeCompare(b.label))];
   });
 
   const groups = $derived.by<Group[]>(() => {
@@ -166,10 +153,7 @@ export function createSessionListModel(opts: SessionListModelOptions) {
       .map((g) => {
         const matches = (s: AggSession) => s.name.toLowerCase().includes(q) ||
           (s.cwd ?? '').toLowerCase().includes(q) || rules.filterLabel(s, g).toLowerCase().includes(q);
-        const sessions = g.pair
-          ? (g.pair.label.toLowerCase().includes(q) || g.sessions.some(matches) ? g.sessions : [])
-          : g.sessions.filter(matches);
-        return { ...g, sessions };
+        return { ...g, sessions: g.sessions.filter(matches) };
       })
       .filter((g) => g.sessions.length > 0);
   });
@@ -186,7 +170,28 @@ export function createSessionListModel(opts: SessionListModelOptions) {
   const awaitingTotal = $derived(countAwaiting(allSessions));
 
   function pairMembers(gid: string): AggSession[] {
-    return allGroups.find(g => g.pair?.id === gid)?.sessions ?? allSessions.filter(s => s.pair_gid === gid);
+    return allSessions.filter(s => s.pair_gid === gid);
+  }
+
+  // Selo do grupo que atravessa máquinas (I-9A): o membro fica na máquina dele, e o selo diz o
+  // código do ticket ou quantas máquinas o grupo tem. Grupo de uma máquina só já tem o cabeçalho.
+  const badges = $derived.by(() => {
+    const out = new Map<string, string>();
+    for (const g of groupGlobal(rows, sessionsStore.identities ?? new Map())) {
+      const machines = new Set<string>();
+      for (const mb of g.members) {
+        if (mb.kind === 'here') machines.add(`here:${mb.server}`);
+        else if (mb.kind === 'missing') machines.add(`id:${mb.server_id}`);
+      }
+      if (machines.size < 2) continue;
+      const code = PAIR_COD.exec(g.label)?.[1];
+      const label = code ?? m.grupo_selo_maquinas({ n: machines.size });
+      for (const mb of g.members) if (mb.kind === 'here') out.set(selectionKey({ serverId: mb.server, name: mb.name }), label);
+    }
+    return out;
+  });
+  function groupBadge(s: AggSession): string | null {
+    return badges.get(selectionKey(s)) ?? null;
   }
 
   // Cabeçalho do grupo com sessão de fora: "hangar ↔ casa::api (Ana)", só com os membros locais.
@@ -210,7 +215,6 @@ export function createSessionListModel(opts: SessionListModelOptions) {
     // cada volta. O gid renasce a cada pareamento, então o que não está mais na lista é podado
     // aqui mesmo, e o localStorage não acumula gid morto.
     const vivos = new Set(rows.map((s) => `pair:${s.pair_gid ?? ''}`));
-    for (const group of allGroups) if (group.pair) vivos.add(`pair:${group.pair.id}`);
     try {
       localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...next].filter((k) => !k.startsWith('pair:') || vivos.has(k))));
     } catch { /* idem */ }
@@ -390,6 +394,7 @@ export function createSessionListModel(opts: SessionListModelOptions) {
     toggleGroup,
     pairMembers,
     pairLabel,
+    groupBadge,
     get selectMode() { return selectMode; },
     get selected() { return selected; },
     get broadcastText() { return broadcastText; },

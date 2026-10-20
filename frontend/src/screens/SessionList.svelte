@@ -23,6 +23,7 @@ import * as m from '../paraglide/messages';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   import PairAcceptSheet from '../components/PairAcceptSheet.svelte';
+  import PairSheet from '../components/PairSheet.svelte';
   import { abrirConfig } from '../lib/configNav';
   import { quotaFeed } from '../lib/quotaFeed.svelte';
   import { faixaDeCota } from '../lib/cota';
@@ -85,6 +86,12 @@ import * as m from '../paraglide/messages';
   let bastaoAlvo = $state<{ name: string; cwd: string; serverId: string } | null>(null);
   let shareAlvo = $state<{ name: string; serverId: string } | null>(null);
   let pairAlvo = $state<{ name: string; serverId: string } | null>(null);
+  // Painel do grupo aberto pelo selo da linha, na máquina da sessão tocada.
+  let grupoAlvo = $state<{ name: string; serverId: string } | null>(null);
+  function selo(s: AggSession) {
+    const label = model.groupBadge(s);
+    return label ? { label, onOpen: () => (grupoAlvo = { name: s.name, serverId: s.serverId }) } : null;
+  }
   // Sessões locais do mesmo grupo: o convite de par com acesso completo abre todas.
   function grupoDe(alvo: { name: string; serverId: string } | null): string[] {
     const s = alvo ? sessions.find((x) => x.serverId === alvo.serverId && x.name === alvo.name) : null;
@@ -254,7 +261,7 @@ import * as m from '../paraglide/messages';
   }
   function avaliarDrop(alvo: AggSession): DropResult | null {
     const origem = sessionByKey(arrastarGrupo.origem);
-    return origem ? canPair(origem, alvo) : null;
+    return origem ? canPair(origem, alvo, sessionsStore.identities) : null;
   }
   // Cabeçalho de um cluster de pareamento (recolhido ou não) também é alvo de agrupar (rodada de
   // correção 1): sem representante, ele caía no "fundo" e soltar ali pedia SAÍDA do grupo da
@@ -315,6 +322,7 @@ import * as m from '../paraglide/messages';
       ghostLabel = session.name;
       ghostX = e.clientX; ghostY = e.clientY;
       arrastarGrupo.comecar({ serverId: session.serverId, name: session.name });
+      sessionsStore.requestIdentities();
       return;
     }
     if (phase === 'move') {
@@ -340,7 +348,7 @@ import * as m from '../paraglide/messages';
     const hit = hitTest(e.clientX, e.clientY);
     if (hit === null && !dentroDaLista(e.clientX, e.clientY)) { arrastarGrupo.cancelar(); return; }
     const origemChave = arrastarGrupo.origem;   // capturado 1x: origem é getter, não estreita sozinho
-    const decisao = resolveDrop(hit, origemChave, model.flatRows);
+    const decisao = resolveDrop(hit, origemChave, model.flatRows, sessionsStore.identities);
     if (decisao.kind === 'pair') arrastarGrupo.soltar(decisao.chave);
     // A linha de fora não sai do grupo por arrasto: quem a tira é o "Sair do pareamento".
     else if (decisao.kind === 'leave' && origemChave && !sessionByKey(origemChave)?.outside) arrastarGrupo.pedirSaida(origemChave);
@@ -635,8 +643,7 @@ import * as m from '../paraglide/messages';
                          title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : undefined}>
                       <SessionCard
                         {session}
-                        serverBadge={g.pair ? { label: sessionsStore.byServer.find(b => b.server.id === session.serverId)?.error === 'offline'
-                          ? m.lista_servidor_offline({ label: session.serverLabel }) : session.serverLabel, color: session.serverColor } : null}
+                        groupBadge={selo(session)}
                         onClick={() => openSession(session)}
                         onDelete={() => handleDelete(session)}
                         onResume={() => handleResume(session)}
@@ -697,7 +704,7 @@ import * as m from '../paraglide/messages';
                    title={dropRecusa !== null ? mensagemRecusa(dropRecusa) : undefined}>
             <SessionCard
               {session}
-              serverBadge={null}
+              groupBadge={selo(session)}
               onClick={() => openSession(session)}
               onDelete={() => handleDelete(session)}
               onResume={() => handleResume(session)}
@@ -870,6 +877,9 @@ import * as m from '../paraglide/messages';
 
   <ShareSessionSheet open={shareAlvo !== null} name={shareAlvo?.name ?? ''} serverId={shareAlvo?.serverId ?? ''}
                      groupSessions={grupoDe(shareAlvo)} onClose={() => (shareAlvo = null)} />
+  <PairSheet open={grupoAlvo !== null} serverId={grupoAlvo?.serverId} sessionName={grupoAlvo?.name ?? ''}
+             pairPeers={sessions.find((x) => x.serverId === grupoAlvo?.serverId && x.name === grupoAlvo?.name)?.pair_peers ?? null}
+             onClose={() => (grupoAlvo = null)} onChanged={() => {}} />
   {#if pairAlvo}
     <PairAcceptSheet sessions={paraParear} initial={pairAlvo} fallbackFocus={hamEl} onFechar={() => (pairAlvo = null)} />
   {/if}

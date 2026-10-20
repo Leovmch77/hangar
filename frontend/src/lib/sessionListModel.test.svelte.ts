@@ -118,7 +118,7 @@ describe('grupos por servidor (divergência #3)', () => {
   });
 });
 
-describe('pares remotos ficam juntos antes de agrupar por servidor ou projeto', () => {
+describe('grupo entre máquinas fica na máquina de cada membro, com selo (I-9A)', () => {
   beforeEach(() => {
     store.identities = new Map([['srv-a', 'notebook-jefferson'], ['srv-b', 'delphi-02']]);
     comServidores([
@@ -132,73 +132,47 @@ describe('pares remotos ficam juntos antes de agrupar por servidor ou projeto', 
       ] },
     ]);
   });
+  const grupoDe = (model: ReturnType<typeof createSessionListModel>, name: string) =>
+    model.allGroups.find(g => g.sessions.some(s => s.name === name))!;
 
   it.each((['desktop', 'mobile'] as const).flatMap(variant =>
-    ['server', 'project', 'none'].map(mode => ({ variant, mode }))))('$variant/$mode: um cabeçalho remoto, sem duplicar membros', ({ variant, mode }) => {
+    ['server', 'project'].map(mode => ({ variant, mode }))))('$variant/$mode: sem bloco no topo, cada membro no grupo da sua máquina ou projeto', ({ variant, mode }) => {
     localStorage.setItem('cp_group_by', mode);
     const model = createSessionListModel(opts(variant));
-    const group = model.allGroups[0];
-    expect(group.pair?.label).toBe('TASK-123 Configurar VM');
-    expect(group.label).toBe('');
-    expect(group.sessions.map(s => s.name)).toEqual(['jefferson-2', 'setup-vm']);
+    expect(model.allGroups.every(g => g.label !== '')).toBe(true);
+    expect(grupoDe(model, 'jefferson-2').id).toBe(mode === 'server' ? 'srv-a' : '/w/web');
+    expect(grupoDe(model, 'setup-vm').id).toBe(mode === 'server' ? 'srv-b' : '/w/delphi');
     expect(model.allSessions).toHaveLength(4);
-    expect(new Set(model.allSessions.map(s => `${s.serverId}::${s.name}`)).size).toBe(4);
-    expect(model.allGroups.slice(1).flatMap(g => g.sessions.map(s => s.name)).sort()).toEqual(['solo-a', 'solo-b']);
-    const items = groupItems(group);
-    expect(items[0]).toEqual({ kind: 'header', gid: group.pair!.id, label: 'TASK-123 Configurar VM', count: 2 });
-    expect(items.filter(item => item.kind === 'session')).toHaveLength(2);
-    expect(model.pairMembers(group.pair!.id)).toEqual(group.sessions);
-    expect(group.sessions.map(s => s.pair_gid)).toEqual(['b745f21b', '3881e52a']);
+    expect(model.groupBadge(store.rows[0])).toBe('TASK-123');
+    expect(model.groupBadge(store.rows[2])).toBe('TASK-123');
+    expect(model.groupBadge(store.rows[1])).toBeNull();
   });
 
-  it.each(['desktop', 'mobile'] as const)('filtro por nome ou tarefa mantém o par inteiro no %s', (variant) => {
-    const model = createSessionListModel(opts(variant));
-    for (const query of ['setup-vm', 'jefferson-2', 'configurar vm']) {
-      model.filterText = query;
-      expect(model.groups).toHaveLength(1);
-      expect(model.flatRows.map(s => s.name)).toEqual(['jefferson-2', 'setup-vm']);
-    }
-    model.filterText = 'não-existe';
-    expect(model.groups).toEqual([]);
-  });
-
-  it('abrir, comparar e enviar ao par usam os servidores originais', async () => {
-    const options = opts('desktop');
-    const model = createSessionListModel(options);
-    const group = model.allGroups[0];
-    const remote = group.sessions.find(s => s.name === 'setup-vm')!;
-    expect(model.open(remote)).toBe(true);
-    expect(selectServer).toHaveBeenLastCalledWith('srv-b');
-    expect(options.onOpen).toHaveBeenCalledWith('setup-vm');
-    model.selectGroupForBroadcast(group);
-    model.openCompare();
-    expect(options.onCompare).toHaveBeenCalledWith([
-      { serverId: 'srv-a', name: 'jefferson-2' }, { serverId: 'srv-b', name: 'setup-vm' },
+  it('grupo sem código de ticket mostra quantas máquinas, contando a desconectada', () => {
+    comServidores([
+      { id: 'srv-a', label: 'Notebook', sessions: [
+        sess('x', 'srv-a', { pair_gid: 'g1', pair_owner: 'notebook-jefferson', pair_peers: ['delphi-02::y', 'lab::z'] }),
+      ] },
+      { id: 'srv-b', label: 'Delphi', sessions: [
+        sess('y', 'srv-b', { pair_gid: 'g1', pair_owner: 'notebook-jefferson', pair_peers: ['notebook-jefferson::x', 'lab::z'] }),
+      ] },
     ]);
-    const targets: Array<{ server: unknown; names: string[] }> = [];
-    vi.mocked(broadcast).mockImplementation(async (names: string[]) => {
-      targets.push({ server: vi.mocked(selectServer).mock.lastCall?.[0], names });
-      return Object.fromEntries(names.map(name => [name, { ok: true }])) as any;
-    });
-    model.broadcastText = 'continuar';
-    await model.sendBroadcast();
-    expect(targets).toEqual([
-      { server: 'srv-a', names: ['jefferson-2'] }, { server: 'srv-b', names: ['setup-vm'] },
-    ]);
+    const model = createSessionListModel(opts('mobile'));
+    expect(model.groupBadge(store.rows[0])).toBe(m.grupo_selo_maquinas({ n: 3 }));
+    expect(model.groupBadge(store.rows[1])).toBe(m.grupo_selo_maquinas({ n: 3 }));
   });
 
-  it('persiste o recolhimento pelo id visual remoto', () => {
-    const model = createSessionListModel(opts('desktop'));
-    const key = `pair:${model.allGroups[0].pair!.id}`;
-    model.toggleGroup(key);
-    expect(JSON.parse(localStorage.getItem('cp_collapsed_servers')!)).toContain(key);
-    expect(createSessionListModel(opts('desktop')).collapsed.has(key)).toBe(true);
+  it('grupo de uma máquina só não ganha selo', () => {
+    comServidores([{ id: 'srv-a', label: 'Notebook', sessions: [
+      sess('x', 'srv-a', { pair_gid: 'g1', pair_peers: ['y'] }), sess('y', 'srv-a', { pair_gid: 'g1', pair_peers: ['x'] }),
+    ] }]);
+    expect(createSessionListModel(opts('mobile')).groupBadge(store.rows[0])).toBeNull();
   });
 
-  it('sem identidade confirmada mantém os membros no agrupamento existente', () => {
+  it('sem identidade confirmada o par antigo não vira selo e fica no cluster da máquina', () => {
     store.identities = undefined;
     const model = createSessionListModel(opts('desktop'));
-    expect(model.allGroups.every(g => !g.pair)).toBe(true);
+    expect(model.groupBadge(store.rows[0])).toBeNull();
     const local = model.allGroups.find(g => g.id === 'srv-a')!;
     expect(groupItems(local).find(item => item.kind === 'header')).toMatchObject({ gid: 'b745f21b', count: 1 });
     expect(model.pairMembers('b745f21b').map(s => s.name)).toEqual(['jefferson-2']);

@@ -21,6 +21,9 @@ import { avisarSemArmazem, definirArmazem, definirProtegido, definirSemPrazo, es
 function createSessionsStore() {
   let servers = $state<Server[]>([]);
   let identities = $state.raw<ReadonlyMap<string, string>>(new Map());
+  // Agrupar entre máquinas precisa do identificador de cada uma antes de haver par `srv::`.
+  let identitiesWanted = false;
+  const identityLoaders = new Map<string, () => void>();
   // $state.raw: agg é SUBSTITUÍDO inteiro a cada recompute e nunca mutado — o proxy profundo do
   // $state só custava, e embrulhar as rows em proxy quebrava a identidade que o memo do
   // aggregateSessions preserva (rows de servidor que não emitiu = mesmo objeto -> keyed each das
@@ -201,7 +204,7 @@ function createSessionsStore() {
       let identityNeeded = false;
       const loadIdentity = () => {
         if (s.invite) return;   // servidor de convite não responde /api/peers/identificador
-        if (!isCurrent() || !identityNeeded || identityRequested || Date.now() < identityRetryAt) return;
+        if (!isCurrent() || !(identityNeeded || identitiesWanted) || identityRequested || Date.now() < identityRetryAt) return;
         identityRequested = true;
         void getIdentificador(s).then(({ identificador }) => {
           if (!isCurrent() || !identificador) return;
@@ -214,6 +217,7 @@ function createSessionsStore() {
             codigo: error instanceof Error ? error.name : 'erro' }, s.baseUrl);
         });
       };
+      identityLoaders.set(s.id, loadIdentity);
       if (identities.has(s.id)) { const next = new Map(identities); next.delete(s.id); identities = next; }
       const tentativa = (tentativas.get(s.id) ?? 0) + 1;
       tentativas.set(s.id, tentativa);
@@ -489,6 +493,8 @@ function createSessionsStore() {
     // voltaria exibindo a latência de outra época, que ninguém mais vai corrigir.
     latencias = new Map();
     identities = new Map();
+    identitiesWanted = false;
+    identityLoaders.clear();
     // As entradas temporárias ficam no auth: o chat de uma sessão de fora segue com a lista fechada.
     pairSync.reset();
     pairLeft = null;
@@ -513,6 +519,11 @@ function createSessionsStore() {
     get loading() { return agg.loading; },
     get servers() { return servers; },
     get identities() { return identities; },
+    /** Lê o identificador de toda máquina conectada (arrastar ou painel do grupo), uma vez por conexão. */
+    requestIdentities() {
+      identitiesWanted = true;
+      for (const load of identityLoaders.values()) load();
+    },
     /** Último par que sumiu da lista sem ter sido desfeito aqui: "<dono> saiu do pareamento". */
     get pairLeft() { return pairLeft; },
     /** O aviso de `pairLeft` uma vez só, mesmo com a lista remontando; lê `pairLeft`, então acorda um `$effect`. */
