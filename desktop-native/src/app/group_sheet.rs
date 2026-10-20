@@ -4,7 +4,7 @@
 use super::*;
 use super::activity::web;
 use super::device::Remote;
-use super::grouping::{Grant, IdSlot, Refusal, Row, can_pair, failed, full_grants, glyph, identity_of, pair_and_grant, qualified, web_with};
+use super::grouping::{Grant, IdSlot, Refusal, Row, can_pair, failed, full_grants, glyph, identity_of, identity_settled, pair_and_grant, qualified, web_with};
 use super::sidebar::{SidebarReply, Target};
 use crate::api::dto::{PairExternalEntry, PairResult};
 use gpui_kit::component::{WindowExt, checkbox::Checkbox};
@@ -234,8 +234,9 @@ impl Hangar {
         let machines = self.group_machines();
         if let Some(key) = machines.iter().find(|k| identity_of(k, ids) == Some(id)) { return MemberAt::Here(Target::new(key, name)); }
         let outside = self.sheet_live().is_some_and(|s| s.outside_pairs().iter().any(|p| p.alias == id && p.session == name));
-        let reading = machines.iter().any(|k| matches!(self.identity_slot(k), Some(IdSlot::Loading)));
-        if outside || reading { MemberAt::Unknown } else { MemberAt::Missing(id.to_owned()) }
+        // Máquina conectada ainda sem identificador (em leitura ou falhou) pode ser a deste membro: não se diz que ela está fora.
+        let unsettled = machines.iter().any(|k| !identity_settled(self.identity_slot(k)));
+        if outside || unsettled { MemberAt::Unknown } else { MemberAt::Missing(id.to_owned()) }
     }
 
     /// Com grupo, quantos são; em voo; erro; as marcadas (pelo nome que o pedido leva).

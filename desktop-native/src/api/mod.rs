@@ -142,7 +142,9 @@ fn envelope_code(body: Option<&Value>) -> Option<String> {
 /// Recusa ou aviso de grupo `{code, params}`: a frase do web pelo código.
 pub fn group_text(envelope: &Value) -> Option<String> {
     let code = envelope.get("code")?.as_str()?;
-    if !(code.starts_with("erro_grupo_") || matches!(code, "groups_need_rust_server" | "erro_contrato_mudou" | "erro_link_remoto")) { return None; }
+    if !(code.starts_with("erro_grupo_") || code.starts_with("erro_pareamento_") || matches!(code, "groups_need_rust_server"
+        | "erro_contrato_mudou" | "erro_link_remoto" | "erro_sessao_nao_pareada" | "erro_sessao_sem_grupo" | "erro_peer_nao_avisado"
+        | "erro_group_message_tempestade")) { return None; }
     envelope_text(envelope)
 }
 
@@ -1095,6 +1097,16 @@ mod tests {
         let warning = json!({"code": "erro_grupo_membro_nao_confirmado", "params": {"membros": ["casa::a", "casa::b"]}, "msg": "x"});
         let text = group_text(&warning).unwrap();
         assert!(text.contains("casa::a; casa::b"), "{text}");
+    }
+
+    #[test]
+    fn pairing_and_session_group_errors_use_the_phrase_of_the_ui_language() {
+        crate::i18n::english_in_this_thread(true);
+        let detail = |code: &str| failure_detail(Some(json!({"detail": {"code": code, "params": {}, "msg": "frase fixa do servidor"}})), 409);
+        assert_eq!(detail("erro_sessao_sem_grupo"), "session is not in a group");
+        for code in ["erro_pareamento_desfeito", "erro_sessao_nao_pareada", "erro_peer_nao_avisado", "erro_group_message_tempestade"] {
+            assert_ne!(detail(code), "frase fixa do servidor", "{code}");
+        }
     }
 
     #[test]

@@ -342,14 +342,38 @@ pub(super) struct Grouping {
     pub(super) send_to_group: Option<(SessionKey, String)>,
     /// Identificador de cada máquina (`/api/peers/identificador`), lido uma vez por máquina.
     ids: HashMap<String, IdSlot>,
+    /// Selos da última lista: a barra se desenha a cada quadro e o modelo global é quadrático.
+    seals: RefCell<Option<(u64, Rc<Seals>)>>,
 }
 
-/// Leitura do identificador de uma máquina. `Known("")` é máquina sem `CP_SERVER_ID`: não se adivinha.
+pub(super) type Seals = HashMap<Target, (String, String)>;
+
+/// Leitura do identificador de uma máquina; identificador vazio vira `Failed` (`id_slot`).
 #[derive(Clone)]
 pub(super) enum IdSlot { Loading, Known(String), Failed(Instant) }
 
 /// Falha na leitura do identificador espera isto antes de tentar de novo, como o web.
 const ID_RETRY: Duration = Duration::from_secs(30);
+
+/// A máquina tem identificador válido: em voo, falha, vazio ou não lido ainda não dizem nada sobre quem está fora.
+pub(super) fn identity_settled(slot: Option<&IdSlot>) -> bool { matches!(slot, Some(IdSlot::Known(id)) if !id.is_empty()) }
+
+/// Resposta de `/api/peers/identificador` (`None` = a leitura falhou). Vazio é máquina sem `CP_SERVER_ID`: conta como falha
+/// e é relido depois de `ID_RETRY`, para o conserto aparecer sem reconectar.
+pub(super) fn id_slot(read: Option<&Value>) -> IdSlot {
+    match read.and_then(|v| v.get("identificador")).and_then(Value::as_str).filter(|id| !id.is_empty()) {
+        Some(id) => IdSlot::Known(id.to_owned()),
+        None => IdSlot::Failed(Instant::now()),
+    }
+}
+
+/// Valor guardado pela chave da entrada; só recalcula quando ela muda.
+pub(super) fn memo<T>(cell: &RefCell<Option<(u64, Rc<T>)>>, key: u64, compute: impl FnOnce() -> T) -> Rc<T> {
+    if let Some((k, value)) = cell.borrow().as_ref() && *k == key { return value.clone(); }
+    let value = Rc::new(compute());
+    *cell.borrow_mut() = Some((key, value.clone()));
+    value
+}
 
 impl Grouping {
     pub(super) fn reset(&mut self) {
@@ -423,8 +447,8 @@ impl Hangar {
 
     pub(super) fn receive_identity(&mut self, key: String, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
         let slot = match result {
-            Ok(v) => IdSlot::Known(v.get("identificador").and_then(Value::as_str).unwrap_or_default().to_owned()),
-            Err(error) => { eprintln!("identificador de {key} não lido: {}", Self::fetch_failure(&error)); IdSlot::Failed(Instant::now()) }
+            Ok(v) => id_slot(Some(&v)),
+            Err(error) => { eprintln!("identificador de {key} não lido: {}", Self::fetch_failure(&error)); id_slot(None) }
         };
         self.sidebar.grouping.ids.insert(key, slot);
         self.refresh_group_ask();
@@ -433,13 +457,31 @@ impl Hangar {
     }
 
     /// Selo de cada membro de grupo que atravessa máquinas: o texto (`seal_text`) e a dica com a tarefa e os membros.
-    /// Calculado uma vez por desenho da barra, para todas as linhas.
-    pub(super) fn group_seals(&self, cx: &App) -> HashMap<Target, (String, String)> {
+    /// Recalculado só quando muda o que ele lê (campos de grupo das linhas, identificadores, nomes das máquinas, idioma).
+    pub(super) fn group_seals(&self, cx: &App) -> Rc<Seals> {
+        use std::hash::{DefaultHasher, Hash, Hasher};
         let machines = self.group_machines();
-        if machines.len() < 2 && self.sessions.iter().all(|s| s.pair_owner.is_none()) { return HashMap::new(); }
+        if machines.len() < 2 && self.sessions.iter().all(|s| s.pair_owner.is_none()) { return Rc::default(); }
+        let ids = self.identities();
+        let mut hasher = DefaultHasher::new();
+        crate::i18n::english().hash(&mut hasher);
+        let mut sorted: Vec<_> = ids.iter().collect();
+        sorted.sort();
+        sorted.hash(&mut hasher);
+        for key in &machines {
+            (key, self.machine_label(key, cx)).hash(&mut hasher);
+            for s in self.sessions_of(key) {
+                (&s.name, &s.pair_gid, &s.pair_owner, s.peers(), &s.pair_task).hash(&mut hasher);
+                for p in s.outside_pairs().iter() { (&p.alias, &p.session).hash(&mut hasher); }
+            }
+        }
+        memo(&self.sidebar.grouping.seals, hasher.finish(), || self.compute_seals(&machines, &ids, cx))
+    }
+
+    fn compute_seals(&self, machines: &[String], ids: &HashMap<String, String>, cx: &App) -> Seals {
         let rows: Vec<Row> = machines.iter().flat_map(|key| self.sessions_of(key).iter().map(move |s| Row { server: key, session: s, invite: false })).collect();
         let mut out = HashMap::new();
-        for g in global_groups(&rows, &self.identities()) {
+        for g in global_groups(&rows, ids) {
             let Some(text) = seal_text(&g) else { continue };
             let names: Vec<String> = g.members.iter().map(|m| match m {
                 Member::Here { server, name } => format!("{}::{name}", self.machine_label(server, cx)),
@@ -894,11 +936,11 @@ pub(super) fn fill_group(menu: PopupMenu, hangar: &WeakEntity<Hangar>, origin: &
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` do gpui_kit, que o `super::*` traz, esconderia o `#[test]` da linguagem.
-    use super::{GlobalGroup, Grant, ListRow, Member, Refusal, Row, SessionInfo, can_leave, can_pair, cluster, existing_group, full_grants,
-        global_groups, pair_header_label, qualified, seal_text, split_code};
+    use super::{GlobalGroup, Grant, IdSlot, ListRow, Member, Refusal, Row, SessionInfo, can_leave, can_pair, cluster, existing_group, full_grants,
+        global_groups, id_slot, identity_settled, memo, pair_header_label, qualified, seal_text, split_code};
     use crate::api::dto::{PairExternal, PairExternalEntry, PairResult};
     use serde_json::Value;
-    use std::collections::HashMap;
+    use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Instant};
 
     fn s(name: &str, gid: Option<&str>, peers: &[&str]) -> SessionInfo {
         SessionInfo { name: name.into(), state: "idle".into(), pair_gid: gid.map(str::to_owned),
@@ -1058,6 +1100,41 @@ mod tests {
         assert_eq!(existing_group(Some(&lone), Some(&grouped)).map(|g| g.name.as_str()), Some("b"));
         assert!(existing_group(Some(&lone), Some(&s("z", None, &[]))).is_none(), "duas soltas: grupo novo");
         assert!(existing_group(Some(&grouped), Some(&s("d", Some("h"), &["e"]))).is_none(), "dois grupos: fundem");
+    }
+
+    #[test]
+    fn identity_counts_only_when_read_and_not_empty() {
+        assert!(identity_settled(Some(&IdSlot::Known("casa".into()))));
+        for slot in [None, Some(IdSlot::Loading), Some(IdSlot::Failed(Instant::now())), Some(IdSlot::Known(String::new()))] {
+            assert!(!identity_settled(slot.as_ref()), "leitura em voo, falha ou vazio não dizem que a máquina está fora");
+        }
+    }
+
+    #[test]
+    fn empty_identifier_is_a_failed_read_retried_later() {
+        assert!(matches!(id_slot(Some(&serde_json::json!({"identificador": ""}))), IdSlot::Failed(_)));
+        assert!(matches!(id_slot(Some(&serde_json::json!({}))), IdSlot::Failed(_)));
+        assert!(matches!(id_slot(None), IdSlot::Failed(_)));
+        assert!(matches!(id_slot(Some(&serde_json::json!({"identificador": "casa"}))), IdSlot::Known(id) if id == "casa"));
+    }
+
+    #[test]
+    fn seals_are_recomputed_only_when_the_key_changes() {
+        let cell = RefCell::new(None);
+        let mut runs = 0;
+        let first = memo(&cell, 1, || { runs += 1; 10 });
+        let again = memo(&cell, 1, || { runs += 1; 20 });
+        assert!(Rc::ptr_eq(&first, &again), "mesma lista: o mesmo cálculo");
+        let changed = memo(&cell, 2, || { runs += 1; 30 });
+        assert_eq!((*changed, runs), (30, 2));
+    }
+
+    #[test]
+    fn every_refusal_has_a_phrase() {
+        for r in [Refusal::Same, Refusal::Orq, Refusal::Dead, Refusal::Invite, Refusal::SameGroup, Refusal::NoIdentity, Refusal::OtherOwner] {
+            let text = r.text();
+            assert!(!text.starts_with("grupo_recusa") && !text.starts_with("group_"), "{r:?} sem frase: {text}");
+        }
     }
 
     #[test]
