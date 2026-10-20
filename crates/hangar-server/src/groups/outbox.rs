@@ -1,7 +1,7 @@
 //! Fila de saída entre máquinas (`.hangar-pair/groups/outbox.json`), só do Rust. O item vai ao
 //! disco antes da rede; um trabalhador por máquina de destino entrega em ordem e só existe com
 //! item. Quem monta o pedido HTTP de cada item é o `OutboxSend` de quem usa a fila.
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,9 +38,33 @@ impl OutboxItem {
         }
     }
 
+    pub fn gid(&self) -> &str {
+        match self {
+            OutboxItem::Push { gid, .. } | OutboxItem::Dissolved { gid, .. } | OutboxItem::Leave { gid, .. }
+                | OutboxItem::Rename { gid, .. } | OutboxItem::Outside { gid, .. } => gid,
+        }
+    }
+
     fn is_push_to(&self, to: &str, of: &str) -> bool {
         matches!(self, OutboxItem::Push { server, gid, .. } if server == to && gid == of)
     }
+}
+
+/// O que a dona manda a cada outra máquina do grupo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fan { Push, Dissolved }
+
+/// Um item `kind` de `gid` na `version` a cada máquina de `servers`, com `origin` = `me`.
+pub fn fan_out(servers: impl IntoIterator<Item = String>, gid: &str, version: u64, me: &str, kind: Fan) -> Vec<OutboxItem> {
+    servers.into_iter().map(|server| match kind {
+        Fan::Push => OutboxItem::Push { server, gid: gid.into(), version, joining: Vec::new(), origin: me.into() },
+        Fan::Dissolved => OutboxItem::Dissolved { server, gid: gid.into(), version, origin: me.into() },
+    }).collect()
+}
+
+/// As outras máquinas com membro no registro.
+pub fn remote_servers(record: &GroupRecord, me: &str) -> BTreeSet<String> {
+    record.members.iter().map(|m| m.server.clone()).filter(|s| s != me).collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,12 +123,7 @@ pub fn verdict(err: &PeerError) -> Verdict {
 
 /// Subida da dona: reenvia cada registro dela a cada outra máquina com membro.
 pub fn restart_pushes(records: &[GroupRecord], me: &str) -> Vec<OutboxItem> {
-    records.iter().filter(|r| r.owner == me).flat_map(|r| {
-        let servers: BTreeSet<&str> = r.members.iter().map(|m| m.server.as_str()).filter(|s| *s != me).collect();
-        servers.into_iter().map(|server| OutboxItem::Push {
-            server: server.to_owned(), gid: r.gid.clone(), version: r.version, joining: Vec::new(), origin: me.to_owned(),
-        }).collect::<Vec<_>>()
-    }).collect()
+    records.iter().filter(|r| r.owner == me).flat_map(|r| fan_out(remote_servers(r, me), &r.gid, r.version, me, Fan::Push)).collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,7 +199,9 @@ impl Outbox {
         let mut dissolved = Vec::new();
         self.inner.mutate(|queue, next| {
             Self::apply(queue, next, items, &mut touched, &mut dissolved);
-            if let Some(full) = touched.iter().find(|d| queue.iter().filter(|e| e.item.destination() == d.as_str()).count() > MAX_PER_DESTINATION) {
+            let mut counts: HashMap<&str, usize> = HashMap::new();
+            for e in queue.iter() { *counts.entry(e.item.destination()).or_default() += 1; }
+            if let Some(full) = touched.iter().find(|d| counts.get(d.as_str()).is_some_and(|n| *n > MAX_PER_DESTINATION)) {
                 tracing::warn!(code = QUEUE_FULL, server = %full, "groups: fila de saída cheia para a máquina, nada enfileirado");
                 return Err(io::Error::other(QUEUE_FULL));
             }
@@ -262,6 +283,23 @@ impl Outbox {
 
     /// Itens ainda na fila, em ordem.
     pub fn pending(&self) -> Vec<OutboxItem> { self.inner.lock().items.iter().map(|e| e.item.clone()).collect() }
+
+    /// Algum item do grupo `gid` ainda na fila.
+    pub fn touches(&self, gid: &str) -> bool { self.inner.lock().items.iter().any(|e| e.item.gid() == gid) }
+
+    /// (renomeados `de → para`, quem está saindo) na fila para o grupo (`owner`, `gid`).
+    pub fn moves_for(&self, owner: &str, gid: &str) -> (HashMap<String, String>, HashSet<String>) {
+        let mut renamed = HashMap::new();
+        let mut leaving = HashSet::new();
+        for e in &self.inner.lock().items {
+            match &e.item {
+                OutboxItem::Rename { owner: o, gid: g, from, to, .. } if o == owner && g == gid => { renamed.insert(from.clone(), to.clone()); }
+                OutboxItem::Leave { owner: o, gid: g, member, .. } if o == owner && g == gid => { leaving.insert(member.clone()); }
+                _ => {}
+            }
+        }
+        (renamed, leaving)
+    }
 
     /// Destinos com trabalhador vivo.
     pub fn workers(&self) -> Vec<String> {

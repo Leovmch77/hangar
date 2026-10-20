@@ -4,99 +4,12 @@
 //! privada para a ponte de grupos do Python.
 #![cfg(unix)]
 use crate::fake;
-use crate::list_support;
+use crate::groups_support::*;
 
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
-use fake::{OWNER, SECRET, client};
+use fake::{SECRET, client};
 use hangar_server::groups::federation;
-use hangar_server::groups::orq::PythonOrq;
 use hangar_server::groups::outbox::OutboxItem;
-use hangar_server::groups::peers::{PeerBook, PeerClient};
-use hangar_server::groups::service::GroupService;
-use hangar_server::groups::store::PairDir;
-use hangar_server::list::bridge::{ListBridge, ListEnv, parse_dirs};
-use hangar_server::list::facts::FactsClient;
-use hangar_server::list::mux::Mux;
-use hangar_server::routes::{AppState, router, terminal_router};
-use hangar_server::runtime::gateway::RuntimeRegistry;
-use hangar_server::share::store::Kind;
 use serde_json::{Value, json};
-
-const NAMES: [&str; 4] = ["s0", "s1", "s2", "s3"];
-
-struct Machine { addr: SocketAddr, private: SocketAddr, pair: PathBuf, root: PathBuf, state: Arc<AppState>,
-    share: Arc<hangar_server::share::ShareState> }
-
-async fn serve(app: axum::Router) -> SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap() });
-    addr
-}
-
-async fn machine(root: &Path, id: &str) -> Machine {
-    let script = list_support::sessions(root, NAMES.len());
-    let home = root.join("home");
-    let dirs = parse_dirs(&json!({"home": home, "claude": home.join(".claude"), "codex_home": home.join(".codex"),
-        "pi_sessions": home.join(".pi/agent/sessions"), "omp_config": home.join(".omp"),
-        "omp_agent": home.join(".omp/agent"), "kimi_home": home.join(".kimi-code")}).to_string());
-    let (_python, upstream) = fake::spawn_fake().await;
-    let mut state = AppState::new(fake::config(upstream, ""));
-    state.list = Arc::new(ListBridge::new(ListEnv { mux: Mux::with_program(&script, Duration::from_secs(5)),
-        capture_program: script.into_os_string(), procs: Arc::new(hangar_server::list::procs::SystemProcs::default()), dirs },
-        FactsClient::new(upstream, SECRET.into())));
-    let pair = home.join(".claude/.hangar-pair");
-    federation::configure(&pair, Duration::from_millis(1500), vec![Duration::from_millis(150)]);
-    state.groups = Some(Arc::new(GroupService::new(PairDir::new(pair.clone(), root.join("arquivo")), Arc::new(PythonOrq::from_state(&state)), id.into())));
-    state.peers = Arc::new(PeerClient::new(PeerBook::new(Some(root.join("peers.json")))));
-    let share = crate::share_pair_routes::share_state(&root.join("shares.json"), &pair, Arc::new(Mutex::new(1_000.0)));
-    state.share = Some(share.clone());
-    let runtime = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "s".into(), "i".into()));
-    assert!(state.state.runtime.set(runtime).is_ok());
-    let state = Arc::new(state);
-    let addr = serve(router(state.clone())).await;
-    let private = serve(terminal_router(state.clone())).await;
-    Machine { addr, private, pair, root: root.to_path_buf(), state, share }
-}
-
-async fn closed_port() -> SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    addr
-}
-
-fn peers(m: &Machine, others: &[(&str, SocketAddr)]) {
-    let map: serde_json::Map<String, Value> = others.iter()
-        .map(|(id, addr)| ((*id).to_owned(), json!({"base_url": format!("http://{addr}"), "token": OWNER}))).collect();
-    std::fs::write(m.root.join("peers.json"), Value::Object(map).to_string()).unwrap();
-}
-
-struct Net { casa: Machine, lab: Machine, vm: Machine, _dirs: Vec<tempfile::TempDir> }
-
-async fn net() -> Net {
-    let dirs: Vec<tempfile::TempDir> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
-    let casa = machine(dirs[0].path(), "casa").await;
-    let lab = machine(dirs[1].path(), "lab").await;
-    let vm = machine(dirs[2].path(), "vm").await;
-    peers(&casa, &[("lab", lab.addr), ("vm", vm.addr)]);
-    peers(&lab, &[("casa", casa.addr), ("vm", vm.addr)]);
-    peers(&vm, &[("casa", casa.addr), ("lab", lab.addr)]);
-    Net { casa, lab, vm, _dirs: dirs }
-}
-
-async fn call(addr: SocketAddr, method: &str, path: &str, body: Option<&Value>) -> (u16, Value) {
-    let mut req = client().request(method.parse().unwrap(), format!("http://{addr}{path}")).bearer_auth(OWNER);
-    if let Some(body) = body { req = req.header("content-type", "application/json").body(body.to_string()); }
-    let resp = req.send().await.unwrap();
-    let status = resp.status().as_u16();
-    let text = resp.text().await.unwrap();
-    (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
-}
 
 /// Grupo criado em `m` com `name` e `others`; devolve o gid.
 async fn pair(m: &Machine, name: &str, others: &[&str]) -> String {
@@ -120,26 +33,6 @@ async fn bridge(m: &Machine, op: &str, args: Value) -> Value {
     body["result"].clone()
 }
 
-async fn push(m: &Machine, gid: &str, body: Value) -> (u16, Value) { call(m.addr, "PUT", &format!("/api/groups/{gid}"), Some(&body)).await }
-
-fn read_json(path: PathBuf) -> Option<Value> { std::fs::read(path).ok().and_then(|raw| serde_json::from_slice(&raw).ok()) }
-
-fn sidecar(m: &Machine, name: &str) -> Option<Value> { read_json(m.pair.join(format!("{name}.json"))) }
-
-fn record(m: &Machine, gid: &str) -> Option<Value> { read_json(m.pair.join("groups").join(format!("{gid}.json"))) }
-
-fn sorted(v: &Value, f: impl Fn(&Value) -> String) -> Vec<String> {
-    let mut out: Vec<String> = v.as_array().unwrap().iter().map(f).collect();
-    out.sort();
-    out
-}
-
-fn members(rec: &Value) -> Vec<String> { sorted(&rec["members"], |m| format!("{}::{}", m["server"].as_str().unwrap(), m["name"].as_str().unwrap())) }
-
-fn peers_of(s: &Value) -> Vec<String> { sorted(&s["peers"], |p| p.as_str().unwrap().to_owned()) }
-
-fn member(server: &str, name: &str) -> Value { json!({"server": server, "name": name, "provider": ""}) }
-
 /// O sidecar de `name` em `m` chega a `want` (a fila entrega depois da resposta).
 async fn sidecar_becomes(m: &Machine, name: &str, want: impl Fn(Option<Value>) -> bool + Send + 'static) {
     let path = m.pair.join(format!("{name}.json"));
@@ -152,21 +45,11 @@ async fn record_becomes(m: &Machine, gid: &str, want: impl Fn(Option<Value>) -> 
 }
 
 fn has_members(want: &'static [&'static str]) -> impl Fn(Option<Value>) -> bool + Send + 'static {
-    move |r| r.is_some_and(|r| members(&r) == want)
+    move |r| r.is_some_and(|r| members(&r["members"]) == want)
 }
 
 fn has_peers(want: &'static [&'static str]) -> impl Fn(Option<Value>) -> bool + Send + 'static {
     move |s| s.is_some_and(|s| peers_of(&s) == want)
-}
-
-/// Par externo de `local` antes de tudo (o mesmo do `groups_federation.rs`).
-fn outside_pair(m: &Machine, local: &str, alias: &str, peer: &str) {
-    let (s, _) = m.share.store.create_redeemed(local, Some("t:1".into()), Kind::Pair).unwrap();
-    m.share.pairs.add(hangar_server::share::pairs::ExternalPair { share_id: s.id.clone(), local_session: local.into(),
-        alias: alias.into(), peer_owner: "Ana".into(), peer_session: peer.into(), peer_address: "http://127.0.0.1:1".into(),
-        peer_token: "tok".into(), created_at: 1.0 }).unwrap();
-    std::fs::create_dir_all(&m.pair).unwrap();
-    std::fs::write(m.pair.join(format!("{local}.json")), json!({"peers": [format!("{alias}::{peer}")], "task": "", "gid": "abababab", "harness": {}}).to_string()).unwrap();
 }
 
 /// Dona fora do ar: a saída vale na hora em lab, e o `Leave` espera na fila.
@@ -311,7 +194,7 @@ async fn leave_ends_outside_pairs_as_today() {
     unpair(&n.casa, "s0").await;
     assert!(n.casa.share.pairs.all().is_empty(), "o par de fora acabou");
     assert!(sidecar(&n.casa, "s0").is_none());
-    assert_eq!(members(&record(&n.casa, &gid).unwrap()), ["lab::s1", "vm::s2"]);
+    assert_eq!(members(&record(&n.casa, &gid).unwrap()["members"]), ["lab::s1", "vm::s2"]);
     sidecar_becomes(&n.lab, "s1", has_peers(&["vm::s2"])).await;
 }
 
@@ -323,7 +206,7 @@ async fn owner_without_own_members_stays_owner() {
     sidecar_becomes(&n.vm, "s2", |s| s.is_some()).await;
     unpair(&n.casa, "s0").await;
     let rec = record(&n.casa, &gid).expect("a dona mantém o registro");
-    assert_eq!((rec["owner"].clone(), members(&rec)), (json!("casa"), vec!["lab::s1".to_owned(), "vm::s2".to_owned()]));
+    assert_eq!((rec["owner"].clone(), members(&rec["members"])), (json!("casa"), vec!["lab::s1".to_owned(), "vm::s2".to_owned()]));
     sidecar_becomes(&n.lab, "s1", has_peers(&["vm::s2"])).await;
     sidecar_becomes(&n.vm, "s2", has_peers(&["lab::s1"])).await;
     assert_eq!(sidecar(&n.lab, "s1").unwrap()["fed"]["owner"], "casa");

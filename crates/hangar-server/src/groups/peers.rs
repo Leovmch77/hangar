@@ -32,12 +32,7 @@ impl PeerBook {
 
     /// `peer_cfg`: só entrada com `base_url` e `token` (a que só tem `app` é máquina da lista do app,
     /// não peer). `enabled: false` só tira da varredura; continua endereçável.
-    pub fn get(&self, server: &str) -> Option<PeerCfg> {
-        let all = self.load();
-        let entry = all.get(server)?.as_object()?;
-        let field = |k: &str| entry.get(k).and_then(Value::as_str).filter(|v| !v.is_empty());
-        Some(PeerCfg { base_url: field("base_url")?.trim_end_matches('/').to_owned(), token: field("token")?.to_owned() })
-    }
+    pub fn get(&self, server: &str) -> Option<PeerCfg> { cfg(self.load().get(server)?) }
 
     /// Todos os tokens do `peers.json`, para tirá-los do que volta ao modelo.
     pub fn tokens(&self) -> Vec<String> {
@@ -75,6 +70,12 @@ impl PeerBook {
         *cache = Some((version, map.clone()));
         map
     }
+}
+
+fn cfg(entry: &Value) -> Option<PeerCfg> {
+    let entry = entry.as_object()?;
+    let field = |k: &str| entry.get(k).and_then(Value::as_str).filter(|v| !v.is_empty());
+    Some(PeerCfg { base_url: field("base_url")?.trim_end_matches('/').to_owned(), token: field("token")?.to_owned() })
 }
 
 fn version(path: &std::path::Path) -> Option<Version> {
@@ -131,6 +132,13 @@ impl PeerClient {
 
     /// Endereço do peer no `peers.json` (o aparelho abre a sessão de lá por ele); nunca o token.
     pub fn base_url(&self, server: &str) -> Option<String> { self.book.get(server).map(|c| c.base_url) }
+
+    /// Os ids com `base_url` e `token` (os que `base_url` acha), lidos uma vez e fora do executor.
+    pub async fn addressable(&self) -> std::collections::HashSet<String> {
+        let book = self.book.clone();
+        tokio::task::spawn_blocking(move || book.load().iter().filter(|(_, v)| cfg(v).is_some()).map(|(k, _)| k.clone()).collect())
+            .await.unwrap_or_default()
+    }
 
     /// `peers.call` (peers.py:401-411): prazo de 8 s por leitura e 16 s no total, corpo até 1 MiB,
     /// segue redirect como o Python. O `reqwest` tira o `Authorization` quando o redirect troca de

@@ -129,6 +129,9 @@ impl GroupService {
         blocking(move || dir.archive_contracts(&gid)).await
     }
 
+    /// O `PairDir` deste serviço, para quem grava sob o `locked` dele (grupo entre máquinas).
+    pub(super) fn dir(&self) -> Arc<PairDir> { self.dir.clone() }
+
     /// A pasta `.hangar-pair`, onde o Python também guarda `external_pairs.json`.
     pub fn pair_root(&self) -> &std::path::Path { self.dir.root() }
 
@@ -332,14 +335,14 @@ fn reader(dir: &PairDir) -> impl Fn(&str) -> Option<Sidecar> + '_ {
     }
 }
 
-fn apply(dir: &PairDir, clears: &[String], writes: &[(String, Sidecar)]) -> Result<(), StoreError> {
+pub(super) fn apply(dir: &PairDir, clears: &[String], writes: &[(String, Sidecar)]) -> Result<(), StoreError> {
     for name in clears { dir.clear_sidecar(name)?; }
     for (name, sidecar) in writes { dir.write_sidecar(name, sidecar)?; }
     Ok(())
 }
 
 /// Tenta todos mesmo que um falhe: parar no primeiro deixaria o resto assimétrico. Devolve o primeiro erro.
-fn restore_all(dir: &PairDir, before: &Snapshot) -> Result<(), StoreError> {
+pub(super) fn restore_all(dir: &PairDir, before: &Snapshot) -> Result<(), StoreError> {
     let mut first = None;
     for (name, state) in before {
         let done = match state {
@@ -355,7 +358,7 @@ fn restore_all(dir: &PairDir, before: &Snapshot) -> Result<(), StoreError> {
 }
 
 /// Restauração de quem já está devolvendo outro erro: o erro original é o que importa ao chamador.
-fn restore_logged(dir: &PairDir, before: &Snapshot) { let _ = restore_all(dir, before); }
+pub(super) fn restore_logged(dir: &PairDir, before: &Snapshot) { let _ = restore_all(dir, before); }
 
 /// 8 hex como o `uuid4().hex[:8]` do Python; `RandomState` é semeado pelo sistema, sem dependência nova.
-fn fresh_gid() -> String { format!("{:08x}", RandomState::new().build_hasher().finish() as u32) }
+pub(super) fn fresh_gid() -> String { format!("{:08x}", RandomState::new().build_hasher().finish() as u32) }

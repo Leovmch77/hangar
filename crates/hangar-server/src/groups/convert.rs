@@ -2,8 +2,8 @@
 //! máquinas sozinho (I-8B). As duas pontas chegam à mesma dona (menor `server_id`) e ao mesmo
 //! `gid` sem conversar; só a dona age, e só grava depois de a outra confirmar. Máquina antiga ou
 //! que não responde: o par segue 1:1 e a dona tenta de novo, com espera crescente.
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
@@ -14,7 +14,7 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 use super::exit::segment;
-use super::federation::{PushBody, Refusal, remember};
+use super::federation::{PushBody, Refusal, identity_ok, no, remember, unavailable};
 use super::local::is_remote;
 use super::model::{Fed, GroupRecord, Member, PROTOCOL, Sidecar};
 use super::outbox::OutboxItem;
@@ -23,7 +23,6 @@ use super::routes::outside_addresses;
 use super::service::GroupService;
 use super::store::{PairDir, StoreError};
 use crate::routes::AppState;
-use crate::session_write::detail_body;
 
 /// `gid` do par convertido: 12 hex do sha1 dos dois nomes qualificados, em ordem de bytes.
 pub fn group_id(a: &str, b: &str) -> String {
@@ -33,21 +32,15 @@ pub fn group_id(a: &str, b: &str) -> String {
 
 /// Espera entre as novas tentativas enquanto sobra par antigo: as máquinas do dono atualizam em
 /// dias diferentes, e a dona não pode depender de reiniciar.
-const RETRY_LADDER: [Duration; 5] = [Duration::from_secs(30), Duration::from_secs(60), Duration::from_secs(120), Duration::from_secs(300), Duration::from_secs(600)];
+pub(super) const RETRY_LADDER: [Duration; 5] = [Duration::from_secs(30), Duration::from_secs(60), Duration::from_secs(120), Duration::from_secs(300), Duration::from_secs(600)];
 
 #[derive(Default)]
 struct Kick { notify: Notify, kicked: AtomicBool }
 
-/// Por pasta `.hangar-pair` (os testes sobem várias máquinas num processo): escada e a volta viva.
-#[derive(Default)]
-struct Retry { ladder: Vec<Duration>, running: Option<Arc<Kick>> }
+/// A volta viva por pasta `.hangar-pair` (os testes sobem várias máquinas num processo).
+static RETRIES: LazyLock<Mutex<HashMap<PathBuf, Arc<Kick>>>> = LazyLock::new(Mutex::default);
 
-static RETRIES: LazyLock<Mutex<HashMap<PathBuf, Retry>>> = LazyLock::new(Mutex::default);
-
-fn retries() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Retry>> { RETRIES.lock().unwrap_or_else(|e| e.into_inner()) }
-
-/// Escada das novas tentativas da máquina de `root` (testes).
-pub fn configure_retry(root: &Path, ladder: Vec<Duration>) { retries().entry(root.to_path_buf()).or_default().ladder = ladder; }
+fn retries() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Arc<Kick>>> { RETRIES.lock().unwrap_or_else(|e| e.into_inner()) }
 
 /// Subida: converte já e, sobrando par antigo em que esta é a dona, segue tentando com espera
 /// crescente até não sobrar nenhum. Sem par antigo, nada fica rodando.
@@ -56,16 +49,16 @@ pub async fn run_and_retry(st: &Arc<AppState>, groups: &Arc<GroupService>) {
     let root = groups.pair_root().to_path_buf();
     let (kick, ladder) = {
         let mut all = retries();
-        let entry = all.entry(root.clone()).or_default();
-        if let Some(kick) = &entry.running {
+        if let Some(kick) = all.get(&root) {
             // Já há uma volta: recomeça a escada dela.
             kick.kicked.store(true, Ordering::SeqCst);
             kick.notify.notify_one();
             return;
         }
         let kick = Arc::new(Kick::default());
-        entry.running = Some(kick.clone());
-        (kick, if entry.ladder.is_empty() { RETRY_LADDER.to_vec() } else { entry.ladder.clone() })
+        all.insert(root.clone(), kick.clone());
+        let ladder = super::federation::timing(&root).retry_ladder;
+        (kick, if ladder.is_empty() { RETRY_LADDER.to_vec() } else { ladder })
     };
     // shortcut: a volta não é abortada com o servidor (um por processo em produção); só acaba sem par
     // antigo. Ganha cancelamento quando o servidor puder parar e subir de novo no mesmo processo.
@@ -84,25 +77,28 @@ async fn retry(st: Arc<AppState>, groups: Arc<GroupService>, root: PathBuf, kick
         let mut all = retries();
         // Pedido novo durante a última tentativa: mais uma volta.
         if kick.kicked.swap(false, Ordering::SeqCst) { continue; }
-        if let Some(entry) = all.get_mut(&root) { entry.running = None; }
+        all.remove(&root);
         return;
     }
 }
 
-fn pair_dir(groups: &GroupService) -> PairDir { PairDir::new(groups.pair_root().to_path_buf(), PathBuf::new()) }
-
 /// `name` daqui em par antigo com `remote` da máquina `server` (chave do `peers.json`).
 struct Legacy { name: String, server: String, remote: String, sidecar: Sidecar }
 
+/// Os sidecars de `names` (vazio = todos). Falha ao ler só ao log: o par segue como está.
+fn sidecars(dir: &PairDir, names: &[String]) -> Vec<(String, Sidecar)> {
+    let unreadable = |error: StoreError| tracing::warn!(code = "groups_convert_unreadable", %error, "groups: os pares antigos não foram lidos");
+    if names.is_empty() { return dir.sidecars().unwrap_or_else(|e| { unreadable(e); Vec::new() }); }
+    names.iter().filter_map(|n| match dir.sidecar(n) {
+        Ok(s) => s.map(|s| (n.clone(), s)),
+        Err(e) => { unreadable(e); None }
+    }).collect()
+}
+
 /// Pares antigos desta máquina (`names` vazio = todos) e os ambíguos com par de fora.
 fn find(dir: &PairDir, peers: &HashSet<String>, aliases: &HashSet<String>, outside: &HashSet<String>, names: &[String]) -> (Vec<Legacy>, Vec<String>) {
-    let all = match dir.sidecars() {
-        Ok(all) => all,
-        Err(error) => { tracing::warn!(code = "groups_convert_unreadable", %error, "groups: os pares antigos não foram lidos"); return (Vec::new(), Vec::new()) }
-    };
     let (mut found, mut ambiguous) = (Vec::new(), Vec::new());
-    for (name, s) in all {
-        if !names.is_empty() && !names.contains(&name) { continue; }
+    for (name, s) in sidecars(dir, names) {
         let [peer] = s.peers.as_slice() else { continue };
         if s.fed.is_some() || s.orq || !is_remote(peer) { continue; }
         let Some((server, remote)) = peer.split_once("::") else { continue };
@@ -120,16 +116,15 @@ fn find(dir: &PairDir, peers: &HashSet<String>, aliases: &HashSet<String>, outsi
 
 /// Pares antigos (`names` vazio = todos) em que esta máquina é a dona, e os ambíguos.
 async fn scan(st: &AppState, groups: &GroupService, me: &str, names: &[String]) -> (Vec<Legacy>, Vec<String>) {
-    let peers = st.peers.ids();
     let aliases: HashSet<String> = st.share.as_ref().map(|s| s.pairs.all().into_iter().map(|r| r.alias).collect()).unwrap_or_default();
-    let (outside, dir, names) = (outside_addresses(st), pair_dir(groups), names.to_vec());
-    let (found, ambiguous) = tokio::task::spawn_blocking(move || find(&dir, &peers, &aliases, &outside, &names)).await.unwrap_or_default();
+    let (outside, dir, names, book) = (outside_addresses(st), groups.dir(), names.to_vec(), st.peers.clone());
+    let (found, ambiguous) = tokio::task::spawn_blocking(move || find(&dir, &book.ids(), &aliases, &outside, &names)).await.unwrap_or_default();
     // Chave igual ao id (conferido na conversão) dá a mesma dona que o id: a de chave maior espera a outra.
     (found.into_iter().filter(|l| me < l.server.as_str()).collect(), ambiguous)
 }
 
 /// Converte os pares antigos desta máquina em que ela é a dona e devolve quantos sobraram.
-/// Falha só ao log e ao diário.
+/// Cada máquina em paralelo, os pares de uma mesma máquina em fila. Falha só ao log e ao diário.
 pub async fn run(st: &Arc<AppState>, groups: &Arc<GroupService>, names: &[String]) -> usize {
     let me = groups.server_id().to_owned();
     if me.is_empty() { return 0; }
@@ -137,12 +132,19 @@ pub async fn run(st: &Arc<AppState>, groups: &Arc<GroupService>, names: &[String
     for name in &ambiguous {
         st.diag.report("rust.grupos_conversao_ambigua", name, "grupos_conversao_ambigua", "par 1:1 antigo que também parece par de fora; não convertido");
     }
-    if found.is_empty() { return 0; }
-    for legacy in found { convert(st, groups, &me, legacy).await; }
-    scan(st, groups, &me, names).await.0.len()
+    let mut by_server: BTreeMap<String, Vec<Legacy>> = BTreeMap::new();
+    for legacy in found { by_server.entry(legacy.server.clone()).or_default().push(legacy); }
+    let me = me.as_str();
+    let left = futures_util::future::join_all(by_server.into_values().map(|pairs| async move {
+        let mut left = 0;
+        for legacy in pairs { if convert(st, groups, me, legacy).await { left += 1; } }
+        left
+    })).await;
+    left.into_iter().sum()
 }
 
-async fn convert(st: &Arc<AppState>, groups: &Arc<GroupService>, me: &str, l: Legacy) {
+/// Devolve se o par continua antigo (sobra para a próxima tentativa).
+async fn convert(st: &Arc<AppState>, groups: &Arc<GroupService>, me: &str, l: Legacy) -> bool {
     let server = l.server.as_str();
     // A sessão de lá como a máquina de lá a vê: quem atendeu, e se o par ainda é este.
     let seen = match st.peers.call(server, reqwest::Method::GET, &format!("/api/sessions/{}/group", segment(&l.remote)), None).await {
@@ -151,14 +153,14 @@ async fn convert(st: &Arc<AppState>, groups: &Arc<GroupService>, me: &str, l: Le
         Err(PeerError::Refused { status: 404, detail }) if detail.get("code").is_none() => return old(server),
         Err(error) => {
             tracing::warn!(code = "groups_convert_not_confirmed", %server, error = %error.text(server), "groups: o par antigo não foi conferido na outra máquina");
-            return;
+            return true;
         }
     };
     let reported = seen["server_id"].as_str().unwrap_or_default();
     if reported != server {
         st.diag.report("rust.grupos_conversao_identidade", &l.name, "erro_grupo_identificador_divergente", "a chave do peers.json não é o id da outra máquina");
         tracing::warn!(code = "erro_grupo_identificador_divergente", key = %server, %reported, "groups: par antigo não convertido");
-        return;
+        return true;
     }
     let (a, b) = (format!("{me}::{}", l.name), format!("{server}::{}", l.remote));
     let gid = group_id(&a, &b);
@@ -168,7 +170,7 @@ async fn convert(st: &Arc<AppState>, groups: &Arc<GroupService>, me: &str, l: Le
     let converted_there = seen["owner"] == me && seen["gid"] == gid.as_str();
     if !back || !(legacy_there || converted_there) {
         tracing::warn!(code = "groups_convert_pair_differs", %server, "groups: a outra máquina não tem o mesmo par antigo; não convertido");
-        return;
+        return true;
     }
     let provider = |m: &str| l.sidecar.harness.get(m).cloned().unwrap_or_default();
     let theirs = members.iter().find(|m| m.server == server).map(|m| m.provider.clone()).filter(|p| !p.is_empty()).unwrap_or_else(|| provider(&b));
@@ -183,19 +185,22 @@ async fn convert(st: &Arc<AppState>, groups: &Arc<GroupService>, me: &str, l: Le
         Err(PeerError::OldVersion) => return old(server),
         Err(error) => {
             tracing::warn!(code = "groups_convert_not_confirmed", %server, error = %error.text(server), "groups: a outra máquina não confirmou a conversão");
-            return;
+            return true;
         }
     }
     // Confirmado: só agora a dona grava registro e `fed`, se o par daqui não mudou no meio.
-    let (dir, me_owned, name, peer) = (pair_dir(groups), me.to_owned(), l.name.clone(), b.clone());
+    let (dir, me_owned, name, peer) = (groups.dir(), me.to_owned(), l.name.clone(), b.clone());
     let written = groups.locked(async move {
         tokio::task::spawn_blocking(move || write_owner(&dir, &me_owned, &name, &peer, record)).await
     }).await;
     match written {
-        Ok(Ok(Written::Done)) => groups.changed(),
-        Ok(Ok(Written::Already)) => {}
+        Ok(Ok(Written::Done)) => { groups.changed(); false }
+        Ok(Ok(Written::Already)) => false,
         // Id trocado não desfaz o grupo na outra ponta: só o diário diz por quê.
-        Ok(Ok(Written::IdChanged)) => tracing::error!(code = "erro_grupo_identificador_trocado", "groups: conversão confirmada não gravada: o CP_SERVER_ID desta máquina mudou"),
+        Ok(Ok(Written::IdChanged)) => {
+            tracing::error!(code = "erro_grupo_identificador_trocado", "groups: conversão confirmada não gravada: o CP_SERVER_ID desta máquina mudou");
+            true
+        }
         Ok(Ok(Written::Gone)) => {
             // A outra já converteu: o grupo acaba lá também, como acabou aqui.
             tracing::warn!(code = "groups_convert_pair_gone", %server, "groups: o par antigo mudou durante a conversão; o grupo foi desfeito");
@@ -209,14 +214,16 @@ async fn convert(st: &Arc<AppState>, groups: &Arc<GroupService>, me: &str, l: Le
                 }
                 Err(_) => tracing::error!(code = "groups_convert_undo_failed", %server, "groups: a dissolução da conversão não entrou na fila"),
             }
+            false
         }
-        Ok(Err(error)) => tracing::error!(code = "groups_convert_store_failed", %error, "groups: a conversão confirmada não foi gravada; tenta de novo na subida"),
-        Err(error) => tracing::error!(code = "groups_convert_store_failed", %error, "groups: a conversão confirmada não foi gravada; tenta de novo na subida"),
+        Ok(Err(error)) => { tracing::error!(code = "groups_convert_store_failed", %error, "groups: a conversão confirmada não foi gravada; tenta de novo na subida"); true }
+        Err(error) => { tracing::error!(code = "groups_convert_store_failed", %error, "groups: a conversão confirmada não foi gravada; tenta de novo na subida"); true }
     }
 }
 
-fn old(server: &str) {
+fn old(server: &str) -> bool {
     tracing::info!(code = "groups_convert_old_version", %server, "groups: a outra máquina é de versão antiga; o par segue 1:1");
+    true
 }
 
 enum Written { Done, Already, Gone, IdChanged }
@@ -239,7 +246,12 @@ fn write_owner(dir: &PairDir, me: &str, name: &str, peer: &str, record: GroupRec
 }
 
 fn differs(name: &str) -> Refusal {
-    Refusal(StatusCode::CONFLICT, detail_body("erro_grupo_mudou", &format!("'{name}' não está no par antigo que a dona quer converter"), json!({"membro": name})))
+    no(StatusCode::CONFLICT, "erro_grupo_mudou", &format!("'{name}' não está no par antigo que a dona quer converter"), json!({"membro": name}))
+}
+
+fn store(error: impl std::fmt::Display) -> Refusal {
+    tracing::error!(code = "groups_store_failed", %error, "groups: a conversão do par antigo não foi lida ou gravada");
+    unavailable("groups_store_failed")
 }
 
 /// A participante recebe o `PUT` da dona com `convert_from_legacy`: converte o próprio sidecar se
@@ -254,18 +266,10 @@ pub(super) async fn accept(groups: &Arc<GroupService>, gid: &str, body: PushBody
     if body.dissolved || owner_side != body.owner || from != expected || body.owner >= me || group_id(&from, &format!("{me}::{name}")) != gid {
         return Err(differs(&name));
     }
-    let (dir, gid_owned, reply_name) = (pair_dir(groups), gid.to_owned(), name.clone());
+    let (dir, gid_owned, reply_name) = (groups.dir(), gid.to_owned(), name.clone());
     let done = groups.locked(async move {
         tokio::task::spawn_blocking(move || -> Result<(u64, bool), Refusal> {
-            let store = |error: StoreError| {
-                tracing::error!(code = "groups_store_failed", %error, "groups: a conversão do par antigo não foi lida ou gravada");
-                Refusal(StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_grupo_indisponivel", "os grupos estão indisponíveis agora", json!({"detalhe": "groups_store_failed"})))
-            };
-            if let Some(changed) = dir.identity_check(&me).map_err(store)? {
-                return Err(Refusal(StatusCode::CONFLICT, detail_body("erro_grupo_identificador_trocado",
-                    &format!("o CP_SERVER_ID desta máquina mudou de '{}' para '{}' com grupo entre máquinas vivo", changed.saved, changed.current),
-                    json!({"salvo": changed.saved, "atual": changed.current}))));
-            }
+            identity_ok(&dir, &me)?;
             let Some(s) = dir.sidecar(&name).map_err(store)? else { return Err(differs(&name)) };
             if let Some(f) = s.fed.as_ref().filter(|f| f.owner == body.owner && s.gid == gid_owned) { return Ok((f.version, false)); }
             if s.fed.is_some() || s.orq || s.peers != [from.clone()] { return Err(differs(&name)); }
@@ -277,10 +281,7 @@ pub(super) async fn accept(groups: &Arc<GroupService>, gid: &str, body: PushBody
             Ok((body.version, true))
         }).await
     }).await;
-    let (version, changed) = done.map_err(|error| {
-        tracing::error!(code = "groups_store_failed", %error, "groups: a conversão do par antigo não terminou");
-        Refusal(StatusCode::SERVICE_UNAVAILABLE, detail_body("erro_grupo_indisponivel", "os grupos estão indisponíveis agora", json!({"detalhe": "groups_store_failed"})))
-    })??;
+    let (version, changed) = done.map_err(store)??;
     if changed { groups.changed(); }
     Ok(json!({"protocol": PROTOCOL, "version": version, "members": [reply_name]}))
 }

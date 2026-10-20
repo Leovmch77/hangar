@@ -3,116 +3,23 @@
 //! a confirmação por pouco tempo, para a máquina fora do ar não segurar o teste.
 #![cfg(unix)]
 use crate::fake;
-use crate::list_support;
+use crate::groups_support::*;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use axum::Router;
 use axum::http::Method;
-use fake::{OWNER, SECRET, client};
+use fake::{SECRET, client};
 use hangar_server::groups::federation;
-use hangar_server::groups::orq::PythonOrq;
 use hangar_server::groups::outbox::OutboxItem;
-use hangar_server::groups::peers::{PeerBook, PeerClient};
-use hangar_server::groups::service::GroupService;
-use hangar_server::groups::store::PairDir;
-use hangar_server::list::bridge::{ListBridge, ListEnv, parse_dirs};
-use hangar_server::list::facts::FactsClient;
-use hangar_server::list::mux::Mux;
-use hangar_server::routes::{AppState, router};
-use hangar_server::runtime::gateway::RuntimeRegistry;
 use hangar_server::share::caller::{GuestGrant, guest_allowed};
 use hangar_server::share::store::Kind;
 use serde_json::{Value, json};
 
-const NAMES: [&str; 4] = ["s0", "s1", "s2", "s3"];
-
-struct Machine { addr: SocketAddr, python: Arc<fake::Fake>, pair: PathBuf, root: PathBuf, state: Arc<AppState>,
-    share: Arc<hangar_server::share::ShareState>, changes: Arc<AtomicUsize>, runtime: Arc<RuntimeRegistry> }
-
-async fn machine(root: &Path, id: &str) -> Machine {
-    let script = list_support::sessions(root, NAMES.len());
-    let home = root.join("home");
-    let dirs = parse_dirs(&json!({"home": home, "claude": home.join(".claude"), "codex_home": home.join(".codex"),
-        "pi_sessions": home.join(".pi/agent/sessions"), "omp_config": home.join(".omp"),
-        "omp_agent": home.join(".omp/agent"), "kimi_home": home.join(".kimi-code")}).to_string());
-    let (python, upstream) = fake::spawn_fake().await;
-    let mut state = AppState::new(fake::config(upstream, ""));
-    state.list = Arc::new(ListBridge::new(ListEnv { mux: Mux::with_program(&script, Duration::from_secs(5)),
-        capture_program: script.into_os_string(), procs: Arc::new(hangar_server::list::procs::SystemProcs::default()), dirs },
-        FactsClient::new(upstream, SECRET.into())));
-    let pair = home.join(".claude/.hangar-pair");
-    federation::configure(&pair, Duration::from_millis(1500), vec![Duration::from_millis(150)]);
-    let changes = Arc::new(AtomicUsize::new(0));
-    let counter = changes.clone();
-    state.groups = Some(Arc::new(GroupService::new(PairDir::new(pair.clone(), root.join("arquivo")), Arc::new(PythonOrq::from_state(&state)), id.into())
-        .with_change_hook(Arc::new(move || { counter.fetch_add(1, Ordering::SeqCst); }))));
-    state.peers = Arc::new(PeerClient::new(PeerBook::new(Some(root.join("peers.json")))));
-    let share = crate::share_pair_routes::share_state(&root.join("shares.json"), &pair, Arc::new(Mutex::new(1_000.0)));
-    state.share = Some(share.clone());
-    let runtime = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "s".into(), "i".into()));
-    assert!(state.state.runtime.set(runtime.clone()).is_ok());
-    let state = Arc::new(state);
-    let app = router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Machine { addr, python, pair, root: root.to_path_buf(), state, share, changes, runtime }
-}
-
-/// Endereço que recusa conexão: a máquina fora do ar.
-async fn closed_port() -> SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    addr
-}
-
-fn peers(m: &Machine, others: &[(&str, SocketAddr)]) {
-    let map: serde_json::Map<String, Value> = others.iter()
-        .map(|(id, addr)| ((*id).to_owned(), json!({"base_url": format!("http://{addr}"), "token": OWNER}))).collect();
-    std::fs::write(m.root.join("peers.json"), Value::Object(map).to_string()).unwrap();
-}
-
-struct Net { casa: Machine, lab: Machine, vm: Machine, _dirs: Vec<tempfile::TempDir> }
-
-/// `casa`, `lab` e `vm`, cada uma conhecendo as outras duas.
-async fn net() -> Net {
-    let dirs: Vec<tempfile::TempDir> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
-    let casa = machine(dirs[0].path(), "casa").await;
-    let lab = machine(dirs[1].path(), "lab").await;
-    let vm = machine(dirs[2].path(), "vm").await;
-    peers(&casa, &[("lab", lab.addr), ("vm", vm.addr)]);
-    peers(&lab, &[("casa", casa.addr), ("vm", vm.addr)]);
-    peers(&vm, &[("casa", casa.addr), ("lab", lab.addr)]);
-    Net { casa, lab, vm, _dirs: dirs }
-}
-
-async fn call(addr: SocketAddr, method: &str, path: &str, body: Option<&Value>) -> (u16, Value) {
-    let mut req = client().request(method.parse().unwrap(), format!("http://{addr}{path}")).bearer_auth(OWNER);
-    if let Some(body) = body { req = req.header("content-type", "application/json").body(body.to_string()); }
-    let resp = req.send().await.unwrap();
-    let status = resp.status().as_u16();
-    let text = resp.text().await.unwrap();
-    (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
-}
-
 async fn pair(m: &Machine, name: &str, body: Value) -> (u16, Value) { call(m.addr, "POST", &format!("/api/sessions/{name}/pair"), Some(&body)).await }
-
-async fn push(m: &Machine, gid: &str, body: Value) -> (u16, Value) { call(m.addr, "PUT", &format!("/api/groups/{gid}"), Some(&body)).await }
-
-fn sidecar(m: &Machine, name: &str) -> Option<Value> {
-    std::fs::read(m.pair.join(format!("{name}.json"))).ok().map(|raw| serde_json::from_slice(&raw).unwrap())
-}
-
-fn record(m: &Machine, gid: &str) -> Option<Value> {
-    std::fs::read(m.pair.join("groups").join(format!("{gid}.json"))).ok().map(|raw| serde_json::from_slice(&raw).unwrap())
-}
 
 /// A versão nova chega às participantes pela fila, depois da resposta.
 async fn peers_become(m: &Machine, name: &str, want: &[&str]) {
@@ -121,21 +28,6 @@ async fn peers_become(m: &Machine, name: &str, want: &[&str]) {
         .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok()).is_some_and(|v| peers_of(&v) == want)).await;
 }
 
-fn inputs(m: &Machine, name: &str) -> usize { m.python.hits_to(&format!("/api/sessions/{name}/input")) }
-
-fn members(v: &Value) -> Vec<String> {
-    let mut out: Vec<String> = v.as_array().unwrap().iter().map(|m| format!("{}::{}", m["server"].as_str().unwrap(), m["name"].as_str().unwrap())).collect();
-    out.sort();
-    out
-}
-
-fn peers_of(v: &Value) -> Vec<String> {
-    let mut out: Vec<String> = v["peers"].as_array().unwrap().iter().map(|p| p.as_str().unwrap().to_owned()).collect();
-    out.sort();
-    out
-}
-
-fn member(server: &str, name: &str) -> Value { json!({"server": server, "name": name, "provider": ""}) }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn three_locals_plus_one_remote() {
@@ -311,17 +203,6 @@ async fn merge_with_different_owners_is_refused() {
     assert_eq!((status, body["detail"]["code"].clone()), (409, json!("erro_grupo_fusao_entre_donos")), "{body}");
     assert_eq!(sidecar(&n.lab, "s2").unwrap(), lab_before);
     assert_eq!(sidecar(&n.casa, "s0").unwrap(), casa_before);
-}
-
-/// Par externo de `casa::s0` antes de tudo: devolve o id do convite.
-fn outside_pair(m: &Machine, local: &str, alias: &str, peer: &str) -> String {
-    let (s, _) = m.share.store.create_redeemed(local, Some("t:1".into()), Kind::Pair).unwrap();
-    m.share.pairs.add(hangar_server::share::pairs::ExternalPair { share_id: s.id.clone(), local_session: local.into(),
-        alias: alias.into(), peer_owner: "Ana".into(), peer_session: peer.into(), peer_address: "http://127.0.0.1:1".into(),
-        peer_token: "tok".into(), created_at: 1.0 }).unwrap();
-    std::fs::create_dir_all(&m.pair).unwrap();
-    std::fs::write(m.pair.join(format!("{local}.json")), json!({"peers": [format!("{alias}::{peer}")], "task": "", "gid": "abababab", "harness": {}}).to_string()).unwrap();
-    s.id
 }
 
 #[tokio::test(flavor = "multi_thread")]

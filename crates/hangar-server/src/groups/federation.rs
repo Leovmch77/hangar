@@ -18,15 +18,15 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use super::deliver::{ContractLine, Kind, TextArgs, protocol_text};
 use super::exit::{NO_SERVER_ID, segment};
 use super::local::{Snapshot, is_remote};
 use super::model::{Fed, GroupRecord, Member, OutsideRef, PROTOCOL, Sidecar};
-use super::outbox::{Delivery, OutboxItem, OutboxSend, OutsideOp, QUEUE_FULL};
+use super::outbox::{Delivery, Fan, OutboxItem, OutboxSend, OutsideOp, QUEUE_FULL, fan_out, remote_servers};
 use super::peers::{PeerClient, PeerError};
-use super::routes::{Asked, Bridged, PREFIX, outside_addresses, providers};
-use super::service::{BoxFuture, GroupService};
+use super::routes::{Asked, Bridged, outside_addresses, providers};
+use super::service::{BoxFuture, GroupService, restore_logged};
 use super::store::PairDir;
+use super::text::{ContractLine, Kind, TextArgs, protocol_text};
 use crate::routes::{AppState, cors, gate};
 use crate::runtime::ingress::IngressPass;
 use crate::session_write::input::{deliver_text, json_content_type};
@@ -47,13 +47,37 @@ impl Federation {
     pub fn outbox(&self) -> &Outbox { &self.outbox }
 }
 
+/// Prazos e escadas do grupo entre máquinas de uma pasta `.hangar-pair`.
+#[derive(Clone, Debug)]
+pub struct Timing {
+    /// Quanto a dona espera cada participante confirmar um join (lido ao abrir a fila).
+    pub join_wait: Duration,
+    /// Escada da fila de saída (lida ao abrir a fila).
+    pub ladder: Vec<Duration>,
+    /// Quanto a dona espera cada máquina receber um aviso (lido a cada aviso).
+    pub deliver_wait: Duration,
+    /// Escada das novas tentativas de converter par antigo (lida quando a volta começa).
+    pub retry_ladder: Vec<Duration>,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Timing { join_wait: JOIN_WAIT, ladder: super::outbox::LADDER.to_vec(), deliver_wait: super::fed_notice::DELIVER_WAIT,
+            retry_ladder: super::convert::RETRY_LADDER.to_vec() }
+    }
+}
+
 /// Uma por pasta `.hangar-pair` (uma por processo; os testes sobem várias máquinas num processo).
 static ALL: LazyLock<Mutex<HashMap<PathBuf, Arc<Federation>>>> = LazyLock::new(Mutex::default);
-static SETTINGS: LazyLock<Mutex<HashMap<PathBuf, (Duration, Vec<Duration>)>>> = LazyLock::new(Mutex::default);
+static TIMINGS: LazyLock<Mutex<HashMap<PathBuf, Timing>>> = LazyLock::new(Mutex::default);
 
-/// Prazo de confirmação e escada da fila da máquina de `root`, antes do primeiro uso (testes).
-pub fn configure(root: &Path, wait: Duration, ladder: Vec<Duration>) {
-    SETTINGS.lock().unwrap_or_else(|e| e.into_inner()).insert(root.to_path_buf(), (wait, ladder));
+/// Prazos da máquina de `root` (testes); cada um vale a partir do momento em que é lido.
+pub fn configure(root: &Path, timing: Timing) {
+    TIMINGS.lock().unwrap_or_else(|e| e.into_inner()).insert(root.to_path_buf(), timing);
+}
+
+pub(super) fn timing(root: &Path) -> Timing {
+    TIMINGS.lock().unwrap_or_else(|e| e.into_inner()).get(root).cloned().unwrap_or_default()
 }
 
 /// A federação já aberta da máquina de `root`.
@@ -64,20 +88,15 @@ pub fn existing(root: &Path) -> Option<Arc<Federation>> {
 /// Esquece a federação aberta de `root`: o próximo uso reabre do disco, como depois de reiniciar.
 pub fn forget(root: &Path) { ALL.lock().unwrap_or_else(|e| e.into_inner()).remove(root); }
 
-fn pair_dir(groups: &GroupService) -> PairDir {
-    // O arquivo de contratos não é usado aqui: arquivar é da saída (`GroupService`).
-    PairDir::new(groups.pair_root().to_path_buf(), PathBuf::new())
-}
-
 /// Abre (uma vez) a fila desta máquina, que já põe para andar o que ficou no disco.
 pub async fn of(st: &AppState, groups: &GroupService) -> Result<Arc<Federation>, Refusal> {
     let root = groups.pair_root().to_path_buf();
     if let Some(found) = existing(&root) { return Ok(found); }
-    let sender = Arc::new(Sender { peers: st.peers.clone(), dir: Arc::new(pair_dir(groups)) });
+    let sender = Arc::new(Sender { peers: st.peers.clone(), dir: groups.dir() });
     let opened = tokio::task::spawn_blocking(move || -> std::io::Result<Arc<Federation>> {
         let mut all = ALL.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(found) = all.get(&root) { return Ok(found.clone()); }
-        let (wait, ladder) = SETTINGS.lock().unwrap_or_else(|e| e.into_inner()).get(&root).cloned().unwrap_or((JOIN_WAIT, Vec::new()));
+        let Timing { join_wait: wait, ladder, .. } = timing(&root);
         let outbox = Outbox::open_with_ladder(root.join("groups"), sender, ladder)?;
         let fed = Arc::new(Federation { outbox, wait });
         all.insert(root, fed.clone());
@@ -95,15 +114,31 @@ pub async fn of(st: &AppState, groups: &GroupService) -> Result<Arc<Federation>,
 /// Status e corpo `{"detail": {...}}` de uma recusa.
 pub struct Refusal(pub StatusCode, pub Value);
 
-fn no(status: StatusCode, code: &str, msg: &str, params: Value) -> Refusal { Refusal(status, detail_body(code, msg, params)) }
+pub(super) fn no(status: StatusCode, code: &str, msg: &str, params: Value) -> Refusal { Refusal(status, detail_body(code, msg, params)) }
 
-fn unavailable(detail: &str) -> Refusal {
+pub(super) fn unavailable(detail: &str) -> Refusal {
     no(StatusCode::SERVICE_UNAVAILABLE, "erro_grupo_indisponivel", "os grupos estão indisponíveis agora", json!({"detalhe": detail}))
 }
 
-fn store_refusal(error: impl std::fmt::Display) -> Refusal {
+pub(super) fn store_refusal(error: impl std::fmt::Display) -> Refusal {
     tracing::error!(code = "groups_store_failed", %error, "groups: o grupo entre máquinas não foi lido ou gravado");
     unavailable("groups_store_failed")
+}
+
+pub(super) fn missing(gid: &str) -> Refusal { no(StatusCode::NOT_FOUND, "erro_grupo_inexistente", "grupo inexistente nesta máquina", json!({"gid": gid})) }
+
+fn need_server_id(me: &str) -> Result<(), Refusal> {
+    if me.is_empty() { Err(no(StatusCode::BAD_REQUEST, "erro_pareamento_server_id_ausente", NO_SERVER_ID, json!({}))) } else { Ok(()) }
+}
+
+/// `missing` = os nomes já juntos para a mensagem.
+fn sessions_missing(missing: &str) -> Refusal {
+    no(StatusCode::NOT_FOUND, "erro_sessao_nao_encontrada_detalhe", &format!("sessão não encontrada: {missing}"), json!({"detalhe": missing}))
+}
+
+/// Os de `wanted` que a lista não achou, juntos para a mensagem; vazio = todos achados.
+fn not_found(wanted: &[String], harness: &BTreeMap<String, String>) -> String {
+    wanted.iter().filter(|n| !harness.contains_key(*n)).cloned().collect::<Vec<_>>().join(", ")
 }
 
 fn changed_id(saved: &str, current: &str) -> Refusal {
@@ -134,7 +169,7 @@ fn peer_refusal(server: &str, error: PeerError) -> Refusal {
 }
 
 /// A identidade gravada bate com a atual (ou ainda não há grupo entre máquinas).
-fn identity_ok(dir: &PairDir, me: &str) -> Result<(), Refusal> {
+pub(super) fn identity_ok(dir: &PairDir, me: &str) -> Result<(), Refusal> {
     match dir.identity_check(me) {
         Ok(None) => Ok(()),
         Ok(Some(changed)) => Err(changed_id(&changed.saved, &changed.current)),
@@ -142,35 +177,24 @@ fn identity_ok(dir: &PairDir, me: &str) -> Result<(), Refusal> {
     }
 }
 
-// --- nomes -----------------------------------------------------------------------------------
+// --- disco -----------------------------------------------------------------------------------
 
-fn member(server: &str, name: &str, provider: &str) -> Member { Member { server: server.into(), name: name.into(), provider: provider.into() } }
-
-/// `srv::nome` vira membro de `srv`; nome cru é desta máquina.
-fn parse_member(me: &str, raw: &str) -> Member {
-    match raw.split_once("::") { Some((srv, name)) => member(srv, name, ""), None => member(me, raw, "") }
-}
-
-/// Como `who` aparece para esta máquina: nome cru se é daqui, `srv::nome` se não.
-fn view(me: &str, who: &Member) -> String {
-    if who.server == me { who.name.clone() } else { format!("{}::{}", who.server, who.name) }
-}
-
-fn same(a: &Member, b: &Member) -> bool { a.server == b.server && a.name == b.name }
-
-fn key(m: &Member) -> String { format!("{}::{}", m.server, m.name) }
-
-fn fresh_gid() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    format!("{:08x}", std::collections::hash_map::RandomState::new().build_hasher().finish() as u32)
-}
-
-fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> impl std::future::Future<Output = Result<T, Refusal>> {
+pub(super) fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> impl std::future::Future<Output = Result<T, Refusal>> {
     async move { tokio::task::spawn_blocking(f).await.map_err(store_refusal) }
 }
 
 /// Sidecar ilegível vale como sem grupo, como no `GroupService`.
-fn read(dir: &PairDir, name: &str) -> Option<Sidecar> { dir.sidecar(name).ok().flatten() }
+pub(super) fn read(dir: &PairDir, name: &str) -> Option<Sidecar> { dir.sidecar(name).ok().flatten() }
+
+/// Os membros do grupo de `name` como o sidecar dele os vê: ele, e cada peer que não é par de
+/// fora. O provedor vem do `harness` pela chave como o peer aparece aqui (`srv::nome` de outra
+/// máquina, nome cru daqui): é assim que a dona e o `PUT` o gravam.
+pub(super) fn members_from_sidecar(me: &str, name: &str, s: &Sidecar, outside: &HashSet<String>) -> Vec<Member> {
+    let provider = |key: &str| s.harness.get(key).map_or("", String::as_str).to_owned();
+    std::iter::once(Member::new(me, name, &provider(name)))
+        .chain(s.peers.iter().filter(|p| !outside.contains(*p)).map(|p| Member { provider: provider(p), ..Member::parse(me, p) }))
+        .collect()
+}
 
 // --- fila: o pedido HTTP de cada item --------------------------------------------------------
 
@@ -216,12 +240,12 @@ impl OutboxSend for Sender {
 
 // --- rotas entre máquinas --------------------------------------------------------------------
 
-/// Pedido a `/api/groups/{gid}[/ops]`: só o token de dono (ou a ponte privada). Nunca 404 sem
-/// código, que a outra máquina leria como versão antiga.
-struct Machine { st: Arc<AppState>, groups: Arc<GroupService>, gid: String, parts: Parts, bytes: Bytes }
+/// Pedido de outra máquina do dono a `/api/groups/{gid}[/…]`: só o token de dono (ou a ponte
+/// privada). Nunca 404 sem código, que a outra máquina leria como versão antiga.
+pub(super) struct Machine { pub(super) st: Arc<AppState>, pub(super) groups: Arc<GroupService>, pub(super) gid: String, parts: Parts, bytes: Bytes }
 
 impl Machine {
-    async fn take(st: Arc<AppState>, peer: SocketAddr, req: Request) -> Result<Machine, Response> {
+    pub(super) async fn take(st: Arc<AppState>, peer: SocketAddr, req: Request) -> Result<Machine, Response> {
         let bridged = req.extensions().get::<Bridged>().is_some();
         let (fwd, owner) = gate(&st, peer, &req);
         if !owner && !bridged {
@@ -236,24 +260,20 @@ impl Machine {
         Ok(Machine { st, groups, gid, parts, bytes })
     }
 
-    fn body<T: DeserializeOwned>(&self) -> Result<T, Response> {
-        json_content_type(&self.parts.headers).then(|| serde_json::from_slice(&self.bytes).ok()).flatten()
-            .ok_or_else(|| crate::session_write::invalid_body(&self.parts.headers))
+    pub(super) fn body<T: DeserializeOwned>(&self) -> Result<T, Response> {
+        json_content_type(&self.parts.headers).then(|| serde_json::from_slice(&self.bytes).ok()).flatten().ok_or_else(|| self.invalid())
     }
 
-    fn me(&self) -> String { self.groups.server_id().to_owned() }
+    pub(super) fn invalid(&self) -> Response { crate::session_write::invalid_body(&self.parts.headers) }
 
-    fn answer(&self, result: Result<Value, Refusal>) -> Response {
-        let mut response = match result {
-            Ok(mut body) => {
-                body["server_id"] = json!(self.me());
-                json_response(StatusCode::OK, body)
-            }
-            Err(Refusal(status, mut body)) => {
-                body["server_id"] = json!(self.me());
-                json_response(status, body)
-            }
-        };
+    pub(super) fn method(&self) -> &axum::http::Method { &self.parts.method }
+
+    pub(super) fn me(&self) -> String { self.groups.server_id().to_owned() }
+
+    pub(super) fn answer(&self, result: Result<Value, Refusal>) -> Response {
+        let (status, mut body) = match result { Ok(body) => (StatusCode::OK, body), Err(Refusal(status, body)) => (status, body) };
+        body["server_id"] = json!(self.me());
+        let mut response = json_response(status, body);
         cors(&self.parts.headers, response.headers_mut());
         response
     }
@@ -264,13 +284,13 @@ fn reply(Refusal(status, body): Refusal) -> Response { json_response(status, bod
 /// `GET /api/groups/{gid}`: o registro na dona. A participante pede isto na subida.
 pub(super) async fn get_record(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let m = match Machine::take(st, peer, req).await { Ok(m) => m, Err(r) => return r };
-    let (dir, gid, me) = (Arc::new(pair_dir(&m.groups)), m.gid.clone(), m.me());
+    let (dir, gid, me) = (m.groups.dir(), m.gid.clone(), m.me());
     // Id trocado: "inexistente" faria a participante achar que o grupo acabou.
     let found = blocking(move || identity_ok(&dir, &me).map(|()| (dir.record(&gid), me))).await;
     let result = match found {
         Ok(Err(refused)) => Err(refused),
         Ok(Ok((Ok(Some(record)), me))) if record.owner == me => Ok(serde_json::to_value(&record).unwrap_or_default()),
-        Ok(Ok((Ok(_), _))) => Err(no(StatusCode::NOT_FOUND, "erro_grupo_inexistente", "grupo inexistente nesta máquina", json!({"gid": m.gid}))),
+        Ok(Ok((Ok(_), _))) => Err(missing(&m.gid)),
         Ok(Ok((Err(error), _))) => Err(store_refusal(error)),
         Err(refused) => Err(refused),
     };
@@ -296,7 +316,7 @@ pub struct PushBody {
 /// sob o lock do grupo, senão um join iniciado fora da dona travaria no passe de quem iniciou.
 pub(super) async fn put_record(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let m = match Machine::take(st, peer, req).await { Ok(m) => m, Err(r) => return r };
-    let body = match m.body::<PushBody>() { Ok(b) if b.protocol == PROTOCOL => b, Ok(_) => return crate::session_write::invalid_body(&m.parts.headers), Err(r) => return r };
+    let body = match m.body::<PushBody>() { Ok(b) if b.protocol == PROTOCOL => b, Ok(_) => return m.invalid(), Err(r) => return r };
     let result = local_apply(&m.st, &m.groups, &m.gid, body).await;
     m.answer(result)
 }
@@ -320,7 +340,11 @@ pub(super) async fn ops(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conn
     let result = match body {
         OpsBody::Join { protocol, _origin: _, members, task, replace_task, expected } if protocol == PROTOCOL => {
             let ask = JoinAsk { gid: m.gid.clone(), members, task, replace_task, expected };
-            owner_join(&m.st, &m.groups, ask).await.map(|done| done.to_json())
+            owner_join(&m.st, &m.groups, ask, None).await.map(|done| {
+                let mut body = serde_json::to_value(done).unwrap_or_default();
+                body["protocol"] = json!(PROTOCOL);
+                body
+            })
         }
         OpsBody::Outside { protocol, _origin: _, link, outside } if protocol == PROTOCOL => {
             let op = if link { OutsideOp::Link(outside) } else { OutsideOp::Unlink(outside) };
@@ -329,8 +353,8 @@ pub(super) async fn ops(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conn
         OpsBody::Leave { protocol, origin, member } if protocol == PROTOCOL => super::fed_exit::leave_op(&m.st, &m.groups, &m.gid, &origin, &member).await,
         OpsBody::Rename { protocol, origin, from, to } if protocol == PROTOCOL => super::fed_exit::rename_op(&m.st, &m.groups, &m.gid, &origin, &from, &to).await,
         OpsBody::Message { protocol, origin, sender, text, notice, from_outside } if protocol == PROTOCOL && notice.len() <= 64 =>
-            super::fed_notice::owner_message(&m.st, &m.groups, &m.gid, super::fed_notice::Notice { origin, sender, text, notice, from_outside }).await,
-        _ => return crate::session_write::invalid_body(&m.parts.headers),
+            super::fed_notice::owner_message(&m.st, &m.groups, &m.gid, super::fed_notice::Notice::new(origin, sender, text, notice, from_outside)).await,
+        _ => return m.invalid(),
     };
     m.answer(result)
 }
@@ -348,16 +372,12 @@ pub struct JoinAsk {
     pub expected: BTreeMap<String, String>,
 }
 
-pub struct JoinDone { pub gid: String, pub version: u64, pub task: String, pub members: Vec<Member>, pub unconfirmed: Vec<Member>,
+/// Resposta do `op: join` (com `protocol` e `server_id` a mais, que quem lê ignora).
+#[derive(serde::Serialize, Deserialize)]
+pub struct JoinDone { pub gid: String, pub version: u64, #[serde(default)] pub task: String, pub members: Vec<Member>,
+    #[serde(default)] pub unconfirmed: Vec<Member>,
     /// Acesso de fora não gravado na dona (`grant_members`).
-    pub access_failed: Vec<String> }
-
-impl JoinDone {
-    fn to_json(&self) -> Value {
-        json!({"protocol": PROTOCOL, "gid": self.gid, "version": self.version, "task": self.task, "members": self.members, "unconfirmed": self.unconfirmed,
-            "access_failed": self.access_failed})
-    }
-}
+    #[serde(default)] pub access_failed: Vec<String> }
 
 /// O que a dona grava num join, e como desfazer.
 struct OwnerPlan {
@@ -373,19 +393,20 @@ struct OwnerPlan {
 }
 
 /// Grupo de `gid` visto daqui: o registro (dona) ou os sidecars locais com esse gid.
-fn base_record(dir: &PairDir, me: &str, gid: &str, outside: &HashSet<String>, all: &[(String, Sidecar)]) -> Result<Option<GroupRecord>, Refusal> {
+/// `records` = os registros válidos já lidos; o arquivo só é relido quando o gid não está entre eles
+/// (registro torto continua recusando, em vez de valer como ausente).
+fn base_record(dir: &PairDir, me: &str, gid: &str, outside: &HashSet<String>, all: &[(String, Sidecar)], records: &[GroupRecord]) -> Result<Option<GroupRecord>, Refusal> {
+    if let Some(record) = records.iter().find(|r| r.gid == gid) { return Ok(Some(record.clone())); }
     if let Some(record) = dir.record(gid).map_err(store_refusal)? { return Ok(Some(record)); }
     let locals: Vec<&(String, Sidecar)> = all.iter().filter(|(_, s)| s.gid == gid).collect();
     // Grupo de outra dona que só tem membros aqui: pedido mandado à máquina errada, nunca vira registro dela.
-    if locals.iter().any(|(_, s)| s.fed.as_ref().is_some_and(|f| f.owner != me)) {
-        return Err(no(StatusCode::NOT_FOUND, "erro_grupo_inexistente", "grupo inexistente nesta máquina", json!({"gid": gid})));
-    }
+    if locals.iter().any(|(_, s)| s.fed.as_ref().is_some_and(|f| f.owner != me)) { return Err(missing(gid)); }
     for (_, s) in &locals { legacy_refusal(s, outside)?; }
     let Some((_, first)) = locals.first() else { return Ok(None) };
     let mut record = GroupRecord { protocol: PROTOCOL, gid: gid.into(), owner: me.into(), version: 0,
         task: first.task.clone().unwrap_or_default(), members: Vec::new(), outside: Vec::new() };
     for (name, s) in &locals {
-        record.members.push(member(me, name, s.harness.get(name).map_or("", String::as_str)));
+        record.members.push(Member::new(me, name, s.harness.get(name).map_or("", String::as_str)));
         for p in s.peers.iter().filter(|p| outside.contains(*p)) {
             let o = OutsideRef { server: me.into(), address: p.clone() };
             if !record.outside.contains(&o) { record.outside.push(o); }
@@ -407,31 +428,31 @@ fn plan_owner(dir: &PairDir, me: &str, ask: &JoinAsk, outside: &HashSet<String>,
             legacy_refusal(&s, outside)?;
             return Ok(s.gid);
         }
-        Ok(records.iter().find(|r| r.owner == me && r.members.iter().any(|x| same(x, m))).map(|r| r.gid.clone()).unwrap_or_default())
+        Ok(records.iter().find(|r| r.owner == me && r.members.iter().any(|x| x.same(m))).map(|r| r.gid.clone()).unwrap_or_default())
     };
     let mut gids: Vec<String> = Vec::new();
     if !ask.gid.is_empty() { gids.push(ask.gid.clone()); }
     for m in &ask.members {
         let gid = current(m)?;
-        if let Some(seen) = ask.expected.get(&key(m)) && *seen != gid {
-            return Err(no(StatusCode::CONFLICT, "erro_grupo_mudou", "o grupo mudou desde a consulta; tente de novo", json!({"membro": key(m)})));
+        if let Some(seen) = ask.expected.get(&m.key()) && *seen != gid {
+            return Err(no(StatusCode::CONFLICT, "erro_grupo_mudou", "o grupo mudou desde a consulta; tente de novo", json!({"membro": m.key()})));
         }
         if !gid.is_empty() && !gids.contains(&gid) { gids.push(gid); }
     }
     let mut bases = Vec::new();
     for gid in &gids {
-        match base_record(dir, me, gid, outside, &all)? {
+        match base_record(dir, me, gid, outside, &all, &records)? {
             Some(r) if r.owner != me => return Err(owners_refusal()),
             Some(r) => bases.push(r),
             None => {}
         }
     }
-    let survivor = bases.first().map_or_else(fresh_gid, |r| r.gid.clone());
+    let survivor = bases.first().map_or_else(super::service::fresh_gid, |r| r.gid.clone());
     let mut members: Vec<Member> = Vec::new();
     for m in bases.iter().flat_map(|r| r.members.iter()).chain(ask.members.iter()) {
         let mut m = m.clone();
         if m.server == me && let Some(p) = harness.get(&m.name) { m.provider.clone_from(p); }
-        match members.iter_mut().find(|x| same(x, &m)) {
+        match members.iter_mut().find(|x| x.same(&m)) {
             Some(x) => if x.provider.is_empty() { x.provider = m.provider },
             None => members.push(m),
         }
@@ -452,7 +473,7 @@ fn plan_owner(dir: &PairDir, me: &str, ask: &JoinAsk, outside: &HashSet<String>,
     let survivor_before = bases.first().filter(|r| r.gid == survivor);
     let mut joiners: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for m in members.iter().filter(|m| m.server != me) {
-        if !survivor_before.is_some_and(|r| r.members.iter().any(|x| same(x, m))) {
+        if !survivor_before.is_some_and(|r| r.members.iter().any(|x| x.same(m))) {
             joiners.entry(m.server.clone()).or_default().push(m.name.clone());
         }
     }
@@ -465,14 +486,14 @@ fn plan_owner(dir: &PairDir, me: &str, ask: &JoinAsk, outside: &HashSet<String>,
         harness_all.extend(s.harness.clone());
     }
     harness_all.extend(harness.clone());
-    for m in members.iter().filter(|m| m.server != me && !m.provider.is_empty()) { harness_all.insert(view(me, m), m.provider.clone()); }
+    for m in members.iter().filter(|m| m.server != me && !m.provider.is_empty()) { harness_all.insert(m.view(me), m.provider.clone()); }
     let mut before = Snapshot::new();
     let mut writes = Vec::new();
     let mut newcomers = Vec::new();
     for m in members.iter().filter(|m| m.server == me) {
         let old = local(&m.name);
         if old.is_none() { newcomers.push(m.name.clone()); }
-        let mut peers: Vec<String> = members.iter().filter(|x| !same(x, m)).map(|x| view(me, x)).collect();
+        let mut peers: Vec<String> = members.iter().filter(|x| !x.same(m)).map(|x| x.view(me)).collect();
         peers.extend(kept_outside.iter().cloned());
         let linked_by = old.as_ref().and_then(|s| s.linked_by.clone());
         writes.push((m.name.clone(), Sidecar { peers, task: Some(task.clone()), gid: survivor.clone(), harness: harness_all.clone(), orq: false,
@@ -501,23 +522,6 @@ fn owners_refusal() -> Refusal {
     no(StatusCode::CONFLICT, "erro_grupo_fusao_entre_donos", "os grupos têm máquinas donas diferentes e não se juntam", json!({}))
 }
 
-fn remote_servers(record: &GroupRecord, me: &str) -> BTreeSet<String> {
-    record.members.iter().map(|m| m.server.clone()).filter(|s| s != me).collect()
-}
-
-fn write_sidecars(dir: &PairDir, clears: &[String], writes: &[(String, Sidecar)]) -> Result<(), super::store::StoreError> {
-    for name in clears { dir.clear_sidecar(name)?; }
-    for (name, s) in writes { dir.write_sidecar(name, s)?; }
-    Ok(())
-}
-
-fn restore_sidecars(dir: &PairDir, before: &Snapshot) {
-    for (name, state) in before {
-        let done = match state { None => dir.clear_sidecar(name), Some(s) => dir.write_sidecar(name, s) };
-        if let Err(error) = done { tracing::warn!(code = "groups_restore_failed", name, %error, "groups: o sidecar não voltou ao estado anterior"); }
-    }
-}
-
 /// Só depois de `identity_ok` passar: id gravado diferente aqui é troca sem grupo vivo, e vale o atual.
 pub(super) fn remember(dir: &PairDir, me: &str) {
     if dir.self_id().ok().flatten().as_deref() != Some(me)
@@ -528,18 +532,16 @@ pub(super) fn remember(dir: &PairDir, me: &str) {
 
 /// Grava registro, sidecars daqui e os itens da fila no mesmo passo; falha desfaz tudo.
 fn apply_owner(dir: &PairDir, outbox: &Outbox, me: &str, plan: &OwnerPlan) -> Result<(), Refusal> {
-    let mut items: Vec<OutboxItem> = remote_servers(&plan.record, me).into_iter().map(|server| OutboxItem::Push {
-        joining: plan.joiners.get(&server).cloned().unwrap_or_default(),
-        server, gid: plan.record.gid.clone(), version: plan.record.version, origin: me.into() }).collect();
-    for loser in &plan.losers {
-        items.extend(remote_servers(loser, me).into_iter().map(|server| OutboxItem::Dissolved {
-            server, gid: loser.gid.clone(), version: loser.version + 1, origin: me.into() }));
+    let mut items = fan_out(remote_servers(&plan.record, me), &plan.record.gid, plan.record.version, me, Fan::Push);
+    for item in &mut items {
+        if let OutboxItem::Push { server, joining, .. } = item { *joining = plan.joiners.get(server).cloned().unwrap_or_default(); }
     }
+    for loser in &plan.losers { items.extend(fan_out(remote_servers(loser, me), &loser.gid, loser.version + 1, me, Fan::Dissolved)); }
     let written = (|| -> Result<(), super::store::StoreError> {
         dir.write_record(&plan.record)?;
         // O contrato do absorvido só se junta depois da confirmação: desfazer não separa texto.
         for loser in &plan.losers { dir.remove_record(&loser.gid)?; }
-        write_sidecars(dir, &[], &plan.writes)
+        super::service::apply(dir, &[], &plan.writes)
     })();
     let queued = written.map_err(store_refusal).and_then(|()| outbox.enqueue(items).map_err(|e| {
         if e.to_string() == QUEUE_FULL {
@@ -547,7 +549,7 @@ fn apply_owner(dir: &PairDir, outbox: &Outbox, me: &str, plan: &OwnerPlan) -> Re
         } else { store_refusal(e) }
     }));
     if let Err(refused) = queued {
-        restore_sidecars(dir, &plan.before);
+        restore_logged(dir, &plan.before);
         for (gid, record) in &plan.before_records {
             if let Err(error) = match record { Some(r) => dir.write_record(r), None => dir.remove_record(gid) } {
                 tracing::error!(code = "groups_record_restore_failed", gid = %gid, %error, "groups: o registro do grupo não voltou ao de antes");
@@ -560,20 +562,23 @@ fn apply_owner(dir: &PairDir, outbox: &Outbox, me: &str, plan: &OwnerPlan) -> Re
 }
 
 /// Entrada no grupo, na dona. Quem não confirma no prazo sai do registro; ninguém confirmado e
-/// alguém de outra máquina pedido = 502 e o grupo volta ao que era.
-pub async fn owner_join(st: &Arc<AppState>, groups: &Arc<GroupService>, mut ask: JoinAsk) -> Result<JoinDone, Refusal> {
+/// alguém de outra máquina pedido = 502 e o grupo volta ao que era. `known` = provedores dos
+/// membros daqui que quem chamou já conferiu na lista (o `/pair` desta máquina); `None` = conferir.
+pub async fn owner_join(st: &Arc<AppState>, groups: &Arc<GroupService>, mut ask: JoinAsk, known: Option<BTreeMap<String, String>>) -> Result<JoinDone, Refusal> {
     let me = groups.server_id().to_owned();
-    if me.is_empty() { return Err(no(StatusCode::BAD_REQUEST, "erro_pareamento_server_id_ausente", NO_SERVER_ID, json!({}))); }
+    need_server_id(&me)?;
     let fed = of(st, groups).await?;
-    if let Some(server) = ask.members.iter().map(|m| m.server.as_str()).find(|s| *s != me && st.peers.base_url(s).is_none()) {
+    let registered = st.peers.addressable().await;
+    if let Some(server) = ask.members.iter().map(|m| m.server.as_str()).find(|s| *s != me && !registered.contains(*s)) {
         return Err(unregistered(server));
     }
     let locals: Vec<String> = ask.members.iter().filter(|m| m.server == me).map(|m| m.name.clone()).collect();
-    let harness = providers(st, &locals).await.map_err(|failed| Refusal(StatusCode::SERVICE_UNAVAILABLE, json!({"detail": failed})))?;
-    let missing = locals.iter().filter(|n| !harness.contains_key(*n)).cloned().collect::<Vec<_>>().join(", ");
-    if !missing.is_empty() {
-        return Err(no(StatusCode::NOT_FOUND, "erro_sessao_nao_encontrada_detalhe", &format!("sessão não encontrada: {missing}"), json!({"detalhe": missing})));
-    }
+    let harness = match known {
+        Some(harness) => harness,
+        None => providers(st, &locals).await.map_err(|failed| Refusal(StatusCode::SERVICE_UNAVAILABLE, json!({"detail": failed})))?,
+    };
+    let absent = not_found(&locals, &harness);
+    if !absent.is_empty() { return Err(sessions_missing(&absent)); }
     if !locals.is_empty() {
         match super::orq::is_orchestrator(st, &locals).await {
             Ok(found) if found.is_empty() => {}
@@ -583,7 +588,7 @@ pub async fn owner_join(st: &Arc<AppState>, groups: &Arc<GroupService>, mut ask:
     }
     for m in ask.members.iter_mut().filter(|m| m.server == me) { if let Some(p) = harness.get(&m.name) { m.provider.clone_from(p); } }
     let outside = outside_addresses(st);
-    let dir = Arc::new(pair_dir(groups));
+    let dir = groups.dir();
     let plan = {
         let (dir, outbox, me) = (dir.clone(), fed.outbox.clone(), me.clone());
         groups.locked(blocking(move || -> Result<OwnerPlan, Refusal> {
@@ -608,17 +613,17 @@ pub async fn owner_join(st: &Arc<AppState>, groups: &Arc<GroupService>, mut ask:
             Delivery::Confirmed | Delivery::Dissolved => confirmed_any = true,
             Delivery::Refused { code } => {
                 tracing::warn!(code = "erro_grupo_membro_nao_confirmado", server = %server, refusal = %code, "groups: a máquina recusou os membros novos");
-                unconfirmed.extend(names.iter().map(|n| member(&server, n, "")));
+                unconfirmed.extend(names.iter().map(|n| Member::new(&server, n, "")));
             }
             Delivery::Pending => {
                 tracing::warn!(code = "erro_grupo_membro_nao_confirmado", server = %server, "groups: a máquina não confirmou no prazo");
-                unconfirmed.extend(names.iter().map(|n| member(&server, n, "")));
+                unconfirmed.extend(names.iter().map(|n| Member::new(&server, n, "")));
             }
         }
     }
     if !plan.joiners.is_empty() && !confirmed_any {
         undo_owner(groups, &fed, &plan).await?;
-        let names: Vec<String> = unconfirmed.iter().map(key).collect();
+        let names: Vec<String> = unconfirmed.iter().map(Member::key).collect();
         return Err(no(StatusCode::BAD_GATEWAY, "erro_grupo_membro_nao_confirmado",
             &format!("nenhuma outra máquina confirmou ({}); o grupo voltou ao que era", names.join(", ")), json!({"membros": names})));
     }
@@ -631,8 +636,13 @@ pub async fn owner_join(st: &Arc<AppState>, groups: &Arc<GroupService>, mut ask:
         })).await?;
     }
     let mut record = plan.record.clone();
-    for gone in &unconfirmed {
-        if let Some(r) = super::fed_exit::remove_and_dissolve(st, groups, &gid, gone).await? { record = r; }
+    if !unconfirmed.is_empty() {
+        // Todos de uma vez; o aviso de saída a quem ficou sozinho sai depois da resposta.
+        if let Some((r, dropped)) = super::fed_exit::remove_and_dissolve(st, groups, &gid, &unconfirmed).await? {
+            record = r;
+            let st = st.clone();
+            tokio::spawn(async move { super::fed_exit::tell_dropped(&st, &dropped).await });
+        }
     }
     // Acesso de fora depois de tudo gravado, só a quem ficou; é disco, e a falha volta a quem pediu.
     let access_failed = grant_locals(st, groups, &me, &record).await;
@@ -650,13 +660,13 @@ pub async fn owner_join(st: &Arc<AppState>, groups: &Arc<GroupService>, mut ask:
 /// podem ter aplicado o join no meio do caminho.
 async fn undo_owner(groups: &GroupService, fed: &Federation, plan: &OwnerPlan) -> Result<(), Refusal> {
     let me = groups.server_id().to_owned();
-    let (dir, outbox) = (Arc::new(pair_dir(groups)), fed.outbox.clone());
+    let (dir, outbox) = (groups.dir(), fed.outbox.clone());
     let (record, before, before_records, joiners) = (plan.record.clone(), plan.before.clone(), plan.before_records.clone(), plan.joiners.clone());
     groups.locked(blocking(move || -> Result<(), Refusal> {
         for (server, names) in &joiners {
             for n in names { outbox.cancel_joining(server, &record.gid, n).map_err(store_refusal)?; }
         }
-        restore_sidecars(&dir, &before);
+        restore_logged(&dir, &before);
         let mut items = Vec::new();
         let bump = record.version + 1;
         for (gid, old) in &before_records {
@@ -666,19 +676,17 @@ async fn undo_owner(groups: &GroupService, fed: &Federation, plan: &OwnerPlan) -
                     dir.write_record(&back).map_err(store_refusal)?;
                     let mut servers = remote_servers(&back, &me);
                     if *gid == record.gid { servers.extend(remote_servers(&record, &me)); }
-                    items.extend(servers.into_iter().map(|server| OutboxItem::Push { server, gid: gid.clone(), version: bump, joining: Vec::new(), origin: me.clone() }));
+                    items.extend(fan_out(servers, gid, bump, &me, Fan::Push));
                 }
                 None => {
                     dir.remove_record(gid).map_err(store_refusal)?;
-                    if *gid == record.gid {
-                        items.extend(remote_servers(&record, &me).into_iter().map(|server| OutboxItem::Dissolved { server, gid: gid.clone(), version: bump, origin: me.clone() }));
-                    }
+                    if *gid == record.gid { items.extend(fan_out(remote_servers(&record, &me), gid, bump, &me, Fan::Dissolved)); }
                 }
             }
         }
         if !before_records.iter().any(|(g, _)| *g == record.gid) {
             dir.remove_record(&record.gid).map_err(store_refusal)?;
-            items.extend(remote_servers(&record, &me).into_iter().map(|server| OutboxItem::Dissolved { server, gid: record.gid.clone(), version: bump, origin: me.clone() }));
+            items.extend(fan_out(remote_servers(&record, &me), &record.gid, bump, &me, Fan::Dissolved));
         }
         outbox.enqueue(items).map_err(store_refusal)
     })).await??;
@@ -686,25 +694,29 @@ async fn undo_owner(groups: &GroupService, fed: &Federation, plan: &OwnerPlan) -
     Ok(())
 }
 
-/// Tira `who` do grupo `gid` desta dona: registro com versão nova, o membro fora dos `joining`
-/// pendentes no mesmo passo, sidecars daqui e o grupo empurrado de novo (inclusive à máquina dele,
-/// que pode ter aplicado o join atrasado). Devolve o registro novo e quem daqui ficou sem ninguém
-/// (sidecar apagado); sem registro, `None`.
-pub async fn remove_member(st: &AppState, groups: &GroupService, gid: &str, who: &Member) -> Result<Option<(GroupRecord, Vec<String>)>, Refusal> {
+/// Tira `whos` do grupo `gid` desta dona num passo só: registro com uma versão nova, cada um fora
+/// dos `joining` pendentes, sidecars daqui e o grupo empurrado de novo (inclusive à máquina de cada
+/// um, que pode ter aplicado o join atrasado). Devolve o registro novo e quem daqui ficou sem
+/// ninguém (sidecar apagado) e se mudou algo; sem registro, `None`. Quem já não está no registro
+/// (saída repetida) não muda nada: volta o registro como está, com `false`.
+pub async fn remove_members(st: &AppState, groups: &GroupService, gid: &str, whos: &[Member]) -> Result<Option<(GroupRecord, Vec<String>, bool)>, Refusal> {
     let me = groups.server_id().to_owned();
     let fed = of(st, groups).await?;
-    let (dir, outbox, gid, who) = (Arc::new(pair_dir(groups)), fed.outbox.clone(), gid.to_owned(), who.clone());
-    let done = groups.locked(blocking(move || -> Result<Option<(GroupRecord, Vec<String>)>, Refusal> {
+    let (dir, outbox, gid) = (groups.dir(), fed.outbox.clone(), gid.to_owned());
+    let whos: Vec<Member> = whos.to_vec();
+    let done = groups.locked(blocking(move || -> Result<Option<(GroupRecord, Vec<String>, bool)>, Refusal> {
         let Some(mut record) = dir.record(&gid).map_err(store_refusal)?.filter(|r| r.owner == me) else { return Ok(None) };
-        record.members.retain(|m| !same(m, &who));
+        let whos: Vec<&Member> = whos.iter().filter(|w| record.members.iter().any(|m| m.same(w))).collect();
+        if whos.is_empty() { return Ok(Some((record, Vec::new(), false))); }
+        record.members.retain(|m| !whos.iter().any(|w| m.same(w)));
         record.version += 1;
         dir.write_record(&record).map_err(store_refusal)?;
-        outbox.cancel_joining(&who.server, &gid, &who.name).map_err(store_refusal)?;
-        let gone = view(&me, &who);
+        for who in &whos { outbox.cancel_joining(&who.server, &gid, &who.name).map_err(store_refusal)?; }
+        let gone: Vec<String> = whos.iter().map(|w| w.view(&me)).collect();
         let mut alone = Vec::new();
         for m in record.members.iter().filter(|m| m.server == me) {
             if let Some(mut s) = read(&dir, &m.name).filter(|s| s.gid == gid) {
-                s.peers.retain(|p| *p != gone);
+                s.peers.retain(|p| !gone.contains(p));
                 // Sem peers o sidecar já não vale como grupo: a dissolução não o veria para apagar e avisar.
                 if s.peers.is_empty() && !s.orq {
                     dir.clear_sidecar(&m.name).map_err(store_refusal)?;
@@ -715,14 +727,14 @@ pub async fn remove_member(st: &AppState, groups: &GroupService, gid: &str, who:
                 dir.write_sidecar(&m.name, &s).map_err(store_refusal)?;
             }
         }
-        if who.server == me { dir.clear_sidecar(&who.name).map_err(store_refusal)?; }
         let mut servers = remote_servers(&record, &me);
-        if who.server != me { servers.insert(who.server.clone()); }
-        outbox.enqueue(servers.into_iter().map(|server| OutboxItem::Push { server, gid: gid.clone(), version: record.version, joining: Vec::new(), origin: me.clone() }).collect())
-            .map_err(store_refusal)?;
-        Ok(Some((record, alone)))
+        for who in &whos {
+            if who.server == me { dir.clear_sidecar(&who.name).map_err(store_refusal)?; } else { servers.insert(who.server.clone()); }
+        }
+        outbox.enqueue(fan_out(servers, &gid, record.version, &me, Fan::Push)).map_err(store_refusal)?;
+        Ok(Some((record, alone, true)))
     })).await??;
-    groups.changed();
+    if done.as_ref().is_some_and(|(_, _, changed)| *changed) { groups.changed(); }
     Ok(done)
 }
 
@@ -731,11 +743,9 @@ pub async fn remove_member(st: &AppState, groups: &GroupService, gid: &str, who:
 pub async fn owner_outside(st: &AppState, groups: &GroupService, gid: &str, op: OutsideOp) -> Result<u64, Refusal> {
     let me = groups.server_id().to_owned();
     let fed = of(st, groups).await?;
-    let (dir, outbox, gid) = (Arc::new(pair_dir(groups)), fed.outbox.clone(), gid.to_owned());
+    let (dir, outbox, gid) = (groups.dir(), fed.outbox.clone(), gid.to_owned());
     let version = groups.locked(blocking(move || -> Result<(u64, bool), Refusal> {
-        let Some(mut record) = dir.record(&gid).map_err(store_refusal)?.filter(|r| r.owner == me) else {
-            return Err(no(StatusCode::NOT_FOUND, "erro_grupo_inexistente", "grupo inexistente nesta máquina", json!({"gid": gid})));
-        };
+        let Some(mut record) = dir.record(&gid).map_err(store_refusal)?.filter(|r| r.owner == me) else { return Err(missing(&gid)) };
         let changed = match &op {
             OutsideOp::Link(o) if !record.outside.contains(o) => { record.outside.push(o.clone()); true }
             OutsideOp::Unlink(o) if record.outside.contains(o) => { record.outside.retain(|x| x != o); true }
@@ -750,8 +760,7 @@ pub async fn owner_outside(st: &AppState, groups: &GroupService, gid: &str, op: 
                 dir.write_sidecar(&m.name, &s).map_err(store_refusal)?;
             }
         }
-        outbox.enqueue(remote_servers(&record, &me).into_iter().map(|server| OutboxItem::Push {
-            server, gid: gid.clone(), version: record.version, joining: Vec::new(), origin: me.clone() }).collect()).map_err(store_refusal)?;
+        outbox.enqueue(fan_out(remote_servers(&record, &me), &gid, record.version, &me, Fan::Push)).map_err(store_refusal)?;
         Ok((record.version, true))
     })).await??;
     if version.1 { groups.changed(); }
@@ -788,7 +797,7 @@ async fn tell_newcomers(st: &AppState, groups: &GroupService, me: &str, record: 
         else { ContractLine { path: None, remote_owner: Some(record.owner.clone()) } };
     for n in names {
         let Some(mine) = record.members.iter().find(|m| m.server == me && &m.name == n) else { continue };
-        let args = TextArgs { me: n.clone(), others: record.members.iter().filter(|m| !same(m, mine)).map(|m| view(me, m)).collect(),
+        let args = TextArgs { me: n.clone(), others: record.members.iter().filter(|m| !m.same(mine)).map(|m| m.view(me)).collect(),
             task: record.task.clone(), harness: BTreeMap::from([(n.clone(), if mine.provider.is_empty() { "claude".into() } else { mine.provider.clone() })]),
             contract: contract.clone(), across: true, ..Default::default() };
         let sent = match protocol_text(Kind::Group, &args) { Ok(text) => deliver_text(st, n, &text).await, Err(e) => Err(e) };
@@ -818,28 +827,26 @@ enum Applied { Ignored(u64), Done { version: u64, names: Vec<String>, newcomers:
 /// (dona, gid) muda ou sai; renomear e sair pendentes nesta máquina vencem o envio.
 pub async fn local_apply(st: &Arc<AppState>, groups: &Arc<GroupService>, gid: &str, body: PushBody) -> Result<Value, Refusal> {
     let me = groups.server_id().to_owned();
-    if me.is_empty() { return Err(no(StatusCode::BAD_REQUEST, "erro_pareamento_server_id_ausente", NO_SERVER_ID, json!({}))); }
+    need_server_id(&me)?;
     // Sem a dona no peers.json daqui, saída, renomear e aviso dela não teriam para onde ir.
     if st.peers.base_url(&body.owner).is_none() { return Err(unregistered(&body.owner)); }
     if body.owner == me { return Err(no(StatusCode::CONFLICT, "erro_grupo_identificador_igual", "a dona do grupo tem o mesmo id desta máquina", json!({}))); }
     if let Some(from) = body.convert_from_legacy.clone() { return super::convert::accept(groups, gid, body, from).await; }
     let fed = of(st, groups).await?;
     // Leitura antecipada só para conferir as sessões na lista; quem vale é a da fila sob o lock.
-    let (renamed, leaving) = pending_moves(&fed.outbox.pending(), &body.owner, gid);
+    let (renamed, leaving) = fed.outbox.moves_for(&body.owner, gid);
     let joining = moved(&body.joining, &renamed, &leaving);
     let harness = if joining.is_empty() || body.dissolved { BTreeMap::new() } else {
         providers(st, &joining).await.map_err(|failed| Refusal(StatusCode::SERVICE_UNAVAILABLE, json!({"detail": failed})))?
     };
-    if !body.dissolved && let Some(missing) = joining.iter().find(|n| !harness.contains_key(*n)) {
-        return Err(no(StatusCode::NOT_FOUND, "erro_sessao_nao_encontrada_detalhe", &format!("sessão não encontrada: {missing}"), json!({"detalhe": missing})));
-    }
+    if !body.dissolved && let Some(absent) = joining.iter().find(|n| !harness.contains_key(*n)) { return Err(sessions_missing(absent)); }
     let outside = outside_addresses(st);
-    let dir = Arc::new(pair_dir(groups));
+    let dir = groups.dir();
     let applied = {
-        let (dir, me, gid, outbox) = (dir.clone(), me.clone(), gid.to_owned(), fed.outbox.clone());
+        let (dir, me, gid, outbox, outside) = (dir.clone(), me.clone(), gid.to_owned(), fed.outbox.clone(), outside.clone());
         groups.locked(blocking(move || {
             // Renomear e sair que entraram na fila até agora vencem o envio.
-            let (renamed, leaving) = pending_moves(&outbox.pending(), &body.owner, &gid);
+            let (renamed, leaving) = outbox.moves_for(&body.owner, &gid);
             let joining = moved(&body.joining, &renamed, &leaving);
             apply_push(&dir, &me, &gid, &body, &renamed, &leaving, &joining, &harness, &outside)
         })).await??
@@ -853,34 +860,15 @@ pub async fn local_apply(st: &Arc<AppState>, groups: &Arc<GroupService>, gid: &s
     // a faria tirar do grupo quem já entrou. Falha vai ao diário daqui.
     let (st, groups, gid, reply) = (st.clone(), groups.clone(), gid.to_owned(), json!({"protocol": PROTOCOL, "version": version, "members": names}));
     tokio::spawn(async move {
-        if !newcomers.is_empty() && let Some(record) = record_view(&dir, &me, &gid, &names) {
+        if !newcomers.is_empty() && let Some(record) = record_view(&dir, &me, &gid, &names, &outside) {
             tell_newcomers(&st, &groups, &me, &record, &newcomers).await;
             for failed in grant_locals(&st, &groups, &me, &record).await {
                 tracing::warn!(code = super::routes::ACCESS_FAILED, error = %failed, "groups: acesso de fora ao membro novo não gravado");
             }
         }
-        for n in &dropped {
-            let text = format!("{PREFIX} Você saiu do grupo de trabalho entre máquinas. Volte a operar independente; use hangar-send só quando o usuário pedir.");
-            if let Err(error) = deliver_text(&st, n, &text).await {
-                tracing::warn!(code = "groups_exit_notice_failed", session = %n, error = %error["code"], "groups: o aviso de saída não chegou");
-            }
-        }
+        super::fed_exit::tell_dropped(&st, &dropped).await;
     });
     Ok(reply)
-}
-
-/// (renomeados `de → para`, quem está saindo) da fila desta máquina para o grupo (`owner`, `gid`).
-fn pending_moves(pending: &[OutboxItem], owner: &str, gid: &str) -> (HashMap<String, String>, HashSet<String>) {
-    let mut renamed = HashMap::new();
-    let mut leaving = HashSet::new();
-    for item in pending {
-        match item {
-            OutboxItem::Rename { owner: o, gid: g, from, to, .. } if o == owner && g == gid => { renamed.insert(from.clone(), to.clone()); }
-            OutboxItem::Leave { owner: o, gid: g, member, .. } if o == owner && g == gid => { leaving.insert(member.clone()); }
-            _ => {}
-        }
-    }
-    (renamed, leaving)
 }
 
 fn moved(names: &[String], renamed: &HashMap<String, String>, leaving: &HashSet<String>) -> Vec<String> {
@@ -888,17 +876,18 @@ fn moved(names: &[String], renamed: &HashMap<String, String>, leaving: &HashSet<
 }
 
 /// O grupo como os sidecars daqui o veem, para o texto do protocolo.
-fn record_view(dir: &PairDir, me: &str, gid: &str, names: &[String]) -> Option<GroupRecord> {
+fn record_view(dir: &PairDir, me: &str, gid: &str, names: &[String], outside: &HashSet<String>) -> Option<GroupRecord> {
     let first = names.first()?;
     let s = read(dir, first)?;
     let f = s.fed.clone()?;
-    let mut members: Vec<Member> = vec![member(me, first, s.harness.get(first).map_or("", String::as_str))];
-    for p in s.peers.iter() {
-        let m = parse_member(me, p);
-        let provider = if m.server == me { s.harness.get(&m.name).cloned().unwrap_or_default() } else { String::new() };
-        members.push(Member { provider, ..m });
-    }
+    let members = members_from_sidecar(me, first, &s, outside);
     Some(GroupRecord { protocol: PROTOCOL, gid: gid.into(), owner: f.owner, version: f.version, task: s.task.unwrap_or_default(), members, outside: Vec::new() })
+}
+
+/// O sidecar de `name` entre os já lidos (`sidecars()` devolve o nome do arquivo, não o da sessão).
+fn loaded<'a>(all: &'a [(String, Sidecar)], name: &str) -> Option<&'a Sidecar> {
+    let stem = super::store::file_stem(name);
+    all.iter().find(|(n, _)| *n == stem).map(|(_, s)| s)
 }
 
 /// Maior versão aplicada por `dona::gid`, também depois de o último sidecar sair: um envio atrasado
@@ -962,10 +951,10 @@ fn apply_push(dir: &PairDir, me: &str, gid: &str, body: &PushBody, renamed: &Has
             let old = match existing {
                 Some(s) => Some(s),
                 None if joining.contains(&m.name) => {
-                    match read(dir, &m.name) {
+                    match loaded(&all, &m.name) {
                         None => None,
                         // Outro grupo da mesma dona é a fusão dela; qualquer outro grupo, recusa.
-                        Some(s) if s.fed.as_ref().is_some_and(|f| f.owner == body.owner) && !s.orq => Some(s),
+                        Some(s) if s.fed.as_ref().is_some_and(|f| f.owner == body.owner) && !s.orq => Some(s.clone()),
                         Some(_) => return Err(no(StatusCode::CONFLICT, "erro_grupo_mudou", &format!("'{}' já está em outro grupo", m.name), json!({"membro": m.name}))),
                     }
                 }
@@ -974,11 +963,11 @@ fn apply_push(dir: &PairDir, me: &str, gid: &str, body: &PushBody, renamed: &Has
             };
             let was_loose = old.is_none();
             let old = old.unwrap_or_default();
-            let mut peers: Vec<String> = members.iter().filter(|x| !same(x, m)).map(|x| view(me, x)).collect();
+            let mut peers: Vec<String> = members.iter().filter(|x| !x.same(m)).map(|x| x.view(me)).collect();
             peers.extend(old.peers.iter().filter(|p| outside.contains(*p)).cloned());
             let mut h = old.harness.clone();
             h.extend(harness.iter().filter(|(k, _)| **k == m.name).map(|(k, v)| (k.clone(), v.clone())));
-            for x in members.iter().filter(|x| !x.provider.is_empty()) { h.entry(view(me, x)).or_insert_with(|| x.provider.clone()); }
+            for x in members.iter().filter(|x| !x.provider.is_empty()) { h.entry(x.view(me)).or_insert_with(|| x.provider.clone()); }
             writes.push((m.name.clone(), Sidecar { peers, task: Some(body.task.clone()), gid: gid.into(), harness: h, orq: false,
                 fed: Some(Fed { owner: body.owner.clone(), local: false, version: body.version }), linked_by: old.linked_by }));
             if was_loose { newcomers.push(m.name.clone()); }
@@ -988,12 +977,12 @@ fn apply_push(dir: &PairDir, me: &str, gid: &str, body: &PushBody, renamed: &Has
             if !names.contains(name) { clears.push(name.clone()); dropped.push(name.clone()); }
         }
     }
-    let before: Snapshot = clears.iter().chain(writes.iter().map(|(n, _)| n)).map(|n| (n.clone(), read(dir, n))).collect();
+    let before: Snapshot = clears.iter().chain(writes.iter().map(|(n, _)| n)).map(|n| (n.clone(), loaded(&all, n).cloned())).collect();
     applied.insert(seen_key, body.version);
     // A versão só vale gravada junto dos sidecars: sem ela, a dona reenvia e a mesma versão aplica de novo.
-    let written = write_sidecars(dir, &clears, &writes).map_err(store_refusal).and_then(|()| write_applied(dir, &applied).map_err(store_refusal));
+    let written = super::service::apply(dir, &clears, &writes).map_err(store_refusal).and_then(|()| write_applied(dir, &applied).map_err(store_refusal));
     if let Err(refused) = written {
-        restore_sidecars(dir, &before);
+        restore_logged(dir, &before);
         return Err(refused);
     }
     if !body.dissolved { remember(dir, me); }
@@ -1011,29 +1000,20 @@ pub(super) async fn session_group(State(st): State<Arc<AppState>>, ConnectInfo(p
         return asked.reply(StatusCode::NOT_FOUND, json!({"detail": {"code": "erro_sessao_sem_grupo", "params": {}, "msg": "sessão não está num grupo"}, "server_id": me}));
     };
     let outside = outside_addresses(&asked.st);
-    let dir = Arc::new(pair_dir(&asked.groups));
     let record = match &s.fed {
-        Some(f) if f.owner == me => { let (dir, gid) = (dir.clone(), s.gid.clone()); blocking(move || dir.record(&gid)).await.ok().and_then(Result::ok).flatten() }
+        Some(f) if f.owner == me => { let (dir, gid) = (asked.groups.dir(), s.gid.clone()); blocking(move || dir.record(&gid)).await.ok().and_then(Result::ok).flatten() }
         _ => None,
     };
     let (owner, version, members, outside_refs) = match record {
         Some(r) => (r.owner, r.version, r.members, r.outside),
         None => {
-            let mut members = vec![member(&me, &asked.name, s.harness.get(&asked.name).map_or("", String::as_str))];
-            members.extend(s.peers.iter().filter(|p| !outside.contains(*p)).map(|p| {
-                let m = parse_member(&me, p);
-                let provider = s.harness.get(p).cloned().unwrap_or_default();
-                Member { provider, ..m }
-            }));
+            let members = members_from_sidecar(&me, &asked.name, &s, &outside);
             let outside_refs = s.peers.iter().filter(|p| outside.contains(*p)).map(|p| OutsideRef { server: me.clone(), address: p.clone() }).collect();
             let (owner, version) = s.fed.as_ref().map_or((me.clone(), 0), |f| (f.owner.clone(), f.version));
             (owner, version, members, outside_refs)
         }
     };
-    let sync = existing(asked.groups.pair_root()).is_none_or(|fed| !fed.outbox.pending().iter().any(|i| match i {
-        OutboxItem::Push { gid, .. } | OutboxItem::Dissolved { gid, .. } | OutboxItem::Leave { gid, .. }
-            | OutboxItem::Rename { gid, .. } | OutboxItem::Outside { gid, .. } => *gid == s.gid,
-    }));
+    let sync = existing(asked.groups.pair_root()).is_none_or(|fed| !fed.outbox.touches(&s.gid));
     asked.reply(StatusCode::OK, json!({"server_id": me, "gid": s.gid, "owner": owner, "version": version, "task": s.task.unwrap_or_default(),
         "orq": s.orq, "members": members, "outside": outside_refs, "sync": sync}))
 }
@@ -1071,18 +1051,18 @@ pub(super) async fn pair(asked: Asked, held: Option<IngressPass>, others: Vec<St
     drop(held);
     let respond = |r: Refusal| asked.reply(r.0, r.1);
     let me = asked.groups.server_id().to_owned();
-    if me.is_empty() { return asked.refuse(StatusCode::BAD_REQUEST, "erro_pareamento_server_id_ausente", NO_SERVER_ID, json!({})); }
+    if let Err(r) = need_server_id(&me) { return respond(r); }
     if orq { return respond(orq_refusal()); }
-    let dir = Arc::new(pair_dir(&asked.groups));
     {
-        let (dir, me) = (dir.clone(), me.clone());
+        let (dir, me) = (asked.groups.dir(), me.clone());
         match blocking(move || identity_ok(&dir, &me)).await { Ok(Ok(())) => {}, Ok(Err(r)) | Err(r) => return respond(r) }
     }
     if others.iter().any(|o| o.split_once("::").is_some_and(|(srv, _)| srv == me || srv.is_empty())) {
         return asked.refuse(StatusCode::BAD_REQUEST, "erro_grupo_identificador_igual", "o membro de outra máquina tem o id desta", json!({}));
     }
-    let candidates: Vec<Member> = std::iter::once(member(&me, &asked.name, "")).chain(others.iter().map(|o| parse_member(&me, o))).collect();
-    if let Some(c) = candidates.iter().find(|c| c.server != me && asked.st.peers.base_url(&c.server).is_none()) {
+    let candidates: Vec<Member> = std::iter::once(Member::new(&me, &asked.name, "")).chain(others.iter().map(|o| Member::parse(&me, o))).collect();
+    let registered = asked.st.peers.addressable().await;
+    if let Some(c) = candidates.iter().find(|c| c.server != me && !registered.contains(&c.server)) {
         return respond(unregistered(&c.server));
     }
     let locals: Vec<String> = candidates.iter().filter(|c| c.server == me).map(|c| c.name.clone()).collect();
@@ -1091,25 +1071,24 @@ pub(super) async fn pair(asked: Asked, held: Option<IngressPass>, others: Vec<St
         Ok(h) => h,
         Err(failed) => return asked.reply(StatusCode::SERVICE_UNAVAILABLE, json!({"detail": failed})),
     };
-    let missing = locals.iter().filter(|n| !harness.contains_key(*n)).cloned().collect::<Vec<_>>().join(", ");
-    if !missing.is_empty() {
-        return asked.refuse(StatusCode::NOT_FOUND, "erro_sessao_nao_encontrada_detalhe", &format!("sessão não encontrada: {missing}"), json!({"detalhe": missing}));
-    }
-    // O grupo de cada candidato: daqui pelo sidecar, de fora pela máquina dele.
+    let absent = not_found(&locals, &harness);
+    if !absent.is_empty() { return respond(sessions_missing(&absent)); }
+    // O grupo de cada candidato: daqui pelo sidecar, de fora pela máquina dele, todos ao mesmo
+    // tempo; a primeira recusa, na ordem dos candidatos, é a que volta.
+    let lookups = futures_util::future::join_all(candidates.iter().map(|c| async {
+        if c.server != me { return remote_group(&asked.st, c).await.map_err(Err); }
+        match asked.groups.link(&c.name).await {
+            Ok(Some(s)) if s.orq => Err(Err(orq_refusal())),
+            Ok(Some(s)) => Ok(Some((s.owner_or(&me), s.gid))),
+            Ok(None) => Ok(None),
+            Err(error) => Err(Ok(error)),
+        }
+    })).await;
     let mut expected = BTreeMap::new();
     let mut owners: Vec<(String, String)> = Vec::new();
-    for c in &candidates {
-        let found = if c.server == me {
-            match asked.groups.link(&c.name).await {
-                Ok(Some(s)) if s.orq => return respond(orq_refusal()),
-                Ok(Some(s)) => Some((s.fed.map_or_else(|| me.clone(), |f| f.owner), s.gid)),
-                Ok(None) => None,
-                Err(error) => return asked.store_failed(&error),
-            }
-        } else {
-            match remote_group(&asked.st, c).await { Ok(found) => found, Err(r) => return respond(r) }
-        };
-        expected.insert(key(c), found.as_ref().map_or_else(String::new, |(_, g)| g.clone()));
+    for (c, found) in candidates.iter().zip(lookups) {
+        let found = match found { Ok(found) => found, Err(Ok(error)) => return asked.store_failed(&error), Err(Err(r)) => return respond(r) };
+        expected.insert(c.key(), found.as_ref().map_or_else(String::new, |(_, g)| g.clone()));
         if let Some(found) = found && !owners.contains(&found) { owners.push(found); }
     }
     let distinct: BTreeSet<&str> = owners.iter().map(|(o, _)| o.as_str()).collect();
@@ -1120,30 +1099,25 @@ pub(super) async fn pair(asked: Asked, held: Option<IngressPass>, others: Vec<St
     }).collect();
     let (owner, gid) = owners.first().cloned().unwrap_or_else(|| (me.clone(), String::new()));
     let result = if owner == me {
-        owner_join(&asked.st, &asked.groups, JoinAsk { gid, members: candidates, task, replace_task, expected }).await
+        owner_join(&asked.st, &asked.groups, JoinAsk { gid, members: candidates, task, replace_task, expected }, Some(harness)).await
     } else {
-        if asked.st.peers.base_url(&owner).is_none() { return respond(unregistered(&owner)); }
+        if !registered.contains(&owner) { return respond(unregistered(&owner)); }
         let body = json!({"op": "join", "protocol": PROTOCOL, "origin": me, "members": candidates, "task": task, "replace_task": replace_task, "expected": expected});
         match asked.st.peers.call_group_waiting(&owner, &format!("/api/groups/{}/ops", segment(&gid)), &body).await {
-            Ok(done) => serde_json::from_value::<RemoteDone>(done).map(|d| JoinDone { gid: d.gid, version: d.version, task: d.task, members: d.members,
-                unconfirmed: d.unconfirmed, access_failed: d.access_failed })
+            Ok(done) => serde_json::from_value::<JoinDone>(done)
                 .map_err(|_| no(StatusCode::BAD_GATEWAY, "erro_grupo_dono_indisponivel", "a dona respondeu fora do formato", json!({"servidor": owner}))),
             Err(error) => Err(peer_refusal(&owner, error)),
         }
     };
     let done = match result { Ok(done) => done, Err(r) => return respond(r) };
-    let unconfirmed: Vec<String> = done.unconfirmed.iter().map(key).collect();
+    let unconfirmed: Vec<String> = done.unconfirmed.iter().map(Member::key).collect();
     let warning = if unconfirmed.is_empty() { super::routes::access_warning(&done.access_failed) } else {
         json!({"code": "erro_grupo_membro_nao_confirmado", "params": {"membros": unconfirmed, "acesso": done.access_failed},
             "msg": format!("não confirmado: {}", unconfirmed.join(", "))})
     };
-    let members: Vec<String> = done.members.iter().map(|m| view(&me, m)).collect();
+    let members: Vec<String> = done.members.iter().map(|m| m.view(&me)).collect();
     asked.reply(StatusCode::OK, json!({"ok": true, "members": members, "gid": done.gid, "owner": owner, "warning": warning}))
 }
-
-#[derive(Deserialize)]
-struct RemoteDone { gid: String, version: u64, #[serde(default)] task: String, members: Vec<Member>, #[serde(default)] unconfirmed: Vec<Member>,
-    #[serde(default)] access_failed: Vec<String> }
 
 // --- subida ----------------------------------------------------------------------------------
 
@@ -1154,8 +1128,7 @@ pub fn spawn(st: Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
     if groups.server_id().is_empty() { return None; }
     Some(tokio::spawn(async move {
         let me = groups.server_id().to_owned();
-        let dir = Arc::new(pair_dir(&groups));
-        let read = { let (dir, me) = (dir.clone(), me.clone()); blocking(move || (identity_ok(&dir, &me).map(drop), dir.records(), dir.sidecars())).await };
+        let read = { let (dir, me) = (groups.dir(), me.clone()); blocking(move || (identity_ok(&dir, &me).map(drop), dir.records(), dir.sidecars())).await };
         let (records, sidecars) = match read {
             Ok((Ok(()), Ok(records), Ok(sidecars))) => (records, sidecars),
             Ok((Err(Refusal(_, body)), _, _)) => {
@@ -1186,12 +1159,16 @@ pub fn spawn(st: Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
             }
         }
         let asks: BTreeSet<(String, String)> = sidecars.iter().filter_map(|(_, s)| s.fed.as_ref().filter(|f| f.owner != me).map(|f| (f.owner.clone(), s.gid.clone()))).collect();
-        for (owner, gid) in asks {
-            match st.peers.call_group(&owner, reqwest::Method::GET, &format!("/api/groups/{}", segment(&gid)), None).await {
+        use futures_util::StreamExt as _;
+        // Uma dona fora do ar não atrasa as outras: os pedidos saem juntos, até `ASKS` de uma vez.
+        const ASKS: usize = 8;
+        let (st_ref, groups_ref) = (&st, &groups);
+        futures_util::stream::iter(asks).for_each_concurrent(ASKS, |(owner, gid)| async move {
+            match st_ref.peers.call_group(&owner, reqwest::Method::GET, &format!("/api/groups/{}", segment(&gid)), None).await {
                 Ok(record) => match serde_json::from_value::<GroupRecord>({ let mut r = record; if let Some(o) = r.as_object_mut() { o.remove("server_id"); } r }) {
                     Ok(r) => {
                         let body = PushBody { protocol: PROTOCOL, owner: r.owner, version: r.version, task: r.task, members: r.members, outside: r.outside, joining: Vec::new(), dissolved: false, convert_from_legacy: None };
-                        if let Err(Refusal(status, _)) = local_apply(&st, &groups, &gid, body).await {
+                        if let Err(Refusal(status, _)) = local_apply(st_ref, groups_ref, &gid, body).await {
                             tracing::warn!(code = "groups_restart_apply_failed", %owner, %status, "groups: o grupo pedido à dona não foi aplicado");
                         }
                     }
@@ -1201,7 +1178,7 @@ pub fn spawn(st: Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
                 // registro perdido ou id trocado, e dissolver por isso seria para sempre.
                 Err(error) => tracing::warn!(code = "groups_restart_ask_failed", %owner, error = %error.text(&owner), "groups: a dona não respondeu na subida"),
             }
-        }
+        }).await;
         super::convert::run_and_retry(&st, &groups).await;
     }))
 }
@@ -1238,4 +1215,21 @@ pub async fn serve_forwarded(st: Arc<AppState>, peer: SocketAddr, mut req: Reque
             _ => reply(no(StatusCode::METHOD_NOT_ALLOWED, "erro_metodo_nao_permitido", "método não aceito nesta rota", json!({}))),
         }
     }).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// O provedor de membro de outra máquina vem da chave `srv::nome` do `harness` (como a dona e o
+    /// `PUT` gravam), e par de fora não vira membro.
+    #[test]
+    fn members_from_sidecar_reads_providers_by_view_and_skips_outside() {
+        let s = Sidecar { peers: vec!["lab::s3".into(), "s1".into(), "ana::x".into()], gid: "g".into(),
+            harness: BTreeMap::from([("s0".into(), "claude".into()), ("s1".into(), "pi".into()), ("lab::s3".into(), "codex".into())]),
+            ..Sidecar::default() };
+        let outside = HashSet::from(["ana::x".to_owned()]);
+        assert_eq!(members_from_sidecar("casa", "s0", &s, &outside),
+            [Member::new("casa", "s0", "claude"), Member::new("lab", "s3", "codex"), Member::new("casa", "s1", "pi")]);
+    }
 }

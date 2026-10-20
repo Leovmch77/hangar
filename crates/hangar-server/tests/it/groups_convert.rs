@@ -2,70 +2,25 @@
 //! verdade no processo (`casa`, `lab`), cada uma com a pasta, o id e o `peers.json` dela.
 #![cfg(unix)]
 use crate::fake;
-use crate::list_support;
+use crate::groups_support::*;
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use fake::{OWNER, SECRET, client};
-use hangar_server::groups::convert::{self, group_id};
-use hangar_server::groups::federation;
-use hangar_server::groups::orq::PythonOrq;
-use hangar_server::groups::peers::{PeerBook, PeerClient};
-use hangar_server::groups::service::GroupService;
+use fake::client;
+use hangar_server::groups::convert::group_id;
+use hangar_server::groups::federation::{self, Timing};
 use hangar_server::groups::store::PairDir;
-use hangar_server::list::bridge::{ListBridge, ListEnv, parse_dirs};
-use hangar_server::list::facts::FactsClient;
-use hangar_server::list::mux::Mux;
-use hangar_server::routes::{AppState, router};
-use hangar_server::runtime::gateway::RuntimeRegistry;
-use hangar_server::share::store::Kind;
 use serde_json::{Value, json};
 
-const NAMES: [&str; 4] = ["s0", "s1", "s2", "s3"];
 /// sha1("casa::s0\nlab::s1") = 3c09fbe2ae99b90a9869e4348c8d7c9abcc06cf5, conferido fora do código.
 const GID: &str = "3c09fbe2ae99";
 const LEGACY_GID: &str = "0a0b0c0d";
 
-struct Machine { addr: SocketAddr, python: Arc<fake::Fake>, pair: PathBuf, root: PathBuf, state: Arc<AppState>,
-    share: Arc<hangar_server::share::ShareState> }
-
-async fn machine(root: &Path, id: &str) -> Machine {
-    let script = list_support::sessions(root, NAMES.len());
-    let home = root.join("home");
-    let dirs = parse_dirs(&json!({"home": home, "claude": home.join(".claude"), "codex_home": home.join(".codex"),
-        "pi_sessions": home.join(".pi/agent/sessions"), "omp_config": home.join(".omp"),
-        "omp_agent": home.join(".omp/agent"), "kimi_home": home.join(".kimi-code")}).to_string());
-    let (python, upstream) = fake::spawn_fake().await;
-    let mut state = AppState::new(fake::config(upstream, ""));
-    state.list = Arc::new(ListBridge::new(ListEnv { mux: Mux::with_program(&script, Duration::from_secs(5)),
-        capture_program: script.into_os_string(), procs: Arc::new(hangar_server::list::procs::SystemProcs::default()), dirs },
-        FactsClient::new(upstream, SECRET.into())));
-    let pair = home.join(".claude/.hangar-pair");
-    federation::configure(&pair, Duration::from_millis(1500), vec![Duration::from_millis(150)]);
-    state.groups = Some(Arc::new(GroupService::new(PairDir::new(pair.clone(), root.join("arquivo")), Arc::new(PythonOrq::from_state(&state)), id.into())));
-    state.peers = Arc::new(PeerClient::new(PeerBook::new(Some(root.join("peers.json")))));
-    let share = crate::share_pair_routes::share_state(&root.join("shares.json"), &pair, Arc::new(Mutex::new(1_000.0)));
-    state.share = Some(share.clone());
-    let runtime = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "s".into(), "i".into()));
-    assert!(state.state.runtime.set(runtime).is_ok());
-    let state = Arc::new(state);
-    let app = router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Machine { addr, python, pair, root: root.to_path_buf(), state, share }
-}
-
-fn peers(m: &Machine, others: &[(&str, SocketAddr)]) {
-    let map: serde_json::Map<String, Value> = others.iter()
-        .map(|(id, addr)| ((*id).to_owned(), json!({"base_url": format!("http://{addr}"), "token": OWNER}))).collect();
-    std::fs::write(m.root.join("peers.json"), Value::Object(map).to_string()).unwrap();
-}
-
+/// Só `casa` e `lab`: o par antigo é de duas máquinas.
 struct Net { casa: Machine, lab: Machine, _dirs: Vec<tempfile::TempDir> }
 
 async fn net() -> Net {
@@ -77,40 +32,18 @@ async fn net() -> Net {
     Net { casa, lab, _dirs: dirs }
 }
 
-async fn call(addr: SocketAddr, method: &str, path: &str, body: Option<&Value>) -> (u16, Value) {
-    let mut req = client().request(method.parse().unwrap(), format!("http://{addr}{path}")).bearer_auth(OWNER);
-    if let Some(body) = body { req = req.header("content-type", "application/json").body(body.to_string()); }
-    let resp = req.send().await.unwrap();
-    let status = resp.status().as_u16();
-    let text = resp.text().await.unwrap();
-    (status, serde_json::from_str(&text).unwrap_or(Value::String(text)))
-}
-
 /// O sidecar como o Python gravava o par 1:1 entre máquinas.
 fn legacy(m: &Machine, name: &str, peer: &str) {
     std::fs::create_dir_all(&m.pair).unwrap();
     std::fs::write(m.pair.join(format!("{name}.json")), json!({"peers": [peer], "task": "t", "gid": LEGACY_GID, "harness": {}}).to_string()).unwrap();
 }
 
-fn sidecar(m: &Machine, name: &str) -> Option<Value> {
-    std::fs::read(m.pair.join(format!("{name}.json"))).ok().map(|raw| serde_json::from_slice(&raw).unwrap())
-}
-
-fn record(m: &Machine, gid: &str) -> Option<Value> {
-    std::fs::read(m.pair.join("groups").join(format!("{gid}.json"))).ok().map(|raw| serde_json::from_slice(&raw).unwrap())
-}
-
 fn records(m: &Machine) -> Vec<String> {
     PairDir::new(m.pair.clone(), PathBuf::new()).records().unwrap().into_iter().map(|r| r.gid).collect()
 }
 
-fn members(v: &Value) -> Vec<String> {
-    let mut out: Vec<String> = v.as_array().unwrap().iter().map(|m| format!("{}::{}", m["server"].as_str().unwrap(), m["name"].as_str().unwrap())).collect();
-    out.sort();
-    out
-}
-
-fn member(server: &str, name: &str) -> Value { json!({"server": server, "name": name, "provider": ""}) }
+/// Novas tentativas de conversão a cada 100 ms.
+fn quick_retry(m: &Machine) { timing(m, Timing { retry_ladder: vec![Duration::from_millis(100)], ..fast() }); }
 
 /// A subida da máquina, que converte os pares antigos dela.
 async fn start(m: &Machine) { federation::spawn(m.state.clone()).expect("máquina com id").await.unwrap(); }
@@ -155,15 +88,6 @@ async fn upgradable(target: SocketAddr, upgraded: Arc<std::sync::atomic::AtomicB
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     addr
-}
-
-fn outside_pair(m: &Machine, local: &str, alias: &str, peer: &str) {
-    let (s, _) = m.share.store.create_redeemed(local, Some("t:1".into()), Kind::Pair).unwrap();
-    m.share.pairs.add(hangar_server::share::pairs::ExternalPair { share_id: s.id.clone(), local_session: local.into(),
-        alias: alias.into(), peer_owner: "Ana".into(), peer_session: peer.into(), peer_address: "http://127.0.0.1:1".into(),
-        peer_token: "tok".into(), created_at: 1.0 }).unwrap();
-    std::fs::create_dir_all(&m.pair).unwrap();
-    std::fs::write(m.pair.join(format!("{local}.json")), json!({"peers": [format!("{alias}::{peer}")], "task": "", "gid": "abababab", "harness": {}}).to_string()).unwrap();
 }
 
 fn assert_converted(n: &Net) {
@@ -237,7 +161,7 @@ async fn old_version_peer_stays_legacy() {
 #[tokio::test(flavor = "multi_thread")]
 async fn conversion_retries_after_the_peer_upgrades() {
     let n = net().await;
-    convert::configure_retry(&n.casa.pair, vec![Duration::from_millis(100)]);
+    quick_retry(&n.casa);
     let upgraded = Arc::new(std::sync::atomic::AtomicBool::new(false));
     peers(&n.casa, &[("lab", upgradable(n.lab.addr, upgraded.clone()).await)]);
     legacy(&n.casa, "s0", "lab::s1");
@@ -351,7 +275,7 @@ async fn unconverted_legacy_member_is_refused() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pair_remote_converts_after_the_peer_upgrades() {
     let n = net().await;
-    convert::configure_retry(&n.casa.pair, vec![Duration::from_millis(100)]);
+    quick_retry(&n.casa);
     let upgraded = Arc::new(std::sync::atomic::AtomicBool::new(false));
     peers(&n.casa, &[("lab", upgradable(n.lab.addr, upgraded.clone()).await)]);
     legacy(&n.lab, "s1", "casa::s0");

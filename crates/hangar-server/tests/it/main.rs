@@ -16,6 +16,8 @@ mod dictation_process;
 mod dictation_provider;
 mod fake;
 #[cfg(unix)]
+mod groups_support;
+#[cfg(unix)]
 mod list_support;
 mod mods_support;
 #[cfg(unix)]

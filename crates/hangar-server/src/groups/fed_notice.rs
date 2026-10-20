@@ -10,25 +10,22 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::to_bytes;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{Method, StatusCode};
 use axum::response::Response;
-use serde::Deserialize;
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::exit::segment;
-use super::federation::Refusal;
+use super::federation::{Machine, Refusal, missing, no, unavailable};
 use super::local::is_remote;
 use super::model::{PROTOCOL, Sidecar};
 use super::peers::PeerError;
-use super::routes::{Asked, Bridged, STORM_MAX, STORM_WINDOW, envelope, failures_text, outside_addresses, storm};
+use super::routes::{Asked, STORM_MAX, STORM_WINDOW, envelope, failures_text, outside_addresses, storm};
 use super::service::GroupService;
-use super::store::PairDir;
-use crate::routes::{AppState, cors, gate};
-use crate::session_write::input::{deliver_text, json_content_type};
-use crate::session_write::{BODY_LIMIT, detail_body, invalid_body, json_response};
+use crate::routes::AppState;
+use crate::session_write::input::deliver_text;
+use crate::session_write::{detail_body, json_response};
 
 const OWNER_DOWN: &str = "erro_grupo_dono_indisponivel";
 
@@ -41,29 +38,11 @@ fn session_wait(deliver: Duration) -> Duration { deliver * 3 / 5 }
 const _: () = assert!(DELIVER_WAIT.as_secs() < super::peers::OWNER_WAIT_TIMEOUT.as_secs()
     && super::federation::JOIN_WAIT.as_secs() < super::peers::OWNER_WAIT_TIMEOUT.as_secs());
 
-static DELIVER_WAITS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<PathBuf, std::time::Duration>>> =
-    std::sync::LazyLock::new(Default::default);
-
-/// Prazo de entrega da dona da máquina de `root` (testes).
-pub fn configure_deliver_wait(root: &std::path::Path, wait: std::time::Duration) {
-    DELIVER_WAITS.lock().unwrap_or_else(|e| e.into_inner()).insert(root.to_path_buf(), wait);
-}
-
-fn deliver_wait(groups: &GroupService) -> std::time::Duration {
-    DELIVER_WAITS.lock().unwrap_or_else(|e| e.into_inner()).get(groups.pair_root()).copied().unwrap_or(DELIVER_WAIT)
-}
-
-fn no(status: StatusCode, code: &str, msg: &str, params: Value) -> Refusal { Refusal(status, detail_body(code, msg, params)) }
+fn deliver_wait(groups: &GroupService) -> Duration { super::federation::timing(groups.pair_root()).deliver_wait }
 
 fn owner_down(owner: &str) -> Refusal {
     no(StatusCode::SERVICE_UNAVAILABLE, OWNER_DOWN, &format!("a máquina dona do grupo ({owner}) não respondeu"), json!({"servidor": owner}))
 }
-
-fn unavailable(detail: &str) -> Refusal {
-    no(StatusCode::INTERNAL_SERVER_ERROR, "erro_grupo_indisponivel", "os grupos estão indisponíveis agora", json!({"detalhe": detail}))
-}
-
-fn missing(gid: &str) -> Refusal { no(StatusCode::NOT_FOUND, "erro_grupo_inexistente", "grupo inexistente nesta máquina", json!({"gid": gid})) }
 
 /// Recusa com código da dona volta como veio; o resto (rede, modo `python`, versão antiga) é dona fora.
 fn from_owner(owner: &str, error: PeerError) -> Refusal {
@@ -90,10 +69,15 @@ fn qualify(me: &str, label: &str) -> String { if label.contains("::") { label.to
 
 /// Corpo do `op: message` (à dona) e do `POST /api/groups/{gid}/deliver` (dela às outras).
 /// `origin` = máquina de quem mandou, ou a ponta do par de fora; `notice` vazio = a dona gera.
-#[derive(Clone)]
-pub struct Notice { pub origin: String, pub sender: String, pub text: String, pub notice: String, pub from_outside: bool }
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Notice { pub protocol: u32, pub origin: String, pub sender: String, pub text: String, pub notice: String, #[serde(default)] pub from_outside: bool }
 
 impl Notice {
+    pub fn new(origin: String, sender: String, text: String, notice: String, from_outside: bool) -> Notice {
+        Notice { protocol: PROTOCOL, origin, sender, text, notice, from_outside }
+    }
+
     /// O texto que as sessões de `me` recebem.
     fn line(&self, me: &str) -> String {
         if self.from_outside { format!("[de fora: {} via {}] {}", self.sender, self.origin, self.text) }
@@ -101,8 +85,13 @@ impl Notice {
         else { format!("[grupo: {}::{}] {}", self.origin, self.sender, self.text) }
     }
 
-    fn body(&self) -> Value {
-        json!({"protocol": PROTOCOL, "origin": self.origin, "sender": self.sender, "text": self.text, "notice": self.notice, "from_outside": self.from_outside})
+    fn body(&self) -> Value { serde_json::to_value(self).unwrap_or_default() }
+
+    /// O `op: message` à dona.
+    fn ops_body(&self) -> Value {
+        let mut ask = self.body();
+        ask["op"] = json!("message");
+        ask
     }
 }
 
@@ -146,8 +135,7 @@ async fn deliver_here(st: &AppState, groups: &GroupService, gid: &str, n: &Notic
 /// entrega aos dela). Devolve o `notice` usado e os pulados, qualificados.
 async fn owner_fanout(st: &AppState, groups: &GroupService, gid: &str, mut n: Notice) -> Result<(String, Vec<String>), Refusal> {
     let me = groups.server_id().to_owned();
-    let dir = PairDir::new(groups.pair_root().to_path_buf(), PathBuf::new());
-    let g = gid.to_owned();
+    let (dir, g) = (groups.dir(), gid.to_owned());
     let record = tokio::task::spawn_blocking(move || dir.record(&g)).await.map_err(|_| unavailable("groups_store_failed"))?
         .map_err(|_| unavailable("groups_store_failed"))?.filter(|r| r.owner == me).ok_or_else(|| missing(gid))?;
     if let Some(refused) = stormed(&me, gid) { return Err(refused); }
@@ -179,8 +167,8 @@ async fn owner_fanout(st: &AppState, groups: &GroupService, gid: &str, mut n: No
 /// `group-message` de uma sessão daqui num grupo entre máquinas.
 pub(super) async fn group_message(asked: &Asked, link: &Sidecar, text: String) -> Response {
     let me = asked.groups.server_id().to_owned();
-    let owner = link.fed.as_ref().map_or_else(|| me.clone(), |f| f.owner.clone());
-    let mut n = Notice { origin: me.clone(), sender: asked.name.clone(), text, notice: String::new(), from_outside: false };
+    let owner = link.owner_or(&me);
+    let mut n = Notice::new(me.clone(), asked.name.clone(), text, String::new(), false);
     let mut down = false;
     let skipped = if owner == me {
         match owner_fanout(&asked.st, &asked.groups, &link.gid, n.clone()).await {
@@ -188,9 +176,7 @@ pub(super) async fn group_message(asked: &Asked, link: &Sidecar, text: String) -
             Err(Refusal(status, body)) => return asked.reply(status, body),
         }
     } else {
-        let mut ask = n.body();
-        ask["op"] = json!("message");
-        match asked.st.peers.call_group_waiting(&owner, &format!("/api/groups/{}/ops", segment(&link.gid)), &ask).await {
+        match asked.st.peers.call_group_waiting(&owner, &format!("/api/groups/{}/ops", segment(&link.gid)), &n.ops_body()).await {
             Ok(v) => {
                 n.notice = v["notice"].as_str().unwrap_or_default().to_owned();
                 v["pulados"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()
@@ -229,18 +215,17 @@ pub(super) async fn owner_message(st: &AppState, groups: &GroupService, gid: &st
 
 /// Aviso de grupo que chegou de fora à sessão `anchor` daqui, já entregue aos membros daqui: em
 /// grupo entre máquinas sobe à dona, que leva às outras máquinas e a nenhum par de fora.
-/// Roda depois da resposta a quem é de fora; falha só ao diário.
-pub fn relay_outside(st: Arc<AppState>, anchor: String, sender: String, text: String, notice: String) {
+/// Roda depois da resposta a quem é de fora; falha só ao diário. O fim da tarefa é o fim da
+/// entrega (a dona só responde depois de levar às outras máquinas).
+pub fn relay_outside(st: Arc<AppState>, anchor: String, sender: String, text: String, notice: String) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let Some(groups) = st.groups.clone() else { return };
         let Ok(Some(link)) = groups.link(&anchor).await else { return };
         let Some(owner) = link.fed.map(|f| f.owner) else { return };
         let me = groups.server_id().to_owned();
-        let n = Notice { origin: me.clone(), sender, text, notice, from_outside: true };
+        let n = Notice::new(me.clone(), sender, text, notice, true);
         let done = if owner == me { owner_fanout(&st, &groups, &link.gid, n).await.map(|(_, skipped)| skipped.len()) } else {
-            let mut ask = n.body();
-            ask["op"] = json!("message");
-            st.peers.call_group_waiting(&owner, &format!("/api/groups/{}/ops", segment(&link.gid)), &ask).await
+            st.peers.call_group_waiting(&owner, &format!("/api/groups/{}/ops", segment(&link.gid)), &n.ops_body()).await
                 .map(|v| v["pulados"].as_array().map_or(0, Vec::len)).map_err(|e| from_owner(&owner, e))
         };
         match done {
@@ -249,56 +234,17 @@ pub fn relay_outside(st: Arc<AppState>, anchor: String, sender: String, text: St
             Err(Refusal(status, body)) => tracing::warn!(code = "groups_outside_notice_not_relayed", session = %anchor, %status,
                 detail = %body["detail"]["code"], "groups: aviso de fora não subiu à dona"),
         }
-    });
+    })
 }
 
 // --- rotas entre máquinas --------------------------------------------------------------------
 
-/// Pedido de outra máquina do dono a `/api/groups/{gid}/deliver|contract`: token de dono (ou a ponte).
-struct Machine { st: Arc<AppState>, groups: Arc<GroupService>, gid: String, method: Method, headers: axum::http::HeaderMap, bytes: axum::body::Bytes }
-
-impl Machine {
-    async fn take(st: Arc<AppState>, peer: SocketAddr, req: Request) -> Result<Machine, Response> {
-        let bridged = req.extensions().get::<Bridged>().is_some();
-        let (fwd, owner) = gate(&st, peer, &req);
-        if !owner && !bridged {
-            st.auth.record_fail(&fwd.client_ip);
-            return Err(json_response(StatusCode::UNAUTHORIZED, detail_body("erro_nao_autorizado", "unauthorized", json!({}))));
-        }
-        let Some(groups) = st.groups.clone() else { let Refusal(s, b) = unavailable("groups_unavailable"); return Err(json_response(s, b)) };
-        let gid = req.uri().path().strip_prefix("/api/groups/").and_then(|rest| rest.split('/').next())
-            .map(|g| percent_encoding::percent_decode_str(g).decode_utf8_lossy().into_owned()).unwrap_or_default();
-        let (parts, body) = req.into_parts();
-        let Ok(bytes) = to_bytes(body, BODY_LIMIT).await else {
-            return Err(json_response(StatusCode::PAYLOAD_TOO_LARGE, detail_body("erro_corpo_grande", "corpo grande demais", json!({}))));
-        };
-        Ok(Machine { st, groups, gid, method: parts.method, headers: parts.headers, bytes })
-    }
-
-    fn body<T: DeserializeOwned>(&self) -> Result<T, Response> {
-        json_content_type(&self.headers).then(|| serde_json::from_slice(&self.bytes).ok()).flatten().ok_or_else(|| invalid_body(&self.headers))
-    }
-
-    fn answer(&self, result: Result<Value, Refusal>) -> Response {
-        let (status, mut body) = match result { Ok(body) => (StatusCode::OK, body), Err(Refusal(status, body)) => (status, body) };
-        body["server_id"] = json!(self.groups.server_id());
-        let mut response = json_response(status, body);
-        cors(&self.headers, response.headers_mut());
-        response
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DeliverBody { protocol: u32, origin: String, sender: String, text: String, notice: String, #[serde(default)] from_outside: bool }
-
 /// `POST /api/groups/{gid}/deliver`: a dona entrega um aviso aos membros desta máquina.
 pub(super) async fn deliver(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let m = match Machine::take(st, peer, req).await { Ok(m) => m, Err(r) => return r };
-    let n = match m.body::<DeliverBody>() {
-        Ok(b) if b.protocol == PROTOCOL && !b.notice.is_empty() && b.notice.len() <= 64 =>
-            Notice { origin: b.origin, sender: b.sender, text: b.text, notice: b.notice, from_outside: b.from_outside },
-        Ok(_) => return invalid_body(&m.headers),
+    let n = match m.body::<Notice>() {
+        Ok(n) if n.protocol == PROTOCOL && !n.notice.is_empty() && n.notice.len() <= 64 => n,
+        Ok(_) => return m.invalid(),
         Err(r) => return r,
     };
     let me = m.groups.server_id().to_owned();
@@ -328,9 +274,11 @@ fn read_contract(path: PathBuf) -> std::io::Result<(String, Option<String>)> {
     }
 }
 
+/// 500, não o 503 de grupo indisponível: é o status do `/pair/contract` (como no Python), e a dona o
+/// repassa a quem pediu de outra máquina, que o lê como recusa dela e não como "dona fora do ar".
 fn unreadable(error: impl std::fmt::Display) -> Refusal {
     tracing::error!(code = "groups_contract_unreadable", %error, "groups: o contrato do grupo não foi lido ou gravado");
-    unavailable("groups_contract_unreadable")
+    no(StatusCode::INTERNAL_SERVER_ERROR, "erro_grupo_indisponivel", "os grupos estão indisponíveis agora", json!({"detalhe": "groups_contract_unreadable"}))
 }
 
 /// Grava se o `mtime` lido ainda é o do arquivo; sem `mtime`, só cria. Sob o lock do grupo: duas
@@ -359,7 +307,7 @@ async fn write_contract(groups: &GroupService, gid: &str, content: String, expec
 
 /// A dona do grupo `gid` é esta máquina (registro gravado).
 async fn owned_here(groups: &GroupService, gid: &str) -> Result<(), Refusal> {
-    let (dir, g, me) = (PairDir::new(groups.pair_root().to_path_buf(), PathBuf::new()), gid.to_owned(), groups.server_id().to_owned());
+    let (dir, g, me) = (groups.dir(), gid.to_owned(), groups.server_id().to_owned());
     match tokio::task::spawn_blocking(move || dir.record(&g)).await {
         Ok(Ok(Some(r))) if r.owner == me => Ok(()),
         Ok(Ok(_)) => Err(missing(gid)),
@@ -375,8 +323,8 @@ struct OwnerPut { protocol: u32, content: String, mtime: Option<String> }
 pub(super) async fn owner_contract(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let m = match Machine::take(st, peer, req).await { Ok(m) => m, Err(r) => return r };
     if let Err(refused) = owned_here(&m.groups, &m.gid).await { return m.answer(Err(refused)); }
-    let result = if m.method == Method::PUT {
-        let body = match m.body::<OwnerPut>() { Ok(b) if b.protocol == PROTOCOL => b, Ok(_) => return invalid_body(&m.headers), Err(r) => return r };
+    let result = if m.method() == Method::PUT {
+        let body = match m.body::<OwnerPut>() { Ok(b) if b.protocol == PROTOCOL => b, Ok(_) => return m.invalid(), Err(r) => return r };
         write_contract(&m.groups, &m.gid, body.content, body.mtime).await.map(|mtime| json!({"protocol": PROTOCOL, "mtime": mtime}))
     } else {
         let path = m.groups.contract_path(&m.gid);
@@ -393,7 +341,7 @@ pub(super) async fn owner_contract(State(st): State<Arc<AppState>>, ConnectInfo(
 /// do grupo, pela dona (`path` vazio).
 pub(super) async fn session_contract(asked: &Asked, link: &Sidecar) -> Response {
     let me = asked.groups.server_id().to_owned();
-    let owner = link.fed.as_ref().map_or_else(|| me.clone(), |f| f.owner.clone());
+    let owner = link.owner_or(&me);
     let read = if owner == me {
         let path = asked.groups.contract_path(&link.gid);
         let shown = path.to_string_lossy().into_owned();
@@ -426,7 +374,7 @@ pub(super) async fn session_contract_put(State(st): State<Arc<AppState>>, Connec
         return asked.refuse(StatusCode::NOT_FOUND, "erro_sessao_nao_pareada", "sessão não está pareada", json!({}));
     };
     let me = asked.groups.server_id().to_owned();
-    let owner = link.fed.as_ref().map_or_else(|| me.clone(), |f| f.owner.clone());
+    let owner = link.owner_or(&me);
     let written = if owner == me { write_contract(&asked.groups, &link.gid, body.content, body.mtime).await } else {
         let ask = json!({"protocol": PROTOCOL, "content": body.content, "mtime": body.mtime});
         asked.st.peers.call_group(&owner, reqwest::Method::PUT, &format!("/api/groups/{}/contract", segment(&link.gid)), Some(&ask)).await
