@@ -542,7 +542,9 @@ impl Api {
         if let Some((key, value)) = query { url.query_pairs_mut().append_pair(key, value); }
         let mut req = self.client.request(method, url);
         if let Some(body) = body { req = req.json(&body); }
-        let r = req.timeout(Duration::from_secs(seconds)).send().await.map_err(|_| Failure::transport(true))?;
+        // `0`: sem prazo, para quem espera o Claude subir; a máquina carregada não tem tempo fixo.
+        if seconds > 0 { req = req.timeout(Duration::from_secs(seconds)); }
+        let r = req.send().await.map_err(|_| Failure::transport(true))?;
         let r = Self::checked(r, true).await?;
         r.json().await.map_err(|_| Failure::transport(true))
     }
