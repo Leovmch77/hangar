@@ -1,10 +1,14 @@
 //! Par 1:1 antigo entre máquinas (sidecar sem `fed` com um só peer `srv::x`) vira grupo entre
 //! máquinas sozinho (I-8B). As duas pontas chegam à mesma dona (menor `server_id`) e ao mesmo
 //! `gid` sem conversar; só a dona age, e só grava depois de a outra confirmar. Máquina antiga ou
-//! que não responde: o par segue 1:1 e a dona tenta de novo na próxima subida.
-use std::collections::HashSet;
-use std::path::PathBuf;
-use std::sync::Arc;
+//! que não responde: o par segue 1:1 e a dona tenta de novo, com espera crescente.
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
+
+use tokio::sync::Notify;
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
@@ -25,6 +29,63 @@ use crate::session_write::detail_body;
 pub fn group_id(a: &str, b: &str) -> String {
     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
     sha1_smol::Sha1::from(format!("{lo}\n{hi}")).digest().to_string()[..12].to_owned()
+}
+
+/// Espera entre as novas tentativas enquanto sobra par antigo: as máquinas do dono atualizam em
+/// dias diferentes, e a dona não pode depender de reiniciar.
+const RETRY_LADDER: [Duration; 5] = [Duration::from_secs(30), Duration::from_secs(60), Duration::from_secs(120), Duration::from_secs(300), Duration::from_secs(600)];
+
+#[derive(Default)]
+struct Kick { notify: Notify, kicked: AtomicBool }
+
+/// Por pasta `.hangar-pair` (os testes sobem várias máquinas num processo): escada e a volta viva.
+#[derive(Default)]
+struct Retry { ladder: Vec<Duration>, running: Option<Arc<Kick>> }
+
+static RETRIES: LazyLock<Mutex<HashMap<PathBuf, Retry>>> = LazyLock::new(Mutex::default);
+
+fn retries() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Retry>> { RETRIES.lock().unwrap_or_else(|e| e.into_inner()) }
+
+/// Escada das novas tentativas da máquina de `root` (testes).
+pub fn configure_retry(root: &Path, ladder: Vec<Duration>) { retries().entry(root.to_path_buf()).or_default().ladder = ladder; }
+
+/// Subida: converte já e, sobrando par antigo em que esta é a dona, segue tentando com espera
+/// crescente até não sobrar nenhum. Sem par antigo, nada fica rodando.
+pub async fn run_and_retry(st: &Arc<AppState>, groups: &Arc<GroupService>) {
+    if run(st, groups, &[]).await == 0 { return; }
+    let root = groups.pair_root().to_path_buf();
+    let (kick, ladder) = {
+        let mut all = retries();
+        let entry = all.entry(root.clone()).or_default();
+        if let Some(kick) = &entry.running {
+            // Já há uma volta: recomeça a escada dela.
+            kick.kicked.store(true, Ordering::SeqCst);
+            kick.notify.notify_one();
+            return;
+        }
+        let kick = Arc::new(Kick::default());
+        entry.running = Some(kick.clone());
+        (kick, if entry.ladder.is_empty() { RETRY_LADDER.to_vec() } else { entry.ladder.clone() })
+    };
+    // shortcut: a volta não é abortada com o servidor (um por processo em produção); só acaba sem par antigo.
+    tokio::spawn(retry(st.clone(), groups.clone(), root, kick, ladder));
+}
+
+async fn retry(st: Arc<AppState>, groups: Arc<GroupService>, root: PathBuf, kick: Arc<Kick>, ladder: Vec<Duration>) {
+    let mut step = 0;
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep(ladder[step.min(ladder.len() - 1)]) => step += 1,
+            () = kick.notify.notified() => step = 0,
+        }
+        kick.kicked.store(false, Ordering::SeqCst);
+        if run(&st, &groups, &[]).await > 0 { continue; }
+        let mut all = retries();
+        // Pedido novo durante a última tentativa: mais uma volta.
+        if kick.kicked.swap(false, Ordering::SeqCst) { continue; }
+        if let Some(entry) = all.get_mut(&root) { entry.running = None; }
+        return;
+    }
 }
 
 fn pair_dir(groups: &GroupService) -> PairDir { PairDir::new(groups.pair_root().to_path_buf(), PathBuf::new()) }
@@ -56,21 +117,28 @@ fn find(dir: &PairDir, peers: &HashSet<String>, aliases: &HashSet<String>, outsi
     (found, ambiguous)
 }
 
-/// Converte os pares antigos desta máquina em que ela é a dona. Falha só ao log e ao diário.
-pub async fn run(st: &Arc<AppState>, groups: &Arc<GroupService>, names: &[String]) {
-    let me = groups.server_id().to_owned();
-    if me.is_empty() { return; }
+/// Pares antigos (`names` vazio = todos) em que esta máquina é a dona, e os ambíguos.
+async fn scan(st: &AppState, groups: &GroupService, me: &str, names: &[String]) -> (Vec<Legacy>, Vec<String>) {
     let peers = st.peers.ids();
     let aliases: HashSet<String> = st.share.as_ref().map(|s| s.pairs.all().into_iter().map(|r| r.alias).collect()).unwrap_or_default();
     let (outside, dir, names) = (outside_addresses(st), pair_dir(groups), names.to_vec());
-    let Ok((found, ambiguous)) = tokio::task::spawn_blocking(move || find(&dir, &peers, &aliases, &outside, &names)).await else { return };
+    let (found, ambiguous) = tokio::task::spawn_blocking(move || find(&dir, &peers, &aliases, &outside, &names)).await.unwrap_or_default();
+    // Chave igual ao id (conferido na conversão) dá a mesma dona que o id: a de chave maior espera a outra.
+    (found.into_iter().filter(|l| me < l.server.as_str()).collect(), ambiguous)
+}
+
+/// Converte os pares antigos desta máquina em que ela é a dona e devolve quantos sobraram.
+/// Falha só ao log e ao diário.
+pub async fn run(st: &Arc<AppState>, groups: &Arc<GroupService>, names: &[String]) -> usize {
+    let me = groups.server_id().to_owned();
+    if me.is_empty() { return 0; }
+    let (found, ambiguous) = scan(st, groups, &me, names).await;
     for name in &ambiguous {
         st.diag.report("rust.grupos_conversao_ambigua", name, "grupos_conversao_ambigua", "par 1:1 antigo que também parece par de fora; não convertido");
     }
-    // Chave igual ao id (conferido abaixo) dá a mesma dona que o id: a de chave maior espera a outra.
-    for legacy in found.into_iter().filter(|l| me < l.server) {
-        convert(st, groups, &me, legacy).await;
-    }
+    if found.is_empty() { return 0; }
+    for legacy in found { convert(st, groups, &me, legacy).await; }
+    scan(st, groups, &me, names).await.0.len()
 }
 
 async fn convert(st: &Arc<AppState>, groups: &Arc<GroupService>, me: &str, l: Legacy) {

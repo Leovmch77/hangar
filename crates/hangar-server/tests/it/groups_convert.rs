@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use axum::Router;
 use fake::{OWNER, SECRET, client};
-use hangar_server::groups::convert::group_id;
+use hangar_server::groups::convert::{self, group_id};
 use hangar_server::groups::federation;
 use hangar_server::groups::orq::PythonOrq;
 use hangar_server::groups::peers::{PeerBook, PeerClient};
@@ -130,6 +130,33 @@ async fn old_machine() -> SocketAddr {
     addr
 }
 
+/// `target` atrás de um interruptor: desligado responde como Hangar antigo, ligado repassa.
+async fn upgradable(target: SocketAddr, upgraded: Arc<std::sync::atomic::AtomicBool>) -> SocketAddr {
+    let app = Router::new().fallback(move |req: axum::extract::Request| {
+        let upgraded = upgraded.clone();
+        async move {
+            if !upgraded.load(std::sync::atomic::Ordering::SeqCst) {
+                return axum::http::Response::builder().status(404).header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"detail":"Not Found"}"#)).unwrap();
+            }
+            let (parts, body) = req.into_parts();
+            let bytes = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+            let mut fwd = client().request(parts.method.clone(), format!("http://{target}{}", parts.uri.path())).body(bytes.to_vec());
+            for name in ["authorization", "content-type"] {
+                if let Some(v) = parts.headers.get(name) { fwd = fwd.header(name, v); }
+            }
+            let resp = fwd.send().await.unwrap();
+            let status = resp.status().as_u16();
+            let text = resp.bytes().await.unwrap();
+            axum::http::Response::builder().status(status).header("content-type", "application/json").body(axum::body::Body::from(text)).unwrap()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
 fn outside_pair(m: &Machine, local: &str, alias: &str, peer: &str) {
     let (s, _) = m.share.store.create_redeemed(local, Some("t:1".into()), Kind::Pair).unwrap();
     m.share.pairs.add(hangar_server::share::pairs::ExternalPair { share_id: s.id.clone(), local_session: local.into(),
@@ -203,6 +230,25 @@ async fn old_version_peer_stays_legacy() {
     // A outra máquina atualizou: a próxima subida converte.
     peers(&n.casa, &[("lab", n.lab.addr)]);
     start(&n.casa).await;
+    assert_converted(&n);
+}
+
+/// As máquinas do dono atualizam em dias diferentes: a dona tenta de novo sozinha, sem reiniciar.
+#[tokio::test(flavor = "multi_thread")]
+async fn conversion_retries_after_the_peer_upgrades() {
+    let n = net().await;
+    convert::configure_retry(&n.casa.pair, vec![Duration::from_millis(100)]);
+    let upgraded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    peers(&n.casa, &[("lab", upgradable(n.lab.addr, upgraded.clone()).await)]);
+    legacy(&n.casa, "s0", "lab::s1");
+    legacy(&n.lab, "s1", "casa::s0");
+    start(&n.casa).await;
+    assert!(records(&n.casa).is_empty(), "lab ainda é antiga: segue 1:1");
+    upgraded.store(true, std::sync::atomic::Ordering::SeqCst);
+    // O sidecar da dona é o último a ser gravado na conversão.
+    let casa = n.casa.pair.clone();
+    fake::wait_until(move || std::fs::read(casa.join("s0.json")).ok().and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        .is_some_and(|s| s["fed"]["owner"] == "casa")).await;
     assert_converted(&n);
 }
 

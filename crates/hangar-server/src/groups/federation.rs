@@ -797,10 +797,10 @@ pub async fn local_apply(st: &Arc<AppState>, groups: &Arc<GroupService>, gid: &s
     // Sem a dona no peers.json daqui, saída, renomear e aviso dela não teriam para onde ir.
     if st.peers.base_url(&body.owner).is_none() { return Err(unregistered(&body.owner)); }
     if body.owner == me { return Err(no(StatusCode::CONFLICT, "erro_grupo_identificador_igual", "a dona do grupo tem o mesmo id desta máquina", json!({}))); }
+    if let Some(from) = body.convert_from_legacy.clone() { return super::convert::accept(groups, gid, body, from).await; }
     let fed = of(st, groups).await?;
     // Leitura antecipada só para conferir as sessões na lista; quem vale é a da fila sob o lock.
     let (renamed, leaving) = pending_moves(&fed.outbox.pending(), &body.owner, gid);
-    if let Some(from) = body.convert_from_legacy.clone() { return super::convert::accept(groups, gid, body, from).await; }
     let joining = moved(&body.joining, &renamed, &leaving);
     let harness = if joining.is_empty() || body.dissolved { BTreeMap::new() } else {
         providers(st, &joining).await.map_err(|failed| Refusal(StatusCode::SERVICE_UNAVAILABLE, json!({"detail": failed})))?
@@ -1061,10 +1061,10 @@ pub(super) async fn pair(asked: Asked, held: Option<IngressPass>, others: Vec<St
         return respond(unregistered(&c.server));
     }
     let locals: Vec<String> = candidates.iter().filter(|c| c.server == me).map(|c| c.name.clone()).collect();
+    super::convert::run(&asked.st, &asked.groups, &locals).await;
     let harness = match providers(&asked.st, &locals).await {
         Ok(h) => h,
         Err(failed) => return asked.reply(StatusCode::SERVICE_UNAVAILABLE, json!({"detail": failed})),
-    super::convert::run(&asked.st, &asked.groups, &locals).await;
     };
     let missing = locals.iter().filter(|n| !harness.contains_key(*n)).cloned().collect::<Vec<_>>().join(", ");
     if !missing.is_empty() {
@@ -1157,10 +1157,10 @@ pub fn spawn(st: Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
                 Err(error) => tracing::warn!(code = "groups_restart_ask_failed", %owner, error = %error.text(&owner), "groups: a dona não respondeu na subida"),
             }
         }
+        super::convert::run_and_retry(&st, &groups).await;
     }))
 }
 
-        super::convert::run(&st, &groups, &[]).await;
 // --- repasse da porta do Connect ---------------------------------------------------------------
 
 /// Rotas de grupo entre máquinas que o Python das portas dele (Connect) repassa a esta.
