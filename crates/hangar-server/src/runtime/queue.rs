@@ -33,7 +33,7 @@ const RECEIPT_METADATA: &[&str] = &["native", "message_id", "native_status", "cl
     // A repetição da reabertura em bypass só se reconhece por estes campos (`reopen_claude`).
     "reopened", "mode", "current", "previous_non_plan"];
 /// Ações cujo resultado é a operação inteira. Mesmo conjunto de `_OPERATION_RECEIPTS` em runtime_queue.py.
-const OPERATION_RECEIPTS: &[&str] = &["prepare", "bind_dispatch", "begin_dispatch", "mark_writing", "finish", "late_rpc_resolution"];
+const OPERATION_RECEIPTS: &[&str] = &["prepare", "bind_dispatch", "bind_dispatch_if_prepared", "begin_dispatch", "mark_writing", "finish", "late_rpc_resolution"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
