@@ -132,6 +132,15 @@ fn pair_context_without_local_others_prints_only_the_outside_warning() {
     assert_eq!(context(&run(&files, &json!({}), &pane_a(), PANES).stdout), external);
 }
 
+/// Sidecar 1:1 legado (`peer`, sem `peers`) reinjeta o mesmo texto do formato atual, como o servidor o lê.
+#[test]
+fn legacy_peer_sidecar_reinjects_like_peers() {
+    let of = |sidecar: Value| run(&json!({"a.json": sidecar.to_string()}), &json!({}), &pane_a(), PANES).stdout;
+    let current = of(json!({"peers": ["b"], "task": ""}));
+    assert!(!current.is_empty());
+    assert_eq!(of(json!({"peer": "b", "task": ""})), current);
+}
+
 /// I-4A: grupo entre máquinas cita o caminho na dona e a dona pela tool `contract` nas outras.
 #[test]
 fn fed_contract_line_follows_the_owner() {

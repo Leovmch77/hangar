@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
-use super::model::Fed;
+use super::model::{Fed, Sidecar};
 use super::store::file_stem;
 use super::text::{self, ContractLine, Kind, OutsidePeer, TextArgs};
 use crate::transcript::pyjson;
@@ -51,12 +51,11 @@ fn protocol(pair_dir: &Path, me: &str, d: &Map<String, Value>) -> Option<String>
     if d.get("orq") == Some(&Value::Bool(true)) {
         return Some(text::render(Kind::Orq, &TextArgs { task, ..Default::default() }));
     }
-    let Some(peers) = d.get("peers")?.as_array() else { return failed("pair_context_peers_invalid", "peers não é lista") };
-    let peers: Vec<String> = peers.iter().filter_map(Value::as_str)
-        .filter(|p| !p.is_empty()).map(str::to_owned).collect();
-    if peers.is_empty() {
-        return None;
+    if d.get("peers").is_some_and(|p| !p.is_array()) {
+        return failed("pair_context_peers_invalid", "peers não é lista");
     }
+    // `Sidecar::parse` lê também o formato 1:1 legado (`peer`), como o servidor.
+    let peers = Sidecar::parse(me, d)?.peers;
     let outside = outside_of(pair_dir, me, &peers);
     let others: Vec<String> = peers.iter().filter(|p| !outside.iter().any(|o| &o.address == *p)).cloned().collect();
     // Filha ligada não recebe o protocolo (cobraria tokens do pai a cada /clear); o aviso de par de
