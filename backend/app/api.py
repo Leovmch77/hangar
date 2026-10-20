@@ -605,16 +605,13 @@ async def _jev_aux_pelo_rust(request: Request, call_next):
                                   "/__hangar_server/forwarded" if delivery else "/__hangar_server/jev/aux")
 
 
-# Grupo entre máquinas: rotas só do Rust. Pelas portas do Python (Connect) só repasse, nunca o 404 sem
-# código que a outra máquina leria como versão antiga.
-_GRUPOS_RUST = re.compile(r"^/api/groups/[^/]+(/ops|/deliver|/contract)?$")
-_GRUPO_DA_SESSAO = re.compile(r"^/api/sessions/[^/]+/group$")
-
-
 @app.middleware("http")
 async def _grupos_pelo_rust(request: Request, call_next):
+    """Grupo entre máquinas: rotas só do Rust. Pelas portas do Python (Connect) tudo segue a ele, que
+    decide o que atende; o que não é dele volta com código, nunca o 404 cru que a outra máquina leria
+    como versão antiga."""
     path = request.url.path
-    if not (_GRUPOS_RUST.match(path) or (request.method == "GET" and _GRUPO_DA_SESSAO.match(path))):
+    if not (path.startswith("/api/groups/") or (request.method == "GET" and path.startswith("/api/sessions/") and path.endswith("/group"))):
         return await call_next(request)
     if guest_of(request) is not None or guest_users.current.get() is not None:
         return JSONResponse({"detail": erro("erro_fora_do_convite", "fora da sessao compartilhada")}, status_code=403)
@@ -2180,20 +2177,12 @@ def _jsonl_of_session(name: str) -> str | None:
         return None
 
 
-def _orq_phases(name: str) -> dict:
-    from app.adapters.orq import runs
-    link = PairLink(name).get() or {}
-    return {link["gid"]: runs.group_phase(link["gid"])} if link.get("orq") else {}
-
-
 async def _deliver_deferred(deliveries) -> list[dict]:
     """Recados que o Rust devolveu por serem a sessões que só o Python atende; falhas como avisos."""
-    failed = []
-    for d in deliveries or []:
-        res = await _enviar(d["name"], d["text"])
-        if not res.get("ok"):
-            failed.append({"sessao": d["name"], "erro": res.get("error") or erro("erro_envio_falhou_desconhecida", "falha desconhecida no envio")})
-    return failed
+    deliveries = deliveries or []
+    results = await asyncio.gather(*(_enviar(d["name"], d["text"]) for d in deliveries))
+    return [{"sessao": d["name"], "erro": res.get("error") or erro("erro_envio_falhou_desconhecida", "falha desconhecida no envio")}
+            for d, res in zip(deliveries, results) if not res.get("ok")]
 
 
 async def _rust_leave(name: str, phases: dict) -> list[dict]:
@@ -2219,7 +2208,7 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
     # a fase do `orq` lida aqui antes, para o Rust não perguntar de volta.
     skip_leave = closed or marked("x-hangar-rust-leaves")
     phases = None if skip_leave or not groups_bridge.rust_owns_groups() \
-        else await asyncio.to_thread(_orq_phases, name)
+        else (await asyncio.to_thread(_route_facts, name, None))["phases"]
     # Sem o Rust a saída do grupo não acontece: fechar segue, e a falta vai no aviso e no diário.
     orphan = phases is None and not skip_leave and await asyncio.to_thread(lambda: PairLink(name).get() is not None)
     # Fechada pelo Rust a sessão já saiu da lista: o transcript vem no cabeçalho dele.
@@ -4171,9 +4160,10 @@ def _require_rust_groups() -> None:
         raise HTTPException(503, detail=_groups_need_rust())
 
 
-def _route_facts(name: str, body: dict | None) -> dict:
+def _route_facts(name: str, body: dict | None, route: str | None = None) -> dict:
     """Fatos do `orq` que a rota de grupo usaria, lidos antes da ponte (I-5A): dentro dela o Rust não
-    pergunta ao Python. Orquestradores = todas as execuções ativas; fase = gid `orq` dos nomes citados."""
+    pergunta ao Python. Orquestradores = execuções ativas, só nas rotas que recusam orquestrador
+    (`pair`, `pair-remote`); fase = gid `orq` dos nomes citados."""
     from app.adapters.orq import runs
     body = body or {}
     names = [name, *(body.get("peers") or []), *([body["peer"]] if body.get("peer") else [])]
@@ -4182,7 +4172,8 @@ def _route_facts(name: str, body: dict | None) -> dict:
         link = PairLink(n).get() or {} if "::" not in n else {}
         if link.get("orq") and link.get("gid"):
             phases[link["gid"]] = runs.group_phase(link["gid"])
-    return {"orchestrators": [r["name"] for r in runs.active()], "phases": phases}
+    orchestrators = [r["name"] for r in runs.active()] if route in ("pair", "pair-remote") else []
+    return {"orchestrators": orchestrators, "phases": phases}
 
 
 async def _route_after(out: dict) -> None:
@@ -4234,7 +4225,7 @@ async def _group_route(method: str, name: str, route: str, body: BaseModel | Non
     há reserva Python."""
     _require_rust_groups()
     data = body.model_dump() if body is not None else None
-    facts = await asyncio.to_thread(_route_facts, name, data)
+    facts = await asyncio.to_thread(_route_facts, name, data, route)
     try:
         out = await asyncio.to_thread(groups_bridge.call, "group.route", method=method, name=name, route=route,
                                       body=data, facts=facts)

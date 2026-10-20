@@ -25,8 +25,10 @@ class _Rust(BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length") or 0)
         _Rust.seen.append({"method": self.command, "path": self.path, "original": self.headers.get("x-hangar-path"),
                            "body": self.rfile.read(length).decode() if length else ""})
-        data = json.dumps({"server_id": "casa", "de": "rust", **_Rust.extra}).encode()
-        self.send_response(200)
+        # Rota que o Rust não atende: o 404 com código do `forwarded::private`.
+        unknown = _Rust.seen[-1]["original"] == "/api/groups/x/y"
+        data = json.dumps({"code": "forwarded_route_not_owned"} if unknown else {"server_id": "casa", "de": "rust", **_Rust.extra}).encode()
+        self.send_response(404 if unknown else 200)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(data)))
         self.end_headers()
@@ -65,6 +67,10 @@ def test_connect_forwards_groups_routes(rust):
         (m.upper(), "/__hangar_server/forwarded", p) for m, p, _ in ROUTES]
     # O corpo do PUT e do POST chega inteiro ao Rust.
     assert json.loads(_Rust.seen[1]["body"]) == ROUTES[1][2] and json.loads(_Rust.seen[2]["body"]) == ROUTES[2][2]
+    # Caminho que o Rust não conhece também segue a ele, e volta com código.
+    r = client.post("/api/groups/x/y", headers=AUTH, json={})
+    assert (r.status_code, r.json()) == (404, {"code": "forwarded_route_not_owned"})
+    assert _Rust.seen[-1]["original"] == "/api/groups/x/y"
 
 
 def test_connect_forward_delivers_what_the_rust_deferred(rust, monkeypatch):
