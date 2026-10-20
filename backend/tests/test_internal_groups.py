@@ -1,9 +1,11 @@
-"""Rotas internas que o Rust usa nas operações de grupo: texto do protocolo e fatos da orquestração."""
+"""Rotas internas que o Rust usa nas operações de grupo: fatos da orquestração."""
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
 import app.api as api_mod
-from app import internal_api, orq_context as oc, orq_md, orq_papeis as roles, pair, pair_texto
+from app import internal_api, orq_context as oc, orq_md, orq_papeis as roles, pair
 from app.adapters.orq import runs
 
 SECRET = "cd" * 32
@@ -27,28 +29,13 @@ def _post(path, body, headers=H):
     return TestClient(api_mod.app, client=("127.0.0.1", 50000)).post(f"/internal/{path}", json=body, headers=headers)
 
 
-def _text(**kw):
-    body = {"kind": "group", "me": "a", "others": ["b"], "task": "t", "contract": "/c.md", "contract_remote": False,
-            "harness": {"a": "codex"}, "peer": "", "owner": ""}
-    return _post("pair/text", {**body, **kw})
-
-
 def test_routes_need_the_secret():
-    for path in ("pair/text", "orq/group-phase", "orq/promote", "orq/is-orchestrator"):
+    for path in ("orq/group-phase", "orq/promote", "orq/is-orchestrator"):
         assert _post(path, {}, headers={}).status_code == 404, path
 
 
-def test_protocol_text_comes_from_pair_texto():
-    assert _text().json() == {"text": pair_texto.texto_grupo("a", ["b"], "t", "/c.md", {"a": "codex"})}
-    assert _text(contract=None).json() == {"text": pair_texto.texto_grupo("a", ["b"], "t", None, {"a": "codex"})}
-    assert _text(kind="orq").json() == {"text": pair_texto.texto_grupo_orq("t")}
-    assert _text(kind="external", peer="p", owner="o").json() == {"text": pair_texto.texto_par_externo("a", "p", "o")}
-
-
-def test_protocol_text_refuses_bad_bodies():
-    assert _text(kind="outro").status_code == 422
-    assert _text(extra=1).status_code == 422
-    assert _text(others=[]).status_code == 400
+def test_protocol_text_route_is_gone():
+    assert _post("pair/text", {"kind": "orq"}).status_code == 404
 
 
 def test_group_phase(monkeypatch):
@@ -68,7 +55,7 @@ def test_promote_maps_conflicts_and_tolerates_missing_identity(monkeypatch):
             raise exc
         return promote
 
-    # Como no `pair.join_group`: sem identidade não houve configuração para promover.
+    # Sem identidade não houve configuração para promover.
     monkeypatch.setattr(oc, "promote", raising(oc.IdentityUnavailable("sem identidade")))
     assert _post("orq/promote", {"name": "a", "gid": "g1"}).status_code == 200
     for exc in (oc.PromotionConflict("o time já pertence a outro grupo"), orq_md.Conflito("/x.md")):
@@ -111,7 +98,7 @@ def _saved(name):
 
 def test_public_associate_still_takes_the_lock(monkeypatch):
     mtime = _saved("planner")
-    pair.PairLink("arbiter").set([], "obra", "real", orq=True)
+    (pair._pair_dir() / "arbiter.json").write_text(json.dumps({"peers": [], "task": "obra", "gid": "real", "orq": True}))
     monkeypatch.setattr(pair, "_LOCK", _NoLock())
     with pytest.raises(AssertionError, match="pair._LOCK"):
         oc.associate("planner", "real", mtime)

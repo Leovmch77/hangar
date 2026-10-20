@@ -1,5 +1,5 @@
-"""No modo `rust`/`pending` o Rust é o único que grava `.hangar-pair`: o Python pede pela ponte
-`/__hangar_server/groups`, e as primitivas de escrita do `pair.py` recusam alto."""
+"""O Rust é o único que grava `.hangar-pair`: o que chega às portas do Python segue pela ponte
+`/__hangar_server/groups`, num sentido; no modo `python` as rotas de grupo recusam com código."""
 import asyncio
 import json
 import threading
@@ -11,7 +11,6 @@ from fastapi.testclient import TestClient
 
 from app import api, groups_bridge, pair, registry, runtime_coordinator
 from app.config import settings
-from app.models import SessionInfo
 
 H = {"Authorization": "Bearer secret"}
 
@@ -43,32 +42,17 @@ def _rust(monkeypatch, reply=None, error=None):
     return calls
 
 
-def test_write_primitives_refuse_in_rust_mode(monkeypatch, tmp_path):
-    pair.PairLink("a").set(["b"], "", "g1", {})
-    (pair._pair_dir() / "grupo-g2.md").write_text("perdedor", encoding="utf-8")
-    monkeypatch.setattr(groups_bridge, "rust_owns_groups", lambda: True)
-    with pytest.raises(pair.GroupsOwnedByRust):
-        pair.PairLink("a").set(["b"], "", "g1", {})
-    with pytest.raises(pair.GroupsOwnedByRust):
-        pair.PairLink("a").clear()
-    with pytest.raises(pair.GroupsOwnedByRust):
-        pair._merge_contract("g2", "g1")
-    with pytest.raises(pair.GroupsOwnedByRust):
-        pair._arquivar_contratos("g1")
-    # A leitura continua do Python.
-    assert pair.PairLink("a").get()["peers"] == ["b"]
-    assert (pair._pair_dir() / "grupo-g2.md").exists()
+def _sidecar(name, peers, gid="g1", orq=False):
+    """Sidecar como o Rust o grava."""
+    body = {"peers": peers, "task": "", "gid": gid, "harness": {}, **({"orq": True} if orq else {})}
+    (pair._pair_dir() / f"{name}.json").write_text(json.dumps(body), encoding="utf-8")
 
 
-def test_ownership_follows_mode_and_health(monkeypatch):
-    monkeypatch.setattr(groups_bridge, "_capable", True)
+def test_ownership_follows_mode(monkeypatch):
     for mode, owned in (("rust", True), ("pending", True), ("python", False)):
         monkeypatch.setattr(runtime_coordinator, "_current", SimpleNamespace(mode=mode))
         assert groups_bridge.rust_owns_groups() is owned, mode
-    monkeypatch.setattr(groups_bridge, "_capable", False)
-    assert groups_bridge.rust_owns_groups() is False, "Rust sem grupos na saúde: o Python segue dono"
     monkeypatch.setattr(runtime_coordinator, "_current", None)
-    monkeypatch.setattr(groups_bridge, "_capable", True)
     assert groups_bridge.rust_owns_groups() is False
 
 
@@ -136,26 +120,13 @@ def test_lone_surrogate_in_the_task_reaches_the_rust_instead_of_500(monkeypatch)
     assert seen[0]["args"]["task"] == "ok \ufffd fim"
 
 
-def test_call_in_python_mode_refuses(monkeypatch):
-    monkeypatch.setattr(runtime_coordinator, "_current", SimpleNamespace(mode="python"))
-    with pytest.raises(groups_bridge.GroupsBridgeError) as e:
-        groups_bridge.call("group.leave", name="a")
-    assert e.value.code == "groups_runtime_python"
-
-
-def test_kill_in_rust_mode_leaves_the_group_to_rust(monkeypatch):
-    # O Rust tira do grupo depois do fechamento que repassou: pedir pela ponte seria ida e volta.
-    calls = _rust(monkeypatch, reply={})
-    assert registry.SessionRegistry._clear_pair("a") == [] and calls == []
-
-
 def test_close_that_skipped_the_rust_leaves_with_the_orq_facts(monkeypatch, client):
     """Connect (8768) e convidado não passam pelo `delete` do Rust: a saída vai pela ponte, com a fase."""
     from app import internal_api
     from app.adapters.orq import runs
     internal_api.set_secret("s3gredo")
     monkeypatch.setattr(runs, "group_phase", lambda gid: "live")
-    pair.PairLink("a").set(["b"], "", "g1", {}, orq=True)
+    _sidecar("a", ["b"], orq=True)
     not_notified = {"sessao": "srv::x", "erro": {"code": "erro_peer_nao_avisado", "params": {}, "msg": "srv inacessível"}}
     calls = _rust(monkeypatch, reply={"ex_peers": ["srv::x"], "warnings": [not_notified]})
     monkeypatch.setattr(api, "_recusa_orq", lambda n: None)
@@ -183,20 +154,37 @@ def test_pair_route_forwards_status_and_body(monkeypatch, client):
         "peer": "b", "peers": [], "task": "y", "replace_task": False, "notify_members": True, "orq": False}})]
 
 
-@pytest.mark.parametrize("method,path,route,body", [
+GROUP_ROUTES = [
+    ("post", "/api/sessions/a/pair", "pair", {}),
     ("delete", "/api/sessions/a/pair", "pair", None),
     ("post", "/api/sessions/a/group-message", "group-message", {"text": "oi"}),
     ("get", "/api/sessions/a/pair/contract", "contract", None),
     ("post", "/api/sessions/a/pair-remote", "pair-remote", {"initiator": "srv::x"}),
     ("post", "/api/sessions/a/unpair-remote", "unpair-remote", {"peer": "srv::x"}),
-])
-def test_every_group_route_forwards(monkeypatch, client, method, path, route, body):
-    calls = _rust(monkeypatch, reply={"status": 200, "body": {"ok": True, "de": "rust"}})
+]
+
+
+@pytest.mark.parametrize("method,path,route,body", GROUP_ROUTES)
+def test_connect_group_route_is_one_way(monkeypatch, client, method, path, route, body):
+    """Pela 8768 a rota só repassa: status e corpo do Rust voltam como vieram, sem lógica aqui."""
+    calls = _rust(monkeypatch, reply={"status": 418, "body": {"de": "rust"}})
     kw = {"json": body} if body is not None else {}
     r = getattr(client, method)(path, headers=H, **kw)
-    assert (r.status_code, r.json()) == (200, {"ok": True, "de": "rust"})
+    assert (r.status_code, r.json()) == (418, {"de": "rust"})
     assert [(op, a["method"], a["route"]) for op, a in calls] == [("group.route", method.upper(), route)]
     assert not (pair._pair_dir() / "a.json").exists()
+
+
+@pytest.mark.parametrize("mode", ["python", None])
+@pytest.mark.parametrize("method,path,route,body", GROUP_ROUTES)
+def test_python_mode_group_routes_refuse(monkeypatch, client, mode, method, path, route, body):
+    monkeypatch.setattr(runtime_coordinator, "_current", mode and SimpleNamespace(mode=mode))
+    monkeypatch.setattr(groups_bridge, "call", lambda *a, **k: pytest.fail("sem Rust não há ponte"))
+    kw = {"json": body} if body is not None else {}
+    r = getattr(client, method)(path, headers=H, **kw)
+    assert r.status_code == 503, r.text
+    assert r.json()["detail"]["code"] == "groups_need_rust_server"
+    assert list(pair._pair_dir().iterdir()) == []
 
 
 def test_route_bridge_failure_is_coded(monkeypatch, client):
@@ -207,75 +195,13 @@ def test_route_bridge_failure_is_coded(monkeypatch, client):
     assert r.json()["detail"]["params"]["detalhe"] == "groups_runtime_starting"
 
 
-def test_mcp_path_forwards_in_process(monkeypatch):
-    calls = _rust(monkeypatch, reply={"status": 200, "body": {"ok": True, "warning": None}})
-    assert asyncio.run(api.unpair_session("a")) == {"ok": True, "warning": None}
-    assert calls[0][0] == "group.route"
-
-
-def test_forgotten_writer_is_an_explicit_error():
-    for exc in (pair.GroupsOwnedByRust("a"), groups_bridge.GroupsBridgeError("groups_bridge_off")):
-        handler = api.app.exception_handlers[type(exc)]
-        r = asyncio.run(handler(SimpleNamespace(method="POST", url=SimpleNamespace(path="/x")), exc))
-        body = json.loads(r.body)
-        assert r.status_code == 503 and body["detail"]["code"] == "erro_grupo_indisponivel"
-
-
-def test_sweep_loop_does_not_run_in_rust_mode(monkeypatch):
-    swept = []
-    monkeypatch.setattr(groups_bridge, "rust_owns_groups", lambda: True)
-    monkeypatch.setattr(api.registry, "sweep_pairs", lambda *a: swept.append(a))
-
-    async def stop(_s):
-        raise asyncio.CancelledError
-    monkeypatch.setattr(api.asyncio, "sleep", stop)
-    with pytest.raises(asyncio.CancelledError):
-        asyncio.run(api._pair_sweep_loop())
-    assert swept == []
-
-
-def test_capable_from_the_start_when_the_rust_is_expected():
-    """Antes da primeira saúde o Rust já atende `/pair` e varre: o Python não pode ser dono nem um instante."""
-    import subprocess
-    import sys
-    out = subprocess.run([sys.executable, "-c", "from app import groups_bridge; print(groups_bridge._capable)"],
-                         capture_output=True, text=True, check=True)
-    assert out.stdout.strip() == "True"
-
-
-def test_pending_before_health_does_not_write_and_waits(monkeypatch, tmp_path):
-    pair.PairLink("a").set(["b"], "", "g1", {})
-    pair.PairLink("b").set(["a"], "", "g1", {})
-    loop = asyncio.new_event_loop()
-    threading.Thread(target=loop.run_forever, daemon=True).start()
-    waited = []
-
-    async def await_mode():
-        waited.append(True)
-        raise runtime_coordinator.RuntimeStarting("subindo")
-    monkeypatch.setattr(runtime_coordinator, "_current", SimpleNamespace(mode="pending", loop=loop, await_mode=await_mode))
-    monkeypatch.setattr(groups_bridge, "_capable", True)
-    groups_bridge.configure(None, None)
-    try:
-        assert groups_bridge.rust_owns_groups() is True
-        with pytest.raises(groups_bridge.GroupsBridgeError) as e:
-            groups_bridge.call("group.leave", name="a")
-        assert e.value.code == "groups_runtime_starting" and waited
-        assert registry.SessionRegistry._clear_pair("a") == []
-        with pytest.raises(pair.GroupsOwnedByRust):
-            pair.leave("a")
-        swept = []
-        monkeypatch.setattr(api.registry, "sweep_pairs", lambda *a: swept.append(a))
-
-        async def stop(_s):
-            raise asyncio.CancelledError
-        monkeypatch.setattr(api.asyncio, "sleep", stop)
-        with pytest.raises(asyncio.CancelledError):
-            asyncio.run(api._pair_sweep_loop())
-        assert swept == []
-    finally:
-        loop.call_soon_threadsafe(loop.stop)
-    assert pair.PairLink("a").get()["peers"] == ["b"] and pair.PairLink("b").get()["peers"] == ["a"]
+def test_bridge_failure_is_an_explicit_error():
+    exc = groups_bridge.GroupsBridgeError("groups_bridge_off")
+    handler = api.app.exception_handlers[type(exc)]
+    r = asyncio.run(handler(SimpleNamespace(method="POST", url=SimpleNamespace(path="/x")), exc))
+    body = json.loads(r.body)
+    assert r.status_code == 503 and body["detail"]["code"] == "erro_grupo_indisponivel"
+    assert body["detail"]["params"]["detalhe"] == "groups_bridge_off"
 
 
 def test_associate_in_rust_mode_sends_the_orq_facts(monkeypatch, client):
@@ -320,9 +246,8 @@ def test_rename_in_rust_mode_aborts_when_rust_fails(monkeypatch, client):
     assert r.json()["detail"]["code"] == "erro_grupo_indisponivel"
 
 
-def test_registry_rename_does_not_write_groups_in_rust_mode(monkeypatch):
-    pair.PairLink("a").set(["b"], "", "g1", {})
-    monkeypatch.setattr(groups_bridge, "rust_owns_groups", lambda: True)
+def test_registry_rename_does_not_write_groups(monkeypatch):
+    _sidecar("a", ["b"])
     monkeypatch.setattr("app.conversation_transfer.require_available", lambda n: None)
     for mod in (registry.headless_sessions, registry.codex_sessions):
         monkeypatch.setattr(mod, "exists", lambda name: False)
@@ -333,14 +258,9 @@ def test_registry_rename_does_not_write_groups_in_rust_mode(monkeypatch):
     monkeypatch.setattr(registry.shortcut_terminals, "rename_owner", lambda *a: None)
     monkeypatch.setattr("app.conversation_transfer.rename_transfer", lambda *a: None)
     monkeypatch.setattr(registry.tmux, "is_hidden", lambda *a, **k: False, raising=False)
-    # O rename chega à etapa do grupo e ela não grava: quem renomeou o grupo foi o Rust.
-    reached = []
-    real = registry._rename_pair_python
-    monkeypatch.setattr(registry, "_rename_pair_python", lambda old, new: reached.append((old, new)) or real(old, new))
-    monkeypatch.setattr(registry, "rename_pair", lambda *a: pytest.fail("o rename do registry não pode gravar grupo no modo Rust"))
+    # Quem renomeia o grupo é o Rust, pela rota: o registry não toca no arquivo de grupo.
     reg.rename("a", "c")
-    assert reached == [("a", "c")]
-    assert pair.PairLink("a").get()["peers"] == ["b"]
+    assert pair.PairLink("a").get()["peers"] == ["b"] and pair.PairLink("c").get() is None
 
 
 def test_child_gets_group_env(monkeypatch, tmp_path):

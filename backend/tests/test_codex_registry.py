@@ -31,7 +31,6 @@ def _isolate(tmp_path, monkeypatch):
     SessionRegistry._jsonl_cache.clear()
     SessionRegistry._fd_locked.clear()
     monkeypatch.setattr(pair.settings, "projects_dir", tmp_path / "projects")
-    monkeypatch.setattr(SessionRegistry, "_pair_ausencias", {})
     sdir = tmp_path / "codex-sessions"
     with patch.object(codex_sessions, "_dir", lambda: sdir), \
          patch.object(registry.tmux, "new_session", return_value=True), \
@@ -163,11 +162,10 @@ def test_kill_ja_encerrado_pelo_rust_limpa_so_as_lojas_daqui_e_nao_volta_a_ele(t
     with patch("app.runtime_coordinator.rust_codex_terminal") as rust, \
          patch.object(registry.tmux, "kill_session") as kill_tmux, \
          patch.object(registry, "shortcut_terminals") as shortcuts, \
-         patch.object(SessionRegistry, "_clear_pair") as clear_pair, \
          patch("app.list_bridge.forget") as forget_in_rust, \
          patch("app.list_bridge.discover") as list_in_rust:
         assert reg.kill("cx", closed_by_rust=True) == []
-    for back_to_rust in (rust, kill_tmux, clear_pair, forget_in_rust, list_in_rust):
+    for back_to_rust in (rust, kill_tmux, forget_in_rust, list_in_rust):
         back_to_rust.assert_not_called()
     shortcuts.close_all.assert_called_once_with("cx")
 

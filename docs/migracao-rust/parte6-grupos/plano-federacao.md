@@ -396,15 +396,15 @@ modo `python`/convidado/8768 e transferências (BRG-29), `orq_context.py` (BRG-3
 **Fecha:** PAIR-14 (sai), BRG-01, 02, 03, 07, 11–19, 27, 35 (c → recusa), BRG-04/05/06/08/09/26/30
 (a, ficam no repasse), D na peça D/E do `escopo.md`.
 
-- [ ] **Step 1: Testes**: `test_python_mode_group_routes_refuse` (as 6 rotas → 503
+- [x] **Step 1: Testes**: `test_python_mode_group_routes_refuse` (as 6 rotas → 503
   `groups_need_rust_server` com `CP_RUST_SERVER=0`); `test_connect_group_route_is_one_way` (8768
   repassa status e corpo intactos, sem lógica).
-- [ ] **Step 2: Rodar e ver falhar.**
-- [ ] **Step 3: Remover** na ordem: rotas → registry → pair.py → pair_texto → testes.
-- [ ] **Step 4: Rodar.** Esperado: PASS nos arquivos de teste tocados; saldo de linhas Python
+- [x] **Step 2: Rodar e ver falhar.**
+- [x] **Step 3: Remover** na ordem: rotas → registry → pair.py → pair_texto → testes.
+- [x] **Step 4: Rodar.** Esperado: PASS nos arquivos de teste tocados; saldo de linhas Python
   negativo (`git diff --stat -- backend/app`).
-- [ ] **Step 5: Contrato interno** mudou (`/internal/pair/text` saiu) → subir os protocolos.
-- [ ] **Step 6: Commit** — `refactor(groups): remove the Python group writers and protocol text`.
+- [x] **Step 5: Contrato interno** mudou (`/internal/pair/text` saiu) → subir os protocolos.
+- [x] **Step 6: Commit** — `refactor(groups): remove the Python group writers and protocol text`.
 
 **Prova:** `grep -rn "pair_texto\|join_group\|rename_pair\|dissolve_lone_orq\|_pair_sweep_loop" backend/` → nada.
 

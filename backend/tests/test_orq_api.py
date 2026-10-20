@@ -111,16 +111,6 @@ def test_papel_post_grava_sem_avisar_arbitro(cli, tmp_path):
     assert r.status_code == 400 and r.json()["detail"]["code"] == "erro_orq_celula_invalida"
 
 
-def test_pair_promotion_conflict_returns_409(cli, monkeypatch):
-    def conflict(*args, **kwargs):
-        raise orq_context.PromotionConflict("o time já pertence a outro grupo")
-
-    monkeypatch.setattr(pair, "join_group", conflict)
-    r = cli.post("/api/sessions/exec/pair", headers=H,
-                 json={"peers": ["arb"], "orq": True})
-    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_orq_arquivo_mudou"
-
-
 def test_actual_group_remains_readable_without_identity(cli, monkeypatch):
     def unavailable(name):
         raise orq_context.IdentityUnavailable("cannot read current process")

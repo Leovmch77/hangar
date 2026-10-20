@@ -1,4 +1,5 @@
 """Configuração por contexto, associação ao grupo e concorrência sem herdar outro time."""
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,13 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(oc, "identity", lambda name: "identity:" + name)
     monkeypatch.setattr(oc, "active_gid", lambda name: None)
     monkeypatch.setattr(runs, "group_phase", lambda gid: None)
+
+
+def _orq_sidecar(name, gid="real"):
+    """Membro do grupo `orq` como o Rust o grava."""
+    path = pair._pair_dir() / f"{name}.json"
+    path.write_text(json.dumps({"peers": [], "task": "mobile", "gid": gid, "harness": {}, "orq": True}))
+    return path
 
 
 def save(name):
@@ -46,7 +54,7 @@ def test_recreated_name_does_not_inherit_draft(monkeypatch):
 def test_promotion_preserves_record_and_redirects_source():
     context, mtime = save("planner")
     before = context.path.read_text()
-    pair.PairLink("arbiter").set([], "mobile", "real", orq=True)
+    _orq_sidecar("arbiter")
     grouped = oc.associate("planner", "real", mtime)
     assert grouped.grouped and grouped.gid == "real" and grouped.session_prefix == "planner"
     assert grouped.path.read_text() == before
@@ -62,7 +70,7 @@ def test_promotion_requires_actual_group_and_fresh_mtime():
     context, mtime = save("planner")
     with pytest.raises(ValueError, match="não existe"):
         oc.associate("planner", "missing", mtime)
-    pair.PairLink("arbiter").set([], "mobile", "real", orq=True)
+    _orq_sidecar("arbiter")
     with pytest.raises(orq_md.Conflito):
         oc.associate("planner", "real", 0.0)
     assert context.path.is_file() and not roles.regras_path("real").exists()
@@ -72,7 +80,7 @@ def test_competing_contract_is_not_overwritten():
     context, mtime = save("planner")
     target = roles.regras_path("real")
     target.write_text("another contract", encoding="utf-8")
-    pair.PairLink("arbiter").set([], "mobile", "real", orq=True)
+    _orq_sidecar("arbiter")
     with pytest.raises(ValueError, match="outro contrato"):
         oc.associate("planner", "real", mtime)
     assert target.read_text() == "another contract" and context.path.is_file()
@@ -81,7 +89,7 @@ def test_competing_contract_is_not_overwritten():
 def test_write_started_before_promotion_conflicts():
     context, mtime = save("planner")
     text = context.path.read_text()
-    pair.PairLink("arbiter").set([], "mobile", "real", orq=True)
+    _orq_sidecar("arbiter")
     oc.associate("planner", "real", mtime)
     with pytest.raises(orq_md.Conflito):
         oc.write(context, text, mtime)
@@ -89,11 +97,11 @@ def test_write_started_before_promotion_conflicts():
 
 def test_archived_group_is_not_treated_as_current():
     context, mtime = save("planner")
-    link = pair.PairLink("arbiter")
-    link.set([], "mobile", "real", orq=True)
+    link = _orq_sidecar("arbiter")
     oc.associate("planner", "real", mtime)
-    link.clear()
-    pair._arquivar_contratos("real")
+    link.unlink()
+    pair._arquivo_dir().mkdir()
+    roles.regras_path("real").rename(pair._arquivo_dir() / "regras-real-20261019-120000.md")
     fresh = oc.resolve("planner")
     assert fresh.gid == context.gid and not fresh.grouped
     assert roles.ler(fresh.path.read_text()) == []
@@ -106,10 +114,9 @@ def test_archived_group_is_not_treated_as_current():
 
 def test_unknown_group_phase_does_not_clear_record(monkeypatch):
     context, mtime = save("planner")
-    link = pair.PairLink("arbiter")
-    link.set([], "mobile", "real", orq=True)
+    link = _orq_sidecar("arbiter")
     oc.associate("planner", "real", mtime)
-    link.clear()
+    link.unlink()
     monkeypatch.setattr(runs, "group_phase", lambda gid: "unknown")
     with pytest.raises(oc.PromotionConflict, match="confirmar o encerramento"):
         oc.resolve("planner")
@@ -129,8 +136,7 @@ def test_promotion_conflict_preserves_external_source_and_rolls_back_group(monke
 
     monkeypatch.setattr(orq_md, "gravar", external_write)
     with pytest.raises(oc.PromotionConflict, match="origem não restaurada"):
-        pair.join_group("planner", [], "mobile", orq=True)
-    assert pair.PairLink("planner").get() is None
+        oc.promote("planner", "fresh")
     assert context.path.read_text() == "external editor"
     destinations = [p for p in context.path.parent.glob("regras-*.md") if p != context.path]
     assert len(destinations) == 1 and destinations[0].read_text() == before
@@ -148,9 +154,8 @@ def test_promotion_failure_restores_source_exclusively(monkeypatch):
 
     monkeypatch.setattr(orq_md, "gravar", failed_write)
     with pytest.raises(oc.PromotionConflict, match="origem restaurada"):
-        pair.join_group("planner", [], "mobile", orq=True)
+        oc.promote("planner", "fresh")
     assert context.path.read_text() == before
-    assert pair.PairLink("planner").get() is None
 
 
 def test_associate_facts_carry_what_the_rust_needs(monkeypatch):
@@ -162,24 +167,26 @@ def test_associate_facts_carry_what_the_rust_needs(monkeypatch):
     assert oc.associate_facts("planner", "real") == {"active_gid": None, "draft_gid": context.gid, "groups": {
         "real": {"phase": "live", "archived": False}, "old": {"phase": None, "archived": True}}}
     # Com grupo no sidecar o rascunho não importa: nem a identidade é lida.
-    pair.PairLink("planner").set([], "mobile", "real", orq=True)
+    _orq_sidecar("planner")
     monkeypatch.setattr(oc, "identity", lambda name: pytest.fail("identidade lida"))
     assert oc.associate_facts("planner", "real") == {"active_gid": None, "draft_gid": None,
                                                      "groups": {"real": {"phase": "live", "archived": False}}}
 
 
 def test_actual_pair_link_preserved_without_legacy_identity(monkeypatch):
-    pair.PairLink("legacy").set([], "mobile", "real", orq=True)
+    _orq_sidecar("legacy")
     monkeypatch.setattr(oc, "identity", lambda name: (_ for _ in ()).throw(oc.IdentityUnavailable("unknown")))
     context = oc.resolve("legacy")
     assert context.gid == "real" and context.grouped
 
 
 def test_new_orq_group_promotes_founder_record():
+    # O que o Rust faz quando o grupo `orq` nasce: grava o sidecar e pede `/internal/orq/promote`.
     context, _ = save("planner")
-    members, _ = pair.join_group("planner", [], "mobile", orq=True)
+    _orq_sidecar("planner", "fresh")
+    oc.promote("planner", "fresh")
     grouped = oc.resolve("planner")
-    assert members == ["planner"] and grouped.grouped
+    assert grouped.grouped and grouped.gid == "fresh"
     assert roles.ler(grouped.path.read_text())[0].conta == "chosen"
     assert roles.ler(context.path.read_text()) == []
 
