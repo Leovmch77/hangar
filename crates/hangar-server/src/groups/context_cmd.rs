@@ -109,7 +109,8 @@ fn session_name() -> Option<String> {
     }
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
-    runtime.block_on(async {
+    // Um prazo só para as duas perguntas ao tmux: a abertura espera no máximo isso.
+    runtime.block_on(async { tokio::time::timeout(TMUX_DEADLINE, async {
         if let Some(pane) = env("TMUX_PANE") {
             let listed = tmux(&["list-panes", "-a", "-F", "#{pane_id}\t#{session_name}"]).await.map(|o| o.stdout).unwrap_or_default();
             let listed = String::from_utf8_lossy(&listed);
@@ -121,13 +122,13 @@ fn session_name() -> Option<String> {
         }
         let name = env("CP_SESSION_NAME")?;
         tmux(&["has-session", "-t", &format!("={name}")]).await.filter(|o| o.status.success()).map(|_| name)
-    })
+    }).await.ok().flatten() })
 }
 
 async fn tmux(args: &[&str]) -> Option<std::process::Output> {
     let mut command = crate::terminal_input::child_command("tmux");
     command.args(args).stdin(std::process::Stdio::null()).kill_on_drop(true);
-    tokio::time::timeout(TMUX_DEADLINE, command.output()).await.ok()?.ok()
+    command.output().await.ok()
 }
 
 /// Sessão sem terminal: a chave do processo não muda no rename nem no /clear.

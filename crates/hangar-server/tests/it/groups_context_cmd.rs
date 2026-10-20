@@ -147,7 +147,7 @@ fn pair_context_works_without_server() {
 }
 
 /// Pasta inexistente, sidecar torto, sem argumento, sem tmux ou tmux travado: código 0 e nada no stdout,
-/// e o tmux travado não segura a abertura além do prazo de 3 s.
+/// e o tmux travado (list-panes e has-session) não segura a abertura além do prazo único de 3 s.
 #[test]
 fn pair_context_never_fails_the_open() {
     let ok = json!({"a.json": json!({"peers": ["b"]}).to_string()});
@@ -155,11 +155,11 @@ fn pair_context_never_fails_the_open() {
     for (label, files, tmux) in [
         ("sidecar torto", json!({"a.json": "{torto"}), PANES),
         ("sem tmux", ok.clone(), None),
-        ("tmux travado", ok.clone(), Some(Err("#!/bin/sh\nexec sleep 30\n"))),
+        ("tmux travado", ok.clone(), Some(Err("#!/bin/sh\nexec /bin/sleep 30\n"))),
     ] {
         let got = run(&files, &json!({}), &stamp, tmux);
         assert_eq!((got.rc, got.stdout.as_str()), (Some(0), ""), "{label}");
-        assert!(got.elapsed < Duration::from_secs(10), "{label}: {:?}", got.elapsed);
+        assert!(got.elapsed < Duration::from_secs(5), "{label}: {:?}", got.elapsed);
     }
     let missing = Command::new(env!("CARGO_BIN_EXE_hangar-server")).arg("pair-context").arg(PathBuf::from("/nonexistent/grp-t3"))
         .env_clear().env("CP_SESSION_NAME", "a").output().unwrap();
