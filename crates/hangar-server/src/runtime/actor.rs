@@ -1573,17 +1573,17 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                     },
                     // Queda durante uma subida pedida é a do processo que ela encerrou: não agenda outra.
                     Some(IoEvent::End { .. }) if respawn.task.is_some() => respawn.swallowed = true,
-                    Some(IoEvent::End { code }) => {
-                        if respawn.next_at.is_none() { respawn.was_working = engine.view()["in_progress"] == true; }
-                        effects.extend(engine.apply(EngineInput::Line(json!({"type":"cano_saiu","rc":code})),clock(start))?);
-                        if target.provider=="claude" {publish(&events,&target,&mut revision,"claude_exit",json!({"conversation":engine.view()["conversation"]}));}
-                        respawn.kill = true;
-                        effects.extend(after_exit(&mut respawn,&mut engine,&target,clock(start).monotonic_s,closed.load(Ordering::Acquire)));
-                    }
                     None if respawn.task.is_some() => { io_open = false; respawn.swallowed = true; },
-                    // Claude sem terminal: só o socket caiu (sem `cano_saiu`). O processo segue; religa ao mesmo
-                    // cano com espera crescente, sem erro, sem queda e sem estado novo. A fila segura até lá.
-                    None if target.provider == "claude" && engine.view()["alive"] != false => {
+                    // Claude sem terminal: o socket caiu ou o leitor parou num envelope que não conhece (versões
+                    // diferentes de cano e servidor), sem `cano_saiu`. O processo segue; religa ao mesmo cano com
+                    // espera crescente, sem erro, sem queda e sem estado novo. Cano morto vira queda pela tentativa.
+                    lost @ (None | Some(IoEvent::End { code:None })) if target.provider == "claude" && engine.view()["alive"] != false => {
+                        if lost.is_some() {
+                            tracing::warn!(key=%target.key,session=%target.name,"o cano mandou um envelope que o servidor não conhece; religando");
+                            if let Some(policy) = &engine.policy {
+                                policy.diag.report("rust.cano_protocol_invalid",&target.name,"cano_protocol_invalid","o cano mandou um envelope que o servidor não conhece; o ator religou ao mesmo processo");
+                            }
+                        }
                         io_open = false;
                         std::mem::replace(&mut io,super::codex_terminal::closed_io()).stop().await;
                         transport_epoch += 1;
@@ -1595,6 +1595,13 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         effects.extend(engine.transport_lost("",&std::mem::take(&mut handed))?);
                         reconnect.schedule(sample.monotonic_s,false);
                     },
+                    Some(IoEvent::End { code }) => {
+                        if respawn.next_at.is_none() { respawn.was_working = engine.view()["in_progress"] == true; }
+                        effects.extend(engine.apply(EngineInput::Line(json!({"type":"cano_saiu","rc":code})),clock(start))?);
+                        if target.provider=="claude" {publish(&events,&target,&mut revision,"claude_exit",json!({"conversation":engine.view()["conversation"]}));}
+                        respawn.kill = true;
+                        effects.extend(after_exit(&mut respawn,&mut engine,&target,clock(start).monotonic_s,closed.load(Ordering::Acquire)));
+                    }
                     None => {
                         io_open = false; enter_error(&mut error,&target,failure("cano_closed"));
                         if respawn.next_at.is_none() && !respawn.kill { respawn.was_working = engine.view()["in_progress"] == true; }
@@ -2235,8 +2242,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                 }
                 if cano_lost && cano_check_at.is_some_and(|at|sample.monotonic_s >= at) {
                     let (pid,key,birth) = (target.binding.pid,target.key.clone(),engine.cano_birth);
-                    let alive = tokio::task::spawn_blocking(move||super::cano_reconnect::cano_alive(pid,&key,birth)).await.unwrap_or(Some(true));
-                    if alive == Some(false) { cano_gone = Some(None); }
+                    let life = tokio::task::spawn_blocking(move||super::cano_reconnect::cano_life(pid,&key,birth)).await;
+                    if matches!(life,Ok(super::cano_reconnect::CanoLife::Gone)) { cano_gone = Some(None); }
                     else { cano_check_at = Some(sample.monotonic_s + engine.reconnect_waits.check.as_secs_f64()); }
                 }
                 if cano_lost && !stall_shown && stall_due.is_some_and(|due|sample.monotonic_s >= due) {

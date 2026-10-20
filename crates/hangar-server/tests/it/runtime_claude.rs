@@ -661,6 +661,29 @@ fn kill_or_exit_mid_turn_is_a_crash_and_lost_connection_is_visible() {
 }
 
 #[test]
+fn an_answer_made_while_the_socket_was_down_is_not_written_after_reattach_and_can_be_repeated() {
+    // A resposta escrita com o socket fora nunca saiu: na religação ela volta como não escrita (a pessoa
+    // repete), nunca incerta, e o cartão do retrato é o mesmo.
+    let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+    identified(&mut engine);
+    let request = json!({"type":"control_request","request_id":7,"request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}});
+    line(&mut engine,request.clone(),10.0);
+    let shown = shown_id(&engine).unwrap();
+    engine.transport_lost(&Default::default());
+    let effects = engine.command(command(OperationKind::Select,json!({"option":1,"interaction_id":shown})),clock(11.0)).unwrap();
+    assert_eq!(writes(&effects).len(),1);
+    let mut snapshot = mods_support::cano_snapshot_json();
+    snapshot["pendentes"] = json!([request.to_string()]);
+    let effects = engine.reattach(CanoSnapshot::parse(snapshot).unwrap()).unwrap();
+    let answer = replies(&effects).into_iter().find(|(id,_,_)|id == "op-1").expect("a resposta tem desfecho na religação");
+    assert_eq!((answer.1,answer.2["write_outcome"].clone()),(Disposition::Rejected,json!("not_written")),"{answer:?}");
+    assert_eq!(shown_id(&engine).as_deref(),Some(shown.as_str()),"o mesmo cartão segue aberto");
+    let again = engine.command(RuntimeCommand { operation_id:"op-2".into(),kind:OperationKind::Select,
+        payload:json!({"option":1,"interaction_id":shown}) },clock(12.0)).unwrap();
+    assert_eq!(writes(&again)[0]["response"]["request_id"],7,"a pessoa responde de novo com o mesmo ID");
+}
+
+#[test]
 fn process_exit_fails_pending_mods_calls() {
     let mut engine = attached();
     line(&mut engine,json!({"type":"system","subtype":"ui_panes","panes":[{"id":"p","title":"P","plugin":"m"}],"shown_id":"p","focused_id":null,"focus_requested_id":null}),12.0);

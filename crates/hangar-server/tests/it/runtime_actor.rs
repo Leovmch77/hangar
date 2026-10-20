@@ -2436,9 +2436,10 @@ mod cano_reconnect {
 
     /// Cano falso que aceita várias conexões, como o de verdade: a n-ésima (1 = abertura) recebe o retrato
     /// (`Serve`), fecha sem ele (`Refuse`) ou fica muda até o ator largar o socket (`Hang`). `cut` derruba a
-    /// conexão atual sem `cano_saiu`; `aberto` vai nos retratos seguintes.
+    /// conexão atual sem `cano_saiu`; `garble` manda um envelope que o leitor não conhece, com o socket de pé;
+    /// `aberto` vai nos retratos seguintes.
     struct LiveCano { escuta:String, accepts:Arc<Mutex<Vec<Instant>>>, frames:Arc<Mutex<Vec<Value>>>, cut:Arc<tokio::sync::Notify>,
-        aberto:Arc<AtomicBool>, hung_closed:Arc<tokio::sync::Notify>, server:tokio::task::JoinHandle<()> }
+        garble:Arc<tokio::sync::Notify>, aberto:Arc<AtomicBool>, hung_closed:Arc<tokio::sync::Notify>, server:tokio::task::JoinHandle<()> }
     impl Drop for LiveCano { fn drop(&mut self) { self.server.abort(); } }
     impl LiveCano {
         fn accepts(&self) -> usize { self.accepts.lock().unwrap().len() }
@@ -2447,12 +2448,17 @@ mod cano_reconnect {
         }
     }
 
-    async fn live_cano(answer:fn(usize)->Answer) -> LiveCano {
+    async fn live_cano(answer:fn(usize)->Answer) -> LiveCano { live_cano_with(answer,vec![]).await }
+
+    /// `pendentes`: pedidos da CLI ainda sem resposta, em todo retrato (os do cano de verdade).
+    async fn live_cano_with(answer:fn(usize)->Answer,pendentes:Vec<Value>) -> LiveCano {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let escuta = format!("tcp:{}",listener.local_addr().unwrap());
         let (accepts,frames,cut,aberto,hung_closed) = (Arc::new(Mutex::new(Vec::new())),Arc::new(Mutex::new(Vec::new())),
             Arc::new(tokio::sync::Notify::new()),Arc::new(AtomicBool::new(false)),Arc::new(tokio::sync::Notify::new()));
-        let (seen,written,cutting,open,hung) = (accepts.clone(),frames.clone(),cut.clone(),aberto.clone(),hung_closed.clone());
+        let garble = Arc::new(tokio::sync::Notify::new());
+        let (seen,written,cutting,open,hung,garbling) = (accepts.clone(),frames.clone(),cut.clone(),aberto.clone(),hung_closed.clone(),garble.clone());
+        let pendentes:Vec<String> = pendentes.iter().map(Value::to_string).collect();
         let server = tokio::spawn(async move {
             while let Ok((stream,_)) = listener.accept().await {
                 let n = { let mut seen = seen.lock().unwrap(); seen.push(Instant::now()); seen.len() };
@@ -2465,12 +2471,13 @@ mod cano_reconnect {
                     Answer::Serve => {},
                 }
                 let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":open.load(Ordering::Acquire),
-                    "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+                    "pendentes":pendentes,"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
                 if reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.is_err() { continue; }
                 loop {
                     raw.clear();
                     tokio::select! {
                         _ = cutting.notified() => break,
+                        _ = garbling.notified() => { if reader.get_mut().write_all(b"{\"type\":\"cano_desconhecido\"}\n").await.is_err() { break; } },
                         read = next_line(&mut reader,&mut raw) => {
                             if !read { break; }
                             let envelope:Value = serde_json::from_str(&raw).unwrap();
@@ -2482,7 +2489,7 @@ mod cano_reconnect {
                 }
             }
         });
-        LiveCano { escuta,accepts,frames,cut,aberto,hung_closed,server }
+        LiveCano { escuta,accepts,frames,cut,garble,aberto,hung_closed,server }
     }
 
     struct Waits { normal:Vec<Duration>, pending:Vec<Duration>, stall:Duration }
@@ -2491,6 +2498,12 @@ mod cano_reconnect {
     }
 
     async fn actor(dir:&std::path::Path,cano:&LiveCano,pid:u32,birth:Option<f64>,diag:std::net::SocketAddr,waits:Waits)
+        -> (RuntimeHandle,tokio::sync::broadcast::Receiver<RuntimeEvent>) {
+        actor_with(dir,cano,pid,birth,diag,waits,false).await
+    }
+
+    /// `cards`: com a loja de interações, os cartões publicados levam o ID que os responde.
+    async fn actor_with(dir:&std::path::Path,cano:&LiveCano,pid:u32,birth:Option<f64>,diag:std::net::SocketAddr,waits:Waits,cards:bool)
         -> (RuntimeHandle,tokio::sync::broadcast::Receiver<RuntimeEvent>) {
         let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
             metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
@@ -2503,6 +2516,7 @@ mod cano_reconnect {
         let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
             .with_policy(PolicyClient::new(diag,crate::fake::SECRET.into())).with_publisher(events)
             .with_reconnect_waits(waits.normal,waits.pending,waits.stall).with_cano_check(ms(100)).with_cano_birth(birth);
+        let engine = if cards { engine.with_interactions("key".into(),Arc::new(hangar_server::interactions::InteractionStore::default())).unwrap() } else { engine };
         let connection = cano::connect(&target.binding).await.unwrap();
         (RuntimeActor::spawn(target,QueueActor::start(store,lease),connection,engine),rx)
     }
@@ -2702,6 +2716,48 @@ mod cano_reconnect {
         assert_eq!(cano.said("oi"),0);
         wait_for("religa e entrega",||cano.said("oi") == 1).await;
         state_until(&handle,"o aviso sai na religação",|state|state["problema"].is_null()).await;
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unknown_envelope_from_a_live_cano_reconnects_instead_of_a_crash() {
+        // Cano e servidor de versões diferentes: o leitor encerra no envelope que não conhece, com o processo vivo.
+        let dir = tempfile::tempdir().unwrap();
+        let proc = sleeper(dir.path());
+        let (fake,diag) = crate::fake::spawn_fake().await;
+        let cano = live_cano(|_|Answer::Serve).await;
+        let (handle,mut rx) = actor(dir.path(),&cano,proc.0.id(),birth(&proc),diag,waits(&[0,50],&[0,50],60_000)).await;
+        wait_for("abertura",||cano.accepts() == 1).await;
+        cano.garble.notify_one();
+        wait_for("religa ao mesmo cano",||cano.accepts() == 2).await;
+        let invalid = |fake:&crate::fake::Fake|fake.diag().iter().filter(|line|line["codigo"] == "cano_protocol_invalid").count();
+        wait_for("a causa vai ao diário",||invalid(&fake) == 1).await;
+        tokio::time::sleep(ms(200)).await;
+        let state = handle.view().await.unwrap()["public_state"].clone();
+        assert!(state["problema"].is_null(),"processo vivo nunca é queda: {state}");
+        assert!(healthy(&handle).await);
+        assert_eq!(exits(&mut rx),0);
+        assert_eq!(invalid(&fake),1,"uma vez só");
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_card_open_before_the_drop_keeps_its_id_and_the_old_id_answers_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let proc = sleeper(dir.path());
+        let request = json!({"type":"control_request","request_id":7,"request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}});
+        let cano = live_cano_with(|_|Answer::Serve,vec![request]).await;
+        let (handle,_rx) = actor_with(dir.path(),&cano,proc.0.id(),birth(&proc),crate::refused_address(),waits(&[0,50],&[0,50],60_000),true).await;
+        let before = state_until(&handle,"cartão da permissão",|state|state["interaction_id"].is_string()).await["interaction_id"].clone();
+        cano.cut.notify_one();
+        wait_for("religação",||cano.accepts() == 2).await;
+        tokio::time::sleep(ms(200)).await;
+        let after = handle.view().await.unwrap()["public_state"]["interaction_id"].clone();
+        assert_eq!(after,before,"o retrato novo mostra o mesmo cartão com o mesmo ID");
+        let reply = handle.command(RuntimeCommand { operation_id:"answer".into(),kind:OperationKind::Select,
+            payload:json!({"option":1,"interaction_id":before}) }).await.unwrap();
+        assert!(reply.disposition == Disposition::Accepted,"{reply:?}");
+        assert!(cano.frames.lock().unwrap().iter().any(|frame|frame["response"]["request_id"] == 7),"a resposta sai no socket novo");
         handle.stop().await.unwrap();
     }
 

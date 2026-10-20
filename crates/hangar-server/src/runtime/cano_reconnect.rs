@@ -34,11 +34,38 @@ pub enum Attempt {
     Stopped(RuntimeError),
 }
 
-/// O cano desta vida: `Some(true)` vivo e o mesmo; `Some(false)` morto ou outro processo no pid;
-/// `None` vivo, mas sem nascimento gravado para provar que é o mesmo. Bloqueante (lê o processo).
-pub fn cano_alive(pid:u32,key:&str,birth:Option<f64>) -> Option<bool> {
-    if process::liveness(pid,key) != process::Liveness::Ours { return Some(false); }
-    birth.map(|birth|crate::terminal_facts::agent_birth(pid) == Some(birth))
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub enum CanoLife {
+    /// Vivo e o mesmo processo desta vida.
+    Same,
+    /// Morto, ou outro processo no mesmo pid.
+    Gone,
+    /// Vivo, mas sem nascimento gravado que prove ser o mesmo.
+    Unproven,
+    /// Vivo, mas o nascimento não se leu agora: tenta de novo.
+    Unreadable,
+}
+
+/// O cano desta vida, lido agora. Bloqueante (lê o processo).
+pub fn cano_life(pid:u32,key:&str,birth:Option<f64>) -> CanoLife {
+    let ours = process::liveness(pid,key) == process::Liveness::Ours;
+    judge(ours,ours.then(||crate::terminal_facts::agent_birth(pid)).flatten(),birth)
+}
+
+fn judge(ours:bool,now:Option<f64>,recorded:Option<f64>) -> CanoLife {
+    if !ours { return CanoLife::Gone; }
+    match (now,recorded) {
+        (_,None) => CanoLife::Unproven,
+        (None,_) => CanoLife::Unreadable,
+        (Some(now),Some(recorded)) if same_birth(now,recorded) => CanoLife::Same,
+        _ => CanoLife::Gone,
+    }
+}
+
+/// No Linux o nascimento sai do `btime`, relido agora e guardado na abertura: relógio ajustado (NTP)
+/// depois da subida os separa um pouco. Windows e macOS leem o nascimento direto do processo.
+fn same_birth(now:f64,recorded:f64) -> bool {
+    if cfg!(any(windows,target_os = "macos")) { now == recorded } else { (now - recorded).abs() < 1.5 }
 }
 
 /// Uma tentativa ao cano do Claude: a vida dele antes de conectar.
@@ -47,11 +74,11 @@ pub async fn attempt(binding:CanoBinding,key:String,birth:Option<f64>) -> Attemp
         return Attempt::Stopped(RuntimeError::new("cano_binding_missing","o vínculo do cano desta vida não existe"));
     }
     let pid = binding.pid;
-    match tokio::task::spawn_blocking(move||cano_alive(pid,&key,birth)).await {
-        Err(_) => return Attempt::Retry(RuntimeError::new("cano_probe","a leitura do processo do cano falhou")),
-        Ok(Some(false)) => return Attempt::Gone(RuntimeError::new("cano_gone","o cano da sessão não está mais vivo")),
-        Ok(None) => return Attempt::Stopped(RuntimeError::new("lifecycle_process_birth_missing","o nascimento do cano desta vida não é conhecido")),
-        Ok(Some(true)) => {},
+    match tokio::task::spawn_blocking(move||cano_life(pid,&key,birth)).await {
+        Err(_) | Ok(CanoLife::Unreadable) => return Attempt::Retry(RuntimeError::new("cano_probe","a leitura do processo do cano falhou")),
+        Ok(CanoLife::Gone) => return Attempt::Gone(RuntimeError::new("cano_gone","o cano da sessão não está mais vivo")),
+        Ok(CanoLife::Unproven) => return Attempt::Stopped(RuntimeError::new("lifecycle_process_birth_missing","o nascimento do cano desta vida não é conhecido")),
+        Ok(CanoLife::Same) => {},
     }
     match cano::connect(&binding).await {
         Ok(connection) => Attempt::Connected(RuntimeConnection::Cano(connection)),
@@ -117,6 +144,18 @@ mod tests {
         assert_eq!(waits_of(&mut reconnect,&[false;5]),vec![0.0,1.0,3.0,10.0,30.0]);
         // Mensagem que chega no meio de uma queda longa troca para a lista curta sem voltar ao começo.
         assert_eq!(waits_of(&mut reconnect,&[false,true]),vec![60.0,10.0]);
+    }
+
+    #[test]
+    fn birth_read_now_matches_the_recorded_one_within_the_clock_tolerance() {
+        assert_eq!(judge(false,Some(1000.0),Some(1000.0)),CanoLife::Gone,"processo que não é o cano da chave");
+        assert_eq!(judge(true,Some(1000.0),None),CanoLife::Unproven);
+        assert_eq!(judge(true,None,Some(1000.0)),CanoLife::Unreadable,"leitura que falhou não é morte");
+        assert_eq!(judge(true,Some(1000.0),Some(1000.0)),CanoLife::Same);
+        // O btime lido agora e o guardado na abertura divergem quando o relógio é ajustado (NTP).
+        let shifted = if cfg!(any(windows,target_os = "macos")) { 1000.0 } else { 1001.2 };
+        assert_eq!(judge(true,Some(shifted),Some(1000.0)),CanoLife::Same);
+        assert_eq!(judge(true,Some(1010.0),Some(1000.0)),CanoLife::Gone,"outro processo no mesmo pid");
     }
 
     #[test]

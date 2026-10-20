@@ -368,8 +368,9 @@ impl ClaudeEngine {
     /// turno, perguntas e prévia, como na subida do servidor.
     pub fn reattach(&mut self,snapshot:CanoSnapshot) -> Result<Vec<Effect>,RuntimeError> {
         let mut effects = Vec::new();
+        // O que podia ter saído já ficou incerto na queda: o que segue aberto nasceu com o socket fora e não saiu.
         let open:Vec<String> = self.wires.iter().filter(|(_,wire)|!wire.final_result).map(|(id,_)|id.clone()).collect();
-        for operation_id in open { self.uncertain_wire(operation_id,&mut effects); }
+        for operation_id in open { self.on_ack(operation_id,WriteOutcome::NotWritten,&mut effects); }
         self.waiters.clear();
         self.transport_up = true;
         self.in_progress = false; self.turn_start = None; self.label_deadline = None; self.active_input = None;
@@ -984,7 +985,8 @@ impl ClaudeEngine {
                 if let Some(surface) = self.surface.as_mut() { let out = surface.on_exit(); Self::surface_out(effects,out); }
                 // Só a saída limpa com a sessão parada (0 ou SIGTERM) não é queda. SIGKILL (OOM, kill -9) e qualquer
                 // saída no meio do turno cortaram trabalho: queda, com o motivo (a 1ª linha da faixa é o stderr).
-                // Sem código: o ator só manda isto com o cano morto (vivo, ele religa calado).
+                // Sem código: o cano morreu sem dar o código (com ele vivo, socket caído ou envelope que o
+                // servidor não conhece, o ator religa e isto não chega).
                 let code = match event["rc"].as_i64() {
                     Some(rc) if rc == -9 || ![0,-15].contains(&rc) || working => Some(format!("rc={rc}")),
                     Some(_) => None,
