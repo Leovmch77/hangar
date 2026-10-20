@@ -685,3 +685,16 @@ async fn fusion_contract_failure_is_a_coded_warning() {
     let python = n.casa.python.clone();
     fake::wait_until(move || python.diag().iter().any(|d| d["evento"] == "rust.groups_contract_merge_failed")).await;
 }
+
+/// Registro da dona ilegível: o grupo da sessão responde com o código da falha, nunca com a vista
+/// do sidecar como se nada tivesse acontecido.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_group_with_unreadable_record_is_a_store_failure() {
+    let n = net().await;
+    let (status, body) = pair(&n.casa, "s0", json!({"peers": ["lab::s1"]})).await;
+    assert_eq!(status, 200, "{body}");
+    let gid = body["gid"].as_str().unwrap().to_owned();
+    std::fs::write(n.casa.pair.join("groups").join(format!("{gid}.json")), "{torto").unwrap();
+    let (status, answer) = call(n.casa.addr, "GET", "/api/sessions/s0/group", None).await;
+    assert_eq!(status, 500, "{answer}");
+}

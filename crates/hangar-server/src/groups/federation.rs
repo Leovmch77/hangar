@@ -1014,7 +1014,14 @@ pub(super) async fn session_group(State(st): State<Arc<AppState>>, ConnectInfo(p
     };
     let outside = outside_addresses(&asked.st);
     let record = match &s.fed {
-        Some(f) if f.owner == me => { let (dir, gid) = (asked.groups.dir(), s.gid.clone()); blocking(move || dir.record(&gid)).await.ok().and_then(Result::ok).flatten() }
+        Some(f) if f.owner == me => {
+            let (dir, gid) = (asked.groups.dir(), s.gid.clone());
+            match blocking(move || dir.record(&gid)).await {
+                Ok(Ok(record)) => record,
+                Ok(Err(error)) => return asked.store_failed(&super::service::GroupError::Store(error)),
+                Err(Refusal(status, body)) => return asked.reply(status, body),
+            }
+        }
         _ => None,
     };
     let (owner, version, members, outside_refs) = match record {
