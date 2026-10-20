@@ -5,6 +5,7 @@ import {
   getHistoryDesde,
   openEventStreamForServer,
   prependOlder,
+  mergeHistoryWithLiveRetiring,
   hasSeam,
   isAbortError,
   isTimeoutError,
@@ -211,6 +212,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   // Só mensagens com texto participam do dedup; append comum não relê o histórico.
   const queuedTexts = new Map<number, string>();
   const realTexts = new Map<number, string>();
+  const retiredQueuedIds = new Set<string>();
   // Fonte da prévia no último frame (md/full): a monotonicidade só vale DENTRO da mesma fonte.
   let previewMd = false;
   let previewFull = false;
@@ -304,6 +306,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   }
 
   function aplicarEvents(events: ChatEvent[]) {
+    if (retiredQueuedIds.size) events = events.filter((e) => !retiredQueuedIds.has(e.id));
     const pending = events.reduce(reconcilePending, useChatStore.getState().pending);
     publishEvents(events, 'rebuild', { pending });
   }
@@ -322,12 +325,17 @@ function criarChatStore(serverId: string, name: string): ChatApi {
 
   async function loadHistory(): Promise<void> {
     const { g, signal } = novaLeitura();
+    const cachedEvents = new Set(useChatStore.getState().events);
     try {
       const target = destino();
       if (!target) throw new Error(m.chat_servidor_removido());
       const tail = await getHistory(name, TAIL_FIRST, signal, undefined, target);
       if (g !== histGen) return;
-      aplicarEvents(tail);
+      // O SSE continua chegando durante o GET, inclusive logo após /clear.
+      const merged = mergeHistoryWithLiveRetiring(tail, useChatStore.getState().events,
+        { cachedEvents, removedIds: retiredQueuedIds, retireQueuedFromCurrent: true });
+      for (const id of merged.retired) retiredQueuedIds.add(id);
+      aplicarEvents(merged.events);
       baseLoaded = true;
       useChatStore.setState({ error: '', olderFailed: '' });
       // Histórico antigo NÃO vem automático (diferente da PWA): entra sob demanda no
@@ -348,6 +356,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   // sem costura a cauda vira a verdade, e o antigo volta pelo loadOlder.
   async function syncTail(): Promise<void> {
     const { g, signal } = novaLeitura();
+    const cachedEvents = new Set(useChatStore.getState().events);
     const target = destino();
     try {
       if (!target) throw new Error(m.chat_servidor_removido());
@@ -359,7 +368,10 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       if (!atual.length || !hasSeam(r.eventos, atual)) {
         // Lista trocada pela cauda: o cursor antigo reenviaria o buraco DEPOIS dela, fora de ordem.
         lastEventId = null;
-        aplicarEvents(r.eventos);
+        const merged = mergeHistoryWithLiveRetiring(r.eventos, atual,
+          { cachedEvents, removedIds: retiredQueuedIds, retireQueuedFromCurrent: true });
+        for (const id of merged.retired) retiredQueuedIds.add(id);
+        aplicarEvents(merged.events);
         useChatStore.setState({ olderFailed: '' });
         return;
       }
@@ -417,11 +429,13 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     let { events } = useChatStore.getState();
     let removedQueued = false;
     if (ev.queued_confirmed && ev.id.startsWith('queued-')) {
+      retiredQueuedIds.add(ev.id);
       if (!idIndex.has(ev.id)) return;
       events = events.filter((x) => x.id !== ev.id);
       publishEvents(events);
       return;
     }
+    if (retiredQueuedIds.has(ev.id)) return;
     // Dedup cruzado fila<->transcript: a fila durável emite user_msg sintético (id
     // "queued-") e o transcript grava depois o user_msg REAL com texto igual — sem
     // isto, toda msg enfileirada (cp-send, composer working) aparece DOBRADA. O backend
@@ -443,6 +457,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         const dono = donoDaLinha(ev.text, filas.map((f) => f.text));
         if (dono >= 0) {
           const qi = filas[dono].i;
+          retiredQueuedIds.add(events[qi].id);
           events = [...events.slice(0, qi), ...events.slice(qi + 1)];
           rebuildIndex(events);
           removedQueued = true;
@@ -696,6 +711,8 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       lastEventId = null;
       etag = null;
       baseLoaded = false;
+      retiredQueuedIds.clear();
+      prevState = null;
       previewMd = false;
       previewFull = false;
       cancelPreviewDrop();
@@ -704,7 +721,9 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       pensamentoTimer = undefined;
       clearTimeout(ferramentaTimer);
       ferramentaTimer = undefined;
-      publishEvents(useChatStore.getState().events, 'replace', {
+      publishEvents([], 'rebuild', {
+        // O /clear não vira user_msg na conversa nova para reconciliar seu eco.
+        pending: useChatStore.getState().pending.filter((p) => p.text.trim() !== '/clear'),
         pensamento: '',
         ferramenta: null,
         turnSeen: null,
@@ -721,6 +740,8 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         queuePanel: null,
         queueEdit: null,
         queueEditExit: null,
+        error: '',
+        olderFailed: '',
         loading: true,
       });
       void loadHistory();
@@ -806,6 +827,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   function dropQueuedBubbles(events: ChatEvent[], ids: Iterable<string>): ChatEvent[] {
     const drop = new Set(ids);
     if (!drop.size) return events;
+    for (const id of drop) retiredQueuedIds.add(id);
     return events.filter((e) => !drop.has(e.id));
   }
 
@@ -941,7 +963,11 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       const sent = new Set(result.queued_ids ?? []);
       let events = useChatStore.getState().events;
       if (sent.size) events = events.map((e) => (sent.has(e.id) ? { ...e, queued_delivered: true } : e));
-      if (result.promoted) events = events.filter((e) => !(e.kind === 'user_msg' && e.id.startsWith('queued-')));
+      if (result.promoted) events = events.filter((e) => {
+        if (e.kind !== 'user_msg' || !e.id.startsWith('queued-')) return true;
+        retiredQueuedIds.add(e.id);
+        return false;
+      });
       publishEvents(events);
     },
     async send(text: string, draftRevision?: number, mode?: QueueSendMode) {
