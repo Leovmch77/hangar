@@ -80,6 +80,8 @@ pub struct RuntimeRegistry {
     ingress:super::ingress::IngressGates,
     /// Primeira espera da religação do processo que cai (dobra a cada subida seguida).
     respawn_base:Duration,
+    /// Esperas da religação ao mesmo cano que os atores do Claude sem terminal recebem.
+    reconnect_waits:super::cano_reconnect::ReconnectWaits,
     permissions:Option<Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>>,
     processes:Arc<dyn crate::list::procs::ProcessView>,
     /// Último valor da sessão sem terminal por nome, para o feed do hub (`live`).
@@ -316,7 +318,7 @@ impl RuntimeRegistry {
     pub fn new(upstream:SocketAddr,secret:String,instance:String) -> Self {
         Self { diag:crate::diag::DiagClient::new(upstream,secret.clone()),reopening:Default::default(),terminal_problems:Default::default(),terminal_status:Default::default(),heal_attempts:Default::default(),interactions:None,entries:Arc::new(Mutex::new(BTreeMap::new())),terminal_states:None,terms:None,events:broadcast::channel(1024).0,
             policy:PolicyClient::new(upstream,secret),instance,lifecycle:Mutex::new(BTreeMap::new()),revisions:Mutex::new(BTreeMap::new()),mods:None,plugin:None,ingress:Default::default(),
-            respawn_base:Duration::from_secs(5),permissions:None,processes:Arc::new(crate::list::procs::SystemProcs::default()),live:Default::default(),codex_owned:Default::default(),hubs:std::sync::OnceLock::new(),self_ref:std::sync::OnceLock::new(),
+            respawn_base:Duration::from_secs(5),reconnect_waits:Default::default(),permissions:None,processes:Arc::new(crate::list::procs::SystemProcs::default()),live:Default::default(),codex_owned:Default::default(),hubs:std::sync::OnceLock::new(),self_ref:std::sync::OnceLock::new(),
             watcher:std::sync::OnceLock::new(),codex_wake:Arc::new(tokio::sync::Notify::new()),native:Default::default(),limits:std::sync::OnceLock::new(),limit_holds:Default::default() }
     }
     /// Escrita para sessão doente, ou a conversa aberta: a sessão em erro é reaberta aqui, em segundo plano
@@ -356,6 +358,13 @@ impl RuntimeRegistry {
     }
     pub fn request_reopen(&self,name:&str) {
         let Some(registry) = self.self_ref.get().and_then(std::sync::Weak::upgrade) else { return };
+        // Conversa aberta: a religação ao cano já marcada é antecipada, sem abrir outra.
+        let (waker,wake_name) = (registry.clone(),name.to_owned());
+        tokio::spawn(async move {
+            let handle = waker.entries.lock().await.values().find(|entry|entry.name == wake_name && entry.provider == "claude")
+                .and_then(|entry|match &entry.handle { EntryHandle::Headless(handle)=>Some(handle.clone()),_=>None });
+            if let Some(handle) = handle { handle.wake_reconnect(); }
+        });
         if !self.reopening.lock().unwrap_or_else(|e|e.into_inner()).insert(name.to_owned()) { return; }
         let name = name.to_owned();
         tokio::spawn(async move {
@@ -1004,6 +1013,9 @@ impl RuntimeRegistry {
     pub fn with_processes(mut self,processes:Arc<dyn crate::list::procs::ProcessView>)->Self {self.processes=processes;self}
     pub fn with_permissions(mut self,store:Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>)->Self {self.permissions=Some(store);self}
     pub fn with_respawn_base(mut self,base:Duration) -> Self { self.respawn_base = base; self }
+    pub fn with_reconnect_waits(mut self,normal:Vec<Duration>,pending:Vec<Duration>,stall:Duration) -> Self {
+        self.reconnect_waits = super::cano_reconnect::ReconnectWaits { normal,pending,stall,check:self.reconnect_waits.check }; self
+    }
     /// Só testes: a caixa dos recados nativos numa pasta própria, fora do `cc-socks` da máquina.
     #[doc(hidden)]
     pub fn with_native_inbox_dir(mut self,dir:std::path::PathBuf) -> Self { self.native=super::native_message::Inbox::in_dir(dir); self }
@@ -1383,7 +1395,9 @@ impl RuntimeRegistry {
         let adopted_birth=claude_recipe.as_ref().map(|recipe|recipe.root_identity().map(|(_,birth)|birth)).transpose()?;
         if target.provider=="codex" && let Some(sidecar_dir) = &managed { engine = engine.with_launch(LaunchConfig { sidecar_dir:sidecar_dir.clone(),backoff:self.respawn_base }); }
         if let Some(mods) = &self.mods { engine = engine.with_mods(mods.clone()); }
-        engine = engine.with_live(self.live_sender(&target.name)).with_lifecycle(self.self_ref.get().cloned());
+        engine = engine.with_live(self.live_sender(&target.name)).with_lifecycle(self.self_ref.get().cloned())
+            .with_cano_birth(adopted_birth).with_reconnect_waits(self.reconnect_waits.normal.clone(),self.reconnect_waits.pending.clone(),self.reconnect_waits.stall)
+            .with_cano_check(self.reconnect_waits.check);
         // Dono único dos pedidos dos apps até o `close` (S9). Só o Claude tem superfície. Registrado antes
         // de a tarefa do ator existir: a primeira faixa publicada já encontra a sessão no `Mods`.
         // A vida no `Mods` é única no servidor; o processo é a chave durável mais o cano, que o renomear mantém.

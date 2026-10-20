@@ -651,13 +651,13 @@ fn kill_or_exit_mid_turn_is_a_crash_and_lost_connection_is_visible() {
             "rc={rc} working={working}: {state}");
         assert!(persisted_problem(&effects).is_some());
     }
-    // Sem código de saída: a conexão com o processo caiu; a faixa diz isso, sem gravar queda no arquivo.
+    // Sem código de saída: o ator só entrega isto quando o cano morreu (com ele vivo, religa calado). É
+    // queda como as outras, gravada no arquivo da sessão.
     let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
     let effects = line(&mut engine,json!({"type":"cano_saiu","rc":null}),12.0);
     let state = engine.view()["public_state"].clone();
-    assert_eq!(state["problema"],"runtime_falhou","{state}");
-    assert!(state["problema_detalhe"].as_str().unwrap_or("").starts_with("cano_closed"),"{state}");
-    assert!(persisted_problem(&effects).is_none());
+    assert_eq!((state["problema"].as_str(),state["problema_detalhe"].as_str()),(Some("headless_processo_caiu"),Some("cano_closed sem código de saída")),"{state}");
+    assert_eq!(persisted_problem(&effects),Some(json!(["headless_processo_caiu","cano_closed sem código de saída"])));
 }
 
 #[test]

@@ -28,6 +28,8 @@ pub struct ClaudeEngine {
     clock: ClockSample,
     counter: u64,
     alive: bool,
+    /// Socket com o cano de pé. Fora, o processo segue vivo e a fila espera a religação.
+    transport_up: bool,
     initialized: bool,
     initializing: bool,
     init_warning: Option<f64>,
@@ -125,7 +127,7 @@ impl ClaudeEngine {
         if let Some(intent) = effort_intent.as_mut() {
             if intent["status"] == "dispatching" { intent["status"] = json!("unknown"); }
         }
-        let mut engine = Self { interactions:None,generation,clock,counter:metadata["runtime_counter"].as_u64().unwrap_or(0),alive:true,
+        let mut engine = Self { interactions:None,generation,clock,counter:metadata["runtime_counter"].as_u64().unwrap_or(0),alive:true,transport_up:true,
             initialized:metadata["initialized"] == true,initializing:metadata["initialized"] != true,
             init_warning:None,in_progress:false,state,model:string(&metadata["model"]),effort:string(&metadata["effort"]),
             permission_mode,previous_non_plan,restore_plan:None,pending:Vec::new(),question:None,
@@ -307,7 +309,7 @@ impl ClaudeEngine {
         }
     }
 
-    fn deliverable(&self) -> bool { self.alive && self.initialized && !self.initializing && !self.in_progress
+    fn deliverable(&self) -> bool { self.alive && self.transport_up && self.initialized && !self.initializing && !self.in_progress
         && self.pending.is_empty() && self.question.is_none() && self.active_input.is_none() }
 
     pub fn forget_policy(&mut self,request_id:&RequestId) {
@@ -336,6 +338,49 @@ impl ClaudeEngine {
         let mut effects = Vec::new();
         self.changed(&mut effects,false);
         effects
+    }
+
+    /// Apaga só o problema `code`: o de outra origem que entrou depois fica.
+    pub fn clear_problem(&mut self,code:&str) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        if self.state.problema.as_deref() == Some(code) {
+            self.state.problema = None; self.state.problema_detalhe = None;
+            self.changed(&mut effects,false);
+        }
+        effects
+    }
+
+    /// Só o socket com o cano caiu; o processo segue. A fila deixa de entregar e o que não saiu volta
+    /// como não escrito; o que pode ter saído (`handed`) fica incerto e a conferência pelo transcript decide.
+    pub fn transport_lost(&mut self,handed:&BTreeSet<String>) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        self.transport_up = false;
+        let open:Vec<String> = self.wires.iter().filter(|(_,wire)|!wire.final_result).map(|(id,_)|id.clone()).collect();
+        for operation_id in open {
+            if handed.contains(&operation_id) { self.uncertain_wire(operation_id,&mut effects); }
+            else { self.on_ack(operation_id,WriteOutcome::NotWritten,&mut effects); }
+        }
+        self.changed(&mut effects,false);
+        effects
+    }
+
+    /// Socket novo ao MESMO processo: o que só existia na conexão anterior sai e o retrato do cano repõe
+    /// turno, perguntas e prévia, como na subida do servidor.
+    pub fn reattach(&mut self,snapshot:CanoSnapshot) -> Result<Vec<Effect>,RuntimeError> {
+        let mut effects = Vec::new();
+        let open:Vec<String> = self.wires.iter().filter(|(_,wire)|!wire.final_result).map(|(id,_)|id.clone()).collect();
+        for operation_id in open { self.uncertain_wire(operation_id,&mut effects); }
+        self.waiters.clear();
+        self.transport_up = true;
+        self.in_progress = false; self.turn_start = None; self.label_deadline = None; self.active_input = None;
+        self.pending.clear(); self.question = None; self.clear_streams(&mut effects);
+        effects.extend(self.hydrate(snapshot)?);
+        Ok(effects)
+    }
+
+    fn uncertain_wire(&mut self,operation_id:String,effects:&mut Vec<Effect>) {
+        if let Some(wire) = self.wires.get_mut(&operation_id) { wire.final_result = true; }
+        effects.push(Effect::Reply { operation_id,disposition:Disposition::Unknown,payload:json!({"error":"a conexão com o cano caiu"}) });
     }
 
     fn changed(&mut self,effects:&mut Vec<Effect>,format:bool) {
@@ -939,21 +984,19 @@ impl ClaudeEngine {
                 if let Some(surface) = self.surface.as_mut() { let out = surface.on_exit(); Self::surface_out(effects,out); }
                 // Só a saída limpa com a sessão parada (0 ou SIGTERM) não é queda. SIGKILL (OOM, kill -9) e qualquer
                 // saída no meio do turno cortaram trabalho: queda, com o motivo (a 1ª linha da faixa é o stderr).
-                match event["rc"].as_i64() {
-                    Some(rc) if rc == -9 || ![0,-15].contains(&rc) || working => {
-                        let reason:String = self.stderr_tail.join("\n").chars().take(280).collect();
-                        let detail = if reason.is_empty() { format!("rc={rc}") } else { format!("{reason}\nrc={rc}") };
-                        self.state.problema = Some("headless_processo_caiu".into());
-                        self.state.problema_detalhe = Some(detail.clone());
-                        self.problem_persisted = true;
-                        effects.push(Effect::PersistClaude { operation_id:None,patch:json!({"problema":["headless_processo_caiu",detail]}) });
-                    }
-                    Some(_) => {},
-                    // Sem código: a conexão com o processo caiu (ele pode seguir vivo). Visível, mas não é queda gravada.
-                    None => {
-                        self.state.problema = Some("runtime_falhou".into());
-                        self.state.problema_detalhe = Some("cano_closed: a conexão com o processo caiu sem código de saída".into());
-                    }
+                // Sem código: o ator só manda isto com o cano morto (vivo, ele religa calado).
+                let code = match event["rc"].as_i64() {
+                    Some(rc) if rc == -9 || ![0,-15].contains(&rc) || working => Some(format!("rc={rc}")),
+                    Some(_) => None,
+                    None => Some("cano_closed sem código de saída".to_owned()),
+                };
+                if let Some(code) = code {
+                    let reason:String = self.stderr_tail.join("\n").chars().take(280).collect();
+                    let detail = if reason.is_empty() { code } else { format!("{reason}\n{code}") };
+                    self.state.problema = Some("headless_processo_caiu".into());
+                    self.state.problema_detalhe = Some(detail.clone());
+                    self.problem_persisted = true;
+                    effects.push(Effect::PersistClaude { operation_id:None,patch:json!({"problema":["headless_processo_caiu",detail]}) });
                 }
                 for (operation_id,wire) in &mut self.wires {
                     if !wire.final_result {

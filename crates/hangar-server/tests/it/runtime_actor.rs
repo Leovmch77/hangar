@@ -2404,3 +2404,322 @@ mod terminal_async {
         server.abort();
     }
 }
+
+// --- Claude sem terminal religa ao MESMO cano quando só o socket cai ---
+
+#[cfg(target_os = "linux")]
+mod cano_reconnect {
+    use super::*;
+    use hangar_server::runtime::process;
+    use std::sync::{Arc,Mutex,atomic::{AtomicBool,Ordering}};
+    use std::time::{Duration,Instant};
+
+    fn ms(n:u64) -> Duration { Duration::from_millis(n) }
+
+    /// Processo que se passa pelo cano da chave `key` (argv com `--escuta` e o log `cano-key.log`); morto e
+    /// colhido na limpeza, também quando o teste falha.
+    struct Sleeper(std::process::Child);
+    impl Drop for Sleeper { fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); } }
+    fn sleeper(dir:&std::path::Path) -> Sleeper {
+        let child = Sleeper(std::process::Command::new("python3").args(["-c","import time; time.sleep(300)","--escuta","fixture","--log"])
+            .arg(dir.join("cano-key.log")).spawn().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while process::liveness(child.0.id(),"key") != process::Liveness::Ours {
+            assert!(Instant::now() < deadline,"o processo do cano não chegou ao argv");
+            std::thread::sleep(ms(5));
+        }
+        child
+    }
+
+    #[derive(Clone,Copy)]
+    enum Answer { Serve, Refuse, Hang }
+
+    /// Cano falso que aceita várias conexões, como o de verdade: a n-ésima (1 = abertura) recebe o retrato
+    /// (`Serve`), fecha sem ele (`Refuse`) ou fica muda até o ator largar o socket (`Hang`). `cut` derruba a
+    /// conexão atual sem `cano_saiu`; `aberto` vai nos retratos seguintes.
+    struct LiveCano { escuta:String, accepts:Arc<Mutex<Vec<Instant>>>, frames:Arc<Mutex<Vec<Value>>>, cut:Arc<tokio::sync::Notify>,
+        aberto:Arc<AtomicBool>, hung_closed:Arc<tokio::sync::Notify>, server:tokio::task::JoinHandle<()> }
+    impl Drop for LiveCano { fn drop(&mut self) { self.server.abort(); } }
+    impl LiveCano {
+        fn accepts(&self) -> usize { self.accepts.lock().unwrap().len() }
+        fn said(&self,text:&str) -> usize {
+            self.frames.lock().unwrap().iter().filter(|frame|frame["type"] == "user" && frame.to_string().contains(&format!("\"{text}\""))).count()
+        }
+    }
+
+    async fn live_cano(answer:fn(usize)->Answer) -> LiveCano {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let escuta = format!("tcp:{}",listener.local_addr().unwrap());
+        let (accepts,frames,cut,aberto,hung_closed) = (Arc::new(Mutex::new(Vec::new())),Arc::new(Mutex::new(Vec::new())),
+            Arc::new(tokio::sync::Notify::new()),Arc::new(AtomicBool::new(false)),Arc::new(tokio::sync::Notify::new()));
+        let (seen,written,cutting,open,hung) = (accepts.clone(),frames.clone(),cut.clone(),aberto.clone(),hung_closed.clone());
+        let server = tokio::spawn(async move {
+            while let Ok((stream,_)) = listener.accept().await {
+                let n = { let mut seen = seen.lock().unwrap(); seen.push(Instant::now()); seen.len() };
+                let mut reader = BufReader::new(stream);
+                let mut raw = String::new();
+                if !next_line(&mut reader,&mut raw).await { continue; }
+                match answer(n) {
+                    Answer::Refuse => continue,
+                    Answer::Hang => { raw.clear(); let _ = reader.read_line(&mut raw).await; hung.notify_one(); continue; }
+                    Answer::Serve => {},
+                }
+                let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":open.load(Ordering::Acquire),
+                    "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+                if reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.is_err() { continue; }
+                loop {
+                    raw.clear();
+                    tokio::select! {
+                        _ = cutting.notified() => break,
+                        read = next_line(&mut reader,&mut raw) => {
+                            if !read { break; }
+                            let envelope:Value = serde_json::from_str(&raw).unwrap();
+                            written.lock().unwrap().push(serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap());
+                            let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
+                            if reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.is_err() { break; }
+                        }
+                    }
+                }
+            }
+        });
+        LiveCano { escuta,accepts,frames,cut,aberto,hung_closed,server }
+    }
+
+    struct Waits { normal:Vec<Duration>, pending:Vec<Duration>, stall:Duration }
+    fn waits(normal:&[u64],pending:&[u64],stall:u64) -> Waits {
+        Waits { normal:normal.iter().copied().map(ms).collect(),pending:pending.iter().copied().map(ms).collect(),stall:ms(stall) }
+    }
+
+    async fn actor(dir:&std::path::Path,cano:&LiveCano,pid:u32,birth:Option<f64>,diag:std::net::SocketAddr,waits:Waits)
+        -> (RuntimeHandle,tokio::sync::broadcast::Receiver<RuntimeEvent>) {
+        let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
+            metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
+            binding:CanoBinding { pid,escuta:cano.escuta.clone(),token:"secret-test".into(),versao:2 },
+            lease_path:dir.join("key.lock"),state_path:dir.join("key.queue-state.json"),projection_dir:dir.join("projection"),
+            transcript:dir.join("chat.jsonl"),created:0.0 };
+        let lease = acquire_lease(&target.lease_path).unwrap();
+        let store = Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
+        let (events,rx) = tokio::sync::broadcast::channel(256);
+        let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
+            .with_policy(PolicyClient::new(diag,crate::fake::SECRET.into())).with_publisher(events)
+            .with_reconnect_waits(waits.normal,waits.pending,waits.stall).with_cano_check(ms(100)).with_cano_birth(birth);
+        let connection = cano::connect(&target.binding).await.unwrap();
+        (RuntimeActor::spawn(target,QueueActor::start(store,lease),connection,engine),rx)
+    }
+
+    async fn wait_for(what:&str,check:impl Fn()->bool) {
+        tokio::time::timeout(Duration::from_secs(5),async { while !check() { tokio::time::sleep(ms(10)).await; } }).await
+            .unwrap_or_else(|_|panic!("{what}"));
+    }
+
+    async fn state_until(handle:&RuntimeHandle,what:&str,check:impl Fn(&Value)->bool) -> Value {
+        tokio::time::timeout(Duration::from_secs(5),async { loop {
+            let state = handle.view().await.unwrap()["public_state"].clone();
+            if check(&state) { break state; }
+            tokio::time::sleep(ms(10)).await;
+        } }).await.unwrap_or_else(|_|panic!("{what}"))
+    }
+
+    fn exits(rx:&mut tokio::sync::broadcast::Receiver<RuntimeEvent>) -> usize {
+        let mut count = 0;
+        while let Ok(event) = rx.try_recv() { if event.channel == "claude_exit" { count += 1; } }
+        count
+    }
+
+    fn input(id:&str,text:&str) -> RuntimeCommand { RuntimeCommand { operation_id:id.into(),kind:OperationKind::Input,payload:json!({"text":text,"entry_id":id}) } }
+
+    async fn healthy(handle:&RuntimeHandle) -> bool {
+        let snapshot = handle.snapshot().await.unwrap();
+        snapshot["error"].is_null() && handle.view().await.unwrap()["alive"] != false
+    }
+
+    fn birth(proc:&Sleeper) -> Option<f64> { hangar_server::terminal_facts::agent_birth(proc.0.id()) }
+
+    #[tokio::test]
+    async fn lost_socket_with_live_cano_reconnects_without_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let proc = sleeper(dir.path());
+        let cano = live_cano(|_|Answer::Serve).await;
+        let (handle,mut rx) = actor(dir.path(),&cano,proc.0.id(),birth(&proc),crate::refused_address(),waits(&[0,50],&[0,50],60_000)).await;
+        wait_for("abertura",||cano.accepts() == 1).await;
+        cano.aberto.store(true,Ordering::Release);
+        cano.cut.notify_one();
+        wait_for("religação na primeira tentativa",||cano.accepts() == 2).await;
+        let state = state_until(&handle,"o turno do retrato novo",|state|state["state"] == "working").await;
+        assert!(state["problema"].is_null(),"{state}");
+        assert!(healthy(&handle).await,"religar não põe a sessão em erro");
+        assert_eq!(exits(&mut rx),0,"socket que cai com o cano vivo não é queda");
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnect_waits_follow_the_injected_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let proc = sleeper(dir.path());
+        let cano = live_cano(|n|if [2,3].contains(&n) { Answer::Refuse } else { Answer::Serve }).await;
+        let (handle,_rx) = actor(dir.path(),&cano,proc.0.id(),birth(&proc),crate::refused_address(),waits(&[0,300,600],&[0,300,600],60_000)).await;
+        wait_for("abertura",||cano.accepts() == 1).await;
+        cano.cut.notify_one();
+        tokio::time::timeout(Duration::from_secs(5),async { while cano.accepts() < 4 { tokio::time::sleep(ms(10)).await; } }).await.expect("o cano aceita na terceira tentativa");
+        let at = cano.accepts.lock().unwrap().clone();
+        let (second,third) = (at[2] - at[1],at[3] - at[2]);
+        assert!(second >= ms(300) && second < ms(1300),"segunda espera: {second:?}");
+        assert!(third >= ms(600) && third < ms(1600),"terceira espera: {third:?}");
+        assert!(healthy(&handle).await);
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn input_during_the_outage_waits_in_the_queue_and_is_delivered_on_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let proc = sleeper(dir.path());
+        let cano = live_cano(|n|if n == 2 { Answer::Refuse } else { Answer::Serve }).await;
+        let (handle,_rx) = actor(dir.path(),&cano,proc.0.id(),birth(&proc),crate::refused_address(),waits(&[0,500],&[0,500],60_000)).await;
+        wait_for("abertura",||cano.accepts() == 1).await;
+        cano.cut.notify_one();
+        wait_for("primeira tentativa recusada",||cano.accepts() == 2).await;
+        let reply = handle.command(input("in-1","oi")).await.unwrap();
+        assert!(reply.disposition == Disposition::Deferred,"{reply:?}");
+        wait_for("a mensagem sai no socket novo",||cano.said("oi") == 1).await;
+        tokio::time::sleep(ms(200)).await;
+        assert_eq!(cano.said("oi"),1,"uma vez só");
+        let state = queue_state(dir.path());
+        assert!(state.operations.get("in-1").is_none_or(|op|op.status != Status::Unknown),"entregue, não incerta");
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn input_during_a_long_wait_brings_the_same_attempt_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let proc = sleeper(dir.path());
+        let cano = live_cano(|n|if n == 2 { Answer::Refuse } else { Answer::Serve }).await;
+        let (handle,_rx) = actor(dir.path(),&cano,proc.0.id(),birth(&proc),crate::refused_address(),waits(&[0,30_000],&[0,30_000],60_000)).await;
+        wait_for("abertura",||cano.accepts() == 1).await;
+        cano.cut.notify_one();
+        wait_for("primeira tentativa recusada",||cano.accepts() == 2).await;
+        handle.command(input("in-1","oi")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2),async { while cano.said("oi") == 0 { tokio::time::sleep(ms(10)).await; } }).await
+            .expect("a mensagem antecipa a tentativa marcada para daqui a 30 s");
+        tokio::time::sleep(ms(200)).await;
+        assert_eq!(cano.accepts(),3,"o gatilho antecipa a tentativa, não abre outra");
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cano_dying_during_the_wait_is_a_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let proc = sleeper(dir.path());
+        let cano = live_cano(|n|if n == 1 { Answer::Serve } else { Answer::Refuse }).await;
+        let (handle,mut rx) = actor(dir.path(),&cano,proc.0.id(),birth(&proc),crate::refused_address(),waits(&[0,30_000],&[0,30_000],60_000)).await;
+        wait_for("abertura",||cano.accepts() == 1).await;
+        cano.cut.notify_one();
+        wait_for("primeira tentativa recusada",||cano.accepts() == 2).await;
+        drop(proc);
+        let state = state_until(&handle,"a morte do cano aparece sem esperar os 30 s",|state|state["problema"] == "headless_processo_caiu").await;
+        assert!(state["problema_detalhe"].as_str().unwrap_or("").contains("cano_closed sem código de saída"),"{state}");
+        tokio::time::sleep(ms(100)).await;
+        assert_eq!(exits(&mut rx),1,"a queda real segue o caminho de sempre");
+        let _ = handle.stop().await;
+    }
+
+    #[tokio::test]
+    async fn closing_during_the_wait_cancels_the_attempt_quietly() {
+        let dir = tempfile::tempdir().unwrap();
+        let proc = sleeper(dir.path());
+        let (fake,diag) = crate::fake::spawn_fake().await;
+        let cano = live_cano(|n|if n == 1 { Answer::Serve } else { Answer::Hang }).await;
+        let (handle,mut rx) = actor(dir.path(),&cano,proc.0.id(),birth(&proc),diag,waits(&[0,50],&[0,50],60_000)).await;
+        wait_for("abertura",||cano.accepts() == 1).await;
+        cano.cut.notify_one();
+        wait_for("tentativa em voo",||cano.accepts() == 2).await;
+        let hung = cano.hung_closed.clone();
+        let closed = hung.notified();
+        tokio::time::timeout(Duration::from_secs(2),handle.stop()).await.expect("fechar não espera a tentativa").unwrap();
+        tokio::time::timeout(Duration::from_secs(2),closed).await.expect("a tentativa em voo é cancelada e larga o socket");
+        tokio::time::sleep(ms(200)).await;
+        assert_eq!(cano.accepts(),2,"nenhuma tentativa depois de fechar");
+        assert_eq!(exits(&mut rx),0);
+        assert!(fake.diag().is_empty(),"cancelar não registra nada: {:?}",fake.diag());
+    }
+
+    #[tokio::test]
+    async fn missing_cano_birth_stops_once_and_keeps_the_session_healthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let proc = sleeper(dir.path());
+        let (fake,diag) = crate::fake::spawn_fake().await;
+        let cano = live_cano(|_|Answer::Serve).await;
+        let (handle,_rx) = actor(dir.path(),&cano,proc.0.id(),None,diag,waits(&[0,50],&[0,50],300)).await;
+        wait_for("abertura",||cano.accepts() == 1).await;
+        cano.cut.notify_one();
+        let stopped = |fake:&crate::fake::Fake|fake.diag().iter().filter(|line|line["codigo"] == "claude_reconnect_stopped").count();
+        wait_for("a parada vai ao diário",||stopped(&fake) == 1).await;
+        tokio::time::sleep(ms(300)).await;
+        assert_eq!(stopped(&fake),1,"uma vez só");
+        assert_eq!(fake.diag().iter().find(|line|line["codigo"] == "claude_reconnect_stopped").unwrap()["evento"],"rust.claude_reconnect_stopped");
+        assert_eq!(cano.accepts(),1,"sem prova do processo, não conecta");
+        assert!(healthy(&handle).await,"parar de tentar não vira erro nem faixa");
+        assert!(handle.view().await.unwrap()["public_state"]["problema"].is_null());
+        // A escrita continua indo à fila, e o aviso de entrega parada é o que aparece.
+        let reply = handle.command(input("in-1","oi")).await.unwrap();
+        assert!(reply.disposition == Disposition::Deferred,"{reply:?}");
+        state_until(&handle,"aviso de entrega parada",|state|state["problema"] == "headless_delivery_stalled").await;
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_waiting_message_shortens_the_waits_and_the_normal_ones_return_after_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let proc = sleeper(dir.path());
+        let cano = live_cano(|n|if [2,3,5].contains(&n) { Answer::Refuse } else { Answer::Serve }).await;
+        let (handle,_rx) = actor(dir.path(),&cano,proc.0.id(),birth(&proc),crate::refused_address(),waits(&[0,5_000],&[0,100],60_000)).await;
+        wait_for("abertura",||cano.accepts() == 1).await;
+        cano.cut.notify_one();
+        wait_for("primeira tentativa recusada",||cano.accepts() == 2).await;
+        handle.command(input("in-1","oi")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2),async { while cano.said("oi") == 0 { tokio::time::sleep(ms(10)).await; } }).await
+            .expect("com mensagem esperando, a espera depois da recusa é a curta (100 ms), não a normal (5 s)");
+        assert_eq!(cano.accepts(),4);
+        // Entregue: a próxima queda, sem nada esperando, volta à lista normal.
+        cano.cut.notify_one();
+        wait_for("tentativa da segunda queda",||cano.accepts() == 5).await;
+        tokio::time::sleep(ms(1_500)).await;
+        assert_eq!(cano.accepts(),5,"sem mensagem esperando, a espera seguinte é a normal (5 s)");
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn undelivered_message_past_the_stall_shows_the_warning_until_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let proc = sleeper(dir.path());
+        let cano = live_cano(|n|if [2,3].contains(&n) { Answer::Refuse } else { Answer::Serve }).await;
+        let (handle,_rx) = actor(dir.path(),&cano,proc.0.id(),birth(&proc),crate::refused_address(),waits(&[0,3_600_000],&[0,2_000],300)).await;
+        wait_for("abertura",||cano.accepts() == 1).await;
+        cano.cut.notify_one();
+        wait_for("primeira tentativa recusada",||cano.accepts() == 2).await;
+        handle.command(input("in-1","oi")).await.unwrap();
+        state_until(&handle,"aviso depois do prazo",|state|state["problema"] == "headless_delivery_stalled").await;
+        assert!(healthy(&handle).await,"o aviso não põe a sessão em erro");
+        assert_eq!(cano.said("oi"),0);
+        wait_for("religa e entrega",||cano.said("oi") == 1).await;
+        state_until(&handle,"o aviso sai na religação",|state|state["problema"].is_null()).await;
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn opening_the_conversation_brings_the_marked_attempt_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let proc = sleeper(dir.path());
+        let cano = live_cano(|n|if n == 2 { Answer::Refuse } else { Answer::Serve }).await;
+        let (handle,_rx) = actor(dir.path(),&cano,proc.0.id(),birth(&proc),crate::refused_address(),waits(&[0,30_000],&[0,30_000],60_000)).await;
+        wait_for("abertura",||cano.accepts() == 1).await;
+        cano.cut.notify_one();
+        wait_for("primeira tentativa recusada",||cano.accepts() == 2).await;
+        handle.wake_reconnect();
+        tokio::time::timeout(Duration::from_secs(2),async { while cano.accepts() < 3 { tokio::time::sleep(ms(10)).await; } }).await
+            .expect("o gatilho antecipa a tentativa marcada para daqui a 30 s");
+        tokio::time::sleep(ms(200)).await;
+        assert_eq!(cano.accepts(),3);
+        assert!(healthy(&handle).await);
+        handle.stop().await.unwrap();
+    }
+}
