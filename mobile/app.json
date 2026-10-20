@@ -4,7 +4,7 @@
     "slug": "hangar",
     "scheme": "hangar",
     "version": "0.1.0",
-    "runtimeVersion": "native-2",
+    "runtimeVersion": "native-3",
     "updates": {
       "url": "https://u.expo.dev/9fd06001-323e-4b82-835f-6dfc3674236d",
       "checkAutomatically": "ON_LOAD",
@@ -19,7 +19,7 @@
     "newArchEnabled": true,
     "ios": {
       "bundleIdentifier": "com.hangar.mobile",
-      "supportsTablet": false,
+      "supportsTablet": true,
       "infoPlist": {
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": true
@@ -35,7 +35,16 @@
           "pt-BR",
           "en"
         ],
-        "NSPhotoLibraryUsageDescription": "Mostra suas fotos recentes para anexar na conversa."
+        "NSPhotoLibraryUsageDescription": "Mostra suas fotos recentes para anexar na conversa.",
+        "UISupportedInterfaceOrientations": [
+          "UIInterfaceOrientationPortrait"
+        ],
+        "UISupportedInterfaceOrientations~ipad": [
+          "UIInterfaceOrientationPortrait",
+          "UIInterfaceOrientationPortraitUpsideDown",
+          "UIInterfaceOrientationLandscapeLeft",
+          "UIInterfaceOrientationLandscapeRight"
+        ]
       }
     },
     "android": {
@@ -95,9 +104,11 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "Grava o ditado pro composer e usa o microfone nas chamadas de voz ao vivo."
+          "microphonePermission": "Grava o ditado pro composer e usa o microfone nas chamadas de voz ao vivo.",
+          "enableBackgroundRecording": true
         }
       ],
+      "expo-notifications",
       [
         "expo-media-library",
         {
