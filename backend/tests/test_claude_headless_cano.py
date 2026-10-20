@@ -341,10 +341,12 @@ def test_porta_tomada_por_outro_servidor_sobe_o_cano_noutra(tmp_path, cano_cmd, 
     monkeypatch.setattr(sys.modules[__name__], "_porta_livre", lambda: next(portas, None) or real())
     try:
         p, porta, s, _ = _cano_tcp(cano_cmd, tmp_path, uuid.uuid4().hex)
-        assert porta != alheio.server_address[1]
-        s.close()
-        p.kill()
-        p.wait()
+        try:
+            assert porta != alheio.server_address[1]
+        finally:
+            s.close()
+            p.kill()
+            p.wait()
     finally:
         alheio.shutdown()
         alheio.server_close()
@@ -432,6 +434,7 @@ def _cano_tcp(cano_cmd, tmp_path, token):
     intervalo: a conexão cairia no servidor dele. O snapshot prova que é o cano; sem ele, outra porta."""
     falso = tmp_path / "claude_falso.py"
     falso.write_text(_CLAUDE_FALSO, encoding="utf-8")
+    respostas = []
     for _ in range(5):
         porta = _porta_livre()
         p = subprocess.Popen([*cano_cmd, "--escuta", f"tcp:127.0.0.1:{porta}", "--token", token,
@@ -441,13 +444,25 @@ def _cano_tcp(cano_cmd, tmp_path, token):
             s = _conectar_tcp(porta)
             s.sendall((token + "\n").encode())
             arq = s.makefile("rb")
-            if json.loads(arq.readline() or b"{}").get("type") == "cano_snapshot":
-                return p, porta, s, arq
-        except (OSError, ValueError, AssertionError):
-            pass
+            linha = arq.readline()
+        except BaseException:  # ninguém escutando ou prazo estourado: defeito, não porta tomada
+            p.kill()
+            p.wait()
+            raise
+        try:
+            evento = json.loads(linha)
+        except ValueError:
+            evento = None
+        if isinstance(evento, dict) and evento.get("type") == "cano_snapshot":
+            return p, porta, s, arq
+        s.close()
         p.kill()
         p.wait()
-    raise AssertionError("o cano não subiu em nenhuma porta livre")
+        # Resposta que não é JSON veio de outro servidor na porta; JSON sem snapshot é defeito do cano.
+        if evento is not None:
+            raise AssertionError(f"o cano respondeu sem snapshot: {linha[:200]!r}")
+        respostas.append(linha[:120])
+    raise AssertionError(f"a porta escolhida estava sempre com outro servidor: {respostas}")
 
 
 def _conectar_tcp(porta: int) -> socket.socket:
