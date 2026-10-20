@@ -143,6 +143,20 @@ def test_bridged_route_sends_facts_and_delivers_after(bridge):
     assert warning["code"] == "erro_pareamento_aviso_parcial" and warning["params"]["avisos"][0]["sessao"] == "falha"
 
 
+def test_deferred_deliveries_keep_order_per_session(monkeypatch):
+    """Sessões diferentes em paralelo; a mesma sessão recebe os recados na ordem devolvida."""
+    import asyncio
+    sent = []
+
+    async def enviar(name, text):
+        await asyncio.sleep(0.02 if text == "1" else 0)
+        sent.append((name, text))
+        return {"ok": True}
+    monkeypatch.setattr(api, "_enviar", enviar)
+    failed = asyncio.run(api._deliver_deferred([{"name": "a", "text": "1"}, {"name": "b", "text": "x"}, {"name": "a", "text": "2"}]))
+    assert failed == [] and [t for n, t in sent if n == "a"] == ["1", "2"] and sent[0] == ("b", "x")
+
+
 def test_promote_conflict_undoes_the_new_group(bridge, monkeypatch):
     def conflict(name, gid):
         raise orq_context.PromotionConflict("o grupo já possui outro contrato")

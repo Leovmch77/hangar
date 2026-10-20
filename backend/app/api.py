@@ -2179,10 +2179,16 @@ def _jsonl_of_session(name: str) -> str | None:
 
 async def _deliver_deferred(deliveries) -> list[dict]:
     """Recados que o Rust devolveu por serem a sessões que só o Python atende; falhas como avisos."""
-    deliveries = deliveries or []
-    results = await asyncio.gather(*(_enviar(d["name"], d["text"]) for d in deliveries))
-    return [{"sessao": d["name"], "erro": res.get("error") or erro("erro_envio_falhou_desconhecida", "falha desconhecida no envio")}
-            for d, res in zip(deliveries, results) if not res.get("ok")]
+    by_session: dict[str, list[str]] = {}
+    for d in deliveries or []:
+        by_session.setdefault(d["name"], []).append(d["text"])
+
+    # Sessões em paralelo; dentro de cada uma, na ordem em que o Rust devolveu.
+    async def one(name: str, texts: list[str]) -> list[dict]:
+        results = [await _enviar(name, text) for text in texts]
+        return [{"sessao": name, "erro": res.get("error") or erro("erro_envio_falhou_desconhecida", "falha desconhecida no envio")}
+                for res in results if not res.get("ok")]
+    return [f for failed in await asyncio.gather(*(one(n, t) for n, t in by_session.items())) for f in failed]
 
 
 async def _rust_leave(name: str, phases: dict) -> list[dict]:
