@@ -1471,7 +1471,8 @@ export async function subscribePush(s: Server, subscription: PushSubscriptionJSO
 
 // App nativo (Android): o aparelho tem um token Expo só, repetido em cada servidor com o id que o
 // app usa para ele — o toque na notificação volta com esse id para abrir a conversa certa.
-export async function subscribeExpoPushForServer(s: Server, body: { token: string; server_id: string; label: string; locale: string }): Promise<void> {
+export async function subscribeExpoPushForServer(s: Server, token: string, locale: string): Promise<void> {
+  const body = { token, server_id: s.id, label: s.label, locale };
   await apiFetchForServer(s, '/api/push/expo/subscribe', { method: 'POST', body: JSON.stringify(body) });
 }
 

@@ -1,5 +1,4 @@
 """Cada push também vai ao canal Expo do Rust, com ou sem Web Push configurado."""
-import asyncio
 import contextvars
 import json
 import logging
@@ -29,6 +28,24 @@ def _isolated(monkeypatch, tmp_path):
 
 
 @pytest.fixture
+def join_expo(monkeypatch):
+    """O envio sai numa thread: o teste espera por ela em vez de dormir."""
+    spawned = []
+
+    class Tracked(threading.Thread):
+        def start(self):
+            spawned.append(self)
+            super().start()
+    monkeypatch.setattr(push, "Thread", Tracked)
+
+    def join():
+        for t in spawned:
+            t.join(5)
+            assert not t.is_alive()
+    return join
+
+
+@pytest.fixture
 def rust():
     seen = []
 
@@ -53,9 +70,10 @@ def rust():
     server.server_close()
 
 
-def test_broadcast_reaches_rust_without_vapid_or_subscription(rust):
+def test_broadcast_reaches_rust_without_vapid_or_subscription(rust, join_expo):
     seen, _ = rust
     push.notify_dead("minha-sessao")
+    join_expo()
     assert seen == [("/__hangar_server/push/expo", "sek", None, {
         "session": "minha-sessao",
         "title": {"pt": "minha-sessao", "en": "minha-sessao"},
@@ -64,11 +82,12 @@ def test_broadcast_reaches_rust_without_vapid_or_subscription(rust):
     })]
 
 
-def test_coalesced_push_is_list_view_with_suffix_title(rust):
+def test_coalesced_push_is_list_view_with_suffix_title(rust, join_expo):
     seen, _ = rust
     push._queue_awaiting("a", None)
     push._queue_awaiting("b", None)
     push._flush_coalesce()
+    join_expo()
     assert len(seen) == 1
     sent = seen[0][3]
     assert sent["list"] is True
@@ -83,47 +102,42 @@ def test_send_runs_outside_lock_and_web_push_still_goes(monkeypatch, tmp_path):
     monkeypatch.setattr(push.settings, "vapid_public", "pub")
     web = []
     monkeypatch.setattr(pywebpush, "webpush", lambda **kw: web.append(push._lock.locked()))
-    locked = []
-    monkeypatch.setattr(push_expo_bridge, "send", lambda *a: locked.append(push._lock.locked()))
+    push_expo_bridge.configure("127.0.0.1:1", "sek")
+    seen = []
+    done = threading.Event()
+
+    def fake_send(*args):
+        seen.append((push._lock.locked(), threading.current_thread() is threading.main_thread()))
+        done.set()
+    monkeypatch.setattr(push_expo_bridge, "send", fake_send)
     push.notify_finished("s")
-    assert locked == [False]
+    assert done.wait(5)
+    assert seen == [(False, False)]
     assert web == [True]
 
 
-def test_on_event_loop_send_goes_to_a_thread(monkeypatch):
-    done = threading.Event()
-    where = []
-
-    def fake_send(*args):
-        try:
-            asyncio.get_running_loop()
-            where.append("loop")
-        except RuntimeError:
-            where.append("thread")
-        done.set()
-    monkeypatch.setattr(push_expo_bridge, "send", fake_send)
-
-    async def main():
-        push.notify_dead("s")
-    asyncio.run(main())
-    assert done.wait(5)
-    assert where == ["thread"]
+def test_unconfigured_bridge_spawns_nothing(monkeypatch):
+    monkeypatch.setattr(push_expo_bridge, "send", lambda *a: pytest.fail("send sem ponte"))
+    monkeypatch.setattr(push, "Thread", lambda **kw: pytest.fail("thread sem ponte"))
+    push.notify_dead("s")
 
 
-def test_rust_down_logs_warning_without_raising(caplog):
+def test_rust_down_logs_warning_without_raising(caplog, join_expo):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
     push_expo_bridge.configure(f"127.0.0.1:{port}", "sek")
     with caplog.at_level(logging.WARNING, logger="hangar.push"):
         push.notify_dead("s")
+        join_expo()
     assert "push expo falhou" in caplog.text
 
 
-def test_python_mode_does_not_call(rust, monkeypatch):
+def test_python_mode_does_not_call(rust, monkeypatch, join_expo):
     seen, _ = rust
     monkeypatch.setattr(runtime_coordinator, "_current", SimpleNamespace(mode="python"))
     push.notify_dead("s")
+    join_expo()
     assert seen == []
 
 

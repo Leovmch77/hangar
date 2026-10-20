@@ -3,12 +3,12 @@ import { Linking, Platform } from 'react-native';
 import { router } from 'expo-router';
 import Constants from 'expo-constants';
 import * as Notifications from 'expo-notifications';
-import { subscribeExpoPushForServer, type Server } from '@hangar/core';
+import { isOwnMachine, subscribeExpoPushForServer, type Server } from '@hangar/core';
 import { useServers } from '../../stores/servers';
 import { getLocale } from '../../paraglide/runtime';
 
 // Convite (token de convidado), desligado e entrada montada para par externo não recebem push do dono.
-const pushable = (s: Server) => !s.disabled && !s.invite && !s.removed && !s.ephemeral;
+const pushable = (s: Server) => isOwnMachine(s) && !s.disabled;
 
 type PushResult = 'registered' | 'denied' | 'unsupported';
 let lastResult: PushResult | null = null;
@@ -39,20 +39,21 @@ export function installNotificationHandler(): void {
 
 async function register(servers: Server[], ask: boolean): Promise<PushResult> {
   if (Platform.OS !== 'android') return 'unsupported';
+  let { status } = await Notifications.getPermissionsAsync();
+  if (status !== 'granted' && !ask) return 'denied';
   // O canal precisa existir antes do pedido: no Android 13+ é ele que dispara a pergunta do sistema.
   await Notifications.setNotificationChannelAsync('default', {
     name: 'Hangar',
     importance: Notifications.AndroidImportance.HIGH,
   });
-  let { status } = await Notifications.getPermissionsAsync();
-  if (status !== 'granted' && ask) ({ status } = await Notifications.requestPermissionsAsync());
+  if (status !== 'granted') ({ status } = await Notifications.requestPermissionsAsync());
   if (status !== 'granted') return 'denied';
   const projectId = Constants.expoConfig?.extra?.eas?.projectId as string | undefined;
   const { data: token } = await Notifications.getExpoPushTokenAsync({ projectId });
   const locale = getLocale();
   // Servidor fora do ar não impede os outros; a falha de cada um já vai ao diário pelo apiFetch.
   await Promise.allSettled(servers.filter(pushable).map((s) =>
-    subscribeExpoPushForServer(s, { token, server_id: s.id, label: s.label, locale })));
+    subscribeExpoPushForServer(s, token, locale)));
   return 'registered';
 }
 

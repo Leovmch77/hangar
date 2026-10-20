@@ -115,11 +115,14 @@ async fn deliver(path: PathBuf, base: String, diag: DiagClient, notify: Notify) 
     let reading = path.clone();
     let Ok(Ok(registry)) = tokio::task::spawn_blocking(move || read(&reading)).await else { return report("push_expo_registry") };
     if registry.tokens.is_empty() { return; }
-    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(10)).build() else { return report("push_expo_client") };
+    static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+    let Some(client) = CLIENT.get_or_init(|| reqwest::Client::builder().timeout(Duration::from_secs(10)).build().ok()) else {
+        return report("push_expo_client");
+    };
     let (mut dead, mut read_ids) = (HashSet::new(), HashSet::new());
     if !registry.pending.is_empty() {
         let ids: Vec<&str> = registry.pending.iter().map(|p| p.ticket_id.as_str()).collect();
-        match post(&client, format!("{base}/--/api/v2/push/getReceipts"), json!({"ids": ids})).await {
+        match post(client, format!("{base}/--/api/v2/push/getReceipts"), json!({"ids": ids})).await {
             Ok(reply) => for (id, receipt) in reply["data"].as_object().into_iter().flatten() {
                 if unregistered(receipt) && let Some(p) = registry.pending.iter().find(|p| &p.ticket_id == id) {
                     dead.insert(p.token.clone());
@@ -137,7 +140,7 @@ async fn deliver(path: PathBuf, base: String, diag: DiagClient, notify: Notify) 
             json!({"to": e.token, "title": format!("{} · {}", e.label, notify.title.pick(&e.locale)),
                 "body": notify.body.pick(&e.locale), "data": data, "channelId": "default", "priority": "high"})
         }).collect();
-        match post(&client, format!("{base}/--/api/v2/push/send"), Value::Array(messages)).await {
+        match post(client, format!("{base}/--/api/v2/push/send"), Value::Array(messages)).await {
             // O Expo devolve os tickets na ordem das mensagens.
             Ok(reply) => {
                 let answered = reply["data"].as_array().map_or(&[][..], Vec::as_slice);

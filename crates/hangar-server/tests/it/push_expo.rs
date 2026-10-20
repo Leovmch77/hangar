@@ -77,11 +77,22 @@ impl Fixture {
     }
 
     async fn subscribe(&self, token: &str, label: &str, locale: &str, owner: bool) -> reqwest::Response {
-        let mut request = reqwest::Client::new().post(format!("{}/api/push/expo/subscribe", self.public))
-            .header("content-type", "application/json")
-            .body(json!({"token": token, "server_id": "casa", "label": label, "locale": locale}).to_string());
+        self.subscribe_via(SUBSCRIBE, "casa", token, label, locale, owner).await
+    }
+
+    /// `FORWARDED` entra pela porta privada, como o dono pelo Connect.
+    async fn subscribe_via(&self, path: &str, server_id: &str, token: &str, label: &str, locale: &str, owner: bool) -> reqwest::Response {
+        let client = reqwest::Client::new();
+        let mut request = if path == FORWARDED {
+            client.post(format!("{}{path}", self.private))
+                .header("x-hangar-internal", "fixture-internal").header("x-hangar-path", SUBSCRIBE)
+        } else {
+            client.post(format!("{}{path}", self.public))
+        };
         if owner { request = request.bearer_auth("fixture-owner"); }
-        request.send().await.unwrap()
+        request.header("content-type", "application/json")
+            .body(json!({"token": token, "server_id": server_id, "label": label, "locale": locale}).to_string())
+            .send().await.unwrap()
     }
 
     async fn notify(&self, list: bool) {
@@ -98,25 +109,15 @@ impl Fixture {
     }
 
     fn calls(&self) -> Vec<(String, Value)> { self.expo.calls.lock().unwrap().clone() }
+}
 
-    async fn wait_calls(&self, count: usize) -> Vec<(String, Value)> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let calls = self.calls();
-            if calls.len() >= count { return calls; }
-            assert!(std::time::Instant::now() < deadline, "o Expo recebeu {} chamadas, esperava {count}", calls.len());
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }
-
-    async fn wait_registry(&self, done: impl Fn(&Value) -> bool) -> Value {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let registry = self.registry();
-            if done(&registry) { return registry; }
-            assert!(std::time::Instant::now() < deadline, "registro não chegou ao esperado: {registry}");
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+async fn wait_until<T: std::fmt::Debug>(read: impl Fn() -> T, done: impl Fn(&T) -> bool) -> T {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let value = read();
+        if done(&value) { return value; }
+        assert!(std::time::Instant::now() < deadline, "não chegou ao esperado: {value:?}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -125,6 +126,8 @@ impl Drop for Fixture { fn drop(&mut self) { for task in &self.tasks { task.abor
 async fn body(response: reqwest::Response) -> Value { serde_json::from_slice(&response.bytes().await.unwrap()).unwrap() }
 
 const TOKEN: &str = "ExponentPushToken[aaa]";
+const SUBSCRIBE: &str = "/api/push/expo/subscribe";
+const FORWARDED: &str = "/__hangar_server/forwarded";
 
 #[tokio::test]
 async fn resubscribing_the_same_token_keeps_one_entry() {
@@ -160,7 +163,7 @@ async fn session_notice_uses_label_locale_and_session_data() {
     let fixture = Fixture::start().await;
     fixture.subscribe(TOKEN, "Casa", "pt", true).await;
     fixture.notify(false).await;
-    let calls = fixture.wait_calls(1).await;
+    let calls = wait_until(|| fixture.calls(), |c| c.len() >= 1).await;
     assert_eq!(calls[0].0, "send");
     let message = &calls[0].1[0];
     assert_eq!(message["to"], TOKEN);
@@ -176,7 +179,7 @@ async fn list_notice_only_carries_the_server() {
     let fixture = Fixture::start().await;
     fixture.subscribe(TOKEN, "Casa", "en", true).await;
     fixture.notify(true).await;
-    let calls = fixture.wait_calls(1).await;
+    let calls = wait_until(|| fixture.calls(), |c| c.len() >= 1).await;
     assert_eq!(calls[0].1[0]["title"], "Casa · s1 en");
     assert_eq!(calls[0].1[0]["data"], json!({"server": "casa"}));
 }
@@ -186,16 +189,16 @@ async fn unregistered_device_receipt_removes_the_token_on_the_next_send() {
     let fixture = Fixture::start().await;
     fixture.subscribe(TOKEN, "Casa", "pt", true).await;
     fixture.notify(false).await;
-    fixture.wait_calls(1).await;
-    fixture.wait_registry(|r| r["pending"].as_array().is_some_and(|p| !p.is_empty())).await;
+    wait_until(|| fixture.calls(), |c| c.len() >= 1).await;
+    wait_until(|| fixture.registry(), |r| r["pending"].as_array().is_some_and(|p| !p.is_empty())).await;
     *fixture.expo.receipts.lock().unwrap() = json!({
         format!("ticket-{TOKEN}"): {"status": "error", "details": {"error": "DeviceNotRegistered"}}
     });
     fixture.notify(false).await;
-    let calls = fixture.wait_calls(2).await;
+    let calls = wait_until(|| fixture.calls(), |c| c.len() >= 2).await;
     assert_eq!(calls[1].0, "receipts");
     assert_eq!(calls[1].1, json!({"ids": [format!("ticket-{TOKEN}")]}));
-    let registry = fixture.wait_registry(|r| r["tokens"].as_array().is_some_and(Vec::is_empty)).await;
+    let registry = wait_until(|| fixture.registry(), |r| r["tokens"].as_array().is_some_and(Vec::is_empty)).await;
     assert_eq!(registry["pending"], json!([]));
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(fixture.calls().len(), 2, "sem token vivo não há envio");
@@ -215,7 +218,7 @@ async fn two_tokens_go_in_one_send() {
     fixture.subscribe(TOKEN, "Casa", "pt", true).await;
     fixture.subscribe("ExponentPushToken[bbb]", "Casa", "pt", true).await;
     fixture.notify(false).await;
-    let calls = fixture.wait_calls(1).await;
+    let calls = wait_until(|| fixture.calls(), |c| c.len() >= 1).await;
     assert_eq!(calls[0].1.as_array().unwrap().len(), 2);
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(fixture.calls().len(), 1);
@@ -228,10 +231,10 @@ async fn subscribe_during_a_send_survives_its_write() {
     let (release, hold) = tokio::sync::oneshot::channel();
     *fixture.expo.hold.lock().unwrap() = Some(hold);
     fixture.notify(false).await;
-    fixture.wait_calls(1).await;
+    wait_until(|| fixture.calls(), |c| c.len() >= 1).await;
     assert_eq!(fixture.subscribe("ExponentPushToken[novo]", "Casa", "pt", true).await.status(), 200);
     release.send(()).unwrap();
-    let registry = fixture.wait_registry(|r| r["pending"].as_array().is_some_and(|p| !p.is_empty())).await;
+    let registry = wait_until(|| fixture.registry(), |r| r["pending"].as_array().is_some_and(|p| !p.is_empty())).await;
     let tokens: Vec<&str> = registry["tokens"].as_array().unwrap().iter().map(|e| e["token"].as_str().unwrap()).collect();
     assert_eq!(tokens, [TOKEN, "ExponentPushToken[novo]"]);
 }
@@ -242,7 +245,7 @@ async fn unregistered_ticket_prunes_right_away() {
     fixture.subscribe(TOKEN, "Casa", "pt", true).await;
     fixture.expo.unregistered.store(true, std::sync::atomic::Ordering::SeqCst);
     fixture.notify(false).await;
-    let registry = fixture.wait_registry(|r| r["tokens"].as_array().is_some_and(Vec::is_empty)).await;
+    let registry = wait_until(|| fixture.registry(), |r| r["tokens"].as_array().is_some_and(Vec::is_empty)).await;
     assert_eq!(registry["pending"], json!([]));
     assert_eq!(fixture.calls().len(), 1);
 }
@@ -261,10 +264,7 @@ async fn private_route_needs_the_internal_secret() {
 async fn empty_server_or_label_is_refused() {
     let fixture = Fixture::start().await;
     assert_eq!(fixture.subscribe(TOKEN, " ", "pt", true).await.status(), 400);
-    let response = reqwest::Client::new().post(format!("{}/api/push/expo/subscribe", fixture.public)).bearer_auth("fixture-owner")
-        .header("content-type", "application/json")
-        .body(json!({"token": TOKEN, "server_id": "", "label": "Casa", "locale": "pt"}).to_string())
-        .send().await.unwrap();
+    let response = fixture.subscribe_via(SUBSCRIBE, "", TOKEN, "Casa", "pt", true).await;
     assert_eq!(response.status(), 400);
     assert_eq!(body(response).await["detail"]["code"], "push_expo_invalid");
 }
@@ -272,11 +272,7 @@ async fn empty_server_or_label_is_refused() {
 #[tokio::test]
 async fn connect_owner_subscribes_through_the_forwarder() {
     let fixture = Fixture::start().await;
-    let response = reqwest::Client::new().post(format!("{}/__hangar_server/forwarded", fixture.private))
-        .header("x-hangar-internal", "fixture-internal").header("x-hangar-path", "/api/push/expo/subscribe")
-        .header("content-type", "application/json")
-        .body(json!({"token": TOKEN, "server_id": "casa", "label": "Casa", "locale": "pt"}).to_string())
-        .send().await.unwrap();
+    let response = fixture.subscribe_via(FORWARDED, "casa", TOKEN, "Casa", "pt", false).await;
     assert_eq!(response.status(), 200);
     assert_eq!(fixture.registry()["tokens"][0]["token"], TOKEN);
 }

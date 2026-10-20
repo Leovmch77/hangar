@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { getPrebuildConfigAsync } from '@expo/prebuild-config';
 import { getConfig } from 'expo/config';
 import { AndroidConfig, IOSConfig, compileModsAsync } from 'expo/config-plugins';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const { exp: config } = getConfig(projectRoot);
@@ -79,8 +79,11 @@ const pluginOptions = (name: string) => {
 };
 
 describe('native-3: tablet, ditado em segundo plano e push', () => {
-  it('iPhone só em retrato e iPad nas quatro orientações', async () => {
-    const { plist } = await generatedNative();
+  let native: Awaited<ReturnType<typeof generatedNative>>;
+  beforeAll(async () => { native = await generatedNative(); }, 60_000);
+
+  it('iPhone só em retrato e iPad nas quatro orientações', () => {
+    const { plist } = native;
     expect(config.orientation).toBe('portrait');
     expect(config.ios?.supportsTablet).toBe(true);
     expect(plist.UISupportedInterfaceOrientations).toEqual(['UIInterfaceOrientationPortrait']);
@@ -90,11 +93,11 @@ describe('native-3: tablet, ditado em segundo plano e push', () => {
       'UIInterfaceOrientationLandscapeLeft',
       'UIInterfaceOrientationLandscapeRight',
     ]);
-  }, 60_000);
+  });
 
-  it('Android grava em segundo plano pelo serviço do expo-audio', async () => {
+  it('Android grava em segundo plano pelo serviço do expo-audio', () => {
     expect(pluginOptions('expo-audio')).toMatchObject({ enableBackgroundRecording: true });
-    const { manifest } = await generatedNative();
+    const { manifest } = native;
     const services = manifest.manifest.application[0].service ?? [];
     expect(services).toContainEqual(expect.objectContaining({
       $: expect.objectContaining({
@@ -104,17 +107,17 @@ describe('native-3: tablet, ditado em segundo plano e push', () => {
     }));
     const permissions = manifest.manifest['uses-permission'].map((p: any) => p.$['android:name']);
     expect(permissions).toContain('android.permission.FOREGROUND_SERVICE_MICROPHONE');
-  }, 60_000);
-
-  it('traz o plugin do expo-notifications', () => {
-    expect(config.plugins?.some((p) => (Array.isArray(p) ? p[0] : p) === 'expo-notifications')).toBe(true);
   });
 
-  it('iOS sai sem o entitlement de push, que o SideStore com Apple ID gratuito não assina', async () => {
-    const { entitlements } = await generatedNative();
+  it('traz o plugin do expo-notifications', () => {
+    expect(pluginOptions('expo-notifications')).toBe('expo-notifications');
+  });
+
+  it('iOS sai sem o entitlement de push, que o SideStore com Apple ID gratuito não assina', () => {
+    const { entitlements } = native;
     expect(entitlements).toBeDefined();
     expect(entitlements).not.toHaveProperty('aps-environment');
-  }, 60_000);
+  });
 
   it('lê o google-services.json do ambiente do EAS', () => {
     process.env.GOOGLE_SERVICES_JSON = '/tmp/x.json';

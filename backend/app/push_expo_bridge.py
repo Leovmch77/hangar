@@ -3,18 +3,20 @@ e fala com o Expo (`/__hangar_server/push/expo`)."""
 import http.client
 import json
 import logging
-import urllib.error
 import urllib.request
 
 _log = logging.getLogger("hangar.push")
 _config: tuple[str, str] | None = None
-_TIMEOUT = 5
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def configure(address: str | None, secret: str | None) -> None:
     global _config
     _config = (address, secret) if address and secret else None
+
+
+def configured() -> bool:
+    return _config is not None
 
 
 def send(session: str, title: dict[str, str], body: dict[str, str], list_view: bool) -> None:
@@ -30,7 +32,7 @@ def send(session: str, title: dict[str, str], body: dict[str, str], list_view: b
     req = urllib.request.Request(f"http://{config[0]}/__hangar_server/push/expo", data=data,
         headers={"content-type": "application/json", "x-hangar-internal": config[1]}, method="POST")
     try:
-        with _opener.open(req, timeout=_TIMEOUT) as response:
+        with _opener.open(req, timeout=5) as response:
             response.read(4096)
-    except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException) as e:
+    except (OSError, ValueError, http.client.HTTPException) as e:
         _log.warning("push expo falhou session=%s reason=%s", session, type(e).__name__)

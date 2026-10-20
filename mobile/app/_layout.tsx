@@ -69,12 +69,12 @@ export default function Layout() {
 
   useNotificationNavigation();
   // A lista se regrava por outros motivos (rede local aprendida); só servidor, nome ou idioma refazem o registro.
-  const idioma = useAparencia((s) => s.idioma);
+  useAparencia((s) => s.idioma); // re-renderiza para o getLocale abaixo ler o idioma novo
   const pushKey = pushRegistrationKey(servers, getLocale());
   useEffect(() => {
     if (!ready || !pushKey) return;
     registerExpoPush(useServers.getState().servers).catch(reportPushError);
-  }, [ready, pushKey, idioma]);
+  }, [ready, pushKey]);
 
   useEffect(() => {
     if (!ready) return;

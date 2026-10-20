@@ -1490,11 +1490,11 @@ describe('pedido de atualização e reinício', () => {
 });
 
 describe('subscribeExpoPushForServer', () => {
-  it('posta o token Expo no servidor indicado, com o corpo pedido', async () => {
+  it('posta o token Expo no servidor indicado, com id e nome dele', async () => {
     const { subscribeExpoPushForServer } = await import('./api');
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"ok":true}'));
     const body = { token: 'ExponentPushToken[x]', server_id: 'b', label: 'Casa', locale: 'pt' };
-    await subscribeExpoPushForServer({ id: 'b', label: 'Casa', baseUrl: 'https://b.test', token: 'token-b' }, body);
+    await subscribeExpoPushForServer({ id: 'b', label: 'Casa', baseUrl: 'https://b.test', token: 'token-b' }, 'ExponentPushToken[x]', 'pt');
     expect(fetchMock).toHaveBeenCalledExactlyOnceWith('https://b.test/api/push/expo/subscribe', expect.objectContaining({
       method: 'POST',
       body: JSON.stringify(body),
@@ -1505,7 +1505,7 @@ describe('subscribeExpoPushForServer', () => {
   it('falha quando o servidor recusa', async () => {
     const { subscribeExpoPushForServer } = await import('./api');
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"detail":"x"}', { status: 404 }));
-    await expect(subscribeExpoPushForServer({ id: 'b', label: 'Casa', baseUrl: 'https://b.test', token: 'token-b' },
-      { token: 't', server_id: 'b', label: 'Casa', locale: 'pt' })).rejects.toThrow();
+    await expect(subscribeExpoPushForServer({ id: 'b', label: 'Casa', baseUrl: 'https://b.test', token: 'token-b' }, 't', 'pt'))
+      .rejects.toThrow();
   });
 });

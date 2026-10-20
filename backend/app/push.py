@@ -4,7 +4,6 @@ Disparado pelo hook Notification do Claude Code (via hook_state) -> funciona com
 Inscricoes ficam num arquivo duravel; o envio usa pywebpush + VAPID compartilhado (config). Sem
 chaves VAPID o modulo degrada gracioso (subscribe guarda, mas send vira no-op silencioso).
 """
-import asyncio
 import json
 import logging
 from datetime import datetime, time as dtime
@@ -273,17 +272,13 @@ def _broadcast(session_name: str, body_fn, *, tag: str | None = None,
 
 def _to_expo(session_name: str, body_fn, title_suffix_fn, list_view: bool) -> None:
     """O canal Expo independe do Web Push: sai antes do VAPID e fora do `_lock`."""
+    if not push_expo_bridge.configured():
+        return
     def text(fn) -> dict[str, str]:
         return {locale: fn(locale) for locale in ("pt", "en")}
     title = text(title_suffix_fn) if title_suffix_fn is not None else {"pt": session_name, "en": session_name}
-    args = (session_name, title, text(body_fn), list_view)
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        push_expo_bridge.send(*args)
-        return
-    # A ponte bloqueia até 5 s: no laço ela travaria o backend.
-    Thread(target=push_expo_bridge.send, args=args, daemon=True).start()
+    # A ponte bloqueia até 5 s: nem o laço nem o Web Push esperam por ela.
+    Thread(target=push_expo_bridge.send, args=(session_name, title, text(body_fn), list_view), daemon=True).start()
 
 
 def notify_awaiting(session_name: str, body: str | None = None) -> None:

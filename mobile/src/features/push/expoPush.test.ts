@@ -25,7 +25,10 @@ vi.mock('expo-notifications', () => ({
   clearLastNotificationResponse: h.clear,
   DEFAULT_ACTION_IDENTIFIER: 'default-action',
 }));
-vi.mock('@hangar/core', () => ({ subscribeExpoPushForServer: h.subscribe }));
+vi.mock('@hangar/core', () => ({
+  subscribeExpoPushForServer: h.subscribe,
+  isOwnMachine: (s: { invite?: unknown; ephemeral?: unknown; removed?: unknown }) => !s.invite && !s.ephemeral && !s.removed,
+}));
 vi.mock('../../paraglide/runtime', () => ({ getLocale: () => 'pt' }));
 vi.mock('../../stores/servers', () => ({ useServers: vi.fn() }));
 
@@ -64,14 +67,14 @@ describe('registerExpoPush', () => {
     expect(await registerExpoPush([casa, work])).toBe('registered');
     expect(h.getToken).toHaveBeenCalledWith({ projectId: 'proj-1' });
     expect(h.subscribe).toHaveBeenCalledTimes(2);
-    expect(h.subscribe).toHaveBeenCalledWith(casa, { token: 'ExponentPushToken[abc]', server_id: 'casa', label: 'Casa', locale: 'pt' });
-    expect(h.subscribe).toHaveBeenCalledWith(work, { token: 'ExponentPushToken[abc]', server_id: 'work', label: 'Trabalho', locale: 'pt' });
+    expect(h.subscribe).toHaveBeenCalledWith(casa, 'ExponentPushToken[abc]', 'pt');
+    expect(h.subscribe).toHaveBeenCalledWith(work, 'ExponentPushToken[abc]', 'pt');
   });
 
   it('falha num servidor não impede o outro', async () => {
     h.subscribe.mockImplementation(async (s: { id: string }) => { if (s.id === 'casa') throw new Error('404'); });
     expect(await registerExpoPush([casa, work])).toBe('registered');
-    expect(h.subscribe).toHaveBeenCalledWith(work, expect.objectContaining({ server_id: 'work' }));
+    expect(h.subscribe).toHaveBeenCalledWith(work, 'ExponentPushToken[abc]', 'pt');
   });
 
   it('cria o canal Android default com importância alta', async () => {
@@ -103,15 +106,17 @@ describe('permissão liberada nos ajustes', () => {
     await registerExpoPush([casa]);
     h.permission = 'granted';
     expect(await retryExpoPushIfDenied([casa])).toBe('registered');
-    expect(h.subscribe).toHaveBeenCalledWith(casa, expect.objectContaining({ server_id: 'casa' }));
+    expect(h.subscribe).toHaveBeenCalledWith(casa, 'ExponentPushToken[abc]', 'pt');
   });
 
   it('permissão ainda negada na volta não pergunta de novo', async () => {
     h.permission = 'denied';
     await registerExpoPush([casa]);
     h.request.mockClear();
+    h.channel.mockClear();
     expect(await retryExpoPushIfDenied([casa])).toBe('denied');
     expect(h.request).not.toHaveBeenCalled();
+    expect(h.channel).not.toHaveBeenCalled();
     expect(h.getToken).not.toHaveBeenCalled();
   });
 
