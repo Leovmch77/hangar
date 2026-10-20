@@ -356,6 +356,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   // sem costura a cauda vira a verdade, e o antigo volta pelo loadOlder.
   async function syncTail(): Promise<void> {
     const { g, signal } = novaLeitura();
+    const cachedEvents = new Set(useChatStore.getState().events);
     const target = destino();
     try {
       if (!target) throw new Error(m.chat_servidor_removido());
@@ -367,7 +368,10 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       if (!atual.length || !hasSeam(r.eventos, atual)) {
         // Lista trocada pela cauda: o cursor antigo reenviaria o buraco DEPOIS dela, fora de ordem.
         lastEventId = null;
-        aplicarEvents(r.eventos);
+        const merged = mergeHistoryWithLiveRetiring(r.eventos, atual,
+          { cachedEvents, removedIds: retiredQueuedIds, retireQueuedFromCurrent: true });
+        for (const id of merged.retired) retiredQueuedIds.add(id);
+        aplicarEvents(merged.events);
         useChatStore.setState({ olderFailed: '' });
         return;
       }

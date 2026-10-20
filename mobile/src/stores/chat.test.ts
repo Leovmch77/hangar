@@ -1578,6 +1578,29 @@ test('history recuperado reconcilia eco preservado sem duplicar user_msg', async
 });
 
 describe('primeiro plano', () => {
+  test.each([
+    { live: ev({ id: 'live', text: 'Ao vivo' }), tail: [ev({ id: 'rest' })], ids: ['rest', 'live'] },
+    { live: ev({ id: 'old', text: 'Versão ao vivo' }), tail: [ev({ id: 'rest' })], ids: ['rest', 'old'] },
+    { live: ev({ id: 'live', text: 'Ao vivo' }),
+      tail: [ev({ id: 'real', text: 'Mesmo texto' }), ev({ id: 'queued-new', text: 'Mesmo texto' })],
+      ids: ['real', 'queued-new', 'live'] },
+  ])('retry sem costura conserva os eventos recebidos durante a consulta: $ids', async ({ live, tail, ids }) => {
+    const requests = fetchManual();
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    requests[0].responder([ev({ id: 'old', text: 'Conversa anterior' })]);
+    await tick();
+    const source = created[0];
+    chat.retry();
+    expect(source.close).not.toHaveBeenCalled();
+    source.trigger('message', JSON.stringify(live));
+    requests[1].responder(tail);
+    await tick();
+    expect(chat.use.getState().events.map((e) => e.id)).toEqual(ids);
+    expect(chat.use.getState().events.at(-1)?.text).toBe(live.text);
+    chat.release();
+  });
+
   test('fundo fecha stream e timers sem perder conversa; volta sincroniza uma vez sem duplicar', async () => {
     const pedidos = fetchManual();
     const chat = chatStore('srv1', 'sess');
