@@ -4,7 +4,7 @@
 use super::*;
 use super::activity::web;
 use super::device::Remote;
-use super::grouping::{Grant, IdSlot, Refusal, Row, can_pair, failed, full_grants, glyph, identity_of, identity_settled, pair_and_grant, qualified, web_with};
+use super::grouping::{Grant, IdSlot, Refusal, failed, full_grants, glyph, identity_of, identity_settled, pair_and_grant, qualified, web_with};
 use super::sidebar::{SidebarReply, Target};
 use crate::api::dto::{PairExternalEntry, PairResult};
 use gpui_kit::component::{WindowExt, checkbox::Checkbox};
@@ -430,17 +430,9 @@ impl Hangar {
         let heading = |text: String| div().mt(px(8.)).text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(text);
         let machines = self.group_machines();
         let multi = machines.len() > 1;
-        // Candidatas a entrar: as que o arrastar aceitaria, de todas as máquinas do dono, a desta primeiro.
-        let mut candidates: Vec<(Target, SessionInfo)> = Vec::new();
-        if let Some(live) = self.sheet_live() {
-            let origin = Row { server: &here, session: live, invite: false };
-            for key in std::iter::once(&here).chain(machines.iter().filter(|k| **k != here)) {
-                let mut list: Vec<&SessionInfo> = self.sessions_of(key).iter()
-                    .filter(|s| can_pair(origin, Row { server: key, session: s, invite: false }, &ids).is_ok()).collect();
-                list.sort_by_cached_key(|s| s.name.to_lowercase());
-                candidates.extend(list.into_iter().map(|s| (Target::new(key, &s.name), s.clone())));
-            }
-        }
+        // As mesmas candidatas do arrastar e do "Agrupar com…".
+        let candidates: Vec<(Target, SessionInfo)> = self.group_candidates(&Target::new(&here, &me), cx).into_iter()
+            .filter_map(|(t, _)| self.target_session(&t).cloned().map(|s| (t, s))).collect();
         // Máquinas cujo identificador ainda está em leitura ou faltou: as sessões delas não aparecem, e o painel diz por quê.
         let notes: Vec<String> = machines.iter().filter(|_| multi).filter_map(|k| {
             let label = self.machine_label(k, cx);

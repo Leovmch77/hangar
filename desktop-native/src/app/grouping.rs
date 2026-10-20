@@ -201,6 +201,19 @@ pub(super) async fn pair_and_grant(api: Api, target: String, peers: Vec<String>,
 }
 
 /// `canPair` do web, na mesma ordem. Membro de fora não impede.
+/// Candidatas a entrar no grupo de `origin`: as que o arrastar aceitaria em `machines`, a da origem primeiro, por nome,
+/// sem as que estão sendo apagadas.
+pub(super) fn candidates<'a>(origin: Row, mut machines: Vec<String>, sessions: impl Fn(&str) -> &'a [SessionInfo],
+    hidden: impl Fn(&str, &str) -> bool, ids: &HashMap<String, String>) -> Vec<(Target, &'a SessionInfo)> {
+    machines.sort_by_key(|k| k != origin.server);
+    machines.iter().flat_map(|key| {
+        let mut list: Vec<&SessionInfo> = sessions(key).iter()
+            .filter(|s| !hidden(key, &s.name) && can_pair(origin, Row { server: key, session: s, invite: false }, ids).is_ok()).collect();
+        list.sort_by_cached_key(|s| s.name.to_lowercase());
+        list.into_iter().map(|s| (Target::new(key, &s.name), s)).collect::<Vec<_>>()
+    }).collect()
+}
+
 pub(super) fn can_pair(origin: Row, target: Row, ids: &HashMap<String, String>) -> Result<(), Refusal> {
     let (o, t) = (origin.session, target.session);
     let same_server = origin.server == target.server;
@@ -530,16 +543,11 @@ impl Hangar {
     /// texto do item (o nome; de outra máquina, "nome · máquina").
     pub(super) fn group_candidates(&self, origin: &Target, cx: &App) -> Vec<(Target, String)> {
         let Some(row) = self.pair_row(origin) else { return Vec::new() };
-        let ids = self.identities();
-        let mut machines = self.group_machines();
-        machines.sort_by_key(|k| *k != origin.server);
-        machines.iter().flat_map(|key| {
-            let mut list: Vec<&SessionInfo> = self.sessions_of(key).iter().filter(|s| !self.sidebar.is_hidden(key, &s.name)).collect();
-            list.sort_by_cached_key(|s| s.name.to_lowercase());
-            let label = (*key != origin.server).then(|| self.machine_label(key, cx));
-            list.into_iter().filter(|s| can_pair(row, Row { server: key, session: s, invite: false }, &ids).is_ok())
-                .map(|s| (Target::new(key, &s.name), label.as_ref().map_or_else(|| s.name.clone(), |m| format!("{} · {m}", s.name)))).collect::<Vec<_>>()
-        }).collect()
+        candidates(row, self.group_machines(), |k| self.sessions_of(k), |k, n| self.sidebar.is_hidden(k, n), &self.identities()).into_iter()
+            .map(|(t, s)| {
+                let text = if t.server == origin.server { s.name.clone() } else { format!("{} · {}", s.name, self.machine_label(&t.server, cx)) };
+                (t, text)
+            }).collect()
     }
 
     // ── Arrastar ──
@@ -957,7 +965,7 @@ pub(super) fn fill_group(menu: PopupMenu, hangar: &WeakEntity<Hangar>, origin: &
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` do gpui_kit, que o `super::*` traz, esconderia o `#[test]` da linguagem.
-    use super::{GlobalGroup, Grant, IdSlot, ListRow, Member, Refusal, Row, SessionInfo, can_leave, can_pair, cluster, existing_group, full_grants,
+    use super::{GlobalGroup, Grant, IdSlot, ListRow, Member, Refusal, Row, SessionInfo, can_leave, can_pair, candidates, cluster, existing_group, full_grants,
         global_groups, id_slot, identity_settled, memo, pair_header_label, qualified, seal_text, split_code};
     use crate::api::dto::{PairExternal, PairExternalEntry, PairResult};
     use serde_json::Value;
@@ -1009,6 +1017,17 @@ mod tests {
             let got = can_pair(row(&case["origin"], &origin), row(&case["target"], &target), &identities(case, &all));
             assert_eq!(got, want, "{}", case["name"]);
         }
+    }
+
+    #[test]
+    fn candidates_skip_sessions_being_deleted_and_invite_origins() {
+        let here = vec![s("me", None, &[]), s("Bye", None, &[]), s("b", None, &[])];
+        let me = &here[0];
+        let ids = HashMap::new();
+        let names = |origin: Row| candidates(origin, vec!["h".into()], |_| &here[..], |_, n| n == "Bye", &ids)
+            .into_iter().map(|(t, _)| t.name).collect::<Vec<_>>();
+        assert_eq!(names(Row { server: "h", session: me, invite: false }), ["b"], "a que está sendo apagada não entra");
+        assert!(names(Row { server: "h", session: me, invite: true }).is_empty(), "sessão de servidor de convite não agrupa");
     }
 
     #[test]
