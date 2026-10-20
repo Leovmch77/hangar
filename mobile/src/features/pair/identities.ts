@@ -37,6 +37,7 @@ export function useIdentities(servers: Server[]) {
     };
     read();
     return () => { controller.abort(); clearTimeout(timer); };
+    // `keys` resume `own`: o array novo a cada render reabriria a leitura sem mudar máquina.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keys]);
   return useMemo(() => {
@@ -48,6 +49,7 @@ export function useIdentities(servers: Server[]) {
       else if (!failedUntil.has(cacheKey(server))) loading.add(server.id);
     }
     return { identities, loading };
+    // `version` avisa que os mapas do módulo mudaram; `own` já entra por `keys`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keys, version]);
 }

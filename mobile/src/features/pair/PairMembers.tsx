@@ -40,21 +40,32 @@ export function PairMembers({ members, machines, picked, pickedNames, adding, bu
           const { state, machine } = member;
           const detail = member.missing && machine ? m.grupo_membro_maquina_desconectada({ maquina: machine })
             : [machine, state ? rotuloEstado(state) : null].filter(Boolean).join(' · ');
+          const content = <>
+            <View style={[styles.dot, { backgroundColor: state ? stateDot(state) : theme.tokens.text.muted }]} />
+            <View style={styles.main}>
+              <Text style={[styles.name, { color: member.missing ? theme.tokens.text.muted : theme.tokens.text.primary }]} numberOfLines={1}>{member.name}</Text>
+              {detail ? <Text style={[styles.state, { color: theme.tokens.text.muted }]} numberOfLines={1}>{detail}</Text> : null}
+            </View>
+          </>;
+          // Sem conversa para abrir é só texto: um botão desligado seria anunciado como ação.
+          if (!member.target) {
+            return (
+              <View key={member.key} style={styles.memberRow} accessible accessibilityRole="text"
+                    accessibilityLabel={[member.name, detail].filter(Boolean).join(', ')}>
+                {content}
+              </View>
+            );
+          }
           return (
             <Pressable
               key={member.key}
               onPress={() => onOpenMember(member)}
-              disabled={!member.target}
               style={styles.memberRow}
-              accessibilityRole={member.target ? 'button' : 'text'}
-              accessibilityLabel={member.target ? m.par_abrir_conversa_de({ nome: member.name }) : [member.name, detail].filter(Boolean).join(', ')}
+              accessibilityRole="button"
+              accessibilityLabel={m.par_abrir_conversa_de({ nome: member.name })}
             >
-              <View style={[styles.dot, { backgroundColor: state ? stateDot(state) : theme.tokens.text.muted }]} />
-              <View style={styles.main}>
-                <Text style={[styles.name, { color: member.missing ? theme.tokens.text.muted : theme.tokens.text.primary }]} numberOfLines={1}>{member.name}</Text>
-                {detail ? <Text style={[styles.state, { color: theme.tokens.text.muted }]} numberOfLines={1}>{detail}</Text> : null}
-              </View>
-              {member.target ? <Icon name="ChevronRight" size={18} color={theme.tokens.text.muted} /> : null}
+              {content}
+              <Icon name="ChevronRight" size={18} color={theme.tokens.text.muted} />
             </Pressable>
           );
         })}
