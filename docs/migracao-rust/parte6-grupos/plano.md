@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: ready-for-human (decisões D1 e D2 tomadas; aguarda aprovação do plano e a escolha do modo de execução)
+Status: wontfix (Entrega 1a feita no PR #124; Tasks 9–21 substituídas por [`plano-federacao.md`](plano-federacao.md))
 
 **Goal:** com o Rust de pé, o `hangar-server` passa a ser o único que grava grupos (1a); um grupo
 pode ter N sessões em M máquinas com um `gid` e uma máquina dona (1b); o desktop nativo mostra cada
@@ -902,6 +902,9 @@ Status: ready-for-agent
   paridade).
 - [x] **Step 4: Rodar.** Esperado: PASS.
 - [x] **Step 5: Commit** — `git commit -m "fix(list): re-emit the session list when only the group changes"`
+
+> **Tasks 9–21 substituídas por [`plano-federacao.md`](plano-federacao.md) (19/10/2026).** O texto
+> abaixo fica como registro; não executar daqui.
 
 ### Task 9: Verificação manual com o dono (1a)
 
