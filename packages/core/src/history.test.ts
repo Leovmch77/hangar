@@ -185,4 +185,12 @@ describe('mergeHistoryWithLiveRetiring: real que chega pelo /history', () => {
     expect(r.events.map((e) => e.id)).toContain('queued-1');
     expect(r.retired).toEqual([]);
   });
+  it.each([{ current: [] }, { current: [{ id: 'live', kind: 'assistant_msg', text: 'Ao vivo' } as ChatEvent] }])(
+    'conserva filas quando o chamador faz a própria reconciliação: $current', ({ current }) => {
+      const history = [user('real', 'Vamos fazer hoje agora'), user('queued-specific', 'Vamos fazer hoje')];
+      const r = mergeHistoryWithLiveRetiring(history, current, { cachedEvents: new Set(), retireQueued: false });
+      expect(r.events).toEqual([...history, ...current]);
+      expect(r.retired).toEqual([]);
+    },
+  );
 });

@@ -5,6 +5,7 @@ import {
   getHistoryDesde,
   openEventStreamForServer,
   prependOlder,
+  mergeHistoryWithLive,
   hasSeam,
   isAbortError,
   isTimeoutError,
@@ -322,12 +323,14 @@ function criarChatStore(serverId: string, name: string): ChatApi {
 
   async function loadHistory(): Promise<void> {
     const { g, signal } = novaLeitura();
+    const cachedEvents = new Set(useChatStore.getState().events);
     try {
       const target = destino();
       if (!target) throw new Error(m.chat_servidor_removido());
       const tail = await getHistory(name, TAIL_FIRST, signal, undefined, target);
       if (g !== histGen) return;
-      aplicarEvents(tail);
+      // O SSE continua chegando durante o GET, inclusive logo após /clear.
+      aplicarEvents(mergeHistoryWithLive(tail, useChatStore.getState().events, { cachedEvents, retireQueued: false }));
       baseLoaded = true;
       useChatStore.setState({ error: '', olderFailed: '' });
       // Histórico antigo NÃO vem automático (diferente da PWA): entra sob demanda no

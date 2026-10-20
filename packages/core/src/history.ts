@@ -89,6 +89,7 @@ export function mergeHistoryWithLive(
     preserveNoSeam?: boolean;
     removedIds?: ReadonlySet<string>;
     cachedEvents?: ReadonlySet<ChatEvent>;
+    retireQueued?: boolean;
   } = {},
 ): ChatEvent[] {
   return mergeHistoryWithLiveRetiring(history, current, options).events;
@@ -103,6 +104,7 @@ export function mergeHistoryWithLiveRetiring(
     preserveNoSeam?: boolean;
     removedIds?: ReadonlySet<string>;
     cachedEvents?: ReadonlySet<ChatEvent>;
+    retireQueued?: boolean;
   } = {},
 ): { events: ChatEvent[]; retired: string[] } {
   const removed = options.removedIds ?? new Set<string>();
@@ -141,5 +143,7 @@ export function mergeHistoryWithLiveRetiring(
     }
     merged.push(...current.slice(cursor).filter(e => !historyIds.has(e.id)));
   }
-  return retireQueuedCoveredBy(merged.filter(e => !removed.has(e.id)), fresh, retiredBefore);
+  const events = merged.filter(e => !removed.has(e.id));
+  // O mobile reconcilia as filas no ingest; reais antigos do REST não podem consumi-las de novo.
+  return options.retireQueued === false ? { events, retired: [] } : retireQueuedCoveredBy(events, fresh, retiredBefore);
 }

@@ -429,6 +429,26 @@ test.each(['claude', 'codex'])('reset do %s apaga a conversa e o eco de /clear a
   chat.release();
 });
 
+test.each([
+  { tail: [], live: [ev({ id: 'new:1', text: 'Ao vivo' })], texts: ['Ao vivo'] },
+  { tail: [ev({ id: 'new:0', text: 'Anterior' })], live: [ev({ id: 'new:1', text: 'Ao vivo' })], texts: ['Anterior', 'Ao vivo'] },
+  { tail: [ev({ id: 'new:1', text: 'Versão antiga' })], live: [ev({ id: 'new:1', text: 'Versão atual' }), ev({ id: 'new:2', text: 'Seguinte' })],
+    texts: ['Versão atual', 'Seguinte'] },
+])('histórico após reset preserva as mensagens SSE: $texts', async ({ tail, live, texts }) => {
+  historyResponses = [[ev({ id: 'old:1', text: 'Conversa anterior' })]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const requests = fetchManual();
+  created[0].trigger('reset', '{}');
+  for (const message of live) created[0].trigger('message', JSON.stringify(message));
+  requests[0].responder(tail);
+  await tick();
+  expect(chat.use.getState().events.map((e) => e.text)).toEqual(texts);
+  expect(chat.use.getState().loading).toBe(false);
+  chat.release();
+});
+
 test('/clear aceito só retira seu eco quando o servidor confirma a troca de conversa', async () => {
   historyResponses = [[ev({ id: 'old:1', kind: 'assistant_msg', text: 'Conversa anterior' })]];
   const chat = chatStore('srv1', 'sess');
