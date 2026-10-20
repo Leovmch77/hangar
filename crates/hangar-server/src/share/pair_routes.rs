@@ -277,7 +277,7 @@ async fn link_refusal(app: &AppState, name: &str) -> Result<(), Refusal> {
 /// O aviso de par à sessão daqui; `Err` = o texto da falha (`_erro_texto`).
 async fn notify_paired(app: &AppState, me: &str, peer: &str, owner: &str) -> Result<(), String> {
     let args = crate::groups::text::TextArgs { me: me.into(), peer: peer.into(), owner: owner.into(), ..Default::default() };
-    let text = crate::groups::deliver::protocol_text(crate::groups::text::Kind::External, &args);
+    let text = crate::groups::text::protocol_text(crate::groups::text::Kind::External, &args);
     let sent = match text { Ok(text) => deliver_text(app, me, &text).await, Err(e) => Err(e) };
     sent.map_err(|e| e.get("msg").map_or_else(|| py_str(&e), py_str))
 }

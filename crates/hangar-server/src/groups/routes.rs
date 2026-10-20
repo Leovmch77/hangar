@@ -23,7 +23,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use super::deliver::{ContractLine, Kind, TextArgs, protocol_text};
+use super::text::{ContractLine, Kind, TextArgs, protocol_text};
 use super::local::{JoinRefusal, Snapshot, is_remote};
 use super::orq::{is_orchestrator, list_unavailable};
 use super::service::{GroupError, GroupService, JoinOutcome, JoinOwned, PromoteError};

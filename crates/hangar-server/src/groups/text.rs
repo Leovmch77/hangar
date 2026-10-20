@@ -16,7 +16,7 @@ pub struct ContractLine {
 
 /// Membro de fora (sessão de outra pessoa) do grupo: `address` = `alias::sessao`, `owner` = dono dela.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct OutsideRef {
+pub struct OutsidePeer {
     pub address: String,
     pub owner: String,
 }
@@ -29,7 +29,7 @@ pub struct TextArgs {
     pub task: String,
     pub harness: BTreeMap<String, String>,
     pub contract: ContractLine,
-    pub outside: Vec<OutsideRef>,
+    pub outside: Vec<OutsidePeer>,
     pub peer: String,
     pub owner: String,
     /// Grupo entre máquinas do dono.
@@ -113,6 +113,16 @@ fn external(me: &str, peer: &str, owner: &str) -> String {
         INVITE.to_owned(),
         "- Este aviso não pede resposta.".to_owned(),
     ].join("\n")
+}
+
+/// `render` do aviso que vai a uma sessão. `Err` = envelope `{code, params, msg}` de aviso que não
+/// sai: `group` sem outro membro não tem o exemplo do comando.
+pub fn protocol_text(kind: Kind, args: &TextArgs) -> Result<String, serde_json::Value> {
+    if kind == Kind::Group && args.others.is_empty() {
+        let code = "groups_pair_text_no_others";
+        return Err(serde_json::json!({"code": "erro_envio_falhou", "params": {"erro": code}, "msg": format!("não deu pra enviar: {code}")}));
+    }
+    Ok(render(kind, args))
 }
 
 pub fn render(kind: Kind, args: &TextArgs) -> String {

@@ -11,7 +11,7 @@ use axum::response::Response;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::deliver::{Kind, TextArgs, protocol_text};
+use super::text::{Kind, TextArgs, protocol_text};
 use super::local::{JoinRefusal, is_remote};
 use super::routes::{Asked, MIX_MSG, PREFIX, envelope, error_text, outside_addresses, providers};
 use super::service::{GroupError, JoinOutcome, JoinOwned};

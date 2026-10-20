@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 
 use super::model::Fed;
 use super::store::file_stem;
-use super::text::{self, ContractLine, Kind, OutsideRef, TextArgs};
+use super::text::{self, ContractLine, Kind, OutsidePeer, TextArgs};
 use crate::transcript::pyjson;
 
 const TMUX_DEADLINE: Duration = Duration::from_secs(3);
@@ -86,7 +86,7 @@ fn protocol(pair_dir: &Path, me: &str, d: &Map<String, Value>) -> Option<String>
 
 /// Pares de fora entre os `peers`, pelo `external_pairs.json`. O par pode ter sido feito por outro
 /// membro desta máquina. Registro ilegível: na dúvida, o primeiro `::` é de outra pessoa.
-fn outside_of(pair_dir: &Path, me: &str, peers: &[String]) -> Vec<OutsideRef> {
+fn outside_of(pair_dir: &Path, me: &str, peers: &[String]) -> Vec<OutsidePeer> {
     let locals: Vec<&str> = std::iter::once(me).chain(peers.iter().map(String::as_str).filter(|p| !p.contains("::"))).collect();
     let registry = match std::fs::read_to_string(pair_dir.join("external_pairs.json")) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
@@ -97,13 +97,13 @@ fn outside_of(pair_dir: &Path, me: &str, peers: &[String]) -> Vec<OutsideRef> {
         None => {
             let Some(blind) = peers.iter().find(|p| p.contains("::")) else { return Vec::new() };
             eprintln!("[hangar] external_pairs.json ilegível: par '{blind}' tratado como externo");
-            vec![OutsideRef { address: blind.clone(), owner: "desconhecido".to_owned() }]
+            vec![OutsidePeer { address: blind.clone(), owner: "desconhecido".to_owned() }]
         }
     }
 }
 
 /// Os pares feitos por sessões desta máquina; `None` = registro torto.
-fn registered(registry: &Value, locals: &[&str]) -> Option<Vec<OutsideRef>> {
+fn registered(registry: &Value, locals: &[&str]) -> Option<Vec<OutsidePeer>> {
     let mut found = Vec::new();
     for record in registry.as_array()? {
         let record = record.as_object()?;
@@ -111,7 +111,7 @@ fn registered(registry: &Value, locals: &[&str]) -> Option<Vec<OutsideRef>> {
             continue;
         }
         let field = |k: &str| record.get(k).and_then(Value::as_str);
-        found.push(OutsideRef { address: format!("{}::{}", field("alias")?, field("peer_session")?), owner: field("peer_owner")?.to_owned() });
+        found.push(OutsidePeer { address: format!("{}::{}", field("alias")?, field("peer_session")?), owner: field("peer_owner")?.to_owned() });
     }
     Some(found)
 }

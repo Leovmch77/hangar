@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use fake::*;
-use hangar_server::groups::deliver::{ContractLine, Kind, TextArgs, protocol_text};
+use hangar_server::groups::text::{ContractLine, Kind, TextArgs, protocol_text};
 use hangar_server::groups::orq::{PythonOrq, is_orchestrator};
 use hangar_server::groups::service::{OrqFacts, OrqPhase, PromoteError};
 use hangar_server::routes::AppState;

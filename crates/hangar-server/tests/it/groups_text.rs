@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use hangar_server::groups::text::{ContractLine, Kind, OutsideRef, TextArgs, render};
+use hangar_server::groups::text::{ContractLine, Kind, OutsidePeer, TextArgs, render};
 use serde_json::Value;
 
 fn fixtures() -> BTreeMap<String, Value> {
@@ -54,7 +54,7 @@ fn render_matches_every_python_text() {
     }
     assert_eq!(checked, 18);
     // Recusas da rota interna, que deixa de existir: corpo, segredo e surrogate não chegam a `render`.
-    // `group` sem outro membro fica com `protocol_text` (deliver).
+    // `group` sem outro membro fica com `protocol_text`.
     assert_eq!(skipped, ["group_task_surrogate", "refused_bad_kind", "refused_extra_field", "refused_group_without_others", "refused_without_secret"]);
 }
 
@@ -73,7 +73,7 @@ fn task_is_trimmed_like_python() {
 fn mixed_group_gets_group_and_external_text() {
     let fx = fixtures();
     let mut args = args_of(&fx["group_with_contract"]["request"]["body"]);
-    args.outside = vec![OutsideRef { address: "ana::rev".into(), owner: "Ana".into() }];
+    args.outside = vec![OutsidePeer { address: "ana::rev".into(), owner: "Ana".into() }];
     assert_eq!(render(Kind::Group, &args), format!("{}\n{}", expected("group_with_contract"), expected("external")));
 }
 
@@ -113,7 +113,7 @@ proptest::proptest! {
                            peer in "\\PC*", provider in "\\PC*") {
         let harness: BTreeMap<String, String> = [(me.clone(), provider)].into();
         let args = TextArgs { me, others, task, harness, peer: peer.clone(), owner: peer.clone(),
-            outside: vec![OutsideRef { address: peer.clone(), owner: peer }], ..Default::default() };
+            outside: vec![OutsidePeer { address: peer.clone(), owner: peer }], ..Default::default() };
         for kind in [Kind::Group, Kind::Orq, Kind::External] {
             proptest::prop_assert!(render(kind, &args).starts_with("[painel: grupo de trabalho] "));
         }
