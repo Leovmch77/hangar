@@ -41,7 +41,7 @@ _EXTENSOES_POR_CLI = {
     "omp": tuple(nome for nome in _EXTENSOES_PI if nome not in ("claude-todo", "fullscreen-tui")),
 }
 _HOOKS_CLAUDE = ("state_hook.py", "askq_capture.py", "preview_hook.py", "subagent_hook.py",
-                 "pair_hook.py", "nav_hook.py")
+                 "pair-context", "nav_hook.py")
 
 _versoes: dict[str, tuple[float, str | None]] = {}
 

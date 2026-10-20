@@ -145,6 +145,7 @@ mod costs_routes;
 mod costs_session_unit;
 mod costs_uso_unit;
 mod groups_bridge;
+mod groups_context_cmd;
 mod groups_deliver;
 mod groups_legacy;
 mod groups_local;

@@ -6,6 +6,10 @@ fn main() -> std::process::ExitCode {
     if matches!(args.first().map(String::as_str), Some("open" | "resolve")) {
         return hangar_server::session_open::cli::run(&args);
     }
+    // Hook de SessionStart: só disco, nunca sobe o servidor.
+    if args.first().map(String::as_str) == Some("pair-context") {
+        return hangar_server::groups::context_cmd::run(&args);
+    }
     // O glibc exige a configuração antes de o runtime criar threads.
     unsafe { hangar_server::tune_allocator(); }
     run();

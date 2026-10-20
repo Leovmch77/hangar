@@ -115,20 +115,20 @@ def _load_settings(settings_path: Path) -> dict | None:
 
 
 def _sync_hook(
-    data: dict, event: str, command: str, matcher: str | None = None, por_nome: bool = False
+    data: dict, event: str, command: str | None, matcher: str | None = None, por_nome: bool = False, script: str | None = None
 ) -> bool:
-    """Deixa EXATAMENTE UMA entrada nossa sob hooks[event], com o command atual.
+    """Deixa EXATAMENTE UMA entrada nossa sob hooks[event], com o command atual (`None`: nenhuma).
     Formato antigo e substituido no lugar; duplicatas colapsam na primeira ocorrencia
     (o installer roda a cada subida do backend, entao ele cura a bagunca que criou).
     Hooks de terceiros ficam intactos, na mesma ordem. Retorna True se mudou algo."""
-    script = _script_of(command)
+    script = script or _script_of(command)
     hooks = data.setdefault("hooks", {})
     ev_list = hooks.setdefault(event, [])
     if not isinstance(ev_list, list):
         return False  # lista do evento estranha -> nao mexe
 
     changed = False
-    kept = False
+    kept = command is None  # sem command, toda entrada nossa sai como duplicata
     empties: list[int] = []
     for block in ev_list:
         if not isinstance(block, dict):
@@ -371,29 +371,29 @@ def ensure_guard_hooks_installed() -> list[str]:
     return touched
 
 
-PAIR_HOOK = str((Path(__file__).parent.parent / "hooks" / "pair_hook.py").resolve())
 # startup|resume|clear|compact: todo caminho em que o contexto nasce/renasce sem o prompt do --pair.
 _PAIR_MATCHER = "startup|resume|clear|compact"
 
 
-def _pair_command() -> str:
-    from app.pair import _pair_dir
-    return f'"{sys.executable}" "{PAIR_HOOK}" "{_pair_dir()}"{_FALHA_NAO_BLOQUEIA}'
-
-
 def ensure_pair_hook_installed() -> list[str]:
-    """Instala (idempotente) o reinjetor do protocolo de grupo no SessionStart, em cada config dir.
-    Fail-soft por arquivo, como os demais. Retorna os dirs onde gravou (so pra log)."""
+    """Instala (idempotente) o `hangar-server pair-context` no SessionStart de cada config dir, no lugar
+    do antigo pair_hook.py; sem o binario, nenhum. Fail-soft por arquivo. Retorna os dirs onde gravou."""
+    from app import diag, rust_bins
     try:
+        from app.pair import _pair_dir
         dirs = {Path(c.path) for c in list_config_dirs(ordered=False)} | {_backend_config_base().resolve()}
-        command = _pair_command()
+        command = (exe := rust_bins.find_bin("hangar-server", "CP_RUST_SERVER_BIN")) and f'"{exe}" pair-context "{_pair_dir()}"{_FALHA_NAO_BLOQUEIA}'
     except Exception:
         return []
+    if command is None:
+        diag.registrar("grupos.hook_sem_binario", "aviso")
     touched: list[str] = []
     for d in dirs:
         try:
-            if d.is_dir() and _ensure_event_hook(d / "settings.json", "SessionStart", command,
-                                                 matcher=_PAIR_MATCHER, por_nome=True):
+            data = _load_settings(d / "settings.json") if d.is_dir() else None
+            if data is not None and (_sync_hook(data, "SessionStart", None, por_nome=True, script="pair_hook.py")
+                                     | _sync_hook(data, "SessionStart", command, _PAIR_MATCHER, True, "pair-context")):
+                _write(d / "settings.json", data)
                 touched.append(str(d))
         except Exception:
             continue

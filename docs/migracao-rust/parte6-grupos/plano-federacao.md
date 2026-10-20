@@ -299,19 +299,19 @@ trava ou empobrece toda sessão.
 
 **Fecha:** HOOK-01..14, D-TXT-4, I-2A, BRG-34.
 
-- [ ] **Step 1: Testes** que rodam o binário como processo contra cada entrada de
+- [x] **Step 1: Testes** que rodam o binário como processo contra cada entrada de
   `backend/tests/fixtures/contract/pair_hook/` e comparam o stdout (menos o que I-3A/I-4A mudam,
   com teste próprio); `pair_context_works_without_server` (nenhuma porta aberta);
   `pair_context_never_fails_the_open` (sidecar torto, pasta inexistente, tmux ausente → rc 0, sem
   saída); em Python, `test_installer_without_binary_installs_no_pair_hook`.
-- [ ] **Step 2: Rodar e ver falhar.**
-- [ ] **Step 3: Implementar** o subcomando e trocar o instalador.
-- [ ] **Step 4: Rodar.** Esperado: PASS. `cd backend && uv run pytest tests/test_hook_installer.py`
+- [x] **Step 2: Rodar e ver falhar.**
+- [x] **Step 3: Implementar** o subcomando e trocar o instalador.
+- [x] **Step 4: Rodar.** Esperado: PASS. `cd backend && uv run pytest tests/test_hook_installer.py`
   (ou o arquivo que testa `ensure_pair_hook_installed`) verde com o comando novo.
 - [ ] **Step 5: Windows**: na DELPHI-02 (clone separado, nunca o Hangar vivo de lá), instalar o hook
   num config dir temporário e abrir uma sessão de teste: o `additionalContext` chega; caminho com
   espaço e `.exe` entre aspas.
-- [ ] **Step 6: Commit** — `feat(groups): reinject the group protocol from the Rust binary`.
+- [x] **Step 6: Commit** — `feat(groups): reinject the group protocol from the Rust binary`.
 
 **Prova:** `cargo test -p hangar-server --test it groups_context_cmd` verde; `grep -rn "pair_hook" backend/` → só o histórico de testes removidos (nada).
 

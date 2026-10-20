@@ -205,19 +205,37 @@ def test_capture_script_ignores_non_askq(tmp_path):
     assert not (tmp_path / ".hangar-askq").exists()  # nada escrito
 
 
-def test_pair_hook_entra_no_session_start_com_matcher(tmp_path, monkeypatch):
-    import json
-    from app import hook_installer as hi
-    monkeypatch.setattr(hi, "_pair_command", lambda: f'"py" "{hi.PAIR_HOOK}" "/x/.hangar-pair" || exit 0')
+_OLD_PAIR = {"matcher": "startup|resume|clear|compact",
+             "hooks": [{"type": "command", "command": '"py" "/r/backend/hooks/pair_hook.py" "/x/.hangar-pair" || exit 0'}]}
+
+
+def _pair_setup(tmp_path, monkeypatch, binary):
+    from app import hook_installer as hi, rust_bins
+    monkeypatch.setattr(rust_bins, "find_bin", lambda name, env: binary)
+    monkeypatch.setattr("app.pair._pair_dir", lambda: Path("/x/.hangar-pair"))
     monkeypatch.setattr(hi, "list_config_dirs", lambda **_: [])
     monkeypatch.setattr(hi, "_backend_config_base", lambda: tmp_path)
-    (tmp_path / "settings.json").write_text("{}")
+    (tmp_path / "settings.json").write_text(json.dumps({"hooks": {"SessionStart": [_OLD_PAIR]}}))
+    return hi
+
+
+def test_pair_hook_troca_o_script_pelo_binario(tmp_path, monkeypatch):
+    hi = _pair_setup(tmp_path, monkeypatch, Path("/b/hangar server"))
     assert hi.ensure_pair_hook_installed() == [str(tmp_path)]
-    data = json.loads((tmp_path / "settings.json").read_text())
-    bloco = data["hooks"]["SessionStart"][0]
-    assert bloco["matcher"] == "startup|resume|clear|compact"
-    assert "pair_hook.py" in bloco["hooks"][0]["command"]
+    blocos = json.loads((tmp_path / "settings.json").read_text())["hooks"]["SessionStart"]
+    assert blocos == [{"matcher": "startup|resume|clear|compact", "hooks": [
+        {"type": "command", "command": '"/b/hangar server" pair-context "/x/.hangar-pair" || exit 0'}]}]
     assert hi.ensure_pair_hook_installed() == []   # idempotente
+
+
+def test_installer_without_binary_installs_no_pair_hook(tmp_path, monkeypatch):
+    from app import diag
+    eventos = []
+    monkeypatch.setattr(diag, "registrar", lambda evento, *a, **k: eventos.append(evento))
+    hi = _pair_setup(tmp_path, monkeypatch, None)
+    assert hi.ensure_pair_hook_installed() == [str(tmp_path)]
+    assert json.loads((tmp_path / "settings.json").read_text())["hooks"]["SessionStart"] == []
+    assert eventos == ["grupos.hook_sem_binario"]
 
 
 def test_nav_hook_entra_no_user_prompt_submit(tmp_path, monkeypatch):
