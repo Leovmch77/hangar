@@ -1267,6 +1267,15 @@ impl Hangar {
         self.reset_device(window, cx);
         // Convite só enxerga a própria sessão: custos, contas, busca, configuração e avisos do servidor responderiam 403.
         if !self.active_invite() {
+            // Importa na conexão, sem depender de abrir novamente a tela onde o padrão foi marcado.
+            let defaults_api = self.api.clone();
+            self.runtime.spawn(async move {
+                if let Some(api) = defaults_api {
+                    if let Err(error) = api.import_session_defaults().await {
+                        eprintln!("não foi possível importar os padrões da abertura: {}", Hangar::fetch_failure(&error));
+                    }
+                }
+            });
             self.costs_reconnected(cx);
             self.worktrees_reconnected(cx);
             self.search_reconnected(cx);

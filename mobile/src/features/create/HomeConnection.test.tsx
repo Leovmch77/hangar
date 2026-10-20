@@ -103,7 +103,7 @@ let diagnostics: unknown[];
 const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
 const names = () => useSessions.getState().rows.map((row) => row.name).sort();
 const live = () => streams.filter((stream) => !stream.closed);
-const creationPaths = new Set(['/api/claude-configs', '/api/cotas', '/api/providers', '/api/engines', '/api/model-options', '/api/codex-contas', '/api/fs/roots', '/api/fs/scan', '/api/archive-por-cwd', '/api/worktrees']);
+const creationPaths = new Set(['/api/claude-configs', '/api/cotas', '/api/providers', '/api/engines', '/api/model-options', '/api/codex-contas', '/api/fs/roots', '/api/fs/scan', '/api/archive-por-cwd', '/api/session-defaults', '/api/worktrees']);
 const creationCalls = () => fetchMock.mock.calls.map(([url]) => new URL(url).pathname).filter((path) => creationPaths.has(path)).sort();
 const button = (label: string) => [...container.querySelectorAll<HTMLButtonElement>('button, div[aria-label]')]
   .find((node) => node.getAttribute('aria-label') === label || node.textContent === label);
@@ -141,6 +141,7 @@ beforeEach(() => {
       '/api/claude-configs': [], '/api/cotas': [], '/api/providers': {}, '/api/engines': { motores: {} },
       '/api/external-pairs': [], '/api/config': {}, '/api/voice/settings': { codex: false },
       '/api/model-options': { models: [], reduced: false }, '/api/fs/roots': [], '/api/worktrees': { repos: [] },
+      '/api/session-defaults': { configured: false, defaults: null },
     };
     if (!(path in payloads)) { unexpected.push(path); throw new Error(`unexpected_http:${path}`); }
     return new Response(JSON.stringify(payloads[path]));
@@ -209,7 +210,7 @@ it('Home real carrega criação na primeira abertura e conserva escolhas ao alte
   expect(input.readOnly).toBe(false);
   expect(button('Conta Claude: Carregando…')?.disabled).toBe(true);
   expect(creationCalls()).toEqual([
-    '/api/claude-configs', '/api/cotas', '/api/engines', '/api/fs/roots', '/api/model-options', '/api/providers', '/api/worktrees',
+    '/api/claude-configs', '/api/cotas', '/api/engines', '/api/fs/roots', '/api/model-options', '/api/providers', '/api/session-defaults', '/api/worktrees',
   ]);
   await click('Modelo, nível e permissão');
   expect(container.querySelector('[aria-label="Lendo opções…"]')).not.toBeNull();
@@ -233,7 +234,7 @@ it('Home real carrega criação na primeira abertura e conserva escolhas ao alte
     await flush();
   });
   const loaded = [
-    '/api/claude-configs', '/api/cotas', '/api/engines', '/api/fs/roots', '/api/model-options', '/api/model-options', '/api/providers', '/api/worktrees',
+    '/api/claude-configs', '/api/cotas', '/api/engines', '/api/fs/roots', '/api/model-options', '/api/model-options', '/api/providers', '/api/session-defaults', '/api/worktrees',
   ];
   expect(creationCalls()).toEqual(loaded);
   console.info('criacao-aberta', { count: creationCalls().length, endpoints: creationCalls() });

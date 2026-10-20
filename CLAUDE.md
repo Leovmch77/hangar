@@ -251,6 +251,11 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
 - **Markdown NUNCA aparece cru.** Todo `.md` exibido passa por `renderMarkdown`. Um `<pre>` com
   `**` e `##` à mostra é bug, não estilo.
 - **Tela ou lista nova trata os quatro estados: carregando, vazio, erro e sucesso.**
+- **O padrão de criação marcado no desktop é do servidor.** Modelo, esforço e permissão são
+  publicados em `/api/session-defaults`, por provedor, motor e conta do motor; o APK lê o mesmo
+  registro. Importar o arquivo local antigo nunca sobrepõe um padrão publicado ou removido.
+  Falha de leitura bloqueia a criação e mostra o erro. Evidência em
+  [frontend.md](docs/decisoes/frontend.md#padrões-de-criação-compartilhados-com-o-apk-19102026).
 - **Config e opção moram em MODAL, não em painel docado.** Só o `DesktopSessionContext` fica
   docado. Tela de config usa **container query**, nunca media query — quem aperta a linha é a
   largura do painel.

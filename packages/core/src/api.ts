@@ -844,6 +844,16 @@ export function getClaudeCustomizationsForServer(s: Server, cwd: string, configD
 
 // POST /api/claude/defaults (Rust, claude_defaults.rs): grava no settings.json do principal da máquina.
 export interface ClaudeDefaultsBody { model?: string | null; effort?: string | null; permission?: string | null }
+export interface SessionDefaults { model: string; effort: string; permission: string }
+
+export async function getSessionDefaultsForServer(server: Server, provider: Provider, engine?: string | null,
+  signal?: AbortSignal): Promise<SessionDefaults | null> {
+  const query = new URLSearchParams({ provider, ...(engine ? { engine } : {}) });
+  const result = await apiFetchForServer<{ defaults: SessionDefaults | null }>(server,
+    `/api/session-defaults?${query}`, { signal: comTeto(signal, 8000) });
+  return result.defaults;
+}
+
 export function setClaudeDefaultsForServer(s: Server, body: ClaudeDefaultsBody): Promise<{ ok: boolean; written: string[] }> {
   return apiFetchForServer(s, '/api/claude/defaults', { method: 'POST', body: JSON.stringify(body) });
 }
