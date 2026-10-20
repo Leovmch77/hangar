@@ -190,4 +190,11 @@ fn pair_context_records_real_failures_in_the_diary() {
     }
     let alone = run(&json!({}), &json!({}), &pane_a(), PANES);
     assert_eq!((alone.rc, alone.stdout.as_str(), alone.diary.as_str()), (Some(0), "", ""));
+    // Sem tmux para perguntar quem é a sessão, e `fed` torto (vale como grupo de uma máquina): diário, abertura segue.
+    let no_tmux = run(&json!({"a.json": json!({"peers": ["b"]}).to_string()}), &json!({}), &pane_a(), None);
+    assert_eq!((no_tmux.rc, no_tmux.stdout.as_str()), (Some(0), ""));
+    assert!(no_tmux.diary.contains("pair_context_tmux_failed"), "{}", no_tmux.diary);
+    let fed = run(&json!({"a.json": json!({"peers": ["b"], "gid": "g", "fed": "torto"}).to_string()}), &json!({}), &pane_a(), PANES);
+    assert_eq!(fed.rc, Some(0));
+    assert!(!fed.stdout.is_empty() && fed.diary.contains("pair_context_fed_invalid"), "{}", fed.diary);
 }

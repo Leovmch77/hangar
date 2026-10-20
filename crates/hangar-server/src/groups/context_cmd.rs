@@ -70,7 +70,11 @@ fn protocol(pair_dir: &Path, me: &str, d: &Map<String, Value>) -> Option<String>
     }
     let gid = d.get("gid").and_then(Value::as_str).unwrap_or_default();
     let path = (!gid.is_empty()).then(|| pair_dir.join(format!("grupo-{gid}.md")));
-    let fed = d.get("fed").and_then(|f| serde_json::from_value::<Fed>(f.clone()).ok());
+    // `fed` torto vale como grupo de uma máquina, como no servidor; o diário guarda o porquê.
+    let fed = match d.get("fed") {
+        None | Some(Value::Null) => None,
+        Some(f) => serde_json::from_value::<Fed>(f.clone()).map_or_else(|e| failed("pair_context_fed_invalid", e.to_string()), Some),
+    };
     let across = fed.is_some();
     let contract = match fed {
         Some(fed) if fed.local => ContractLine { path, remote_owner: None },
@@ -149,7 +153,10 @@ fn failed<T>(code: &str, detail: impl Into<String>) -> Option<T> {
 async fn tmux(args: &[&str]) -> Option<std::process::Output> {
     let mut command = crate::terminal_input::child_command("tmux");
     command.args(args).stdin(std::process::Stdio::null()).kill_on_drop(true);
-    command.output().await.ok()
+    match command.output().await {
+        Ok(output) => Some(output),
+        Err(e) => failed("pair_context_tmux_failed", format!("tmux {}: {e}", args.first().copied().unwrap_or_default())),
+    }
 }
 
 /// Sessão sem terminal: a chave do processo não muda no rename nem no /clear.
