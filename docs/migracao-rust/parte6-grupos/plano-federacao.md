@@ -252,14 +252,14 @@ cabeçalho `[painel: grupo de trabalho]` (TXT-01); nunca lista de membros (TXT-0
 
 **Fecha:** TXT-01..14, D-TXT-1, D-TXT-2, D-TXT-3, I-3A, I-4A.
 
-- [ ] **Step 1: Testes** que leem `backend/tests/fixtures/contract/pair_text/*.json` e comparam
+- [x] **Step 1: Testes** que leem `backend/tests/fixtures/contract/pair_text/*.json` e comparam
   com `render`; testes novos para I-3A (`mixed_group_gets_group_and_external_text`) e I-4A
   (`contract_line_by_member_kind`: dona, máquina própria, de fora); proptest de `task`/nomes sem
   pânico.
-- [ ] **Step 2: Rodar e ver falhar** (asserção, não compilação).
-- [ ] **Step 3: Implementar** `text.rs` e trocar `deliver.rs` para usá-lo em processo.
-- [ ] **Step 4: Rodar.** Esperado: PASS.
-- [ ] **Step 5: Commit** — `feat(groups): render the group protocol text in Rust`.
+- [x] **Step 2: Rodar e ver falhar** (asserção, não compilação).
+- [x] **Step 3: Implementar** `text.rs` e trocar `deliver.rs` para usá-lo em processo.
+- [x] **Step 4: Rodar.** Esperado: PASS.
+- [x] **Step 5: Commit** — `feat(groups): render the group protocol text in Rust`.
 
 **Prova:** `cd crates && … cargo test -p hangar-server --test it groups_text` → todos verdes; `grep -rn "pair/text" crates/hangar-server/src` → nada.
 

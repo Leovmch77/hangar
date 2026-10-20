@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use fake::*;
-use hangar_server::groups::deliver::{ProtocolArgs, protocol_text};
+use hangar_server::groups::deliver::{ContractLine, Kind, TextArgs, protocol_text};
 use hangar_server::groups::orq::{PythonOrq, is_orchestrator};
 use hangar_server::groups::service::{OrqFacts, OrqPhase, PromoteError};
 use hangar_server::routes::AppState;
@@ -244,17 +244,16 @@ async fn notice_waits_the_ingress_gate_and_answers_busy() {
     assert_eq!(python.input_calls(), 0);
 }
 
-#[tokio::test]
-async fn protocol_text_asks_python_with_every_field() {
-    let (python, st) = state(None, Duration::from_secs(5)).await;
-    python.set_internal("pair/text", StatusCode::OK, json!({"text": "protocolo do grupo"}));
-    let args = ProtocolArgs { me: "a".into(), others: vec!["b".into()], task: "t".into(), contract: Some("/c.md".into()),
-        harness: [("a".to_owned(), "claude".to_owned())].into(), ..Default::default() };
-    assert_eq!(protocol_text(&st, "group", &args).await, Ok("protocolo do grupo".to_owned()));
-    assert_eq!(python.internal_bodies("pair/text"), vec![json!({"kind": "group", "me": "a", "others": ["b"], "task": "t",
-        "contract": "/c.md", "contract_remote": false, "harness": {"a": "claude"}, "peer": "", "owner": ""})]);
-    python.set_internal("pair/text", StatusCode::INTERNAL_SERVER_ERROR, json!({}));
-    assert_eq!(protocol_text(&st, "orq", &args).await.unwrap_err()["code"], "erro_envio_falhou");
+#[test]
+fn protocol_text_is_rendered_in_process_and_group_needs_another_member() {
+    let args = TextArgs { me: "a".into(), others: vec!["b".into()], task: "t".into(),
+        contract: ContractLine { path: Some("/c.md".into()), remote_owner: None }, ..Default::default() };
+    let text = protocol_text(Kind::Group, &args).unwrap();
+    assert!(text.starts_with("[painel: grupo de trabalho] Você, 'a', está num grupo de trabalho na tarefa: t."), "{text}");
+    assert!(text.contains("vão em /c.md "), "{text}");
+    let alone = TextArgs { others: Vec::new(), ..args };
+    let err = protocol_text(Kind::Group, &alone).unwrap_err();
+    assert_eq!((&err["code"], &err["params"]["erro"]), (&json!("erro_envio_falhou"), &json!("groups_pair_text_no_others")));
 }
 
 #[tokio::test]

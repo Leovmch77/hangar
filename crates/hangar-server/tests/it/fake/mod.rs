@@ -179,7 +179,6 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
         plugin_posts: Mutex::default(),
         input_reply: Mutex::default(),
         internal_replies: Mutex::new(HashMap::from([
-            ("pair/text".to_owned(), (StatusCode::OK, json!({"text": "protocolo"}))),
             ("orq/group-phase".to_owned(), (StatusCode::OK, json!({"phase": null}))),
             ("orq/promote".to_owned(), (StatusCode::OK, json!({}))),
             ("orq/is-orchestrator".to_owned(), (StatusCode::OK, json!({"names": []}))),

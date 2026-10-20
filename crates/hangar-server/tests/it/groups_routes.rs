@@ -112,19 +112,17 @@ async fn routes_answer_like_python() {
 async fn pair_delivers_protocol_only_to_newcomers() {
     let dir = tempfile::tempdir().unwrap();
     let srv = server(dir.path(), 3).await;
-    srv.python.set_internal("pair/text", StatusCode::OK, json!({"text": "protocolo do grupo"}));
     let (status, body) = call(srv.addr, "POST", "s0/pair", Some(&json!({"peers": ["s1"], "task": "t"})), OWNER).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(input_hits(&srv.python, &["s0", "s1", "s2"]), [1, 1, 0]);
-    assert_eq!(serde_json::from_slice::<Value>(&srv.python.last_body()).unwrap(), json!({"text": "protocolo do grupo", "steer": false}));
+    // O texto sai do Rust: o Python não é perguntado.
     let gid = body["gid"].as_str().unwrap();
     let contract = srv.pair.join(format!("grupo-{gid}.md")).to_str().unwrap().to_owned();
-    assert_eq!(srv.python.internal_bodies("pair/text"), vec![
-        json!({"kind": "group", "me": "s0", "others": ["s1"], "task": "t", "contract": contract, "contract_remote": false,
-            "harness": {"s0": "claude", "s1": "claude"}, "peer": "", "owner": ""}),
-        json!({"kind": "group", "me": "s1", "others": ["s0"], "task": "t", "contract": contract, "contract_remote": false,
-            "harness": {"s0": "claude", "s1": "claude"}, "peer": "", "owner": ""}),
-    ]);
+    let sent: Value = serde_json::from_slice(&srv.python.last_body()).unwrap();
+    let text = sent["text"].as_str().unwrap();
+    assert!(text.starts_with("[painel: grupo de trabalho] Você, 's1', está num grupo de trabalho na tarefa: t."), "{text}");
+    assert!(text.contains(&format!("vão em {contract} ")) && text.contains("hangar-send s0 \"msg\""), "{text}");
+    assert!(srv.python.internal_bodies("pair/text").is_empty());
     let (status, _) = call(srv.addr, "POST", "s2/pair", Some(&json!({"peer": "s0"})), OWNER).await;
     assert_eq!(status, 200);
     assert_eq!(input_hits(&srv.python, &["s0", "s1", "s2"]), [1, 1, 1], "veterano não é acordado");
@@ -134,7 +132,6 @@ async fn pair_delivers_protocol_only_to_newcomers() {
 async fn linked_pair_marks_the_child_records_linked_at_and_sends_no_protocol() {
     let dir = tempfile::tempdir().unwrap();
     let srv = server(dir.path(), 3).await;
-    srv.python.set_internal("pair/text", StatusCode::OK, json!({"text": "protocolo do grupo"}));
     let (status, body) = call(srv.addr, "POST", "s0/pair", Some(&json!({"peer": "s1", "link": true})), OWNER).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(input_hits(&srv.python, &["s0", "s1", "s2"]), [0, 0, 0], "ninguém recebe o protocolo");
@@ -306,7 +303,6 @@ async fn local_session_joins_a_group_with_an_outside_member() {
     use hangar_server::share::store::Kind;
     let dir = tempfile::tempdir().unwrap();
     let srv = server(dir.path(), 4).await;
-    srv.python.set_internal("pair/text", StatusCode::OK, json!({"text": "protocolo do grupo"}));
     let (s, _) = srv.share.store.create_redeemed("s0", Some("t:1".into()), Kind::Pair).unwrap();
     srv.share.pairs.add(ExternalPair { share_id: s.id, local_session: "s0".into(), alias: "pc-ana".into(), peer_owner: "pc-ana".into(),
         peer_session: "Y".into(), peer_address: "https://a.tail.ts.net:8443".into(), peer_token: "t".repeat(32), created_at: 1.0 }).unwrap();

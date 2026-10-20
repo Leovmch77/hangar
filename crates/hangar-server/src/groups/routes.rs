@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use super::deliver::{ProtocolArgs, protocol_text};
+use super::deliver::{ContractLine, Kind, TextArgs, protocol_text};
 use super::local::{JoinRefusal, Snapshot, is_remote};
 use super::orq::{is_orchestrator, list_unavailable};
 use super::service::{GroupError, GroupService, JoinOutcome, JoinOwned, PromoteError};
@@ -33,8 +33,7 @@ use crate::session_write::input::{deliver_text, json_content_type};
 use crate::session_write::{BODY_LIMIT, busy_body, detail_body, json_response, session_name, too_large};
 use crate::transcript::py::{py_repr, py_str};
 
-/// `pair_texto.PREFIXO`.
-pub(super) const PREFIX: &str = "[painel: grupo de trabalho]";
+pub(super) use super::text::PREFIX;
 pub(super) const MIX_MSG: &str = "pareamento cross-server é 1:1 (uma sessão local + um peer remoto); uma sessão já pareada cross-server não entra em grupo local nem pareia com outro remoto";
 const ORQ_MSG: &str = "o orquestrador não recebe mensagens; fale com o árbitro";
 /// `_group_unavailable` do Python.
@@ -253,13 +252,13 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
     // Só quem estava solto recebe o protocolo; grupo de orquestração não recebe nada. A ligação também
     // não: o protocolo viraria um turno a mais da filha, pago pelo pai.
     let notices = if orq || body.link { Vec::new() } else { newcomers };
-    let contract = asked.groups.contract_path(&gid).to_string_lossy().into_owned();
+    let contract = asked.groups.contract_path(&gid);
     let inside: BTreeMap<String, String> = harness.into_iter().filter(|(n, _)| members.contains(n)).collect();
     let mut errs = Vec::new();
     for m in &notices {
-        let args = ProtocolArgs { me: m.clone(), others: members.iter().filter(|x| *x != m).cloned().collect(), task: task.clone(),
-            contract: Some(contract.clone()), harness: inside.clone(), ..Default::default() };
-        let sent = match protocol_text(&asked.st, "group", &args).await {
+        let args = TextArgs { me: m.clone(), others: members.iter().filter(|x| *x != m).cloned().collect(), task: task.clone(),
+            contract: ContractLine { path: Some(contract.clone()), remote_owner: None }, harness: inside.clone(), ..Default::default() };
+        let sent = match protocol_text(Kind::Group, &args) {
             Ok(text) => deliver_text(&asked.st, m, &text).await,
             Err(failed) => Err(failed),
         };

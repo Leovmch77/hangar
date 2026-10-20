@@ -379,9 +379,9 @@ async fn valid_redeem_writes_both_records_and_notifies() {
     assert_eq!(guest.pair_shares().iter().map(|s| s.session.as_str()).collect::<Vec<_>>(), ["s0"]);
     assert_eq!(e.sidecar("s0").unwrap()["peers"], json!(["pc-ana::Y"]));
     assert_eq!(e.inputs("s0"), 1);
-    let asked = e.python.internal_bodies("pair/text");
-    assert_eq!((&asked[0]["kind"], &asked[0]["me"], &asked[0]["peer"], &asked[0]["owner"]),
-        (&json!("external"), &json!("s0"), &json!("pc-ana::Y"), &json!("pc-ana")));
+    let sent: Value = serde_json::from_slice(&e.python.last_body()).unwrap();
+    assert!(sent["text"].as_str().unwrap().starts_with(
+        "[painel: grupo de trabalho] Você, 's0', está pareada com 'pc-ana::Y', uma sessão da máquina 'pc-ana', que é de OUTRA pessoa."), "{sent}");
 }
 
 /// Também `resgate_nao_devolve_texto_interno_nem_erro_de_entrega`.

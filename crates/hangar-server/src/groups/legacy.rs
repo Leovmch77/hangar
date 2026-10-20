@@ -11,7 +11,7 @@ use axum::response::Response;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::deliver::{ProtocolArgs, protocol_text};
+use super::deliver::{Kind, TextArgs, protocol_text};
 use super::exit::{NO_SERVER_ID, segment};
 use super::local::{JoinRefusal, is_remote};
 use super::routes::{Asked, MIX_MSG, PREFIX, envelope, error_text, outside_addresses, providers};
@@ -25,9 +25,9 @@ use crate::transcript::py::py_repr;
 /// sincroniza entre máquinas).
 async fn notify(asked: &Asked, peer: &str, task: &str, harness: &BTreeMap<String, String>) -> Result<(), Value> {
     let name = &asked.name;
-    let args = ProtocolArgs { me: name.clone(), others: vec![peer.to_owned()], task: task.to_owned(),
+    let args = TextArgs { me: name.clone(), others: vec![peer.to_owned()], task: task.to_owned(),
         harness: harness.iter().filter(|(n, _)| *n == name).map(|(n, p)| (n.clone(), p.clone())).collect(), ..Default::default() };
-    let text = protocol_text(&asked.st, "group", &args).await?;
+    let text = protocol_text(Kind::Group, &args)?;
     deliver_text(&asked.st, name, &text).await
 }
 
