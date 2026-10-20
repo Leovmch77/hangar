@@ -143,19 +143,10 @@ def test_call_in_python_mode_refuses(monkeypatch):
     assert e.value.code == "groups_runtime_python"
 
 
-def test_kill_in_rust_mode_asks_rust(monkeypatch):
-    calls = _rust(monkeypatch, reply={"ex_peers": ["b"], "warnings": []})
-    registry.SessionRegistry._clear_pair("a")
-    assert calls == [("group.leave", {"name": "a"})]
-
-
-def test_kill_in_rust_mode_reports_bridge_failure(monkeypatch, caplog):
-    _rust(monkeypatch, error="groups_bridge_unavailable")
-    # A sessão viva sai da lista e a varredura do Rust não a vê: o aviso precisa chegar ao kill.
-    [warning] = registry.SessionRegistry._clear_pair("a")
-    assert warning["sessao"] == "a" and warning["erro"]["code"] == "erro_grupo_indisponivel"
-    assert warning["erro"]["params"] == {"detalhe": "groups_bridge_unavailable"}
-    assert "groups_bridge_unavailable" in caplog.text
+def test_kill_in_rust_mode_leaves_the_group_to_rust(monkeypatch):
+    # O Rust tira do grupo depois do fechamento que repassou: pedir pela ponte seria ida e volta.
+    calls = _rust(monkeypatch, reply={})
+    assert registry.SessionRegistry._clear_pair("a") == [] and calls == []
 
 
 def test_pair_route_forwards_status_and_body(monkeypatch, client):
@@ -217,47 +208,6 @@ def test_sweep_loop_does_not_run_in_rust_mode(monkeypatch):
     assert swept == []
 
 
-_NOT_NOTIFIED = {"sessao": "srv::x", "erro": {"code": "erro_peer_nao_avisado", "params": {"peer": "srv::x"},
-                                               "msg": "srv inacessível"}}
-
-
-def _headless_kill_stubs(monkeypatch):
-    from app import adapters
-    monkeypatch.setattr("app.conversation_transfer.require_available", lambda n: None)
-    monkeypatch.setattr(registry.headless_sessions, "exists", lambda n: True)
-    monkeypatch.setattr(registry.headless_sessions, "load", lambda n: {})
-    monkeypatch.setattr(registry.headless_sessions, "delete", lambda n: None)
-    monkeypatch.setattr(adapters, "get_adapter", lambda kind: SimpleNamespace(close_sync=lambda n, m: None))
-    monkeypatch.setattr(registry.shortcut_terminals, "close_all", lambda n: None)
-    monkeypatch.setattr(registry.SessionRegistry, "_forget", lambda self, n: None)
-    monkeypatch.setattr(registry, "PromptQueue", lambda n: SimpleNamespace(clear=lambda: None))
-    monkeypatch.setattr(registry, "ThenLink", lambda n: SimpleNamespace(clear=lambda: None))
-
-
-def test_registry_kill_passes_the_rust_leave_warnings_up(monkeypatch):
-    _headless_kill_stubs(monkeypatch)
-    calls = _rust(monkeypatch, reply={"ex_peers": ["srv::x"], "warnings": [_NOT_NOTIFIED]})
-    assert registry.SessionRegistry().kill("a") == [_NOT_NOTIFIED]
-    assert calls == [("group.leave", {"name": "a"})]
-
-
-def test_kill_session_in_rust_mode_shows_the_leave_warning_once(monkeypatch, client):
-    pair.PairLink("a").set(["srv::x"], "", "g1", {})
-    _rust(monkeypatch, reply={"ex_peers": ["srv::x"], "warnings": [_NOT_NOTIFIED]})
-    monkeypatch.setattr(api, "_recusa_orq", lambda n: None)
-    monkeypatch.setattr(api.registry, "kill", lambda n, closed_by_rust=False: registry.SessionRegistry._clear_pair(n))
-    monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
-    monkeypatch.setattr(api.share_bridge, "revoke_session", lambda n: None)
-
-    async def boom(*a):
-        raise AssertionError("o Rust já avisou")
-    monkeypatch.setattr(api, "_avisar_saida", boom)
-    r = client.delete("/api/sessions/a", headers=H)
-    assert r.status_code == 200, r.text
-    assert r.json()["warning"] == {"code": "erro_pareamento_saida_falhou", "params": {"avisos": [_NOT_NOTIFIED]},
-                                   "msg": "aviso de saída falhou: srv::x: srv inacessível"}
-
-
 def test_capable_from_the_start_when_the_rust_is_expected():
     """Antes da primeira saúde o Rust já atende `/pair` e varre: o Python não pode ser dono nem um instante."""
     import subprocess
@@ -285,8 +235,7 @@ def test_pending_before_health_does_not_write_and_waits(monkeypatch, tmp_path):
         with pytest.raises(groups_bridge.GroupsBridgeError) as e:
             groups_bridge.call("group.leave", name="a")
         assert e.value.code == "groups_runtime_starting" and waited
-        assert [w["erro"]["params"] for w in registry.SessionRegistry._clear_pair("a")] == [
-            {"detalhe": "groups_runtime_starting"}]
+        assert registry.SessionRegistry._clear_pair("a") == []
         with pytest.raises(pair.GroupsOwnedByRust):
             pair.leave("a")
         swept = []
@@ -303,8 +252,9 @@ def test_pending_before_health_does_not_write_and_waits(monkeypatch, tmp_path):
     assert pair.PairLink("a").get()["peers"] == ["b"] and pair.PairLink("b").get()["peers"] == ["a"]
 
 
-def test_associate_in_rust_mode_goes_through_bridge(monkeypatch, client):
+def test_associate_in_rust_mode_sends_the_orq_facts(monkeypatch, client):
     calls = _rust(monkeypatch, reply={"status": 200, "body": {"ok": True, "gid": "g1", "grouped": True}})
+    monkeypatch.setattr(api.orq_context, "associate_facts", lambda name, gid: {"draft_gid": name + gid})
 
     def no_local(*a):
         raise AssertionError("no modo Rust o lock de grupo é do Rust")
@@ -312,7 +262,7 @@ def test_associate_in_rust_mode_goes_through_bridge(monkeypatch, client):
     r = client.post("/api/sessions/arb/orq/grupo", headers=H, json={"gid": "g1", "mtime": 1.5})
     assert r.status_code == 200, r.text
     assert r.json() == {"ok": True, "gid": "g1", "grouped": True}
-    assert calls == [("group.orq_associate", {"name": "arb", "gid": "g1", "mtime": 1.5})]
+    assert calls == [("group.orq_associate", {"name": "arb", "gid": "g1", "mtime": 1.5, "facts": {"draft_gid": "arbg1"}})]
 
 
 def test_rename_in_rust_mode_asks_rust_before_tmux(monkeypatch, client):
@@ -380,4 +330,4 @@ def test_child_gets_group_env(monkeypatch, tmp_path):
     assert env["HANGAR_SERVER_ID"] == "casa"
     assert env["HANGAR_PEERS_FILE"] == str(peers._PEERS_FILE)
     assert env["HANGAR_PAIR_ARCHIVE"] == str(pair._arquivo_dir())
-    assert rust_server.RUST_SERVER_PROTOCOL == 83
+    assert rust_server.RUST_SERVER_PROTOCOL == 85

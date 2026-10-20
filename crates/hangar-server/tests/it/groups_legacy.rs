@@ -190,7 +190,8 @@ async fn cross_routes_answer_like_python() {
         let (status, body) = call(at.addr, step["method"].as_str().unwrap(), step["path"].as_str().unwrap(), step.get("body")).await;
         if let Some(m) = failing { m.python.set_input_reply(None); }
         if step["python_only"] == true {
-            assert_eq!((status, body), (200, json!("from-python")), "{name}: o corpo que o FastAPI recusa vai a ele");
+            // I-1A: o 422 é do Rust, com código, sem repasse.
+            assert_eq!((status, body["detail"]["code"].clone()), (422, json!("erro_corpo_invalido")), "{name}");
             continue;
         }
         assert_eq!((status as u64, common::canon(&mask_network(&body))), (step["status"].as_u64().unwrap(), common::canon(&step["response"])), "{name}");

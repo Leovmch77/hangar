@@ -15,7 +15,6 @@ from app import diag, shortcut_terminals, tmux
 from app import agentpane
 from app import permission_mode as modo_permissao
 from app.config import settings
-from app.mensagens import erro
 from app import claude_customizations as session_customizations
 from app import plugin_bridge
 from app import runtime_config
@@ -2610,16 +2609,8 @@ class SessionRegistry:
         # kill nem a criação — mas LOGA: engolir calado deixava o badge-fantasma indiagnosticável.
         from app import groups_bridge
         if groups_bridge.rust_owns_groups():
-            # O Rust já avisa as outras máquinas e o par externo; falha aqui a varredura dele resolve.
-            try:
-                out = groups_bridge.call("group.leave", name=name)
-            except groups_bridge.GroupsBridgeError as e:
-                _log.warning("_clear_pair(%s): o Rust não tirou a sessão do grupo: %s", name, e.code)
-                # A varredura resolver depois não é ter saído agora: o aviso vai na resposta.
-                return [{"sessao": name, "erro": erro("erro_grupo_indisponivel",
-                                                      "os grupos estão indisponíveis agora", detalhe=e.code)}]
-            warnings = out.get("warnings")
-            return warnings if isinstance(warnings, list) else []
+            # Quem tira do grupo é o Rust, depois do fechamento que repassou: pedir daqui seria ida e volta.
+            return []
         try:
             pair_leave(name)
         except Exception as e:

@@ -33,7 +33,6 @@ from app import (agentes_sync, atomico, atualizacoes, atualizar, closed_names, d
 from app import groups_bridge, internal_api, list_bridge, migration_status, share_bridge, update_channel
 from app.auth import require_auth, require_loopback
 from app.send_executor import send_thread as _send_thread
-from app.internal_pool import internal_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
 from app.bastao import montar as bastao_montar
 from app.fs import FsError, allowed_roots, list_roots, make_dir, scan_dir
@@ -2205,7 +2204,7 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
     await asyncio.to_thread(_recusa_orq, name)
     # Marca do Rust: ele já encerrou o Codex com terminal dele (e o grupo); aqui só as lojas daqui.
     closed = bool(request and internal_api._secret) and secrets.compare_digest(request.headers.get("x-hangar-rust-closed", "").encode(), internal_api._secret.encode())
-    # No modo Rust a saída do grupo (dentro do kill) já avisa as outras máquinas e o par externo.
+    # No modo Rust quem sai do grupo e avisa as outras máquinas é ele, depois deste fechamento.
     link = None if closed or groups_bridge.rust_owns_groups() else await asyncio.to_thread(lambda: PairLink(name).get())
     # Fechada pelo Rust a sessão já saiu da lista: o transcript vem no cabeçalho dele.
     if closed:
@@ -4163,8 +4162,7 @@ def _bridge_reply(out: dict):
 
 
 async def _group_route(method: str, name: str, route: str, body: BaseModel | None = None):
-    """No modo Rust a rota de grupo é dele. Também chega aqui o que o Rust repassou (corpo que só o
-    FastAPI aceita): já validado, volta a ele normalizado, e a ponte nunca repassa de novo."""
+    """No modo Rust a rota de grupo é dele; aqui chega só o que entrou pelas portas do Python."""
     try:
         out = await asyncio.to_thread(groups_bridge.call, "group.route", method=method, name=name, route=route,
                                       body=body.model_dump() if body is not None else None)
@@ -4695,23 +4693,18 @@ class OrqGroupBody(_StrictBody):
 
 @app.post("/api/sessions/{name}/orq/grupo", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def orq_group_set(name: str, body: OrqGroupBody):
-    """Associa o time da planejadora ao grupo real, inclusive com um árbitro novo."""
-    if groups_bridge.rust_owns_groups():
-        # O Rust segura o lock de grupo e chama `/internal/orq/associate`; a resposta é a dela.
-        try:
-            out = await asyncio.to_thread(groups_bridge.call, "group.orq_associate", name=name,
-                                          gid=body.gid, mtime=body.mtime)
-        except groups_bridge.GroupsBridgeError as e:
-            raise _group_unavailable(e.code) from None
-        return _bridge_reply(out)
-    return await _orq_associate(orq_context.associate, name, body.gid, body.mtime)
-
-
-async def _orq_associate(associate, name: str, gid: str, mtime: float) -> dict:
-    """Resposta e erros da associação, iguais na rota pública e na interna do Rust."""
+    """Associa o time da planejadora ao grupo real, inclusive com um árbitro novo. No modo Rust os
+    fatos do `orq` vão no pedido e o Rust associa sob o lock de grupo, sem perguntar de volta."""
     try:
-        # O Rust chama pela rota interna segurando o lock de grupo: fora do pool padrão.
-        context = await internal_thread(associate, name, gid, mtime)
+        if groups_bridge.rust_owns_groups():
+            facts = await asyncio.to_thread(orq_context.associate_facts, name, body.gid)
+            try:
+                out = await asyncio.to_thread(groups_bridge.call, "group.orq_associate", name=name,
+                                              gid=body.gid, mtime=body.mtime, facts=facts)
+            except groups_bridge.GroupsBridgeError as e:
+                raise _group_unavailable(e.code) from None
+            return _bridge_reply(out)
+        context = await asyncio.to_thread(orq_context.associate, name, body.gid, body.mtime)
     except orq_md.Conflito:
         raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou",
                                              "o time mudou desde a leitura — recarregue"))
@@ -4721,7 +4714,7 @@ async def _orq_associate(associate, name: str, gid: str, mtime: float) -> dict:
         raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou", str(e)))
     return {"ok": True, "gid": context.gid, "grouped": context.grouped,
             "session_prefix": context.session_prefix, "arquivo": str(context.path),
-            "mtime": (await internal_thread(orq_md.ler_arquivo, context.path))[1]}
+            "mtime": (await asyncio.to_thread(orq_md.ler_arquivo, context.path))[1]}
 
 
 class ComecarBody(_StrictBody):

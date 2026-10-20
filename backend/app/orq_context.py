@@ -172,14 +172,26 @@ def promote(name: str, gid: str, mtime: float | None = None) -> None:
                                     f"Confira {source} e {dest} antes de associar novamente") from e
 
 
+def associate_facts(name: str, gid: str) -> dict:
+    """O que o Rust precisa do `orq` para associar sob o lock de grupo sem perguntar de volta."""
+    from app.adapters.orq import runs
+    from app.orq_papeis import regras_path
+
+    linked = (pair.PairLink(name).get() or {}).get("gid")
+    active = None if linked else active_gid(name)
+    draft = None if linked or active else draft_gid(name)
+    target = _GROUP.search(orq_md.ler_arquivo(regras_path(draft))[0]) if draft else None
+    return {"active_gid": active, "draft_gid": draft,
+            "groups": {g: {"phase": runs.group_phase(g), "archived": any(pair._arquivo_dir().glob(f"regras-{g}-*.md"))}
+                       for g in {gid, *([target[1]] if target else [])}}}
+
+
 def associate(name: str, gid: str, mtime: float) -> Context:
     with pair._LOCK:
-        return associate_unlocked(name, gid, mtime)
+        return _associate(name, gid, mtime)
 
 
-def associate_unlocked(name: str, gid: str, mtime: float) -> Context:
-    """Sem o `pair._LOCK`: no modo Rust quem segura o lock de grupo é o Rust, que chama por
-    `/internal/orq/associate`."""
+def _associate(name: str, gid: str, mtime: float) -> Context:
     if not real_group(gid, orchestration=True):
         raise ValueError("grupo de orquestração de destino não existe")
     context = resolve(name)

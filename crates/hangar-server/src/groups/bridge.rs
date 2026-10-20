@@ -12,9 +12,8 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::exit::{leave_and_notify, segment};
+use super::exit::segment;
 use super::local::JoinRefusal;
-use super::orq::PythonOrq;
 use super::routes::Bridged;
 use super::service::{GroupError, GroupService, PromoteError};
 use crate::routes::AppState;
@@ -27,12 +26,10 @@ const MAX_REPLY: usize = 4 << 20;
 enum Operation {
     #[serde(rename = "group.route")]
     Route { method: String, name: String, route: String, #[serde(default)] body: Value },
-    #[serde(rename = "group.leave")]
-    Leave { name: String },
     #[serde(rename = "group.rename")]
     Rename { old: String, new: String },
     #[serde(rename = "group.orq_associate")]
-    OrqAssociate { name: String, gid: String, mtime: f64 },
+    OrqAssociate { name: String, gid: String, mtime: f64, facts: TeamFacts },
 }
 
 pub(crate) struct Failed { pub(crate) code: String, detail: String }
@@ -40,7 +37,7 @@ pub(crate) struct Failed { pub(crate) code: String, detail: String }
 fn fail(code: &str, detail: impl Into<String>) -> Failed { Failed { code: code.to_owned(), detail: detail.into() } }
 
 /// Recusa do plano vira o código que o Python já traduz; disco é `groups_store_failed`.
-fn group_failed(e: GroupError) -> Failed {
+pub(crate) fn group_failed(e: GroupError) -> Failed {
     match e {
         GroupError::Refused(JoinRefusal::Mix) => fail("erro_pareamento_mistura_cross", super::routes::MIX_MSG),
         GroupError::Refused(JoinRefusal::OrqOutside) => fail(super::routes::ORQ_OUTSIDE_CODE, super::routes::ORQ_OUTSIDE_MSG),
@@ -80,20 +77,26 @@ pub(crate) async fn route(st: Arc<AppState>, method: &str, name: &str, route: &s
 async fn execute(st: Arc<AppState>, groups: Arc<GroupService>, op: Operation) -> Result<Value, Failed> {
     match op {
         Operation::Route { method, name, route: path, body } => route(st, &method, &name, &path, body).await,
-        Operation::Leave { name } => {
-            let (ex, warnings) = leave_and_notify(&st, &groups, &name).await.map_err(group_failed)?;
-            Ok(json!({"ex_peers": ex, "warnings": warnings}))
-        }
         Operation::Rename { old, new } => {
             groups.rename(&old, &new).await.map_err(group_failed)?;
             super::link_return::renamed(&st, &old, &new).await;
             Ok(json!({}))
         }
-        Operation::OrqAssociate { name, gid, mtime } => {
+        Operation::OrqAssociate { name, gid, mtime, facts } => {
             // Sob o lock: um join ou uma saída concorrente não vê o time meio associado.
-            let python = PythonOrq::from_state(&st);
-            let asked = python.post("orq/associate", json!({"name": name, "gid": gid, "mtime": mtime}));
-            let (status, body) = groups.locked(asked).await.map_err(|code| fail(&code, "associação do orq"))?;
+            let done = groups.locked(async {
+                let link = groups.link(&name).await?;
+                let sidecars = groups.sidecars().await?;
+                let root = groups.pair_root().to_path_buf();
+                let team = TeamFiles { root, name, sidecars: sidecars.into_iter().map(|(_, s)| s).collect(), link_gid: link.map(|l| l.gid), facts };
+                tokio::task::spawn_blocking(move || team.associate(&gid, mtime)).await
+                    .map_err(|e| GroupError::Store(super::store::StoreError::Io(std::io::Error::other(e))))
+            }).await.map_err(group_failed)?;
+            let (status, body) = match done {
+                Ok(body) => (200, body),
+                Err(TeamError::Invalid(msg)) => (409, json!({"detail": {"code": "erro_orq_celula_invalida", "params": {}, "msg": msg}})),
+                Err(TeamError::Changed(msg)) => (409, json!({"detail": {"code": "erro_orq_arquivo_mudou", "params": {}, "msg": msg}})),
+            };
             Ok(json!({"status": status, "body": body}))
         }
     }
@@ -129,5 +132,155 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
             }
             reply(json!({"ok": false, "error": {"code": e.code, "detail": e.detail}}))
         }
+    }
+}
+
+// ── associação do time do `orq` ao grupo (`orq_context.associate`), com os fatos que o Python mandou ──
+
+/// Fatos do `orq` que o Python lê antes de pedir (I-5A): o Rust não pergunta de volta.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TeamFacts {
+    /// `active_gid` e `draft_gid`: o Python só os lê quando o sidecar dele não tinha grupo.
+    active_gid: Option<String>,
+    draft_gid: Option<String>,
+    /// Por gid citado (o destino e o apontado pelo rascunho): fase da execução e contrato arquivado.
+    groups: std::collections::HashMap<String, GroupFacts>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GroupFacts { phase: Option<String>, archived: bool }
+
+/// `ValueError` do Python (409 `erro_orq_celula_invalida`) e `Conflito`/`OSError` (409 `erro_orq_arquivo_mudou`).
+enum TeamError { Invalid(String), Changed(String) }
+
+const CHANGED_MSG: &str = "o time mudou desde a leitura — recarregue";
+const GROUP_MARK: (&str, &str) = ("<!-- hangar-orq-group: ", " -->");
+const PREFIX_MARK: (&str, &str) = ("<!-- hangar-orq-prefix: ", " -->");
+
+struct Team { gid: String, grouped: bool, prefix: String, path: std::path::PathBuf }
+
+struct TeamFiles { root: std::path::PathBuf, name: String, sidecars: Vec<super::model::Sidecar>, link_gid: Option<String>, facts: TeamFacts }
+
+fn valid_gid(gid: &str) -> bool { !gid.is_empty() && gid.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') }
+
+/// `_GROUP`/`_PREFIX` (`re.M`): a primeira linha inteira com a marca.
+fn mark(text: &str, (open, close): (&str, &str)) -> Option<String> {
+    text.split('\n').find_map(|line| line.strip_prefix(open)?.strip_suffix(close).filter(|v| valid_gid(v)).map(str::to_owned))
+}
+
+fn io_changed(e: std::io::Error) -> TeamError { TeamError::Changed(e.to_string()) }
+
+/// `orq_md.ler_arquivo`: (texto, mtime); ausente = ("", 0.0).
+fn read(path: &std::path::Path) -> std::io::Result<(String, f64)> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok((text, mtime(path)?)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((String::new(), 0.0)),
+        Err(e) => Err(e),
+    }
+}
+
+fn mtime(path: &std::path::Path) -> std::io::Result<f64> {
+    match std::fs::metadata(path) {
+        Ok(m) => Ok(m.modified()?.duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0.0),
+        Err(e) => Err(e),
+    }
+}
+
+fn stale(current: f64, read: f64) -> bool { (current - read).abs() > 1e-6 }
+
+impl TeamFiles {
+    fn regras(&self, gid: &str) -> std::path::PathBuf { self.root.join(format!("regras-{gid}.md")) }
+
+    /// Fase que o Python mandou; gid sem fato vale `unknown` (nunca "acabou").
+    fn phase(&self, gid: &str) -> Option<&str> { self.facts.groups.get(gid).map_or(Some("unknown"), |g| g.phase.as_deref()) }
+
+    fn real_group(&self, gid: &str, orchestration: bool) -> bool {
+        self.sidecars.iter().any(|s| s.gid == gid && (!orchestration || s.orq)) || self.phase(gid) == Some("live")
+    }
+
+    fn group_ended(&self, gid: &str) -> bool {
+        let phase = self.phase(gid);
+        if matches!(phase, Some("live" | "unknown")) || self.real_group(gid, false) { return false; }
+        phase == Some("ended") || self.facts.groups.get(gid).is_some_and(|g| g.archived)
+    }
+
+    fn resolve(&self) -> Result<Team, TeamError> {
+        let fallback = || { let p = crate::list::discover_other::sanitize_session_name(&self.name); if p.is_empty() { "hangar".to_owned() } else { p } };
+        if let Some(gid) = self.link_gid.clone().filter(|g| !g.is_empty()).or_else(|| self.facts.active_gid.clone()) {
+            let path = self.regras(&gid);
+            let (text, _) = read(&path).map_err(io_changed)?;
+            return Ok(Team { prefix: mark(&text, PREFIX_MARK).unwrap_or_else(fallback), gid, grouped: true, path });
+        }
+        // O Python viu grupo no sidecar e não leu o rascunho; sem grupo agora, o time mudou no meio.
+        let draft = self.facts.draft_gid.clone().ok_or_else(|| TeamError::Changed(CHANGED_MSG.into()))?;
+        let path = self.regras(&draft);
+        let (text, _) = read(&path).map_err(io_changed)?;
+        if let Some(target) = mark(&text, GROUP_MARK) {
+            let target_path = self.regras(&target);
+            let (target_text, _) = read(&target_path).map_err(io_changed)?;
+            // Um apontamento antigo não ressuscita contratos já arquivados.
+            if !target_text.is_empty() && self.real_group(&target, false) {
+                return Ok(Team { prefix: mark(&target_text, PREFIX_MARK).unwrap_or_else(fallback), gid: target, grouped: true, path: target_path });
+            }
+            if self.group_ended(&target) { return Ok(Team { gid: draft, grouped: false, prefix: fallback(), path }); }
+            return Err(TeamError::Invalid("não foi possível confirmar o encerramento do grupo deste trabalho".into()));
+        }
+        Ok(Team { prefix: mark(&text, PREFIX_MARK).unwrap_or_else(fallback), gid: draft, grouped: false, path })
+    }
+
+    fn associate(&self, gid: &str, mtime_read: f64) -> Result<Value, TeamError> {
+        if !valid_gid(gid) || !self.real_group(gid, true) {
+            return Err(TeamError::Invalid("grupo de orquestração de destino não existe".into()));
+        }
+        let team = self.resolve()?;
+        if team.grouped {
+            if team.gid != gid { return Err(TeamError::Invalid("o time já pertence a outro grupo".into())); }
+            if stale(read(&team.path).map_err(io_changed)?.1, mtime_read) { return Err(TeamError::Changed(CHANGED_MSG.into())); }
+            return self.reply(&team);
+        }
+        let (source_text, current) = read(&team.path).map_err(io_changed)?;
+        if source_text.is_empty() || mark(&source_text, GROUP_MARK).is_some() {
+            return Err(TeamError::Invalid("configure o time deste trabalho antes de associá-lo".into()));
+        }
+        self.promote(gid, &team.path, &source_text, current, mtime_read)?;
+        self.reply(&self.resolve()?)
+    }
+
+    /// `orq_context.promote`: move o registro ao grupo e deixa só o apontamento no rascunho.
+    fn promote(&self, gid: &str, source: &std::path::Path, text: &str, current: f64, mtime_read: f64) -> Result<(), TeamError> {
+        if gid.starts_with("draft-") || gid == "padrao" { return Err(TeamError::Invalid("grupo de destino inválido".into())); }
+        if stale(current, mtime_read) { return Err(TeamError::Changed(CHANGED_MSG.into())); }
+        let dest = self.regras(gid);
+        let (existing, _) = read(&dest).map_err(io_changed)?;
+        if !existing.is_empty() && existing != text {
+            return Err(TeamError::Invalid("o grupo já possui outro contrato; associe o time antes de escrevê-lo".into()));
+        }
+        let moved = existing.is_empty();
+        if moved { std::fs::rename(source, &dest).map_err(io_changed)?; }
+        let pointer = format!("{}{gid}{}\n", GROUP_MARK.0, GROUP_MARK.1);
+        // `orq_md.gravar` com o mtime lido: uma edição de fora no meio é conflito, nunca sobrescrita.
+        let written = match mtime(source) {
+            Ok(now) if stale(now, if moved { 0.0 } else { current }) => Err(source.display().to_string()),
+            Ok(_) => super::store::replace_atomic(source, pointer.as_bytes()).map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        let Err(why) = written else { return Ok(()) };
+        let restoration = if !moved { "não necessária".to_owned() } else {
+            // Criação exclusiva: nunca substitui uma edição externa na origem.
+            match std::fs::hard_link(&dest, source) {
+                Ok(()) => "origem restaurada sem substituir outro arquivo".to_owned(),
+                Err(e) => format!("origem não restaurada: {e}"),
+            }
+        };
+        Err(TeamError::Invalid(format!("a promoção não foi concluída ({why}); {restoration}. Confira {} e {} antes de associar novamente",
+            source.display(), dest.display())))
+    }
+
+    fn reply(&self, team: &Team) -> Result<Value, TeamError> {
+        Ok(json!({"ok": true, "gid": team.gid, "grouped": team.grouped, "session_prefix": team.prefix,
+            "arquivo": team.path.to_string_lossy(), "mtime": mtime(&team.path).map_err(io_changed)?}))
     }
 }

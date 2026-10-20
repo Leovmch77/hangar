@@ -153,6 +153,21 @@ def test_promotion_failure_restores_source_exclusively(monkeypatch):
     assert pair.PairLink("planner").get() is None
 
 
+def test_associate_facts_carry_what_the_rust_needs(monkeypatch):
+    context, _ = save("planner")
+    context.path.write_text("<!-- hangar-orq-group: old -->\n", encoding="utf-8")
+    (pair._arquivo_dir()).mkdir()
+    (pair._arquivo_dir() / "regras-old-20261019-120000.md").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(runs, "group_phase", lambda gid: "live" if gid == "real" else None)
+    assert oc.associate_facts("planner", "real") == {"active_gid": None, "draft_gid": context.gid, "groups": {
+        "real": {"phase": "live", "archived": False}, "old": {"phase": None, "archived": True}}}
+    # Com grupo no sidecar o rascunho não importa: nem a identidade é lida.
+    pair.PairLink("planner").set([], "mobile", "real", orq=True)
+    monkeypatch.setattr(oc, "identity", lambda name: pytest.fail("identidade lida"))
+    assert oc.associate_facts("planner", "real") == {"active_gid": None, "draft_gid": None,
+                                                     "groups": {"real": {"phase": "live", "archived": False}}}
+
+
 def test_actual_pair_link_preserved_without_legacy_identity(monkeypatch):
     pair.PairLink("legacy").set([], "mobile", "real", orq=True)
     monkeypatch.setattr(oc, "identity", lambda name: (_ for _ in ()).throw(oc.IdentityUnavailable("unknown")))

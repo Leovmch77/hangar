@@ -332,10 +332,6 @@ class _OrqNames(BaseModel):
     names: list[str]
 
 
-class _OrqAssociate(_OrqPromote):
-    mtime: float
-
-
 @router.post("/orq/group-phase")
 async def orq_group_phase(body: _OrqGid) -> dict:
     from app.adapters.orq import runs
@@ -361,13 +357,6 @@ async def orq_is_orchestrator(body: _OrqNames) -> dict:
     """Os nomes que são a linha do orquestrador: a recusa `_recusa_orq` das rotas de par."""
     from app.adapters.orq import runs
     return {"names": await internal_thread(lambda: [n for n in body.names if runs.find(n)])}
-
-
-@router.post("/orq/associate")
-async def orq_associate(body: _OrqAssociate) -> dict:
-    """`orq_context.associate` sem o `pair._LOCK`: o Rust segura o lock de grupo em volta."""
-    from app import api, orq_context
-    return await api._orq_associate(orq_context.associate_unlocked, body.name, body.gid, body.mtime)
 
 
 @router.get("/costs/scopes")

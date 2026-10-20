@@ -1,7 +1,7 @@
 //! Rotas de grupo com as respostas do Python (`api.py`: `pair_session`, `unpair_session`,
-//! `group_message`, `pair_contract`; o par 1:1 entre máquinas mora em `legacy.rs`). Convidado e
-//! corpo que o FastAPI recusaria seguem ao Python. Texto do protocolo, avisos e chamadas a outra
-//! máquina saem depois de soltar o lock do grupo.
+//! `group_message`, `pair_contract`; o par 1:1 entre máquinas mora em `legacy.rs`). O convidado
+//! segue ao Python; corpo que o Rust não aceita é 422 `erro_corpo_invalido` daqui, sem repasse.
+//! Texto do protocolo, avisos e chamadas a outra máquina saem depois de soltar o lock do grupo.
 //!
 //! `/pair` e `DELETE /pair` seguram a porta de entrada da sessão até gravar o grupo (um rename não
 //! grava o nome velho por cima) e a soltam antes dos avisos: o aviso à própria sessão passa pela
@@ -12,7 +12,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::body::{Body, Bytes, to_bytes};
+use axum::body::{Bytes, to_bytes};
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
@@ -26,11 +26,10 @@ use super::deliver::{ContractLine, Kind, TextArgs, protocol_text};
 use super::local::{JoinRefusal, Snapshot, is_remote};
 use super::orq::{is_orchestrator, list_unavailable};
 use super::service::{GroupError, GroupService, JoinOutcome, JoinOwned, PromoteError};
-use crate::proxy::Forward;
 use crate::routes::{AppState, cors, gate, pass, pass_any};
 use crate::runtime::ingress::IngressPass;
 use crate::session_write::input::{deliver_text, json_content_type};
-use crate::session_write::{BODY_LIMIT, busy_body, detail_body, json_response, session_name, too_large};
+use crate::session_write::{BODY_LIMIT, busy_body, detail_body, invalid_body, json_response, session_name, too_large};
 use crate::transcript::py::{py_repr, py_str};
 
 pub(super) use super::text::PREFIX;
@@ -51,7 +50,7 @@ pub fn router() -> Router<Arc<AppState>> {
 }
 
 /// Pedido do dono que o Rust atende, com o corpo já lido.
-pub(super) struct Asked { pub(super) st: Arc<AppState>, pub(super) groups: Arc<GroupService>, pub(super) name: String, parts: Parts, bytes: Bytes, fwd: Forward }
+pub(super) struct Asked { pub(super) st: Arc<AppState>, pub(super) groups: Arc<GroupService>, pub(super) name: String, parts: Parts, bytes: Bytes }
 
 /// Pedido que chegou pela ponte privada: o Python já autorizou quem pediu. O que a rota repassaria
 /// ao Python volta como erro, porque lá ele pediria à ponte de novo.
@@ -72,22 +71,14 @@ impl Asked {
         };
         let (parts, body) = req.into_parts();
         let Ok(bytes) = to_bytes(body, BODY_LIMIT).await else { return Err(too_large(&parts.headers)) };
-        Ok(Asked { st, groups, name, parts, bytes, fwd })
+        Ok(Asked { st, groups, name, parts, bytes })
     }
 
-    /// Corpo estrito como o `_StrictBody`; o que não casa fica com o FastAPI e o 422 dele.
-    pub(super) fn body<T: DeserializeOwned>(&self) -> Option<T> {
+    /// Corpo estrito como o `_StrictBody`; o que não casa (campo a mais, tipo errado, surrogate
+    /// solto) é 422 daqui: repassar ao Python faria ele pedir a esta rota de novo pela ponte.
+    pub(super) fn body<T: DeserializeOwned>(&self) -> Result<T, Response> {
         json_content_type(&self.parts.headers).then(|| serde_json::from_slice(&self.bytes).ok()).flatten()
-    }
-
-    pub(super) async fn to_python(self) -> Response {
-        if self.parts.extensions.get::<Bridged>().is_some() {
-            if crate::warn_limit::allow(Some(&self.name), "groups_bridge_relay") {
-                tracing::warn!(code = "groups_bridge_relay", session = %self.name, "groups: corpo da ponte que a rota não aceita");
-            }
-            return relay_refused();
-        }
-        pass(&self.st, Request::from_parts(self.parts, Body::from(self.bytes)), &self.fwd).await
+            .ok_or_else(|| invalid_body(&self.parts.headers))
     }
 
     pub(super) fn reply(&self, status: StatusCode, body: Value) -> Response {
@@ -196,7 +187,7 @@ struct PairBody {
 
 pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let asked = match Asked::take(st, peer, req).await { Ok(a) => a, Err(response) => return response };
-    let Some(body) = asked.body::<PairBody>() else { return asked.to_python().await };
+    let body = match asked.body::<PairBody>() { Ok(body) => body, Err(refused) => return refused };
     let raw = if !body.peers.is_empty() { body.peers } else if !body.peer.is_empty() { vec![body.peer] } else { Vec::new() };
     let mut others: Vec<String> = Vec::new();
     for p in raw.into_iter().filter(|p| !p.is_empty()) {
@@ -336,7 +327,7 @@ pub(crate) fn storm(gid: &str) -> bool {
 
 pub(super) async fn group_message(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let asked = match Asked::take(st, peer, req).await { Ok(a) => a, Err(response) => return response };
-    let Some(body) = asked.body::<GroupMessageBody>() else { return asked.to_python().await };
+    let body = match asked.body::<GroupMessageBody>() { Ok(body) => body, Err(refused) => return refused };
     // `_transfer_check`: só confere; cada entrega passa pela porta do membro.
     if let Err(busy) = asked.enter().await { return busy; }
     let head = body.text.trim_start();

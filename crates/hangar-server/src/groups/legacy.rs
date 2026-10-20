@@ -99,7 +99,7 @@ struct PairRemoteBody { initiator: String, #[serde(default)] task: String }
 /// de volta (o iniciador já gravou o lado dele).
 pub(super) async fn pair_remote(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let asked = match Asked::take(st, peer, req).await { Ok(a) => a, Err(response) => return response };
-    let Some(body) = asked.body::<PairRemoteBody>() else { return asked.to_python().await };
+    let body = match asked.body::<PairRemoteBody>() { Ok(body) => body, Err(refused) => return refused };
     let held = match asked.enter().await { Ok(held) => held, Err(busy) => return busy };
     if !is_remote(&body.initiator) {
         return asked.refuse(StatusCode::BAD_REQUEST, "erro_initiator_invalido", "initiator precisa ser qualificado (srv::nome)", json!({}));
@@ -134,7 +134,7 @@ struct UnpairRemoteBody { peer: String }
 /// quem diz sair: um pedido perdido, repetido ou com peer errado não dissolve um par legítimo.
 pub(super) async fn unpair_remote(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let asked = match Asked::take(st, peer, req).await { Ok(a) => a, Err(response) => return response };
-    let Some(body) = asked.body::<UnpairRemoteBody>() else { return asked.to_python().await };
+    let body = match asked.body::<UnpairRemoteBody>() { Ok(body) => body, Err(refused) => return refused };
     let held = match asked.enter().await { Ok(held) => held, Err(busy) => return busy };
     let name = asked.name.clone();
     let link = match asked.groups.link(&name).await { Ok(link) => link, Err(error) => return asked.store_failed(&error) };

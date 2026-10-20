@@ -34,7 +34,7 @@ def _text(**kw):
 
 
 def test_routes_need_the_secret():
-    for path in ("pair/text", "orq/group-phase", "orq/promote", "orq/is-orchestrator", "orq/associate"):
+    for path in ("pair/text", "orq/group-phase", "orq/promote", "orq/is-orchestrator"):
         assert _post(path, {}, headers={}).status_code == 404, path
 
 
@@ -97,7 +97,7 @@ def test_is_orchestrator(monkeypatch):
 
 class _NoLock:
     def __enter__(self):
-        raise AssertionError("a rota interna não pode tomar o pair._LOCK: quem segura o lock é o Rust")
+        raise AssertionError("pair._LOCK tomado")
 
     def __exit__(self, *exc):
         return False
@@ -107,26 +107,6 @@ def _saved(name):
     context = oc.resolve(name)
     text = roles.escrever_papel("", roles.Papel("executor", "x*", "codex", "c", "", ""))
     return oc.write(context, text, 0.0)
-
-
-def test_associate_runs_without_pair_lock(monkeypatch):
-    mtime = _saved("planner")
-    pair.PairLink("arbiter").set([], "obra", "real", orq=True)
-    monkeypatch.setattr(pair, "_LOCK", _NoLock())
-    r = _post("orq/associate", {"name": "planner", "gid": "real", "mtime": mtime})
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert (body["ok"], body["gid"], body["grouped"], body["session_prefix"]) == (True, "real", True, "planner")
-    assert body["arquivo"] == str(roles.regras_path("real")) and body["mtime"] > 0
-
-
-def test_associate_errors_match_the_public_route():
-    mtime = _saved("planner")
-    r = _post("orq/associate", {"name": "planner", "gid": "missing", "mtime": mtime})
-    assert (r.status_code, r.json()["detail"]["code"]) == (409, "erro_orq_celula_invalida")
-    pair.PairLink("arbiter").set([], "obra", "real", orq=True)
-    r = _post("orq/associate", {"name": "planner", "gid": "real", "mtime": 0.0})
-    assert (r.status_code, r.json()["detail"]["code"]) == (409, "erro_orq_arquivo_mudou")
 
 
 def test_public_associate_still_takes_the_lock(monkeypatch):

@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::http::StatusCode;
 use fake::{OWNER, SECRET, client};
 use hangar_server::groups::orq::PythonOrq;
 use hangar_server::groups::service::{GroupService, JoinOwned};
@@ -86,23 +85,13 @@ async fn group(srv: &Server, name: &str, others: &[&str]) {
 async fn bridge_needs_the_secret_and_the_private_port() {
     let dir = tempfile::tempdir().unwrap();
     let srv = server(dir.path(), 1).await;
-    assert_eq!(bridge(srv.private, "group.leave", json!({"name": "s0"}), None).await.0, 404);
-    assert_eq!(bridge(srv.private, "group.leave", json!({"name": "s0"}), Some("outro")).await.0, 404);
-    assert_eq!(bridge(srv.public, "group.leave", json!({"name": "s0"}), Some(SECRET)).await.0, 404, "a porta pública não tem a ponte");
+    assert_eq!(bridge(srv.private, "group.rename", json!({"old": "s0", "new": "s1"}), None).await.0, 404);
+    assert_eq!(bridge(srv.private, "group.rename", json!({"old": "s0", "new": "s1"}), Some("outro")).await.0, 404);
+    assert_eq!(bridge(srv.public, "group.rename", json!({"old": "s0", "new": "s1"}), Some(SECRET)).await.0, 404, "a porta pública não tem a ponte");
     assert_eq!(bridge(srv.private, "group.nada", json!({}), Some(SECRET)).await.0, 400);
     let health: Value = serde_json::from_str(&client().get(format!("http://{}/__hangar_server/health", srv.public)).send().await.unwrap()
         .text().await.unwrap()).unwrap();
     assert_eq!(health["groups"], true);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn leave_returns_ex_peers() {
-    let dir = tempfile::tempdir().unwrap();
-    let srv = server(dir.path(), 2).await;
-    group(&srv, "s0", &["s1"]).await;
-    assert_eq!(result(&srv, "group.leave", json!({"name": "s0"})).await, json!({"ex_peers": ["s1"], "warnings": []}));
-    assert!(!srv.pair.join("s0.json").exists() && !srv.pair.join("s1.json").exists(), "grupo de 1 não existe");
-    assert_eq!(result(&srv, "group.leave", json!({"name": "s0"})).await, json!({"ex_peers": [], "warnings": []}), "idempotente");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -124,16 +113,15 @@ async fn route_answers_like_the_public_route() {
     assert!(!srv.pair.join("s0.json").exists());
 }
 
-/// O que a rota repassaria ao Python volta como erro: o Python, ao receber, pediria à ponte de novo.
+/// Corpo que a rota recusa é 422 daqui: o Python, ao receber, pediria à ponte de novo.
 #[tokio::test(flavor = "multi_thread")]
 async fn bridged_request_never_goes_back_to_python() {
     let dir = tempfile::tempdir().unwrap();
     let srv = server(dir.path(), 2).await;
     for (route, body) in [("pair", json!({"peer": 1})), ("group-message", json!({"texto": "x"})), ("pair-remote", json!({})), ("unpair-remote", json!(null))] {
         let out = result(&srv, "group.route", json!({"method": "POST", "name": "s0", "route": route, "body": body})).await;
-        assert_eq!(out["status"], 500, "{route}: {out}");
-        assert_eq!(out["body"]["detail"]["code"], "erro_grupo_indisponivel", "{route}");
-        assert_eq!(out["body"]["detail"]["params"]["detalhe"], "groups_bridge_relay", "{route}");
+        assert_eq!(out["status"], 422, "{route}: {out}");
+        assert_eq!(out["body"]["detail"]["code"], "erro_corpo_invalido", "{route}");
     }
     assert_eq!(srv.python.hits_to("/api/sessions/s0/pair") + srv.python.hits_to("/api/sessions/s0/group-message")
         + srv.python.hits_to("/api/sessions/s0/pair-remote") + srv.python.hits_to("/api/sessions/s0/unpair-remote"), 0);
@@ -151,26 +139,50 @@ async fn rename_op() {
     assert_eq!(s1["peers"], json!(["s9"]));
 }
 
+fn mtime(path: &Path) -> f64 {
+    std::fs::metadata(path).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()
+}
+
+/// BRG-20 (I-5A): o Python manda os fatos do `orq` no corpo e o Rust associa o time sob o lock de
+/// grupo, sem chamar o Python de volta.
 #[tokio::test(flavor = "multi_thread")]
-async fn orq_associate_holds_the_group_lock() {
+async fn orq_associate_never_calls_python() {
     let dir = tempfile::tempdir().unwrap();
-    let srv = server(dir.path(), 2).await;
-    group(&srv, "s0", &["s1"]).await;
-    srv.python.set_internal("orq/associate", StatusCode::OK, json!({"ok": true, "gid": "g1", "grouped": true}));
-    *srv.python.internal_delay.lock().unwrap() = Duration::from_millis(600);
+    let srv = server(dir.path(), 1).await;
+    std::fs::create_dir_all(&srv.pair).unwrap();
+    std::fs::write(srv.pair.join("arbiter.json"), json!({"peers": [], "task": "obra", "gid": "real", "harness": {}, "orq": true}).to_string()).unwrap();
+    let (draft, real) = (srv.pair.join("regras-draft-p.md"), srv.pair.join("regras-real.md"));
+    std::fs::write(&draft, "| papel | conta |\n").unwrap();
+    let facts = |gid: &str| json!({"active_gid": null, "draft_gid": "draft-p", "groups": {gid: {"phase": null, "archived": false}}});
+    let args = |gid: &str, mtime: f64| json!({"name": "planner", "gid": gid, "mtime": mtime, "facts": facts(gid)});
+
+    let missing = result(&srv, "group.orq_associate", args("missing", mtime(&draft))).await;
+    assert_eq!((missing["status"].clone(), missing["body"]["detail"]["code"].clone()), (json!(409), json!("erro_orq_celula_invalida")));
+    let stale = result(&srv, "group.orq_associate", args("real", 1.5)).await;
+    assert_eq!((stale["status"].clone(), stale["body"]["detail"]["code"].clone()), (json!(409), json!("erro_orq_arquivo_mudou")));
+    assert!(!real.exists(), "a recusa não move o time");
+
+    // O lock de grupo segura a associação: uma saída ou um join concorrente não a vê pela metade.
+    let (release, held) = tokio::sync::oneshot::channel::<()>();
+    let groups = srv.groups.clone();
+    let holder = tokio::spawn(async move { groups.locked(async { held.await.ok() }).await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let private = srv.private;
-    let associating = tokio::spawn(async move {
-        bridge(private, "group.orq_associate", json!({"name": "arb", "gid": "g1", "mtime": 1.5}), Some(SECRET)).await
-    });
-    let python = srv.python.clone();
-    fake::wait_until(move || !python.internal_bodies("orq/associate").is_empty()).await;
-    assert!(tokio::time::timeout(Duration::from_millis(200), srv.groups.leave("s0")).await.is_err(), "a saída espera a associação");
+    let ask = args("real", mtime(&draft));
+    let mut associating = tokio::spawn(async move { bridge(private, "group.orq_associate", ask, Some(SECRET)).await });
+    assert!(tokio::time::timeout(Duration::from_millis(200), &mut associating).await.is_err(), "a associação espera o lock");
+    release.send(()).unwrap();
+    holder.await.unwrap();
     let (status, body) = associating.await.unwrap();
-    assert_eq!((status, body), (200, json!({"ok": true, "result": {"status": 200, "body": {"ok": true, "gid": "g1", "grouped": true}}})));
-    assert_eq!(srv.python.internal_bodies("orq/associate"), vec![json!({"name": "arb", "gid": "g1", "mtime": 1.5})]);
-    *srv.python.internal_delay.lock().unwrap() = Duration::ZERO;
-    srv.python.set_internal("orq/associate", StatusCode::CONFLICT, json!({"detail": {"code": "erro_orq_celula_invalida", "params": {}, "msg": "x"}}));
-    let refused = result(&srv, "group.orq_associate", json!({"name": "arb", "gid": "g1", "mtime": 1.5})).await;
-    assert_eq!(refused, json!({"status": 409, "body": {"detail": {"code": "erro_orq_celula_invalida", "params": {}, "msg": "x"}}}));
-    srv.groups.leave("s0").await.ok().unwrap();
+    assert_eq!(status, 200, "{body}");
+    let done = &body["result"];
+    assert_eq!(done["status"], 200, "{done}");
+    assert_eq!((done["body"]["ok"].clone(), done["body"]["gid"].clone(), done["body"]["grouped"].clone(), done["body"]["session_prefix"].clone()),
+        (json!(true), json!("real"), json!(true), json!("planner")));
+    assert_eq!(done["body"]["arquivo"], json!(real.to_str().unwrap()));
+    assert!(done["body"]["mtime"].as_f64().unwrap() > 0.0);
+    assert_eq!(std::fs::read_to_string(&real).unwrap(), "| papel | conta |\n");
+    assert_eq!(std::fs::read_to_string(&draft).unwrap(), "<!-- hangar-orq-group: real -->\n");
+    assert!(srv.python.internal_bodies("orq/associate").is_empty() && srv.python.internal_bodies("orq/group-phase").is_empty(),
+        "nenhuma pergunta de volta ao Python");
 }

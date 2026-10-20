@@ -349,14 +349,14 @@ Revisão: risco — motivo: concorrência sob o lock de grupo e contrato interno
 
 **Fecha:** BRG-10, BRG-20, BRG-25, PAIR-12, voltas 1–5 do `escopo.md`.
 
-- [ ] **Step 1: Testes**: `unknown_field_is_422_without_python` (Python falso conta chamadas = 0);
+- [x] **Step 1: Testes**: `unknown_field_is_422_without_python` (Python falso conta chamadas = 0);
   `surrogate_task_is_422`; `orq_associate_never_calls_python`; `repassed_close_leaves_the_group`
   (sessão Pi fechada pelo repasse sai do grupo e avisa).
-- [ ] **Step 2: Rodar e ver falhar.**
-- [ ] **Step 3: Implementar.**
-- [ ] **Step 4: Rodar.** Esperado: PASS; `uv run pytest tests/test_groups_bridge.py tests/test_orq_group.py` verde.
-- [ ] **Step 5: Contrato interno** mudou (`/internal/orq/associate`) → subir os dois protocolos.
-- [ ] **Step 6: Commit** — `fix(groups): answer bad bodies and orq association without a Python round trip`.
+- [x] **Step 2: Rodar e ver falhar.**
+- [x] **Step 3: Implementar.**
+- [x] **Step 4: Rodar.** Esperado: PASS; `uv run pytest tests/test_groups_bridge.py tests/test_orq_group.py` verde.
+- [x] **Step 5: Contrato interno** mudou (`/internal/orq/associate`) → subir os dois protocolos.
+- [x] **Step 6: Commit** — `fix(groups): answer bad bodies and orq association without a Python round trip`.
 
 ---
 

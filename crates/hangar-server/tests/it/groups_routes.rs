@@ -92,8 +92,9 @@ async fn routes_answer_like_python() {
         let before = input_hits(&srv.python, &names);
         let (status, body) = call(srv.addr, step["method"].as_str().unwrap(), step["path"].as_str().unwrap(), step.get("body"), OWNER).await;
         if step["python_only"] == true {
-            assert_eq!((status, body), (200, json!("from-python")), "{name}: o corpo que o FastAPI recusa vai a ele");
-            assert_eq!(serde_json::from_slice::<Value>(&srv.python.last_body()).unwrap(), step["body"], "{name}: corpo intacto");
+            // I-1A: o 422 é do Rust, com código; o Python nunca recebe o corpo.
+            assert_eq!((status, body["detail"]["code"].clone()), (422, json!("erro_corpo_invalido")), "{name}");
+            assert_eq!(srv.python.hits_to(&format!("/api/sessions/{}", step["path"].as_str().unwrap())), 0, "{name}");
             continue;
         }
         if gid.is_empty() && let Some(g) = body["gid"].as_str() {
@@ -398,4 +399,48 @@ async fn group_notice_refuses_outside_header() {
     assert_eq!((status, body["detail"]["code"].clone()), (400, json!("erro_group_message_resposta")));
     assert!(ana.calls().is_empty());
     assert_eq!(input_hits(&srv.python, &["s0", "s1"]), [0, 0]);
+}
+
+/// BRG-10/PAIR-12: corpo que o Rust não aceita é 422 com código daqui, nunca repasse ao Python.
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_field_is_422_without_python() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    for (path, body) in [("s0/pair", json!({"peers": ["s1"], "bogus": 1})), ("s0/group-message", json!({"texto": "x"})),
+        ("s0/pair-remote", json!({"initiator": 1})), ("s0/unpair-remote", json!({}))] {
+        let (status, body) = call(srv.addr, "POST", path, Some(&body), OWNER).await;
+        assert_eq!((status, body["detail"]["code"].clone()), (422, json!("erro_corpo_invalido")), "{path}");
+        assert_eq!(srv.python.hits_to(&format!("/api/sessions/{path}")), 0, "{path}");
+    }
+    assert!(!srv.pair.join("s0.json").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn surrogate_task_is_422() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    let resp = client().post(format!("http://{}/api/sessions/s0/pair", srv.addr)).bearer_auth(OWNER)
+        .header("content-type", "application/json").body(r#"{"peers": ["s1"], "task": "meio \ud83d emoji"}"#).send().await.unwrap();
+    let status = resp.status().as_u16();
+    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    assert_eq!((status, body["detail"]["code"].clone()), (422, json!("erro_corpo_invalido")));
+    assert_eq!(srv.python.hits_to("/api/sessions/s0/pair"), 0);
+    assert!(!srv.pair.join("s0.json").exists());
+}
+
+/// BRG-25: fechamento que o Rust só repassa (Pi/omp/Kimi, sessão sem entrada aqui) sai do grupo
+/// daqui, depois que o Python fechou; o Python não pede mais pela ponte.
+#[tokio::test(flavor = "multi_thread")]
+async fn repassed_close_leaves_the_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 3).await;
+    write_group(&srv, "s0", &["s1", "s2"]);
+    write_group(&srv, "s1", &["s0", "s2"]);
+    write_group(&srv, "s2", &["s0", "s1"]);
+    let (status, _) = call(srv.addr, "DELETE", "s0", None, OWNER).await;
+    assert_eq!(status, 200);
+    assert_eq!(srv.python.hits_to("/api/sessions/s0"), 1, "o Python fecha");
+    assert!(!srv.pair.join("s0.json").exists(), "quem fechou saiu");
+    assert_eq!(srv.groups.link("s1").await.unwrap().unwrap().peers, ["s2"]);
+    assert_eq!(srv.groups.link("s2").await.unwrap().unwrap().peers, ["s1"]);
 }
