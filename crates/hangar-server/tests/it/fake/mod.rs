@@ -557,13 +557,14 @@ pub fn id_of(ev: &Event) -> String {
 }
 
 pub async fn wait_until(cond: impl Fn() -> bool) {
-    for _ in 0..250 {
+    // Teto folgado: só estoura se o código travar, não com a máquina carregada.
+    for _ in 0..750 {
         if cond() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("condição não chegou em 5 s");
+    panic!("condição não chegou em 15 s");
 }
 
 /// Espera a descoberta ser lida `n` vezes depois de agora (a vigia do hub lê a cada 2 s).

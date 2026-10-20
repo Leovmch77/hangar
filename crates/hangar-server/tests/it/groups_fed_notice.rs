@@ -193,7 +193,7 @@ async fn owner_down_contract_is_503() {
 async fn slow_machine_is_skipped_before_the_origin_gives_up() {
     let n = net().await;
     group(&n).await;
-    federation_deliver_wait(&n.casa, Duration::from_millis(500));
+    federation_deliver_wait(&n.casa, Duration::from_secs(3));
     let hit = Arc::new(tokio::sync::Notify::new());
     let h = hit.clone();
     let slow = axum::Router::new().fallback(move || {
@@ -206,10 +206,11 @@ async fn slow_machine_is_skipped_before_the_origin_gives_up() {
     peers(&n.casa, &[("lab", n.lab.addr), ("vm", slow_addr)]);
     let started = std::time::Instant::now();
     let (status, body) = say(&n.lab, "s2", "oi").await;
-    tokio::time::timeout(Duration::from_secs(5), hit.notified()).await.expect("a dona tentou a máquina lenta");
+    tokio::time::timeout(Duration::from_secs(15), hit.notified()).await.expect("a dona tentou a máquina lenta");
     assert_eq!(status, 200, "{body}");
     assert_eq!((body["pulados"].clone(), body["warning"].clone()), (json!(["vm::s3"]), Value::Null), "{body}");
-    assert!(started.elapsed() < Duration::from_secs(10), "resposta antes de quem mandou desistir: {:?}", started.elapsed());
+    // Quem mandou desiste da dona aos 20 s (`OWNER_WAIT_TIMEOUT`).
+    assert!(started.elapsed() < Duration::from_secs(15), "resposta antes de quem mandou desistir: {:?}", started.elapsed());
     reach(&n.casa, &["s0", "s1"], 2).await;
 }
 
@@ -219,7 +220,7 @@ async fn slow_machine_is_skipped_before_the_origin_gives_up() {
 async fn slow_owner_session_is_skipped_in_time() {
     let n = net().await;
     group(&n).await;
-    federation_deliver_wait(&n.casa, Duration::from_secs(1));
+    federation_deliver_wait(&n.casa, Duration::from_secs(3));
     n.casa.python.hold_input(true);
     let started = std::time::Instant::now();
     let (status, body) = say(&n.lab, "s2", "oi").await;
@@ -228,7 +229,8 @@ async fn slow_owner_session_is_skipped_in_time() {
     n.casa.python.release.notify_waiters();
     assert_eq!(status, 200, "{body}");
     assert_eq!((body["pulados"].clone(), body["warning"].clone()), (json!(["casa::s0", "casa::s1"]), Value::Null), "{body}");
-    assert!(took < Duration::from_secs(5), "a dona não espera a sessão lenta além do prazo: {took:?}");
+    // Prazo de 3 s contra o padrão de 15 s: passar de 10 s é a dona ignorando o prazo dela.
+    assert!(took < Duration::from_secs(10), "a dona não espera a sessão lenta além do prazo: {took:?}");
     reach(&n.vm, &["s3"], 2).await;
 }
 
@@ -263,7 +265,8 @@ async fn first_refused(target: SocketAddr) -> SocketAddr {
 #[tokio::test(flavor = "multi_thread")]
 async fn join_from_participant_with_slow_member_reports_the_real_outcome() {
     let n = net().await;
-    timing(&n.casa, Timing { join_wait: Duration::from_secs(11), ladder: vec![Duration::from_secs(9)], ..fast() });
+    // vm confirma na segunda tentativa, aos 9 s: depois dos 8 s de leitura comum, antes do teto da dona.
+    timing(&n.casa, Timing { ladder: vec![Duration::from_secs(9)], ..fast() });
     let (status, body) = call(n.casa.addr, "POST", "/api/sessions/s0/pair", Some(&json!({"peers": ["lab::s1"]}))).await;
     assert_eq!(status, 200, "{body}");
     peers(&n.casa, &[("lab", n.lab.addr), ("vm", first_refused(n.vm.addr).await)]);

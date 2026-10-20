@@ -81,6 +81,7 @@ async fn same_name_on_two_servers_are_two_members() {
 async fn join_partial_when_one_server_is_down() {
     let n = net().await;
     peers(&n.casa, &[("lab", n.lab.addr), ("vm", closed_port().await)]);
+    join_gives_up(&n.casa);
     let (status, body) = pair(&n.casa, "s0", json!({"peers": ["lab::s1", "vm::s2"]})).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["warning"]["code"], "erro_grupo_membro_nao_confirmado");
@@ -101,6 +102,7 @@ async fn join_partial_when_one_server_is_down() {
 async fn removed_member_is_cancelled_in_pending_push() {
     let n = net().await;
     peers(&n.casa, &[("lab", n.lab.addr), ("vm", closed_port().await)]);
+    join_gives_up(&n.casa);
     let (status, body) = pair(&n.casa, "s0", json!({"peers": ["lab::s1", "vm::s2"]})).await;
     assert_eq!(status, 200, "{body}");
     let fed = federation::existing(&n.casa.pair).unwrap();
@@ -117,6 +119,7 @@ async fn removed_member_is_cancelled_in_pending_push() {
 async fn nobody_confirmed_is_502_and_undone() {
     let n = net().await;
     peers(&n.casa, &[("lab", closed_port().await), ("vm", n.vm.addr)]);
+    join_gives_up(&n.casa);
     let (status, body) = pair(&n.casa, "s0", json!({"peers": ["lab::s1"]})).await;
     assert_eq!((status, body["detail"]["code"].clone()), (502, json!("erro_grupo_membro_nao_confirmado")), "{body}");
     assert!(sidecar(&n.casa, "s0").is_none());
@@ -381,11 +384,11 @@ async fn initiator_releases_ingress_before_calling_the_owner() {
     peers(&n.casa, &[("lab", n.lab.addr), ("vm", closed_port().await)]);
     let addr = n.casa.addr;
     let asked = tokio::spawn(async move { call(addr, "POST", "/api/sessions/s0/pair", Some(&json!({"peers": ["lab::s1", "vm::s2"]}))).await });
-    // O registro gravado = a dona já espera vm (1,5 s).
+    // O registro gravado = a dona já espera vm, e segue esperando bem mais que o teto do `close`.
     let pair_dir = n.casa.pair.clone();
     fake::wait_until(move || std::fs::read_dir(pair_dir.join("groups")).is_ok_and(|d| d.flatten()
         .any(|e| { let f = e.file_name().into_string().unwrap(); f.ends_with(".json") && !f.starts_with("outbox") && !f.starts_with("self") }))).await;
-    n.casa.runtime.ingress().close("s0", Duration::from_millis(300)).await.expect("o passe de s0 já saiu");
+    n.casa.runtime.ingress().close("s0", Duration::from_secs(10)).await.expect("o passe de s0 já saiu");
     n.casa.runtime.ingress().open("s0");
     assert_eq!(asked.await.unwrap().0, 200);
 }
@@ -551,6 +554,7 @@ async fn undo_restores_both_contracts() {
     std::fs::write(contract(&a), "contrato A").unwrap();
     std::fs::write(contract(&b), "contrato B").unwrap();
     peers(&n.casa, &[("lab", n.lab.addr), ("vm", closed_port().await)]);
+    join_gives_up(&n.casa);
     let (status, body) = pair(&n.casa, "s0", json!({"peers": ["s2", "vm::x"]})).await;
     assert_eq!((status, body["detail"]["code"].clone()), (502, json!("erro_grupo_membro_nao_confirmado")), "{body}");
     assert_eq!(std::fs::read_to_string(contract(&a)).unwrap(), "contrato A");
@@ -618,7 +622,7 @@ async fn participant_leave_touches_the_list() {
 async fn owner_answers_before_newcomer_notices() {
     let n = net().await;
     n.casa.python.hold_input(true);
-    let asked = tokio::time::timeout(Duration::from_secs(5), pair(&n.casa, "s0", json!({"peers": ["lab::s1"]}))).await;
+    let asked = tokio::time::timeout(Duration::from_secs(15), pair(&n.casa, "s0", json!({"peers": ["lab::s1"]}))).await;
     n.casa.python.hold_input(false);
     n.casa.python.release.notify_waiters();
     let (status, body) = asked.expect("a dona responde sem esperar o aviso");

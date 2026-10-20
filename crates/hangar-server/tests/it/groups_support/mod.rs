@@ -30,10 +30,16 @@ pub const NAMES: [&str; 4] = ["s0", "s1", "s2", "s3"];
 pub struct Machine { pub addr: SocketAddr, pub private: SocketAddr, pub python: Arc<fake::Fake>, pub pair: PathBuf, pub root: PathBuf,
     pub state: Arc<AppState>, pub share: Arc<hangar_server::share::ShareState>, pub changes: Arc<AtomicUsize>, pub runtime: Arc<RuntimeRegistry> }
 
-/// Prazos curtos de teste: confirmação em 1,5 s e fila tentando de novo a cada 150 ms.
+/// Prazos de teste: o que deve acontecer tem teto folgado (15 s, abaixo dos 20 s de quem pede à
+/// dona) e só estoura se o código travar; a fila tenta de novo a cada 150 ms.
 pub fn fast() -> Timing {
-    Timing { join_wait: Duration::from_millis(1500), ladder: vec![Duration::from_millis(150)], ..Timing::default() }
+    let ceiling = Duration::from_secs(15);
+    Timing { join_wait: ceiling, ladder: vec![Duration::from_millis(150)], deliver_wait: ceiling, ..Timing::default() }
 }
+
+/// Para o teste que afirma o caminho do prazo (máquina fora do ar não confirma): a dona desiste
+/// dela em 4 s.
+pub fn join_gives_up(m: &Machine) { timing(m, Timing { join_wait: Duration::from_secs(4), ..fast() }); }
 
 /// Troca os prazos da máquina; cada um vale a partir do próximo uso.
 pub fn timing(m: &Machine, timing: Timing) { federation::configure(&m.pair, timing); }

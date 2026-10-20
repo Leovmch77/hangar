@@ -40,7 +40,6 @@ pub const JOIN_WAIT: Duration = Duration::from_secs(12);
 
 pub struct Federation {
     outbox: Outbox,
-    wait: Duration,
 }
 
 impl Federation {
@@ -50,7 +49,7 @@ impl Federation {
 /// Prazos e escadas do grupo entre máquinas de uma pasta `.hangar-pair`.
 #[derive(Clone, Debug)]
 pub struct Timing {
-    /// Quanto a dona espera cada participante confirmar um join (lido ao abrir a fila).
+    /// Quanto a dona espera cada participante confirmar um join (lido a cada join).
     pub join_wait: Duration,
     /// Escada da fila de saída (lida ao abrir a fila).
     pub ladder: Vec<Duration>,
@@ -96,9 +95,8 @@ pub async fn of(st: &AppState, groups: &GroupService) -> Result<Arc<Federation>,
     let opened = tokio::task::spawn_blocking(move || -> std::io::Result<Arc<Federation>> {
         let mut all = ALL.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(found) = all.get(&root) { return Ok(found.clone()); }
-        let Timing { join_wait: wait, ladder, .. } = timing(&root);
-        let outbox = Outbox::open_with_ladder(root.join("groups"), sender, ladder)?;
-        let fed = Arc::new(Federation { outbox, wait });
+        let outbox = Outbox::open_with_ladder(root.join("groups"), sender, timing(&root).ladder)?;
+        let fed = Arc::new(Federation { outbox });
         all.insert(root, fed.clone());
         Ok(fed)
     }).await;
@@ -600,10 +598,10 @@ pub async fn owner_join(st: &Arc<AppState>, groups: &Arc<GroupService>, mut ask:
     };
     groups.changed();
     // Fora do lock: cada máquina com membro novo confirma (ou não) em paralelo.
-    let (gid, version) = (plan.record.gid.clone(), plan.record.version);
+    let (gid, version, wait) = (plan.record.gid.clone(), plan.record.version, timing(groups.pair_root()).join_wait);
     let waits = plan.joiners.iter().map(|(server, names)| {
         let (fed, gid, server, names) = (fed.clone(), gid.clone(), server.clone(), names.clone());
-        async move { (fed.outbox.wait(&server, &gid, version, fed.wait).await, server, names) }
+        async move { (fed.outbox.wait(&server, &gid, version, wait).await, server, names) }
     });
     let results = futures_util::future::join_all(waits).await;
     let mut unconfirmed: Vec<Member> = Vec::new();
