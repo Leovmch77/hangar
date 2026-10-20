@@ -768,11 +768,11 @@ Revisão: base — motivo: contrato da lista que os três clientes consomem (Tas
 **Invariante:** convidado não recebe `pair_owner` (a lista do convidado é Python e não produz o
 campo; conferir que `guest_header.py` não precisa de mudança).
 
-- [ ] **Step 1: Testes**: `row_carries_pair_owner`; `list_reemits_when_only_the_owner_changes`.
-- [ ] **Step 2: Rodar e ver falhar.**
-- [ ] **Step 3: Implementar.**
-- [ ] **Step 4: Rodar.** Esperado: PASS.
-- [ ] **Step 5: Commit** — `feat(list): carry the group owner machine in session rows`.
+- [x] **Step 1: Testes**: `row_carries_pair_owner`; `list_reemits_when_only_the_owner_changes`.
+- [x] **Step 2: Rodar e ver falhar.**
+- [x] **Step 3: Implementar.**
+- [x] **Step 4: Rodar.** Esperado: PASS.
+- [x] **Step 5: Commit** — `feat(list): carry the group owner machine in session rows`.
 
 ---
 

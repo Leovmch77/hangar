@@ -87,7 +87,9 @@ impl GroupService {
         self
     }
 
-    fn changed(&self) {
+    /// Toda escrita de sidecar chama isto depois de gravar, inclusive as de grupo entre máquinas
+    /// (`PUT` da dona, fila): a lista só reemite a dona nova (`pair_owner`) se for avisada.
+    pub(crate) fn changed(&self) {
         if let Some(hook) = &self.on_change { hook() }
     }
 
