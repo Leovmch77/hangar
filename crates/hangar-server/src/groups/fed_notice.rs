@@ -31,6 +31,22 @@ use crate::session_write::{BODY_LIMIT, detail_body, invalid_body, json_response}
 
 const OWNER_DOWN: &str = "erro_grupo_dono_indisponivel";
 
+/// Quanto a dona espera cada máquina receber o aviso. Bem menor que os 8 s de leitura do
+/// `PeerClient` de quem pediu: a resposta, com `pulados` certo, chega antes de ele desistir da dona.
+pub const DELIVER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+static DELIVER_WAITS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<PathBuf, std::time::Duration>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Prazo de entrega da dona da máquina de `root` (testes).
+pub fn configure_deliver_wait(root: &std::path::Path, wait: std::time::Duration) {
+    DELIVER_WAITS.lock().unwrap_or_else(|e| e.into_inner()).insert(root.to_path_buf(), wait);
+}
+
+fn deliver_wait(groups: &GroupService) -> std::time::Duration {
+    DELIVER_WAITS.lock().unwrap_or_else(|e| e.into_inner()).get(groups.pair_root()).copied().unwrap_or(DELIVER_WAIT)
+}
+
 fn no(status: StatusCode, code: &str, msg: &str, params: Value) -> Refusal { Refusal(status, detail_body(code, msg, params)) }
 
 fn owner_down(owner: &str) -> Refusal {
@@ -126,7 +142,11 @@ async fn owner_fanout(st: &AppState, groups: &GroupService, gid: &str, mut n: No
     let servers: Vec<&str> = record.members.iter().map(|m| m.server.as_str()).filter(|s| *s != me && *s != n.origin)
         .collect::<BTreeSet<_>>().into_iter().collect();
     let (path, body) = (format!("/api/groups/{}/deliver", segment(gid)), n.body());
-    let answers = futures_util::future::join_all(servers.iter().map(|s| st.peers.call_group(s, reqwest::Method::POST, &path, Some(&body)))).await;
+    let (wait, path, body) = (deliver_wait(groups), &path, &body);
+    let answers = futures_util::future::join_all(servers.iter().map(|s| async move {
+        tokio::time::timeout(wait, st.peers.call_group(s, reqwest::Method::POST, &path, Some(&body))).await
+            .unwrap_or_else(|_| Err(PeerError::Transport(format!("{s} não respondeu ao aviso em {} s", wait.as_secs_f32()))))
+    })).await;
     let mut skipped = Vec::new();
     for (server, answer) in servers.iter().zip(answers) {
         match answer {

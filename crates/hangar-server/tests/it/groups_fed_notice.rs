@@ -249,6 +249,36 @@ async fn owner_down_contract_is_503() {
     assert_eq!((status, body["detail"]["code"].clone()), (503, json!("erro_grupo_dono_indisponivel")), "{body}");
 }
 
+/// Máquina que não responde a tempo: a dona desiste dela antes de quem mandou desistir da dona, e
+/// só os membros dela vêm em `pulados`.
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_machine_is_skipped_before_the_origin_gives_up() {
+    let n = net().await;
+    group(&n).await;
+    federation_deliver_wait(&n.casa, Duration::from_millis(500));
+    let hit = Arc::new(tokio::sync::Notify::new());
+    let h = hit.clone();
+    let slow = axum::Router::new().fallback(move || {
+        let h = h.clone();
+        async move { h.notify_one(); tokio::time::sleep(Duration::from_secs(60)).await; "" }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let slow_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, slow).await.unwrap() });
+    peers(&n.casa, &[("lab", n.lab.addr), ("vm", slow_addr)]);
+    let started = std::time::Instant::now();
+    let (status, body) = say(&n.lab, "s2", "oi").await;
+    tokio::time::timeout(Duration::from_secs(5), hit.notified()).await.expect("a dona tentou a máquina lenta");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!((body["pulados"].clone(), body["warning"].clone()), (json!(["vm::s3"]), Value::Null), "{body}");
+    assert!(started.elapsed() < Duration::from_secs(10), "resposta antes de quem mandou desistir: {:?}", started.elapsed());
+    reach(&n.casa, &["s0", "s1"], 2).await;
+}
+
+fn federation_deliver_wait(m: &Machine, wait: Duration) {
+    hangar_server::groups::fed_notice::configure_deliver_wait(&m.pair, wait);
+}
+
 /// Dona fora: os membros da mesma máquina continuam se avisando e as outras vêm em `pulados`.
 #[tokio::test(flavor = "multi_thread")]
 async fn owner_down_same_machine_still_delivers() {
