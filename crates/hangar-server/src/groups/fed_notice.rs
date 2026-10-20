@@ -99,7 +99,7 @@ impl Notice {
 /// pares de fora daqui, todos ao mesmo tempo e cada um no máximo `wait`. Devolve quem não recebeu
 /// (ou não confirmou no prazo): nome daqui ou endereço de fora, com o erro.
 async fn deliver_here(st: &AppState, groups: &GroupService, gid: &str, n: &Notice, wait: Duration) -> Result<Vec<(String, Value)>, Refusal> {
-    use crate::share::pair_routes::{Direct, notice_key, notice_mark, notice_seen, notify_outside};
+    use crate::share::pair_routes::{Direct, notice_claim, notice_key, notify_outside};
     use futures_util::FutureExt as _;
     let me = groups.server_id();
     let all = groups.sidecars().await.map_err(|e| { tracing::error!(code = "groups_store_failed", error = %e, "groups: sidecars ilegíveis no aviso"); unavailable("groups_store_failed") })?;
@@ -109,10 +109,9 @@ async fn deliver_here(st: &AppState, groups: &GroupService, gid: &str, n: &Notic
     for (name, _) in &mine {
         if !n.from_outside && n.origin == me && *name == n.sender { continue; }
         // O mesmo aviso pode chegar direto do par de fora e pela dona: entra uma vez.
-        let key = notice_key(me, &n.notice, name);
-        if notice_seen(&key) { continue; }
+        let Some(claim) = notice_claim(notice_key(me, &n.notice, name)) else { continue };
         let line = &line;
-        sends.push((name.clone(), async move { deliver_text(st, name, line).await.map(|()| notice_mark(key)) }.boxed()));
+        sends.push((name.clone(), async move { deliver_text(st, name, line).await.map(|()| claim.delivered()) }.boxed()));
     }
     if let Some(share) = st.share.as_ref().filter(|_| !n.from_outside) {
         let outside = outside_addresses(st);

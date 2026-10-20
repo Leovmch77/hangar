@@ -1172,6 +1172,35 @@ async fn same_group_notice_through_two_pairs_reaches_each_local_once() {
     assert_eq!((e.inputs("s0"), e.inputs("s2")), (2, 2));
 }
 
+/// O mesmo `notice` chegando ao mesmo tempo pelos dois pares: a sessão reservada pela primeira
+/// entrega não recebe a segunda. Entrega que falha solta a reserva e o reenvio entra.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_same_notice_is_written_once_and_failure_releases_it() {
+    let e = env().await;
+    let (_, t1) = e.seed_pair("s0", "pc-ana", "Y", ADDR);
+    let (_, t2) = e.seed_pair("s2", "pc-ana", "Z", ADDR);
+    e.group("s0", &["s2", "pc-ana::Y", "pc-ana::Z"]);
+    e.group("s2", &["s0", "pc-ana::Y", "pc-ana::Z"]);
+    e.python.hold_input(true);
+    let body = |s: &str| json!({"text": "oi", "session": s, "from": "Y", "group": true, "notice": "c1"});
+    let release = async {
+        // As duas entregas presas no `/input` antes de soltar qualquer uma.
+        while e.python.input_calls() < 2 { tokio::time::sleep(Duration::from_millis(10)).await; }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        e.python.hold_input(false);
+        for _ in 0..50 { e.python.release.notify_waiters(); tokio::time::sleep(Duration::from_millis(10)).await; }
+    };
+    let (a, b, ()) = tokio::join!(e.message(&t1, body("s0")), e.message(&t2, body("s2")), release);
+    assert_eq!((a.0, b.0), (200, 200), "{a:?} {b:?}");
+    assert_eq!((e.inputs("s0"), e.inputs("s2")), (1, 1));
+    e.python.set_input_reply(Some((StatusCode::INTERNAL_SERVER_ERROR, json!({"detail": "x"}))));
+    let failed = json!({"text": "oi", "session": "s0", "from": "Y", "group": true, "notice": "c2"});
+    assert_ne!(e.message(&t1, failed.clone()).await.0, 200);
+    e.python.set_input_reply(Some((StatusCode::OK, json!({"ok": true}))));
+    assert_eq!(e.message(&t1, failed).await.0, 200);
+    assert_eq!((e.inputs("s0"), e.inputs("s2")), (3, 3), "a falha não marca: o reenvio entra nas duas");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn message_with_invalid_from_is_400() {
     let e = env().await;

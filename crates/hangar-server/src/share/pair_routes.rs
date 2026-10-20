@@ -814,14 +814,30 @@ fn seen_notices() -> std::sync::MutexGuard<'static, std::collections::HashMap<St
 /// mesmo aviso vindo por duas máquinas do outro dono, ou pelo par e pela dona do grupo, entra uma vez.
 pub(crate) fn notice_key(me: &str, notice: &str, session: &str) -> String { format!("{me}\n{notice}\n{session}") }
 
-/// Já entregue dentro da janela da tempestade (o mapa é podado aqui).
-pub(crate) fn notice_seen(key: &str) -> bool {
+/// Reserva do aviso para uma entrega: `None` = já entregue (ou em entrega) dentro da janela da
+/// tempestade. Checar e reservar sob a mesma trava impede que duas chegadas simultâneas entreguem.
+pub(crate) fn notice_claim(key: String) -> Option<NoticeClaim> {
     let mut seen = seen_notices();
     seen.retain(|_, t| t.elapsed() < STORM_WINDOW);
-    seen.contains_key(key)
+    if seen.contains_key(&key) { return None; }
+    seen.insert(key.clone(), std::time::Instant::now());
+    Some(NoticeClaim(Some(key)))
 }
 
-pub(crate) fn notice_mark(key: String) { seen_notices().insert(key, std::time::Instant::now()); }
+/// Solta a reserva ao sair sem `delivered()` (falha, prazo estourado, future abandonado): o reenvio entra.
+pub(crate) struct NoticeClaim(Option<String>);
+
+impl NoticeClaim {
+    pub(crate) fn delivered(mut self) {
+        if let Some(k) = self.0.take() { seen_notices().insert(k, std::time::Instant::now()); }
+    }
+}
+
+impl Drop for NoticeClaim {
+    fn drop(&mut self) {
+        if let Some(k) = self.0.take() { seen_notices().remove(&k); }
+    }
+}
 
 async fn pair_message(State(st): St, caller: Option<Extension<Caller>>, bytes: Bytes) -> Response {
     let (v, map) = match fields(&bytes, &[("text", true, Some(MAX_MESSAGE))], false) { Ok(v) => v, Err(r) => return r };
@@ -863,15 +879,15 @@ async fn pair_message(State(st): St, caller: Option<Extension<Caller>>, bytes: B
         let notice = map.get("notice").and_then(Value::as_str).filter(|n| !n.is_empty() && n.len() <= 64);
         let me = server_id(&st.app);
         for session in &locals {
-            let key = notice.map(|n| notice_key(&me, n, session));
-            if key.as_deref().is_some_and(notice_seen) {
-                delivered = true;
-                continue;
-            }
+            let claim = match notice.map(|n| notice_claim(notice_key(&me, n, session))) {
+                Some(None) => { delivered = true; continue; }
+                Some(Some(c)) => Some(c),
+                None => None,
+            };
             let (status, reply) = write_input(&st.app, session, &text, true).await;
             if status.is_success() {
                 delivered = true;
-                if let Some(k) = key { notice_mark(k); }
+                if let Some(c) = claim { c.delivered(); }
             } else {
                 tracing::warn!(code = "external_pair_group_notice_failed", session = %session, status = status.as_u16(), "par externo: aviso de grupo de fora não entregue");
                 last = (status, reply);
