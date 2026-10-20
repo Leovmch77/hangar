@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { sessionsStore } from './sessionsStore.svelte';
 import { getIdentificador } from './peers';
-import { configureDiag, estaDesligado, registrarFalha, registrarSucesso, _limparEsfriamentoParaTestes } from '@hangar/core';
+import { configureDiag, groupGlobal, estaDesligado, registrarFalha, registrarSucesso, _limparEsfriamentoParaTestes } from '@hangar/core';
 
 const streams = vi.hoisted(() => new Map<string, Map<string, (event: { data: string }) => void>>());
 const objetos = vi.hoisted(() => new Map<string, { onerror?: () => void; close: unknown; addEventListener: unknown }>());
@@ -123,6 +123,7 @@ it('repete a identidade após falha transitória, com intervalo e sem reabrir o 
   vi.mocked(getIdentificador).mockRejectedValueOnce(new Error('timeout'));
   const registrar = vi.fn();
   configureDiag({ registrar, novoReq: () => 'identity-retry' });
+  registrarFalha('vpn');   // só a lan conectada: a contagem é das leituras dela
   sessionsStore.retain();
   const original = objetos.get('lan');
   const publish = streams.get('lan')!.get('sessions')!;
@@ -138,6 +139,40 @@ it('repete a identidade após falha transitória, com intervalo e sem reabrir o 
   expect(getIdentificador).toHaveBeenCalledTimes(2);
   expect(objetos.get('lan')).toBe(original);
   expect(original!.close).not.toHaveBeenCalled();
+});
+
+it('grupo entre máquinas numa lista lê o identificador de todas as conectadas e cria o membro da máquina sem conexão', async () => {
+  vi.mocked(getIdentificador).mockClear();
+  sessionsStore.retain();
+  // A (lan) é dona do grupo com D, que não está conectada aqui; B (vpn) não cita ninguém de fora.
+  streams.get('vpn')!.get('sessions')!({ data: JSON.stringify([{ name: 'b', jsonl: '/b', state: 'idle' }]) });
+  streams.get('lan')!.get('sessions')!({ data: JSON.stringify([{ name: 'a', jsonl: '/a', state: 'idle',
+    pair_gid: 'g', pair_owner: 'backend-lan', pair_peers: ['backend-zzz::d'] }]) });
+  await vi.waitFor(() => expect(sessionsStore.identities.get('vpn')).toBe('backend-vpn'));
+  const grupo = groupGlobal(sessionsStore.rows, sessionsStore.identities).find((g) => g.key === 'fed:backend-lan/g');
+  expect(grupo?.members).toContainEqual({ kind: 'missing', server_id: 'backend-zzz', name: 'd' });
+});
+
+it('identificador vazio é falha: aparece por máquina e é relido depois do intervalo; máquina fora do ar não fica em leitura', async () => {
+  vi.useFakeTimers();
+  vi.mocked(getIdentificador).mockClear();
+  let solta: (v: { identificador: string }) => void = () => {};
+  vi.mocked(getIdentificador).mockImplementationOnce(() => new Promise((r) => { solta = r; }));
+  registrarFalha('vpn');
+  sessionsStore.retain();
+  const data = JSON.stringify([{ name: 'a', jsonl: '/a', pair_peers: ['backend-vpn::b'] }]);
+  streams.get('lan')!.get('sessions')!({ data });
+  expect(sessionsStore.identityStatus.get('lan')).toBe('reading');
+  expect(sessionsStore.identityStatus.has('vpn')).toBe(false);
+  solta({ identificador: '' });
+  await vi.waitFor(() => expect(sessionsStore.identityStatus.get('lan')).toBe('failed'));
+  expect(sessionsStore.identities.has('lan')).toBe(false);
+  streams.get('lan')!.get('ping')!({ data: '' });
+  expect(getIdentificador).toHaveBeenCalledTimes(1);
+  vi.setSystemTime(Date.now() + 30000);
+  streams.get('lan')!.get('ping')!({ data: '' });
+  await vi.waitFor(() => expect(sessionsStore.identities.get('lan')).toBe('backend-lan'));
+  expect(sessionsStore.identityStatus.has('lan')).toBe(false);
 });
 
 it('não reabre conexões quando a lista já foi desmontada', () => {

@@ -21,8 +21,18 @@ import { avisarSemArmazem, definirArmazem, definirProtegido, definirSemPrazo, es
 function createSessionsStore() {
   let servers = $state<Server[]>([]);
   let identities = $state.raw<ReadonlyMap<string, string>>(new Map());
+  // Leitura do identificador por máquina com conexão aberta: em voo ou falhou (vazio conta como falha).
+  let identityStatus = $state.raw<ReadonlyMap<string, 'reading' | 'failed'>>(new Map());
+  const setIdentityStatus = (id: string, status: 'reading' | 'failed' | null) => {
+    if ((identityStatus.get(id) ?? null) === status) return;
+    const next = new Map(identityStatus);
+    if (status) next.set(id, status); else next.delete(id);
+    identityStatus = next;
+  };
   // Agrupar entre máquinas precisa do identificador de cada uma antes de haver par `srv::`.
   let identitiesWanted = false;
+  // Basta uma linha de qualquer máquina com grupo entre máquinas para todas precisarem do identificador.
+  let identitiesNeeded = false;
   const identityLoaders = new Map<string, () => void>();
   // $state.raw: agg é SUBSTITUÍDO inteiro a cada recompute e nunca mutado — o proxy profundo do
   // $state só custava, e embrulhar as rows em proxy quebrava a identidade que o memo do
@@ -161,6 +171,7 @@ function createSessionsStore() {
     for (const id of identities.keys()) {
       if (!list.some(s => s.id === id)) { const next = new Map(identities); next.delete(id); identities = next; }
     }
+    for (const id of identityStatus.keys()) if (!list.some(s => s.id === id)) setIdentityStatus(id, null);
     for (const [id, es] of streams) {
       if (!list.some((s) => s.id === id)) {
         es.close(); streams.delete(id); slots.delete(id); ultimoSinal.delete(id); forgetServer(id);
@@ -201,24 +212,33 @@ function createSessionsStore() {
       const isCurrent = () => !leavingPage && refs > 0 && streams.get(s.id) === es;
       let identityRequested = false;
       let identityRetryAt = 0;
-      let identityNeeded = false;
       const loadIdentity = () => {
         if (s.invite) return;   // servidor de convite não responde /api/peers/identificador
-        if (!isCurrent() || !(identityNeeded || identitiesWanted) || identityRequested || Date.now() < identityRetryAt) return;
+        if (!isCurrent() || !(identitiesNeeded || identitiesWanted) || identityRequested || Date.now() < identityRetryAt) return;
         identityRequested = true;
-        void getIdentificador(s).then(({ identificador }) => {
-          if (!isCurrent() || !identificador) return;
-          identities = new Map(identities).set(s.id, identificador);
-        }).catch((error: unknown) => {
-          if (!isCurrent()) return;
+        setIdentityStatus(s.id, 'reading');
+        const failed = (codigo: string) => {
           identityRequested = false;
           identityRetryAt = Date.now() + 30_000;
-          registrarDiag({ evento: 'lista.identificador_falhou', nivel: 'aviso',
-            codigo: error instanceof Error ? error.name : 'erro' }, s.baseUrl);
+          setIdentityStatus(s.id, 'failed');
+          registrarDiag({ evento: 'lista.identificador_falhou', nivel: 'aviso', codigo }, s.baseUrl);
+        };
+        // Resposta de conexão já fechada só limpa a leitura se nenhuma conexão nova assumiu a máquina.
+        const stale = () => { if (!streams.has(s.id)) setIdentityStatus(s.id, null); };
+        void getIdentificador(s).then(({ identificador }) => {
+          if (!isCurrent()) return stale();
+          // Vazio é máquina sem CP_SERVER_ID: relê no mesmo intervalo, para o conserto aparecer sem reconectar.
+          if (!identificador) return failed('vazio');
+          setIdentityStatus(s.id, null);
+          identities = new Map(identities).set(s.id, identificador);
+        }).catch((error: unknown) => {
+          if (!isCurrent()) return stale();
+          failed(error instanceof Error ? error.name : 'erro');
         });
       };
       identityLoaders.set(s.id, loadIdentity);
       if (identities.has(s.id)) { const next = new Map(identities); next.delete(s.id); identities = next; }
+      setIdentityStatus(s.id, null);
       const tentativa = (tentativas.get(s.id) ?? 0) + 1;
       tentativas.set(s.id, tentativa);
       registrarDiag({ evento: 'lista.abrir', tela: 'lista', req, tentativa }, s.baseUrl);
@@ -333,9 +353,9 @@ function createSessionsStore() {
           if (!Array.isArray(sessions)) throw new Error('sessions frame must be an array');
           slots.set(s.id, { sessions, error: null });
           if (!s.invite) notePairs();
-          identityNeeded = sessions.some((session: { pair_peers?: string[] }) =>
-            session.pair_peers?.some(peer => peer.includes('::')));
-          loadIdentity();
+          identitiesNeeded = [...slots.values()].some((slot) => slot.sessions?.some((session) =>
+            session.pair_owner || session.pair_peers?.some((peer) => peer.includes('::'))));
+          if (identitiesNeeded) for (const load of identityLoaders.values()) load();
           const caiuEm = quedas.get(s.id);
           if (primeiroValido || caiuEm !== undefined) {
             registrarDiag({ evento: caiuEm === undefined ? 'lista.conectou' : 'lista.voltou',
@@ -519,6 +539,8 @@ function createSessionsStore() {
     get loading() { return agg.loading; },
     get servers() { return servers; },
     get identities() { return identities; },
+    /** Máquina com conexão aberta cujo identificador está em leitura (`reading`) ou não veio (`failed`). */
+    get identityStatus() { return identityStatus; },
     /** Lê o identificador de toda máquina conectada (arrastar ou painel do grupo), uma vez por conexão. */
     requestIdentities() {
       identitiesWanted = true;

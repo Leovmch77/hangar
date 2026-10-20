@@ -58,12 +58,17 @@
   const grupo = $derived(selfRow ? groupGlobal(sessionsStore.rows, identities).find((g) =>
     g.members.some((x) => x.kind === 'here' && x.server === sid && x.name === sessionName)) ?? null : null);
   const machineLabel = (id: string) => sessionsStore.servers.find((x) => x.id === id)?.label ?? id;
-  // Par `srv::` com identificador ainda em leitura: a lista do grupo espera em vez de chutar.
-  const lendoIdentidades = $derived(peers.some((p) => p.includes('::'))
-    && sessionsStore.servers.some((x) => !x.invite && !x.ephemeral && !identities.has(x.id)));
+  // Par `srv::`: a lista do grupo espera a leitura em voo das máquinas conectadas e, se alguma falhou, diz qual.
+  const entreMaquinas = $derived(peers.some((p) => p.includes('::')));
+  const lendoIdentidades = $derived(entreMaquinas && [...sessionsStore.identityStatus.values()].includes('reading'));
+  const semIdentificador = $derived([...sessionsStore.identityStatus].filter(([, st]) => st === 'failed')
+    .map(([id]) => `⚠ ${machineLabel(id)}: ${m.grupo_recusa_sem_identificador()}`));
   type Membro = { key: string; name: string; server: string | null; machine: string | null; note: string | null };
   const membros = $derived.by((): Membro[] => {
-    if (!grupo || lendoIdentidades) return peers.map((p) => ({ key: p, name: p, server: sid, machine: null, note: null }));
+    // Sem resolver as máquinas, o endereço `srv::x` aparece cru e não é desta máquina (sem abrir conversa nem lado a lado).
+    if (!grupo || lendoIdentidades || (entreMaquinas && semIdentificador.length)) {
+      return peers.map((p) => ({ key: p, name: p, server: p.includes('::') ? null : sid, machine: null, note: null }));
+    }
     return grupo.members.flatMap((x): Membro[] => {
       if (x.kind === 'here') {
         if (x.server === sid && x.name === sessionName) return [];
@@ -284,7 +289,8 @@
 
       <!-- Membros: estado vivo + abrir lado a lado (desktop) por membro. -->
       <div class="list">
-        {#if lendoIdentidades}<p class="empty">{m.comum_carregando()}</p>{/if}
+        {#if lendoIdentidades}<p class="empty">{m.comum_carregando()}</p>
+        {:else if entreMaquinas}{#each semIdentificador as nota (nota)}<p class="empty">{nota}</p>{/each}{/if}
         {#each membros as x (x.key)}
           {@const st = stateOf(x)}
           {@const p = x.name}
