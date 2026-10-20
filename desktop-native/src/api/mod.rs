@@ -139,6 +139,18 @@ fn envelope_code(body: Option<&Value>) -> Option<String> {
     body?.get("detail")?.get("code")?.as_str().map(str::to_owned)
 }
 
+/// Recusa ou aviso de grupo `{code, params}`: a frase do web pelo código; lista de parâmetros vira texto com `; `, como no web.
+pub fn group_text(envelope: &Value) -> Option<String> {
+    let code = envelope.get("code")?.as_str()?;
+    if !(code.starts_with("erro_grupo_") || matches!(code, "groups_need_rust_server" | "erro_contrato_mudou" | "erro_link_remoto")) { return None; }
+    let text = |v: &Value| v.as_str().map_or_else(|| v.to_string(), str::to_owned);
+    let params = envelope.get("params").and_then(Value::as_object).map(|p| p.iter().map(|(k, v)| (k.clone(), match v {
+        Value::Array(items) => items.iter().map(text).collect::<Vec<_>>().join("; "),
+        other => text(other),
+    })).collect()).unwrap_or_default();
+    crate::i18n::tr_web(code, &params)
+}
+
 /// A chave da frase de um código da abertura ou da troca de vida da sessão, e a da família dele.
 fn session_life_key(code: &str) -> Option<(&str, Option<&'static str>)> {
     let family = [("lifecycle_", "session_lifecycle_failed"), ("relaunch_", "session_relaunch_failed"), ("heal_", "session_heal_failed")]
@@ -176,6 +188,7 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
             }
+            if let Some(message) = group_text(detail) { return Some(message); }
             // Par externo, botões dos mods e abertura de sessão: a frase do web pelo código; o `detalhe`
             // de uma recusa e o rótulo do botão vêm nos parâmetros.
             if let Some(code) = fields.get("code").and_then(Value::as_str)
@@ -1046,6 +1059,18 @@ mod tests {
         assert!(message.contains("(costs_no_disk)"), "{message}");
         let info = failure_detail(Some(json!({"detail": {"code": "internal_info", "params": {}, "msg": "x — internal_info"}})), 503);
         assert_eq!(info, crate::i18n::tr_web("history_internal_info", &Default::default()).unwrap());
+    }
+
+    #[test]
+    fn group_errors_use_the_shared_phrase_with_lists_joined() {
+        for code in ["groups_need_rust_server", "erro_grupo_peer_nao_registrado", "erro_grupo_fusao_entre_donos", "erro_contrato_mudou", "erro_link_remoto"] {
+            let message = failure_detail(Some(json!({"detail": {"code": code, "params": {"servidor": "casa"}, "msg": "frase fixa do servidor"}})), 409);
+            assert_ne!(message, "frase fixa do servidor", "{code}");
+            assert!(!message.contains('{'), "{code}: {message}");
+        }
+        let warning = json!({"code": "erro_grupo_membro_nao_confirmado", "params": {"membros": ["casa::a", "casa::b"]}, "msg": "x"});
+        let text = group_text(&warning).unwrap();
+        assert!(text.contains("casa::a; casa::b"), "{text}");
     }
 
     #[test]

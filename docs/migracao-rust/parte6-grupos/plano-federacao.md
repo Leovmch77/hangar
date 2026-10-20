@@ -941,11 +941,11 @@ Rust, `routes.rs:221`, sem frase em `messages/pt.json` nem entrada em `errosApi.
 `erro_pareamento_mistura_cross` e `erro_pareamento_cross_1_1` ficam só enquanto o receptor antigo
 puder devolvê-los.
 
-- [ ] **Step 1: Chaves** entram no commit de cada Task que as usa (8, 10, 14–17); este Step confere
+- [x] **Step 1: Chaves** entram no commit de cada Task que as usa (8, 10, 14–17); este Step confere
   que nenhuma ficou sem par pt/en.
-- [ ] **Step 2: Prova**: `cd frontend && npx vitest run src/lib/i18nGuard.test.ts` verde;
+- [x] **Step 2: Prova**: `cd frontend && npx vitest run src/lib/i18nGuard.test.ts` verde;
   `grep -rn "grupo_recusa_other_server\|grupo_recusa_cross_server" frontend/src desktop-native/src mobile/src packages/core/src --exclude-dir=paraglide` → nada.
-- [ ] **Step 3: Commit** (se sobrou ajuste) — `i18n(groups): texts for groups across machines`.
+- [x] **Step 3: Commit** (se sobrou ajuste) — `i18n(groups): texts for groups across machines`.
 
 ---
 
