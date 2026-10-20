@@ -190,6 +190,28 @@ def test_close_that_skipped_the_rust_leaves_with_the_orq_facts(monkeypatch, clie
         internal_api.set_secret(None)
 
 
+def test_close_delivers_what_the_rust_left_for_python(monkeypatch, client):
+    """A saída pela ponte devolve o aviso a sessão que só o Python atende (Pi/omp/Kimi): ele entrega
+    depois que a ponte respondeu, e a falha vira aviso do fechamento."""
+    _sidecar("a", ["b"])
+    left = [{"name": "b", "text": "saiu", "steer": False}, {"name": "c", "text": "saiu", "steer": False}]
+    _rust(monkeypatch, reply={"ex_peers": ["b"], "warnings": [], "deliveries": left})
+    sent = []
+
+    async def enviar(name, text):
+        sent.append((name, text))
+        return {"ok": name == "b", "error": {"code": "erro_x", "params": {}, "msg": "x"}}
+    monkeypatch.setattr(api, "_enviar", enviar)
+    monkeypatch.setattr(api, "_recusa_orq", lambda n: None)
+    monkeypatch.setattr(api.registry, "kill", lambda n, closed_by_rust=False: [])
+    monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
+    monkeypatch.setattr(api.share_bridge, "revoke_session", lambda n: None)
+    r = client.delete("/api/sessions/a", headers=H)
+    assert r.status_code == 200, r.text
+    assert sent == [("b", "saiu"), ("c", "saiu")]
+    assert [w["sessao"] for w in r.json()["warning"]["params"]["avisos"]] == ["c"]
+
+
 def test_pair_route_forwards_status_and_body(monkeypatch, client):
     calls = _rust(monkeypatch, reply={"status": 409, "body": {"detail": {"code": "erro_pareamento_tarefa_existente"}}})
     r = client.post("/api/sessions/a/pair", json={"peer": "b", "task": "y"}, headers=H)
@@ -204,6 +226,7 @@ GROUP_ROUTES = [
     ("delete", "/api/sessions/a/pair", "pair", None),
     ("post", "/api/sessions/a/group-message", "group-message", {"text": "oi"}),
     ("get", "/api/sessions/a/pair/contract", "contract", None),
+    ("put", "/api/sessions/a/pair/contract", "contract", {"content": "x", "mtime": None}),
     ("post", "/api/sessions/a/pair-remote", "pair-remote", {"initiator": "srv::x"}),
     ("post", "/api/sessions/a/unpair-remote", "unpair-remote", {"peer": "srv::x"}),
 ]

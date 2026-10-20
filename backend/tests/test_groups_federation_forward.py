@@ -19,12 +19,13 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 class _Rust(BaseHTTPRequestHandler):
     seen: list = []
+    extra: dict = {}
 
     def _answer(self):
         length = int(self.headers.get("content-length") or 0)
         _Rust.seen.append({"method": self.command, "path": self.path, "original": self.headers.get("x-hangar-path"),
                            "body": self.rfile.read(length).decode() if length else ""})
-        data = json.dumps({"server_id": "casa", "de": "rust"}).encode()
+        data = json.dumps({"server_id": "casa", "de": "rust", **_Rust.extra}).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(data)))
@@ -64,6 +65,25 @@ def test_connect_forwards_groups_routes(rust):
         (m.upper(), "/__hangar_server/forwarded", p) for m, p, _ in ROUTES]
     # O corpo do PUT e do POST chega inteiro ao Rust.
     assert json.loads(_Rust.seen[1]["body"]) == ROUTES[1][2] and json.loads(_Rust.seen[2]["body"]) == ROUTES[2][2]
+
+
+def test_connect_forward_delivers_what_the_rust_deferred(rust, monkeypatch):
+    """Recado a sessão que só o Python atende volta no corpo do Rust: o Python o tira da resposta e
+    entrega depois, sem o Rust chamá-lo dentro do pedido."""
+    sent = []
+
+    async def enviar(name, text):
+        sent.append((name, text))
+        return {"ok": False, "error": {"code": "erro_x", "params": {}, "msg": "x"}}
+    monkeypatch.setattr(api, "_enviar", enviar)
+    registered = []
+    monkeypatch.setattr(api.diag, "registrar", lambda evento, nivel, **kw: registered.append((evento, kw)))
+    monkeypatch.setattr(_Rust, "extra", {"hangar_deliveries": [{"name": "pi1", "text": "[grupo: casa::s0] oi", "steer": False}]})
+    body = {"protocol": 1, "origin": "casa", "sender": "s0", "text": "oi", "notice": "n1"}
+    r = TestClient(api.app).post("/api/groups/g1/deliver", json=body, headers=AUTH)
+    assert r.status_code == 200 and r.json() == {"server_id": "casa", "de": "rust"}
+    assert sent == [("pi1", "[grupo: casa::s0] oi")]
+    assert [e for e, _ in registered if e.startswith("grupos.")] == ["grupos.entrega_adiada_falhou"]
 
 
 def test_groups_routes_refuse_guest_and_python_mode_with_code(rust, monkeypatch):
@@ -125,3 +145,30 @@ def test_promote_conflict_undoes_the_new_group(bridge, monkeypatch):
     r = TestClient(api.app).post("/api/sessions/arb/pair", json={"orq": True}, headers=AUTH)
     assert (r.status_code, r.json()["detail"]["code"]) == (409, "erro_orq_arquivo_mudou")
     assert ("group.leave", {"name": "arb", "phases": {"g9": "ended"}}) in bridge.calls
+
+
+def test_promote_os_error_undoes_and_names_who_did_not_leave(bridge, monkeypatch):
+    """Promoção que falha no disco desfaz o grupo como o conflito; quem não saiu vai no 409 e no
+    diário, e o aviso que o Rust devolveu na saída é entregue."""
+    def broken(name, gid):
+        raise OSError("disco cheio")
+    monkeypatch.setattr(orq_context, "promote", broken)
+    pair._pair_dir().mkdir(parents=True, exist_ok=True)
+    (pair._pair_dir() / "arb.json").write_text(json.dumps({"peers": ["b"], "task": "", "gid": "g9", "harness": {}, "orq": True}))
+    registered = []
+    monkeypatch.setattr(api.diag, "registrar", lambda evento, nivel, **kw: registered.append((evento, kw)))
+
+    def call(op, **args):
+        bridge.calls.append((op, args))
+        if op == "group.route":
+            return bridge.reply
+        if args["name"] == "b":
+            raise groups_bridge.GroupsBridgeError("groups_store_failed")
+        return {"ex_peers": ["b"], "warnings": [], "deliveries": [{"name": "pi", "text": "saiu", "steer": False}]}
+    monkeypatch.setattr(groups_bridge, "call", call)
+    bridge.reply = {"status": 200, "body": {"ok": True}, "deliveries": [], "post": [{"op": "promote", "name": "arb", "gid": "g9"}]}
+    r = TestClient(api.app).post("/api/sessions/arb/pair", json={"orq": True}, headers=AUTH)
+    assert (r.status_code, r.json()["detail"]["code"]) == (409, "erro_orq_arquivo_mudou")
+    assert r.json()["detail"]["params"]["nao_sairam"] == ["b"]
+    assert [e for e, _ in registered if e.startswith("grupos.")] == ["grupos.promocao_desfeita_falhou"]
+    assert ("pi", "saiu") in bridge.sent
