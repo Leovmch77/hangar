@@ -120,6 +120,50 @@ def test_lone_surrogate_in_the_task_reaches_the_rust_instead_of_500(monkeypatch)
     assert seen[0]["args"]["task"] == "ok \ufffd fim"
 
 
+def test_bridge_gives_up_on_a_silent_rust_with_a_code(monkeypatch):
+    """BRG-06: a ponte tem prazo (90 s, para o `/pair` entre m\u00e1quinas); Rust mudo vira c\u00f3digo, n\u00e3o espera eterna."""
+    assert groups_bridge._TIMEOUT == 90
+    release = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            release.wait(5)
+
+        def log_message(self, *a):
+            pass
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    monkeypatch.setattr(groups_bridge, "_TIMEOUT", 0.2)
+    groups_bridge.configure(f"127.0.0.1:{srv.server_port}", "s3gredo")
+    try:
+        with pytest.raises(groups_bridge.GroupsBridgeError) as e:
+            groups_bridge.call("group.leave", name="a")
+        assert e.value.code == "groups_bridge_unavailable"
+    finally:
+        release.set()
+        srv.shutdown()
+        groups_bridge.configure(None, None)
+
+
+def test_task_suggestion_reads_only_sessions_with_a_conversation(monkeypatch, client):
+    """BRG-33: sess\u00e3o sem conversa ou de outro servidor (sem linha aqui) fica de fora; nenhuma \u2192 422 sem o LLM."""
+    from app.models import SessionInfo
+    infos = {"a": SessionInfo(name="a", jsonl="/t/a.jsonl"), "b": SessionInfo(name="b", jsonl="/t/b.jsonl")}
+
+    async def cached(name):
+        return infos.get(name)
+    monkeypatch.setattr(api, "_cached_info", cached)
+    monkeypatch.setattr(api, "_conversa_para_resumo", lambda name, info: "fim da conversa" if name == "a" else "")
+    asked = []
+    monkeypatch.setattr(api.narrar, "sugerir_tarefa_grupo", lambda conversas: asked.append(conversas) or "T-1")
+    r = client.post("/api/pair/task-suggestion", json={"sessions": ["a", "b", "lab::x", "a"]}, headers=H)
+    assert (r.status_code, r.json()) == (200, {"task": "T-1"})
+    assert asked == [{"a": "fim da conversa"}]
+    r = client.post("/api/pair/task-suggestion", json={"sessions": ["b", "lab::x"]}, headers=H)
+    assert (r.status_code, r.json()["detail"]["code"]) == (422, "erro_grupo_sem_conversa")
+    assert len(asked) == 1
+
+
 def test_close_that_skipped_the_rust_leaves_with_the_orq_facts(monkeypatch, client):
     """Connect (8768) e convidado não passam pelo `delete` do Rust: a saída vai pela ponte, com a fase."""
     from app import internal_api

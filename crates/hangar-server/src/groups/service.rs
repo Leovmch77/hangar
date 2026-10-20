@@ -75,11 +75,22 @@ pub struct GroupService {
     server_id: String,
     /// Avisa a lista de que o disco do grupo mudou: sem isso ela só relê no prazo da descoberta.
     on_change: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Falha que só vira faxina (contrato não herdado, `orq` sozinho que não saiu) vai ao diário exportável.
+    diary: Option<crate::diag::DiagClient>,
 }
 
 impl GroupService {
     pub fn new(dir: PairDir, orq: Arc<dyn OrqFacts>, server_id: String) -> Self {
-        Self { dir: Arc::new(dir), lock: Mutex::new(()), orq, server_id, on_change: None }
+        Self { dir: Arc::new(dir), lock: Mutex::new(()), orq, server_id, on_change: None, diary: None }
+    }
+
+    pub fn with_diary(mut self, diary: crate::diag::DiagClient) -> Self {
+        self.diary = Some(diary);
+        self
+    }
+
+    fn report(&self, event: &'static str, name: &str, code: &str, reason: &'static str) {
+        if let Some(diary) = &self.diary { diary.report(event, name, code, reason); }
     }
 
     pub fn with_change_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
@@ -119,19 +130,22 @@ impl GroupService {
         let _guard = self.lock.lock().await;
         let dir = self.dir.clone();
         let name = input.name.clone();
-        let plan = blocking(move || -> Result<local::JoinPlan, GroupError> {
+        let (plan, unmerged) = blocking(move || -> Result<(local::JoinPlan, Vec<String>), GroupError> {
             let read = reader(&dir);
             let outside = |p: &str| input.outside.contains(p);
             let join = JoinInput { name: &input.name, others: &input.others, task: &input.task, replace_task: input.replace_task,
                 harness: &input.harness, orq: input.orq, outside: &outside, linked: input.linked };
             let plan = local::plan_join(&read, &join, &fresh_gid).map_err(GroupError::Refused)?;
-            for loser in &plan.merged { dir.merge_contract(loser, &plan.gid); }
+            let unmerged = plan.merged.iter().filter(|loser| !dir.merge_contract(loser, &plan.gid)).cloned().collect();
             if let Err(e) = apply(&dir, &[], &plan.writes) {
                 restore_logged(&dir, &plan.before);
                 return Err(e.into());
             }
-            Ok(plan)
+            Ok((plan, unmerged))
         }).await??;
+        for loser in &unmerged {
+            self.report("rust.groups_contract_merge_failed", loser, "groups_contract_merge_failed", "a fusão não herdou o contrato do grupo absorvido");
+        }
         // Promover sob o mesmo lock: um join concorrente não enxerga o grupo meio configurado.
         if plan.orq && plan.new_gid && let Err(failed) = self.orq.promote(&name, &plan.gid).await {
             let restored = self.restore_blocking(plan.before.clone()).await;
@@ -199,7 +213,10 @@ impl GroupService {
                 let (d, s) = (self.dir.clone(), stem.clone());
                 match blocking(move || d.clear_sidecar(&s)).await? {
                     Ok(()) => dissolved.push((stem, sidecar.gid)),
-                    Err(error) => tracing::warn!(code = "groups_lone_orq_clear_failed", name = %stem, %error, "groups: o grupo orq sozinho não foi dissolvido"),
+                    Err(error) => {
+                        tracing::warn!(code = "groups_lone_orq_clear_failed", name = %stem, %error, "groups: o grupo orq sozinho não foi dissolvido");
+                        self.report("rust.groups_lone_orq_clear_failed", &stem, "groups_lone_orq_clear_failed", "o grupo orq sozinho não foi dissolvido");
+                    }
                 }
             }
         }

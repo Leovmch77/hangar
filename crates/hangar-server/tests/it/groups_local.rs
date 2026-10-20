@@ -413,7 +413,9 @@ async fn rename_failure_restores_the_group() {
 #[tokio::test]
 async fn fusion_with_unreadable_loser_contract_still_joins() {
     let tmp = tempfile::tempdir().unwrap();
+    let (python, upstream) = crate::fake::spawn_fake().await;
     let (svc, dir) = service(&tmp, FakeOrq::new(OrqPhase::Ended, None));
+    let svc = svc.with_diary(hangar_server::diag::DiagClient::new(upstream, crate::fake::SECRET.into()));
     let first = svc.join(owned("a", &["b"], false)).await.unwrap();
     let loser = svc.join(owned("c", &["d"], false)).await.unwrap();
     std::fs::write(dir.contract_path(&loser.gid), b"\xff\xfe quebrado").unwrap();
@@ -421,6 +423,8 @@ async fn fusion_with_unreadable_loser_contract_still_joins() {
     assert_eq!(merged.gid, first.gid);
     assert_eq!(dir.sidecar("d").unwrap().unwrap().gid, first.gid);
     assert!(dir.contract_path(&loser.gid).exists());
+    // A decisão (I-1A) manda a falha ao diário exportável, não só ao log.
+    crate::fake::wait_until(move || python.diag().iter().any(|d| d["evento"] == "rust.groups_contract_merge_failed")).await;
 }
 
 /// Promoção que espera um sinal e então recusa: segura a trava do grupo enquanto espera.

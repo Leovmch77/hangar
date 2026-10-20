@@ -94,8 +94,10 @@ impl PairDir {
     }
 
     /// `_merge_contract` (pair.py:231-258): anexa `grupo-`/`regras-` do perdedor ao sobrevivente,
-    /// com o cabeçalho `## Contrato herdado do grupo <gid> (merge)`. Falha só ao diário.
-    pub fn merge_contract(&self, loser: &str, survivor: &str) {
+    /// com o cabeçalho `## Contrato herdado do grupo <gid> (merge)`. Falha não desfaz a fusão:
+    /// `false` para quem chama registrar no diário.
+    pub fn merge_contract(&self, loser: &str, survivor: &str) -> bool {
+        let mut ok = true;
         for prefix in CONTRACT_PREFIXES {
             let from = self.root.join(format!("{prefix}-{loser}.md"));
             // Sem contrato do perdedor é o caso comum de uma fusão, não falha.
@@ -119,8 +121,10 @@ impl PairDir {
             })();
             if let Err(error) = merged {
                 tracing::warn!(code = "groups_contract_merge_failed", prefix, loser, survivor, %error, "groups: a fusão não herdou o contrato");
+                ok = false;
             }
         }
+        ok
     }
 
     /// `_arquivar_contratos` (pair.py:271-284): `<archive>/<prefixo>-<gid>-<AAAAmmdd-HHMMSS>.md`

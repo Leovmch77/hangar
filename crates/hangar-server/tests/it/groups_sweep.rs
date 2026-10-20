@@ -214,13 +214,19 @@ async fn dead_owner_of_a_cross_machine_pair_leaves() {
 /// PAIR-41 (I-1A): sidecar `orq` que não sai não para a dissolução dos outros.
 #[tokio::test]
 async fn lone_orq_clear_failure_does_not_stop_the_others() {
-    let r = rig();
-    for name in ["a1", "b2"] { join(&r.groups, name, &[], true).await; }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("pair");
+    let (python, upstream) = fake::spawn_fake().await;
+    let groups = GroupService::new(PairDir::new(root.clone(), tmp.path().join("arquivo")), Arc::new(Phase(Mutex::default())), "casa".into())
+        .with_diary(hangar_server::diag::DiagClient::new(upstream, fake::SECRET.into()));
+    for name in ["a1", "b2"] { join(&groups, name, &[], true).await; }
     // O temporário de `a1` é uma pasta: apagar o sidecar dele falha.
-    std::fs::create_dir(r.root.join("a1.json.tmp")).unwrap();
-    let dissolved = r.groups.dissolve_lone_orq(Duration::ZERO).await.unwrap();
+    std::fs::create_dir(root.join("a1.json.tmp")).unwrap();
+    let dissolved = groups.dissolve_lone_orq(Duration::ZERO).await.unwrap();
     assert_eq!(dissolved, ["b2"]);
-    assert!(!sidecar_exists(&r.root, "b2"));
+    assert!(!sidecar_exists(&root, "b2"));
+    // A decisão (I-1A) manda a falha ao diário exportável, não só ao log.
+    fake::wait_until(move || python.diag().iter().any(|d| d["evento"] == "rust.groups_lone_orq_clear_failed" && d["sessao"] == "a1")).await;
 }
 
 #[tokio::test(start_paused = true)]

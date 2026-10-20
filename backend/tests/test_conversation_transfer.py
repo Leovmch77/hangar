@@ -256,6 +256,23 @@ def test_registry_restores_one_original_card_and_does_not_read_physical_state(tm
     assert result[0].state == "idle"
 
 
+def test_transfer_row_reads_the_group_file(tmp_path, monkeypatch):
+    """BRG-29: a linha da transferência leva o grupo lido do arquivo que o Rust grava, par de fora incluído."""
+    from app import pair
+    monkeypatch.setattr(pair.settings, "projects_dir", tmp_path / "projects")
+    store.save_transfer(sample_record(tmp_path, phase=TransferPhase.RESTORE_FAILED))
+    monkeypatch.setattr(registry, "ThenLink", lambda name: type("Link", (), {"get": lambda self: {}})())
+    (pair._pair_dir() / "s.json").write_text(json.dumps(
+        {"peers": ["b", "ana::y"], "task": "T-1", "gid": "ab12cd34", "harness": {}}), encoding="utf-8")
+    (pair._pair_dir() / "external_pairs.json").write_text(json.dumps(
+        [{"local_session": "s", "alias": "ana", "peer_session": "y", "peer_owner": "Ana"}]), encoding="utf-8")
+    infos = []
+    registry._decorate_transfers(infos)
+    row = infos[0]
+    assert (row.pair_peers, row.pair_gid, row.pair_task) == (["b", "ana::y"], "ab12cd34", "T-1")
+    assert row.pair_external == {"alias": "ana", "owner": "Ana", "session": "y"}
+
+
 def test_registry_recreated_name_does_not_restore_old_operation(tmp_path):
     record = sample_record(tmp_path)
     store.save_transfer(record)
