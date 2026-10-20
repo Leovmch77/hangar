@@ -21,7 +21,7 @@ pub struct AuthCache {
     generations: Arc<Mutex<HashMap<AccountKey, u64>>>,
     /// Prazo da CLI do Claude; `None` = o de produção (10 s, 20 s no `mcp list`). Teste que mede outro prazo
     /// injeta um que a subida da CLI falsa nunca alcança.
-    pub(super) cli_timeout: Option<Duration>,
+    pub cli_timeout: Option<Duration>,
 }
 impl AuthCache {
     pub fn invalidate(&self, key: &AccountKey) {
