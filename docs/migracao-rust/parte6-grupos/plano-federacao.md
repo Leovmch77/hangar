@@ -866,13 +866,13 @@ Status: ready-for-agent
 **Regra 2A:** sem seção "Grupos" no topo; o grupo aparece dentro do modo escolhido, e clicar no
 selo abre o painel do grupo. Nunca um SSE por card.
 
-- [ ] **Step 1: Testes** de unidade das regras novas (`grouping`, `session_tabs`).
-- [ ] **Step 2: Rodar e ver falhar.**
-- [ ] **Step 3: Implementar.**
-- [ ] **Step 4: Rodar.** Esperado: PASS.
+- [x] **Step 1: Testes** de unidade das regras novas (`grouping`, `session_tabs`).
+- [x] **Step 2: Rodar e ver falhar.**
+- [x] **Step 3: Implementar.**
+- [x] **Step 4: Rodar.** Esperado: PASS.
 - [ ] **Step 5: verificação manual na tela**: build otimizado com `nice`, print do nativo nos três
   modos com um grupo de duas máquinas; caminho absoluto do print no relato.
-- [ ] **Step 6: Commit** — `feat(native): show and build groups across machines in every sidebar mode`.
+- [x] **Step 6: Commit** — `feat(native): show and build groups across machines in every sidebar mode`.
 
 ---
 

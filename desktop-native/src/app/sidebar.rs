@@ -122,6 +122,8 @@ pub(super) enum SidebarReply {
     Group(u64, super::grouping::GroupReply),
     /// Resposta de um pedido do painel do grupo.
     Sheet(super::group_sheet::SheetReply),
+    /// Identificador de uma máquina, pela chave dela.
+    Identity(String, Result<Value, Failure>),
 }
 
 /// Uma notificação por sessão: o "git pull…" dá lugar ao resultado, como o `flash` único do web.
@@ -635,6 +637,7 @@ impl Hangar {
                 self.scroll_target_tab(&targets[index]);
             } else { self.root_focus.focus(window, cx); }
         }
+        self.ensure_identities();
         self.refresh_group_ask();
         self.refresh_group_sheet(window, cx);
         self.external_pairs_changed(window, cx);
@@ -1110,6 +1113,7 @@ impl Hangar {
             SidebarReply::Note(target, kind, text) => window.push_notification(git_note(&target.name, kind, text), cx),
             SidebarReply::Group(seq, reply) => self.receive_group(seq, reply, window, cx),
             SidebarReply::Sheet(reply) => self.receive_sheet(reply, window, cx),
+            SidebarReply::Identity(key, result) => self.receive_identity(key, result, window, cx),
             SidebarReply::Chained(from, seq, target, result) => {
                 // Só o diálogo que mandou este pedido recebe a resposta; fechado, ela vai à notificação.
                 let open = self.sidebar.chain.as_ref().filter(|c| c.status.borrow().sent == Some(seq));
@@ -1310,7 +1314,7 @@ pub(super) fn session_menu(hangar: WeakEntity<Hangar>, server: String, session: 
         }
         let view = entity.read(cx).sidebar.menu_for(&target);
         let list = others(entity.read(cx), &target);
-        let group = entity.read(cx).group_candidates(&target);
+        let group = entity.read(cx).group_candidates(&target, cx);
         let active = entity.read(cx).is_active_key(&target.server);
         fill_menu(menu, &hangar, &target, &session, Access { invite, active }, view, list, group, window, cx)
     }
@@ -1367,7 +1371,7 @@ fn release_items(hangar: &WeakEntity<Hangar>, target: &Target, pairs: &[api::dto
 
 #[allow(clippy::too_many_arguments)]
 fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, session: &SessionInfo, access: Access, mute: Option<Mute>,
-    others: Vec<String>, group: Vec<String>, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
+    others: Vec<String>, group: Vec<(Target, String)>, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
     let item = |label: String, act: fn(&mut Hangar, Target, &mut Window, &mut Context<Hangar>)| {
         let (hangar, target) = (hangar.clone(), target.clone());
         PopupMenuItem::new(label).on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| act(this, target.clone(), window, cx)); })

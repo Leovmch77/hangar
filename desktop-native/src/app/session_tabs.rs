@@ -1,5 +1,6 @@
 //! Abas horizontais: o grupo ocupa uma pilha sem desnível vertical.
 use super::*;
+use super::grouping::{Member, Row, global_groups};
 use super::sidebar::Target;
 
 pub(super) struct TabGroup {
@@ -25,15 +26,23 @@ impl TabGroup {
     }
 }
 
-pub(super) fn groups(entries: Vec<(Target, &SessionInfo)>) -> Vec<TabGroup> {
+/// Uma faixa por grupo do modelo global: membros de máquinas diferentes do mesmo grupo dividem a faixa.
+pub(super) fn groups(entries: Vec<(Target, &SessionInfo)>, ids: &HashMap<String, String>) -> Vec<TabGroup> {
+    let rows: Vec<Row> = entries.iter().map(|(t, s)| Row { server: &t.server, session: s, invite: false }).collect();
+    let mut keys: HashMap<Target, String> = HashMap::new();
+    for g in global_groups(&rows, ids) {
+        for m in g.members {
+            if let Member::Here { server, name } = m { keys.insert(Target { server, name }, g.key.clone()); }
+        }
+    }
     let mut out: Vec<TabGroup> = Vec::new();
     let mut indexes = HashMap::new();
     for (target, session) in entries {
-        let Some(gid) = &session.pair_gid else {
+        let Some(key) = keys.get(&target).cloned() else {
             out.push(TabGroup { label: None, members: vec![target] });
             continue;
         };
-        let index = *indexes.entry((target.server.clone(), gid.clone())).or_insert_with(|| {
+        let index = *indexes.entry(key).or_insert_with(|| {
             out.push(TabGroup { label: Some(String::new()), members: Vec::new() });
             out.len() - 1
         });
@@ -54,7 +63,7 @@ pub(super) fn groups(entries: Vec<(Target, &SessionInfo)>) -> Vec<TabGroup> {
 impl Hangar {
     fn tab_groups(&self) -> Vec<TabGroup> {
         groups(self.ungrouped_tab_targets().into_iter()
-            .filter_map(|target| self.target_session(&target).map(|session| (target, session))).collect())
+            .filter_map(|target| self.target_session(&target).map(|session| (target, session))).collect(), &self.identities())
     }
 
     pub(super) fn tab_targets(&self) -> Vec<Target> {
@@ -176,6 +185,7 @@ impl Hangar {
 #[cfg(test)]
 mod tests {
     use super::{groups, reveal_offset, Target, SessionInfo};
+    use std::collections::HashMap;
 
     fn session(name: &str, group: Option<&str>, label: Option<&str>) -> SessionInfo {
         SessionInfo { name: name.into(), pair_gid: group.map(str::to_owned), pair_task: label.map(str::to_owned), ..Default::default() }
@@ -187,7 +197,7 @@ mod tests {
         let other = session("outra", None, None);
         let worker = session("serviço", Some("g"), None);
         let grouped = groups(vec![(Target::new("a", &lead.name), &lead), (Target::new("a", &other.name), &other),
-            (Target::new("a", &worker.name), &worker)]);
+            (Target::new("a", &worker.name), &worker)], &HashMap::new());
         assert_eq!(grouped.len(), 2);
         assert_eq!(grouped[0].label.as_deref(), Some("DEMO-42 · Painéis"));
         assert_eq!(grouped[0].members, vec![Target::new("a", "coordenadora"), Target::new("a", "serviço")]);
@@ -201,11 +211,22 @@ mod tests {
         lead.provider = "orq".into();
         let remote = session("executor", Some("g"), Some("Outro trabalho"));
         let grouped = groups(vec![(Target::new("a", "executor"), &worker), (Target::new("b", "executor"), &remote),
-            (Target::new("a", "principal"), &lead)]);
+            (Target::new("a", "principal"), &lead)], &HashMap::new());
         assert_eq!(grouped.len(), 2);
         assert_eq!(grouped[0].members, vec![Target::new("a", "principal"), Target::new("a", "executor")]);
         assert_eq!(grouped[0].label.as_deref(), Some("Plano"));
         assert_eq!(grouped[1].members, vec![Target::new("b", "executor")]);
+    }
+
+    #[test]
+    fn members_of_one_group_on_two_machines_share_the_band() {
+        let owned = |name: &str| SessionInfo { pair_owner: Some("casa".into()), ..session(name, Some("g"), Some("ABC-1")) };
+        let (x, y, solo) = (owned("x"), owned("y"), session("z", Some("g"), None));
+        let ids = HashMap::from([("a".to_owned(), "casa".to_owned()), ("b".to_owned(), "lab".to_owned())]);
+        let grouped = groups(vec![(Target::new("a", "x"), &x), (Target::new("b", "z"), &solo), (Target::new("b", "y"), &y)], &ids);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0].members, vec![Target::new("a", "x"), Target::new("b", "y")], "mesma dona e gid: uma faixa");
+        assert_eq!(grouped[1].members, vec![Target::new("b", "z")], "gid igual sem dona é outro grupo, da máquina dele");
     }
 
     #[test]

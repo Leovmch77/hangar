@@ -5366,6 +5366,7 @@ impl Hangar {
         let (by_machine, now) = (Self::by_machine(), Instant::now());
         let still = cx.reduce_motion() || !window.is_window_active();
         // Membros de um grupo vêm juntos, sob o cabeçalho do bloco, como o `clusterByPair` do web.
+        let seals = self.group_seals(cx);
         let rows = |list: &[&SessionInfo], remote: Option<&str>, at: &'static str, children: &mut Vec<(String, &'static str, AnyElement)>, window: &mut Window, cx: &mut Context<Self>| for row in grouping::cluster(list) {
             let (session, remote) = match row {
                 grouping::ListRow::Header { gid, label, members } => {
@@ -5381,8 +5382,8 @@ impl Hangar {
                         let selected = selected_name == Some(session.name.as_str()) && self.open_key() == at_server;
                         let key = format!("{at}/row:{}::{}", at_server.as_deref().unwrap_or(""), session.name);
                         let show_server = sidebar::row_server_visible(conversations, by_machine, at == "machine" && at_server.as_deref() == remote);
-                        children.push((key, at, if conversations { self.render_conversation_row(session, selected, at_server, show_server, window, cx) }
-                            else { self.render_session_row(session, selected, at_server, show_server, window, cx) }));
+                        children.push((key, at, if conversations { self.render_conversation_row(session, selected, at_server, show_server, None, window, cx) }
+                            else { self.render_session_row(session, selected, at_server, show_server, None, window, cx) }));
                         continue;
                     }
                     None => {
@@ -5400,8 +5401,10 @@ impl Hangar {
             // no trajeto ela leva o avatar parado.
             self.sidebar.still_avatar.set(by_machine && self.sidebar.flip.borrow().lifting(&key, now));
             let show_server = sidebar::row_server_visible(conversations, by_machine, at == "machine");
-            let row = if conversations { self.render_conversation_row(session, selected, remote, show_server, window, cx) }
-                else { self.render_session_row(session, selected, remote, show_server, window, cx) };
+            // O selo vai em qualquer seção: também na linha que o agrupar por máquina puxou para "Aguardando" ou "Trabalhando".
+            let seal = seals.get(&sidebar::Target::new(&remote.clone().unwrap_or_else(|| self.active_key()), &session.name)).cloned();
+            let row = if conversations { self.render_conversation_row(session, selected, remote, show_server, seal, window, cx) }
+                else { self.render_session_row(session, selected, remote, show_server, seal, window, cx) };
             self.sidebar.still_avatar.set(false);
             children.push((key, at, row));
         };
@@ -5619,7 +5622,8 @@ impl Hangar {
     /// Linha do Zeron: estado, glifo, nome e hora numa linha só; no Normal, a branch fora de main/master embaixo.
     /// `remote` é a chave da máquina de uma linha que não é do servidor ativo: menu, foco e gestos são os mesmos, cada um
     /// na máquina da linha.
-    fn render_conversation_row(&self, session: SessionInfo, selected: bool, remote: Option<String>, show_server: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_conversation_row(&self, session: SessionInfo, selected: bool, remote: Option<String>, show_server: bool, seal: Option<(String, String)>,
+        window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let compact = appearance::get().sidebar_compact;
         let (_, selection, hover, _) = theme::conversation_sidebar();
         let name = session.name.clone();
@@ -5677,6 +5681,7 @@ impl Hangar {
             .when(session.orq(), |el| el.child(badge(tr_shared("orq_row_badge", &[]), theme::muted())))
             .when_some(session.owner.clone(), |el, owner| el.child(badge(format!("👤 {owner}"), theme::muted())))
             .children(pair_badges(&session))
+            .children(seal.map(|seal| self.render_seal(&target, seal, cx)))
             .child(div().w(px(21.)).h(px(17.)).flex_shrink_0().flex().items_center()
                 .when(show_menu, |el| el.child(menu()))).child(time);
         let (open, menu_target, click_target) = (target.clone(), target.clone(), target.clone());
@@ -5740,7 +5745,8 @@ impl Hangar {
     /// worktree), a branch fora de main/master, o ↑/↓ do upstream e o diff.
     /// Mais, como o web: "? N" das perguntas, o ⋯ e o clique direito com o menu da sessão, pressionar 500 ms para renomear
     /// na própria linha e a prévia da última resposta ao parar o mouse. A linha entra no Tab (Enter abre) e o ⋯ vem depois dela.
-    fn render_session_row(&self, session: SessionInfo, selected: bool, remote: Option<String>, show_server: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_session_row(&self, session: SessionInfo, selected: bool, remote: Option<String>, show_server: bool, seal: Option<(String, String)>,
+        window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // O logo já identifica o agente; o nome do motor ainda distingue a configuração usada.
         let engine_label = session.engine.as_deref().filter(|e| !e.is_empty() && session.provider == "claude" && !session.orq())
             .map(|e| format!("⚙ {e}"));
@@ -5814,6 +5820,7 @@ impl Hangar {
                     .child(chrome::small_icon(IconName::Link, 12., theme::accent()))))
                 .when_some(session.owner.clone(), |el, owner| el.child(badge(format!("👤 {owner}"), theme::muted())))
                 .children(pair_badges(&session))
+                .children(seal.map(|seal| self.render_seal(&target, seal, cx)))
                 .when(questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning()).child(format!("? {questions}"))))
                 .when(untracked, |el| el.child(badge(tr("untracked_badge"), theme::faint()))).into_any_element(),
         };

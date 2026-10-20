@@ -148,13 +148,40 @@ pub(super) fn full_grants(group: &SessionInfo, side: &SessionInfo) -> Vec<Grant>
         .map(move |p| Grant { session: session.clone(), alias: p.alias.clone(), owner: p.owner.clone() })).collect()
 }
 
-/// Cabeçalho do grupo com par de fora: "tarefa ↔ apelido::sessão (dono)", um por par.
-pub(super) fn pair_header_label(label: &str, pairs: &[PairExternalEntry]) -> String {
+/// Selo do membro de grupo que atravessa máquinas: a chave do ticket da tarefa, senão quantas máquinas. Grupo de uma
+/// máquina só não tem selo; membro de fora não conta máquina.
+pub(super) fn seal_text(group: &GlobalGroup) -> Option<String> {
+    let mut machines: Vec<&str> = Vec::new();
+    for m in &group.members {
+        let machine = match m { Member::Here { server, .. } => server, Member::Missing { server_id, .. } => server_id, Member::Outside { .. } => continue };
+        if !machines.contains(&machine.as_str()) { machines.push(machine); }
+    }
+    if machines.len() < 2 { return None; }
+    let (code, rest) = split_code(&group.label);
+    // Sem chave de ticket o `split_code` devolve o rótulo inteiro: aí vale a contagem.
+    Some(if rest.is_empty() && code == group.label { tr_shared("grupo_selo_maquinas", &[("n", &machines.len().to_string())]) } else { code.to_owned() })
+}
+
+/// Nome da sessão de `from` como o servidor `to` o entende: o nome sozinho na mesma máquina, `<identificador>::<nome>` na
+/// outra. `None`: a máquina de origem não tem identificador válido.
+pub(super) fn qualified(from: &str, to: &str, name: &str, ids: &HashMap<String, String>) -> Option<String> {
+    if from == to { return Some(name.to_owned()); }
+    identity_of(from, ids).map(|id| format!("{id}::{name}"))
+}
+
+/// Cabeçalho do grupo: "tarefa ↔ máquina::sessão" para os membros de outras máquinas e "apelido::sessão (dono)" para cada
+/// par de fora.
+pub(super) fn pair_header_label(label: &str, elsewhere: &[String], pairs: &[PairExternalEntry]) -> String {
     let mut out = label.to_owned();
+    if !elsewhere.is_empty() {
+        out.push_str(" ↔ ");
+        out.push_str(&elsewhere.join(", "));
+        if !pairs.is_empty() { out.push_str(", "); }
+    }
     for (i, p) in pairs.iter().enumerate() {
         let one = tr_shared("pair_header", &[("local", ""), ("alias", &p.alias), ("sessao", &p.session), ("dono", &p.owner)]);
-        // A frase começa com "{local} ↔ "; os pares seguintes entram depois de vírgula.
-        out.push_str(if i == 0 { &one } else { one.trim_start_matches(|c: char| c == ' ' || c == '↔') });
+        // A frase começa com "{local} ↔ "; o que vem depois da primeira seta entra depois de vírgula.
+        out.push_str(if i == 0 && elsewhere.is_empty() { &one } else { one.trim_start_matches(|c: char| c == ' ' || c == '↔') });
         if i + 1 < pairs.len() { out.push_str(", "); }
     }
     out
@@ -231,7 +258,12 @@ pub(super) fn cluster<'a>(list: &[&'a SessionInfo]) -> Vec<ListRow<'a>> {
                 if !outside.iter().any(|o| o.alias == p.alias && o.session == p.session) { outside.push(p.clone()); }
             }
         }
-        out.push(ListRow::Header { gid: gid.to_owned(), label: pair_header_label(&label, &outside), members: members.clone() });
+        // Membros de outras máquinas: os pares `máquina::nome` que não são par de fora.
+        let mut elsewhere: Vec<String> = Vec::new();
+        for p in members.iter().flat_map(|m| m.peers()) {
+            if p.contains("::") && !outside.iter().any(|o| *p == format!("{}::{}", o.alias, o.session)) && !elsewhere.contains(p) { elsewhere.push(p.clone()); }
+        }
+        out.push(ListRow::Header { gid: gid.to_owned(), label: pair_header_label(&label, &elsewhere, &outside), members: members.clone() });
         out.extend(members.into_iter().map(ListRow::Session));
         out.extend(outside.into_iter().map(|pair| ListRow::External { gid: gid.to_owned(), pair }));
     }
@@ -261,14 +293,14 @@ pub(super) fn pair_key(gid: &str, remote: Option<&str>) -> String {
 pub(super) struct SessionDrag { target: Target }
 
 /// Onde o ponteiro está durante o arrasto. `Pair` é o cabeçalho do bloco, que vale pelo primeiro membro (agrupar funde o grupo
-/// inteiro). Alvo de outra máquina que a da origem é recusado.
+/// inteiro). Alvo de outra máquina vale como o da mesma: quem recusa é o `can_pair`.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum DropSpot { Row(Target), Pair { gid: String, rep: Target } }
 
 enum DropAction { Join(Target), Leave }
 
-/// `target` é da mesma máquina da origem: agrupar só existe dentro de uma.
-enum AskMode { Join { origin: Target, target: String }, Leave { origin: Target } }
+/// O pedido de entrar vai ao servidor do alvo, com a origem pelo nome que ele entende (`qualified`).
+enum AskMode { Join { origin: Target, target: Target }, Leave { origin: Target } }
 
 /// O que o diálogo mostra. Mora fora do `Hangar` porque o `open_dialog` desenha na hora, com o `Hangar` em atualização; a
 /// lista nova de sessões refaz os campos vivos (`refresh_group_ask`).
@@ -309,7 +341,16 @@ pub(super) struct Grouping {
     pub(super) sheet: Option<super::group_sheet::Sheet>,
     /// "Mandar pro grupo" ligado nesta sessão, com os membros de quando ligou: grupo que muda desliga, como no web.
     pub(super) send_to_group: Option<(SessionKey, String)>,
+    /// Identificador de cada máquina (`/api/peers/identificador`), lido uma vez por máquina.
+    ids: HashMap<String, IdSlot>,
 }
+
+/// Leitura do identificador de uma máquina. `Known("")` é máquina sem `CP_SERVER_ID`: não se adivinha.
+#[derive(Clone)]
+pub(super) enum IdSlot { Loading, Known(String), Failed(Instant) }
+
+/// Falha na leitura do identificador espera isto antes de tentar de novo, como o web.
+const ID_RETRY: Duration = Duration::from_secs(30);
 
 impl Grouping {
     pub(super) fn reset(&mut self) {
@@ -340,31 +381,114 @@ pub(super) fn web_with(key: &str, name: &str, value: &str) -> String {
 }
 
 impl Hangar {
-    /// Sessão `name` da máquina `server`, pela lista viva dela.
-    fn session(&self, server: &str, name: &str) -> Option<&SessionInfo> { self.target_session(&Target::new(server, name)) }
-
     /// O bloco deste membro está recolhido.
     pub(super) fn pair_collapsed(&self, s: &SessionInfo, remote: Option<&str>) -> bool {
         s.pair_gid.as_deref().is_some_and(|gid| self.sidebar.is_collapsed(&pair_key(gid, remote)))
     }
 
-    /// Identificador de cada máquina do app (`/api/peers/identificador`).
-    // shortcut: ainda não lido no nativo; sem ele, agrupar entre máquinas recusa por falta de identificador, e o
-    // pedido (que ainda vai só à máquina da origem) nunca sai para outra.
-    pub(super) fn identities(&self) -> HashMap<String, String> { HashMap::new() }
+    /// Identificador de cada máquina do app já lido (`/api/peers/identificador`).
+    pub(super) fn identities(&self) -> HashMap<String, String> {
+        self.sidebar.grouping.ids.iter().filter_map(|(k, slot)| match slot { IdSlot::Known(id) => Some((k.clone(), id.clone())), _ => None }).collect()
+    }
+
+    /// Leitura do identificador de `key`; `None` antes de qualquer leitura.
+    pub(super) fn identity_slot(&self, key: &str) -> Option<&IdSlot> { self.sidebar.grouping.ids.get(key) }
+
+    /// Máquinas do dono com lista na barra (sem as de convite): as que o grupo entre máquinas alcança.
+    pub(super) fn group_machines(&self) -> Vec<String> {
+        let active = self.active_key();
+        let mut keys: Vec<String> = (!active.is_empty()).then_some(active).into_iter().collect();
+        for key in self.servers.iter().map(|s| servers::norm(&s.address)) {
+            if self.remote.contains_key(&key) && !keys.contains(&key) { keys.push(key); }
+        }
+        keys.retain(|k| self.server_entry(k).is_none_or(|s| !s.invite));
+        keys
+    }
+
+    /// Com mais de uma máquina (ou grupo citando outra), lê o identificador de cada uma que ainda não tem; falha tenta de novo depois de `ID_RETRY`,
+    /// na próxima lista que chegar. Uma leitura por máquina, nunca por linha nem por quadro.
+    pub(super) fn ensure_identities(&mut self) {
+        // Com uma máquina só, o identificador só importa se algum grupo cita outra (membro `máquina::nome`).
+        if !self.multi_server() && !self.sessions.iter().any(|s| s.peers().iter().any(|p| p.contains("::"))) { return; }
+        for key in self.group_machines() {
+            let due = match self.sidebar.grouping.ids.get(&key) { None => true, Some(IdSlot::Failed(at)) => at.elapsed() >= ID_RETRY, _ => false };
+            let Some(api) = due.then(|| self.machine_api(&key)).flatten() else { continue };
+            self.sidebar.grouping.ids.insert(key.clone(), IdSlot::Loading);
+            let tell = self.sidebar_tell();
+            self.runtime.spawn(async move {
+                let result = api.server_read(&["peers", "identificador"], &[], 15).await;
+                tell.send(SidebarReply::Identity(key, result)).await;
+            });
+        }
+    }
+
+    pub(super) fn receive_identity(&mut self, key: String, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
+        let slot = match result {
+            Ok(v) => IdSlot::Known(v.get("identificador").and_then(Value::as_str).unwrap_or_default().to_owned()),
+            Err(error) => { eprintln!("identificador de {key} não lido: {}", Self::fetch_failure(&error)); IdSlot::Failed(Instant::now()) }
+        };
+        self.sidebar.grouping.ids.insert(key, slot);
+        self.refresh_group_ask();
+        self.refresh_group_sheet(window, cx);
+        cx.notify();
+    }
+
+    /// Selo de cada membro de grupo que atravessa máquinas: o texto (`seal_text`) e a dica com a tarefa e os membros.
+    /// Calculado uma vez por desenho da barra, para todas as linhas.
+    pub(super) fn group_seals(&self, cx: &App) -> HashMap<Target, (String, String)> {
+        let machines = self.group_machines();
+        if machines.len() < 2 && self.sessions.iter().all(|s| s.pair_owner.is_none()) { return HashMap::new(); }
+        let rows: Vec<Row> = machines.iter().flat_map(|key| self.sessions_of(key).iter().map(move |s| Row { server: key, session: s, invite: false })).collect();
+        let mut out = HashMap::new();
+        for g in global_groups(&rows, &self.identities()) {
+            let Some(text) = seal_text(&g) else { continue };
+            let names: Vec<String> = g.members.iter().map(|m| match m {
+                Member::Here { server, name } => format!("{}::{name}", self.machine_label(server, cx)),
+                Member::Missing { server_id, name } => format!("{server_id}::{name}"),
+                Member::Outside { alias, session } => format!("{alias}::{session}"),
+            }).collect();
+            let tip = format!("{} · {}", web_with("sessao_grupo_pareado", "label", &g.label), names.join(", "));
+            for m in &g.members {
+                if let Member::Here { server, name } = m { out.insert(Target::new(server, name), (text.clone(), tip.clone())); }
+            }
+        }
+        out
+    }
+
+    /// O selo na linha: glifo do grupo e o texto; clicar abre o painel do grupo desta sessão. Fora da ordem do Tab: pelo
+    /// teclado o painel abre pelo chip do compositor da sessão aberta.
+    pub(super) fn render_seal(&self, target: &Target, (text, tip): (String, String), cx: &mut Context<Self>) -> Button {
+        let open = target.clone();
+        Button::new(SharedString::from(format!("group-seal-{}", target.id()))).ghost().xsmall().tab_stop(false)
+            .h(px(17.)).px(px(4.)).rounded(px(5.)).flex_shrink_0()
+            .accessibility_label(tip.clone()).tooltip(tip)
+            .child(div().flex().items_center().gap(px(3.)).text_size(px(11.)).text_color(theme::muted())
+                .child(glyph(11., theme::accent())).child(div().max_w(px(96.)).truncate().child(text)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.open_group_sheet_on(open.clone(), window, cx);
+            }))
+    }
 
     /// A linha da sessão para o modelo de grupos.
     fn pair_row<'a>(&'a self, target: &'a Target) -> Option<Row<'a>> {
         Some(Row { server: &target.server, session: self.target_session(target)?, invite: self.invite_target(target) })
     }
 
-    /// Candidatas do "Agrupar com…": as outras da mesma máquina que o arrastar aceitaria, na ordem da barra.
-    pub(super) fn group_candidates(&self, origin: &Target) -> Vec<String> {
+    /// Candidatas do "Agrupar com…": as que o arrastar aceitaria, de todas as máquinas do dono, a da origem primeiro, com o
+    /// texto do item (o nome; de outra máquina, "nome · máquina").
+    pub(super) fn group_candidates(&self, origin: &Target, cx: &App) -> Vec<(Target, String)> {
         let Some(row) = self.pair_row(origin) else { return Vec::new() };
         let ids = self.identities();
-        let mut list: Vec<&SessionInfo> = self.sessions_of(&origin.server).iter().filter(|s| !self.sidebar.is_hidden(&origin.server, &s.name)).collect();
-        list.sort_by_cached_key(|s| s.name.to_lowercase());
-        list.into_iter().filter(|s| can_pair(row, Row { session: s, ..row }, &ids).is_ok()).map(|s| s.name.clone()).collect()
+        let mut machines = self.group_machines();
+        machines.sort_by_key(|k| *k != origin.server);
+        machines.iter().flat_map(|key| {
+            let mut list: Vec<&SessionInfo> = self.sessions_of(key).iter().filter(|s| !self.sidebar.is_hidden(key, &s.name)).collect();
+            list.sort_by_cached_key(|s| s.name.to_lowercase());
+            let label = (*key != origin.server).then(|| self.machine_label(key, cx));
+            list.into_iter().filter(|s| can_pair(row, Row { server: key, session: s, invite: false }, &ids).is_ok())
+                .map(|s| (Target::new(key, &s.name), label.as_ref().map_or_else(|| s.name.clone(), |m| format!("{} · {m}", s.name)))).collect::<Vec<_>>()
+        }).collect()
     }
 
     // ── Arrastar ──
@@ -436,7 +560,7 @@ impl Hangar {
         let verdict = self.verdict(&origin, spot.as_ref());
         self.end_session_drag(cx);
         match verdict {
-            Some(Ok(DropAction::Join(target))) => self.request_group(origin, target.name, window, cx),
+            Some(Ok(DropAction::Join(target))) => self.request_group(origin, target, window, cx),
             Some(Ok(DropAction::Leave)) => self.request_leave(origin, window, cx),
             _ => {}
         }
@@ -516,10 +640,10 @@ impl Hangar {
 
     // ── Diálogo ──
 
-    /// `target` é outra sessão da máquina de `origin`.
-    pub(super) fn request_group(&mut self, origin: Target, target: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// `target` é outra sessão, desta ou de outra máquina do dono.
+    pub(super) fn request_group(&mut self, origin: Target, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         // Tarefa que já existe entra no campo (a do alvo antes), como o web.
-        let task = [&target, &origin.name].into_iter().filter_map(|n| self.session(&origin.server, n)?.pair_task.clone()).find(|t| !t.trim().is_empty());
+        let task = [&target, &origin].into_iter().filter_map(|t| self.target_session(t)?.pair_task.clone()).find(|t| !t.trim().is_empty());
         self.open_group_ask(AskMode::Join { origin, target }, task.unwrap_or_default(), window, cx);
     }
 
@@ -623,11 +747,13 @@ impl Hangar {
         let mut v = ask.view.borrow_mut();
         match &ask.mode {
             AskMode::Join { origin, target } => {
-                let (o, t) = (self.target_session(origin), self.session(&origin.server, target));
-                // Agrupar funde os grupos inteiros: todos os afetados, não só os dois.
+                let (o, t) = (self.target_session(origin), self.target_session(target));
+                let ids = self.identities();
+                // Agrupar funde os grupos inteiros: todos os afetados, não só os dois; o alvo de outra máquina com o identificador dela.
                 let mut names: Vec<String> = Vec::new();
-                for s in [o, t].into_iter().flatten() {
-                    for name in std::iter::once(&s.name).chain(s.peers()) { if !names.contains(name) { names.push(name.clone()); } }
+                for (s, own) in [(o, origin.name.clone()), (t, qualified(&target.server, &origin.server, &target.name, &ids).unwrap_or(target.name.clone()))] {
+                    let Some(s) = s else { continue };
+                    for name in std::iter::once(&own).chain(s.peers()) { if !names.contains(name) { names.push(name.clone()); } }
                 }
                 v.affected = names;
                 // Com a chamada em voo fica o que se via no clique.
@@ -635,12 +761,13 @@ impl Hangar {
                 v.block = match (o, t) {
                     (Some(o), Some(t)) => {
                         let row = Row { server: &origin.server, session: o, invite: self.invite_target(origin) };
-                        can_pair(row, Row { session: t, ..row }, &self.identities()).err().map(Refusal::text)
+                        can_pair(row, Row { server: &target.server, session: t, invite: self.invite_target(target) }, &ids).err().map(Refusal::text)
                     }
                     _ => Some(Refusal::Dead.text()),
                 };
+                // O par de fora só ganha acesso na máquina onde o par foi feito: entre máquinas não se abre nada.
                 if !v.busy {
-                    v.grants = match (o, t) { (Some(o), Some(t)) => [full_grants(t, o), full_grants(o, t)].concat(), _ => Vec::new() };
+                    v.grants = match (o, t) { (Some(o), Some(t)) if origin.server == target.server => [full_grants(t, o), full_grants(o, t)].concat(), _ => Vec::new() };
                 }
             }
             AskMode::Leave { origin } => {
@@ -658,14 +785,21 @@ impl Hangar {
         let mut v = ask.view.borrow_mut();
         if v.busy || v.done || v.suggesting { return; }
         if let Some(block) = v.block.clone() { v.error = Some(block); cx.notify(); return; }
-        let Some(api) = self.machine_api(ask_origin(&ask.mode).server.as_str()) else { v.error = Some(tr("connection_failed")); cx.notify(); return };
+        // Entrar vai ao servidor do alvo; sair, ao da origem.
+        let server = match &ask.mode { AskMode::Join { target, .. } => &target.server, AskMode::Leave { origin } => &origin.server };
+        let Some(api) = self.machine_api(server) else { v.error = Some(tr("connection_failed")); cx.notify(); return };
         let (seq, tell) = (ask.seq, self.sidebar_tell());
         // Entrando num grupo que existe, a tarefa é a dele: o campo nem aparece.
         let task = if v.inherited.is_some() { String::new() } else { ask.task.read(cx).value().trim().to_owned() };
         (v.busy, v.error) = (true, None);
         match &ask.mode {
             AskMode::Join { origin, target } => {
-                let (origin, target, grants) = (origin.name.clone(), target.clone(), v.grants.clone());
+                let Some(from) = qualified(&origin.server, &target.server, &origin.name, &self.identities()) else {
+                    (v.busy, v.error) = (false, Some(Refusal::NoIdentity.text()));
+                    cx.notify();
+                    return;
+                };
+                let (origin, target, grants) = (from, target.name.clone(), v.grants.clone());
                 self.runtime.spawn(async move {
                     let result = pair_and_grant(api, target, vec![origin], task, replace, grants).await;
                     tell.send(SidebarReply::Group(seq, GroupReply::Paired(result))).await;
@@ -747,12 +881,12 @@ fn existing_group<'a>(origin: Option<&'a SessionInfo>, target: Option<&'a Sessio
 }
 
 /// Submenu "Agrupar com…": as candidatas em mono; escolher abre o diálogo.
-pub(super) fn fill_group(menu: PopupMenu, hangar: &WeakEntity<Hangar>, origin: &Target, candidates: &[String]) -> PopupMenu {
+pub(super) fn fill_group(menu: PopupMenu, hangar: &WeakEntity<Hangar>, origin: &Target, candidates: &[(Target, String)]) -> PopupMenu {
     let menu = sidebar::menu_style(menu).label(tr("group_with"));
     if candidates.is_empty() { return menu.item(PopupMenuItem::new(tr("group_none")).disabled(true)); }
-    candidates.iter().fold(menu.min_w(px(220.)).max_h(px(260.)).scrollable(true), |menu, target| {
+    candidates.iter().fold(menu.min_w(px(220.)).max_h(px(260.)).scrollable(true), |menu, (target, text)| {
         let (hangar, origin, target) = (hangar.clone(), origin.clone(), target.clone());
-        menu.item(sidebar::mono_item(target.clone(), false).on_click(move |_, window, cx| {
+        menu.item(sidebar::mono_item(text.clone(), false).on_click(move |_, window, cx| {
             let _ = hangar.update(cx, |this, cx| this.request_group(origin.clone(), target.clone(), window, cx));
         }))
     })
@@ -761,8 +895,8 @@ pub(super) fn fill_group(menu: PopupMenu, hangar: &WeakEntity<Hangar>, origin: &
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` do gpui_kit, que o `super::*` traz, esconderia o `#[test]` da linguagem.
-    use super::{Grant, ListRow, Refusal, Row, SessionInfo, can_leave, can_pair, cluster, existing_group, full_grants, global_groups,
-        pair_header_label, split_code};
+    use super::{GlobalGroup, Grant, ListRow, Member, Refusal, Row, SessionInfo, can_leave, can_pair, cluster, existing_group, full_grants,
+        global_groups, pair_header_label, qualified, seal_text, split_code};
     use crate::api::dto::{PairExternal, PairExternalEntry, PairResult};
     use serde_json::Value;
     use std::collections::HashMap;
@@ -862,7 +996,7 @@ mod tests {
         assert_eq!(outside, ["Y", "Z"], "um por par, mesmo com dois membros locais o tendo");
         let ListRow::Header { label, .. } = &rows[0] else { panic!("cabeçalho primeiro") };
         assert!(label.starts_with("ABC-1 ") && label.contains("ana::Y (Ana)") && label.contains("bia::Z (Bia)"), "{label}");
-        assert_eq!(pair_header_label("t", &[]), "t", "sem par, o rótulo de sempre");
+        assert_eq!(pair_header_label("t", &[], &[]), "t", "sem par, o rótulo de sempre");
     }
 
     #[test]
@@ -877,6 +1011,36 @@ mod tests {
             ..s("X", Some("g"), &["ana::Y", "bia::Z"]) };
         assert!(full_grants(&pending, &s("a", None, &[])).is_empty(), "pendente só abre pelo Liberar");
         assert!(full_grants(&s("a", None, &[]), &group).is_empty(), "grupo sem par de fora não pede nada");
+    }
+
+    #[test]
+    fn header_names_the_members_on_other_machines_before_the_outside_pairs() {
+        let x = SessionInfo { pair_externals: Some(vec![ext("ana", "Ana", "Y", "view", false)]), pair_task: Some("ABC-1".into()),
+            ..s("X", Some("g"), &["W", "casa::a", "ana::Y"]) };
+        let w = s("W", Some("g"), &["X", "casa::a", "lab::b", "ana::Y"]);
+        let ListRow::Header { label, .. } = &cluster(&[&x, &w])[0] else { panic!("cabeçalho primeiro") };
+        assert_eq!(label, "ABC-1 ↔ casa::a, lab::b, ana::Y (Ana)", "cada membro de fora da máquina uma vez, o par de fora por último");
+        assert_eq!(pair_header_label("t", &["casa::a".into()], &[]), "t ↔ casa::a");
+    }
+
+    fn group(label: &str, members: Vec<Member>) -> GlobalGroup { GlobalGroup { key: "k".into(), label: label.into(), members } }
+    fn here(server: &str, name: &str) -> Member { Member::Here { server: server.into(), name: name.into() } }
+
+    #[test]
+    fn seal_shows_the_ticket_or_how_many_machines_only_across_machines() {
+        assert_eq!(seal_text(&group("ABC-12 tela", vec![here("a", "x"), here("b", "y")])).as_deref(), Some("ABC-12"));
+        assert_eq!(seal_text(&group("x, y", vec![here("a", "x"), here("b", "y"), Member::Missing { server_id: "lab".into(), name: "z".into() }]))
+            .as_deref(), Some("3 máquinas"), "máquina sem conexão aqui também conta");
+        assert_eq!(seal_text(&group("x, y", vec![here("a", "x"), here("a", "y"), Member::Outside { alias: "ana".into(), session: "Y".into() }])),
+            None, "uma máquina só, mesmo com par de fora");
+    }
+
+    #[test]
+    fn request_names_the_origin_by_its_machine_identifier_on_another_machine() {
+        let ids = HashMap::from([("a".to_owned(), "casa".to_owned()), ("b".to_owned(), "lab".to_owned()), ("c".to_owned(), String::new())]);
+        assert_eq!(qualified("a", "a", "x", &ids).as_deref(), Some("x"));
+        assert_eq!(qualified("a", "b", "x", &ids).as_deref(), Some("casa::x"));
+        assert_eq!(qualified("c", "b", "x", &ids), None, "identificador vazio não se adivinha");
     }
 
     #[test]

@@ -4,8 +4,8 @@
 use super::*;
 use super::activity::web;
 use super::device::Remote;
-use super::grouping::{Grant, failed, full_grants, glyph, pair_and_grant, web_with};
-use super::sidebar::SidebarReply;
+use super::grouping::{Grant, IdSlot, Refusal, Row, can_pair, failed, full_grants, glyph, identity_of, pair_and_grant, qualified, web_with};
+use super::sidebar::{SidebarReply, Target};
 use crate::api::dto::{PairExternalEntry, PairResult};
 use gpui_kit::component::{WindowExt, checkbox::Checkbox};
 
@@ -23,12 +23,13 @@ struct Feed { items: Vec<FeedItem>, missing: Vec<String> }
 
 pub(super) struct Sheet {
     session: String,
-    /// Máquina da sessão: pode não ser a ativa.
+    /// Chave da máquina da sessão (`servers::norm`): pode não ser a ativa nem a aberta.
     server: String,
     id: u64,
     /// Membros de quando carregou: grupo que muda com o painel aberto recomeça tudo, como o web.
     peers_key: String,
-    picked: Vec<String>,
+    /// Marcadas para entrar, de qualquer máquina.
+    picked: Vec<Target>,
     task: Entity<InputState>,
     adding: bool,
     busy: bool,
@@ -81,6 +82,10 @@ fn build_feed(members: &[String], histories: Vec<(String, Result<Vec<ChatEvent>,
     items.drain(..items.len().saturating_sub(FEED_SHOWN));
     Feed { items, missing }
 }
+
+/// Onde um membro do painel está: numa máquina conectada aqui, numa sem conexão aqui (o identificador dela), ou sem como
+/// saber ainda (par de fora, identificadores em leitura).
+enum MemberAt { Here(Target), Missing(String), Unknown }
 
 /// Envio ao grupo: o `/broadcast` responde 200 com o resultado por sessão, e membro que não recebeu vira recusa dizendo quem
 /// recebeu e quem não, como o web; sem isso a falha de um membro passaria calada.
@@ -159,8 +164,14 @@ impl Hangar {
 
     // ── Painel ──
 
+    /// O chip do compositor: o painel da sessão aberta.
     pub(super) fn open_group_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(session), Some(server)) = (self.selected.as_ref().map(|s| s.name.clone()), self.session_server()) else { return };
+        if let Some(target) = self.selected_target() { self.open_group_sheet_on(target, window, cx); }
+    }
+
+    /// O painel do grupo de qualquer sessão da barra (o selo da linha), sem abrir a conversa dela.
+    pub(super) fn open_group_sheet_on(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        let Target { server, name: session } = target;
         let task = cx.new(|cx| InputState::new(window, cx).placeholder(web("par_tarefa_placeholder")));
         let g = &mut self.sidebar.grouping;
         g.seq += 1;
@@ -205,21 +216,48 @@ impl Hangar {
     }
 
     /// Conexão da máquina do painel; `None` se ela saiu do ar no meio (o painel mostra falha de conexão).
-    fn sheet_api(&self) -> Option<Api> { self.sidebar.grouping.sheet.as_ref().and_then(|s| self.api_for(&s.server)) }
+    fn sheet_api(&self) -> Option<Api> { self.sidebar.grouping.sheet.as_ref().and_then(|s| self.machine_api(&s.server)) }
 
-    /// Com grupo, quantos são; em voo; erro; as marcadas.
+    /// A sessão do painel, na lista da máquina dela.
+    fn sheet_live(&self) -> Option<&SessionInfo> {
+        let sheet = self.sidebar.grouping.sheet.as_ref()?;
+        self.target_session(&Target::new(&sheet.server, &sheet.session))
+    }
+
+    fn sheet_peers(&self) -> Vec<String> { self.sheet_live().map(|s| s.peers().to_vec()).unwrap_or_default() }
+
+    /// Um membro pelo endereço que a lista dá: nome sozinho é da máquina do painel; `identificador::nome`, da máquina com
+    /// esse identificador.
+    fn member_at(&self, address: &str, ids: &HashMap<String, String>) -> MemberAt {
+        let Some(sheet) = self.sidebar.grouping.sheet.as_ref() else { return MemberAt::Unknown };
+        let Some((id, name)) = address.split_once("::") else { return MemberAt::Here(Target::new(&sheet.server, address)) };
+        let machines = self.group_machines();
+        if let Some(key) = machines.iter().find(|k| identity_of(k, ids) == Some(id)) { return MemberAt::Here(Target::new(key, name)); }
+        let outside = self.sheet_live().is_some_and(|s| s.outside_pairs().iter().any(|p| p.alias == id && p.session == name));
+        let reading = machines.iter().any(|k| matches!(self.identity_slot(k), Some(IdSlot::Loading)));
+        if outside || reading { MemberAt::Unknown } else { MemberAt::Missing(id.to_owned()) }
+    }
+
+    /// Com grupo, quantos são; em voo; erro; as marcadas (pelo nome que o pedido leva).
     fn sheet_frame(&self) -> Option<(bool, usize, bool, Option<String>, Vec<String>)> {
         let sheet = self.sidebar.grouping.sheet.as_ref()?;
-        let peers = self.live_peers(&sheet.session);
-        Some((!peers.is_empty(), peers.len() + 1, sheet.busy, sheet.error.clone(), sheet.picked.clone()))
+        let peers = self.sheet_peers();
+        let ids = self.identities();
+        let picked = sheet.picked.iter().map(|t| qualified(&t.server, &sheet.server, &t.name, &ids).unwrap_or_else(|| t.name.clone())).collect();
+        Some((!peers.is_empty(), peers.len() + 1, sheet.busy, sheet.error.clone(), picked))
     }
 
     /// (Re)começa o painel pelos membros de agora: marcadas, tarefa e erro zeram; com grupo, contrato e conversa são relidos.
     fn load_group_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let api = self.sheet_api();
         let tell = self.sidebar_tell();
-        let Some(name) = self.sidebar.grouping.sheet.as_ref().map(|s| s.session.clone()) else { return };
-        let peers = self.live_peers(&name);
+        let peers = self.sheet_peers();
+        // Histórico de cada membro na máquina dele; o de máquina sem conexão aqui entra como "sem histórico".
+        let ids = self.identities();
+        let sources: Vec<(String, Option<(Api, String)>)> = peers.iter().map(|p| (p.clone(), match self.member_at(p, &ids) {
+            MemberAt::Here(t) => self.machine_api(&t.server).map(|api| (api, t.name)),
+            _ => None,
+        })).collect();
         let Some(sheet) = self.sidebar.grouping.sheet.as_mut() else { return };
         let task = sheet.task.clone();
         (sheet.peers_key, sheet.picked, sheet.adding, sheet.busy, sheet.error) = (peers.join(","), Vec::new(), false, false, None);
@@ -232,13 +270,18 @@ impl Hangar {
             return;
         };
         let (id, contract_seq, feed_seq) = (sheet.id, sheet.contract.start(), sheet.feed.start());
-        let members: Vec<String> = std::iter::once(sheet.session.clone()).chain(peers).collect();
+        let me = sheet.session.clone();
+        let members: Vec<String> = std::iter::once(me.clone()).chain(peers).collect();
+        let sources: Vec<(String, Option<(Api, String)>)> = std::iter::once((me.clone(), Some((api.clone(), me)))).chain(sources).collect();
         self.runtime.spawn(async move {
             let contract = api.read(&members[0], &["pair", "contract"], &[], 15).await;
             tell.send(SidebarReply::Sheet(SheetReply::Contract(id, contract_seq, contract))).await;
-            let histories = futures::future::join_all(members.iter().map(|name| {
-                let api = api.clone();
-                async move { (name.clone(), api.history(name, FEED_TAIL, None).await.map(|h| h.events.unwrap_or_default())) }
+            let histories = futures::future::join_all(sources.into_iter().map(|(label, source)| async move {
+                let result = match source {
+                    Some((api, name)) => api.history(&name, FEED_TAIL, None).await.map(|h| h.events.unwrap_or_default()),
+                    None => Err(Failure::local(tr("connection_failed"))),
+                };
+                (label, result)
             })).await;
             tell.send(SidebarReply::Sheet(SheetReply::Feed(id, feed_seq, members, histories))).await;
         });
@@ -250,21 +293,22 @@ impl Hangar {
         if let Some((key, peers_key)) = self.sidebar.grouping.send_to_group.as_ref()
             && self.live_peers(&key.name).join(",") != *peers_key { self.sidebar.grouping.send_to_group = None; }
         let Some(sheet) = self.sidebar.grouping.sheet.as_ref() else { return };
-        if sheet.busy || self.live_peers(&sheet.session).join(",") == sheet.peers_key { return; }
+        if sheet.busy || self.sheet_peers().join(",") == sheet.peers_key { return; }
         self.load_group_sheet(window, cx);
     }
 
-    fn toggle_pick(&mut self, name: String, cx: &mut Context<Self>) {
+    fn toggle_pick(&mut self, target: Target, cx: &mut Context<Self>) {
         let Some(sheet) = self.sidebar.grouping.sheet.as_mut() else { return };
-        if let Some(ix) = sheet.picked.iter().position(|n| *n == name) { sheet.picked.remove(ix); } else { sheet.picked.push(name); }
+        if let Some(ix) = sheet.picked.iter().position(|t| *t == target) { sheet.picked.remove(ix); } else { sheet.picked.push(target); }
         cx.notify();
     }
 
-    /// As marcadas que entram num grupo com par de fora de acesso completo: ficam abertas para ele ao confirmar.
+    /// As marcadas que entram num grupo com par de fora de acesso completo: ficam abertas para ele ao confirmar. Só as da
+    /// máquina do painel: o par de fora só ganha acesso na máquina onde foi feito.
     fn sheet_grants(&self) -> Vec<Grant> {
         let Some(sheet) = self.sidebar.grouping.sheet.as_ref() else { return Vec::new() };
-        let Some(group) = self.live(&sheet.session) else { return Vec::new() };
-        sheet.picked.iter().filter_map(|name| self.live(name)).flat_map(|side| full_grants(group, side)).collect()
+        let Some(group) = self.sheet_live() else { return Vec::new() };
+        sheet.picked.iter().filter(|t| t.server == sheet.server).filter_map(|t| self.target_session(t)).flat_map(|side| full_grants(group, side)).collect()
     }
 
     /// Criar grupo e adicionar membro são o mesmo pedido: o servidor une os grupos.
@@ -272,10 +316,17 @@ impl Hangar {
         let api = self.sheet_api();
         let tell = self.sidebar_tell();
         let grants = self.sheet_grants();
+        let ids = self.identities();
         let Some(sheet) = self.sidebar.grouping.sheet.as_mut() else { return };
         if sheet.busy || sheet.picked.is_empty() { return; }
         let Some(api) = api else { sheet.error = Some(tr("connection_failed")); cx.notify(); return };
-        let (id, name, picked, task) = (sheet.id, sheet.session.clone(), sheet.picked.clone(), sheet.task.read(cx).value().trim().to_owned());
+        // O pedido vai ao servidor desta sessão; a marcada de outra máquina vai pelo identificador dela.
+        let Some(picked) = sheet.picked.iter().map(|t| qualified(&t.server, &sheet.server, &t.name, &ids)).collect::<Option<Vec<String>>>() else {
+            sheet.error = Some(Refusal::NoIdentity.text());
+            cx.notify();
+            return;
+        };
+        let (id, name, task) = (sheet.id, sheet.session.clone(), sheet.task.read(cx).value().trim().to_owned());
         (sheet.busy, sheet.error) = (true, None);
         self.runtime.spawn(async move {
             let result = pair_and_grant(api, name, picked.clone(), task, false, grants).await;
@@ -296,12 +347,12 @@ impl Hangar {
         cx.notify();
     }
 
-    /// Membro escolhido: o painel fecha e a conversa dele abre no lugar desta.
-    fn open_member(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(session) = self.live(name).cloned() else { return };
-        let Some(server) = self.sidebar.grouping.sheet.take().map(|s| s.server) else { return };
+    /// Membro escolhido: o painel fecha e a conversa dele abre no lugar desta, na máquina dele.
+    fn open_member(&mut self, target: &Target, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.target_session(target).cloned() else { return };
+        self.sidebar.grouping.sheet = None;
         window.close_dialog(cx);
-        self.select_on(&servers::norm(&server), session, window, cx);
+        self.select_on(&target.server, session, window, cx);
     }
 
     pub(super) fn receive_sheet(&mut self, reply: SheetReply, window: &mut Window, cx: &mut Context<Self>) {
@@ -346,23 +397,23 @@ impl Hangar {
     }
 
     /// Linha de sessão marcável: caixa, estado, nome, pasta e, se já está num grupo, com quantos.
-    fn pick_row(&self, session: &SessionInfo, picked: bool, aria: &str, cx: &mut Context<Self>) -> Div {
-        let name = session.name.clone();
+    fn pick_row(&self, target: &Target, session: &SessionInfo, picked: bool, aria: &str, cx: &mut Context<Self>) -> Div {
+        let (name, key) = (session.name.clone(), target.id());
         let state = state_label(&session.state).unwrap_or_default();
         let label = web_with(aria, "nome", &name).replace("{estado}", &state);
-        let (check, click) = (name.clone(), name.clone());
+        let (check, click) = (target.clone(), target.clone());
         let peers = session.peers();
         div().flex().items_center().gap_3().px_2().rounded(px(8.)).border_1()
             .border_color(if picked { theme::accent() } else { transparent_black() }).when(picked, |el| el.bg(theme::accent_dim()))
-            .child(Checkbox::new(SharedString::from(format!("group-pick-{name}"))).checked(picked).accessibility_label(label)
+            .child(Checkbox::new(SharedString::from(format!("group-pick-{key}"))).checked(picked).accessibility_label(label)
                 .on_change(cx.listener(move |this, _: &bool, _, cx| this.toggle_pick(check.clone(), cx))))
-            .child(div().id(SharedString::from(format!("group-row-{name}"))).flex_1().min_w_0().py(px(8.)).flex().items_center().gap_3()
+            .child(div().id(SharedString::from(format!("group-row-{key}"))).flex_1().min_w_0().py(px(8.)).flex().items_center().gap_3()
                 .cursor_pointer().on_click(cx.listener(move |this, _, _, cx| this.toggle_pick(click.clone(), cx)))
                 .child(dot(&session.state))
                 .child(div().flex_1().min_w_0().flex().flex_col()
                     .child(div().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(name.clone()))
                     .when_some(session.cwd.clone(), |el, cwd| el.child(div().truncate().text_xs().text_color(theme::faint()).child(cwd))))
-                .when(!peers.is_empty(), |el| el.child(div().id(SharedString::from(format!("group-already-{name}"))).flex_shrink_0()
+                .when(!peers.is_empty(), |el| el.child(div().id(SharedString::from(format!("group-already-{key}"))).flex_shrink_0()
                     .flex().items_center().gap_1().text_xs().text_color(theme::muted()).child(glyph(12., theme::muted())).child(peers.len().to_string())
                     .tooltip({ let tip = web_with("par_ja_agrupada", "nomes", &peers.join(", "));
                         move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx) }))))
@@ -371,15 +422,46 @@ impl Hangar {
     fn render_group_sheet(&mut self, cx: &mut Context<Self>) -> Div {
         let Some(sheet) = self.sidebar.grouping.sheet.as_ref() else { return div() };
         let me = sheet.session.clone();
-        let peers = self.live_peers(&me);
+        let here = sheet.server.clone();
+        let peers = self.sheet_peers();
+        let ids = self.identities();
         let muted = |text: String| div().text_sm().text_color(theme::muted()).whitespace_normal().child(text);
         let heading = |text: String| div().mt(px(8.)).text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(text);
-        // Candidatas a entrar: vivas, fora desta e do grupo dela.
-        let candidates: Vec<SessionInfo> = self.sessions_of(&sheet.server).iter().filter(|s| s.name != me && s.state != "dead" && !peers.contains(&s.name)).cloned().collect();
+        let machines = self.group_machines();
+        let multi = machines.len() > 1;
+        // Candidatas a entrar: as que o arrastar aceitaria, de todas as máquinas do dono, a desta primeiro.
+        let mut candidates: Vec<(Target, SessionInfo)> = Vec::new();
+        if let Some(live) = self.sheet_live() {
+            let origin = Row { server: &here, session: live, invite: false };
+            for key in std::iter::once(&here).chain(machines.iter().filter(|k| **k != here)) {
+                let mut list: Vec<&SessionInfo> = self.sessions_of(key).iter()
+                    .filter(|s| can_pair(origin, Row { server: key, session: s, invite: false }, &ids).is_ok()).collect();
+                list.sort_by_cached_key(|s| s.name.to_lowercase());
+                candidates.extend(list.into_iter().map(|s| (Target::new(key, &s.name), s.clone())));
+            }
+        }
+        // Máquinas cujo identificador ainda está em leitura ou faltou: as sessões delas não aparecem, e o painel diz por quê.
+        let notes: Vec<String> = machines.iter().filter(|_| multi).filter_map(|k| {
+            let label = self.machine_label(k, cx);
+            match self.identity_slot(k) {
+                Some(IdSlot::Known(id)) if !id.is_empty() => None,
+                None | Some(IdSlot::Loading) => Some(format!("{label}: {}", web("comum_carregando"))),
+                _ => Some(format!("⚠ {label}: {}", Refusal::NoIdentity.text())),
+            }
+        }).collect();
         let (picked, adding, busy, task) = (sheet.picked.clone(), sheet.adding, sheet.busy, sheet.task.clone());
+        let picked_names = picked.iter().map(|t| qualified(&t.server, &here, &t.name, &ids).unwrap_or_else(|| t.name.clone())).collect::<Vec<_>>().join(", ");
         let pick_list = |this: &Self, aria: &str, empty: &str, cx: &mut Context<Self>| {
-            if candidates.is_empty() { return muted(web(empty)).py_2(); }
-            candidates.iter().fold(div().flex().flex_col().gap(px(2.)), |list, s| list.child(this.pick_row(s, picked.contains(&s.name), aria, cx)))
+            let list = div().flex().flex_col().gap(px(2.)).children(notes.iter().map(|n| muted(n.clone()).text_xs()));
+            if candidates.is_empty() { return list.child(muted(web(empty)).py_2()); }
+            let mut shown: Option<&str> = None;
+            candidates.iter().fold(list, |list, (t, s)| {
+                // Com mais de uma máquina, as candidatas vêm separadas pelo nome da máquina.
+                let title = (multi && shown != Some(t.server.as_str())).then(|| div().pt(px(6.)).px_2().text_xs().text_color(theme::faint())
+                    .child(this.machine_label(&t.server, cx)));
+                shown = Some(t.server.as_str());
+                list.children(title).child(this.pick_row(t, s, picked.contains(t), aria, cx))
+            })
         };
         if peers.is_empty() {
             return div().flex().flex_col().gap_3()
@@ -388,25 +470,28 @@ impl Hangar {
                 .child(Input::new(&task).disabled(busy).aria_label(web("par_tarefa_placeholder")));
         }
         let members = peers.iter().fold(div().flex().flex_col().gap(px(2.)), |list, peer| {
-            let state = self.live(peer).map(|s| s.state.clone());
-            let open = peer.clone();
+            let at = self.member_at(peer, &ids);
+            let live = match &at { MemberAt::Here(t) => self.target_session(t).map(|s| (t.clone(), s.state.clone())), _ => None };
+            let missing = match &at { MemberAt::Missing(id) => Some(tr_shared("grupo_membro_maquina_desconectada", &[("maquina", id)])), _ => None };
             let tip = web_with("par_abrir_conversa_de", "nome", peer);
             list.child(div().flex().items_center().gap_3().px_2().py(px(6.)).rounded(px(8.))
-                .children(state.as_deref().map(dot))
-                .child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(peer.clone()))
-                .children(state.as_deref().and_then(state_label).map(|label| div().flex_shrink_0().text_xs().text_color(theme::muted()).child(label)))
-                // Membro de outra máquina não está na lista deste servidor: não há conversa aqui para abrir.
-                .when(state.is_some(), |el| el.child(chrome::icon_button(SharedString::from(format!("group-open-{peer}")), IconName::MessageCircle, tip, cx)
-                    .on_click(cx.listener(move |this, _, window, cx| this.open_member(&open, window, cx))))))
+                .children(live.as_ref().map(|(_, state)| dot(state)))
+                .child(div().flex_1().min_w_0().flex().flex_col()
+                    .child(div().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(peer.clone()))
+                    .children(missing.map(|text| div().truncate().text_xs().text_color(theme::muted()).child(text))))
+                .children(live.as_ref().and_then(|(_, state)| state_label(state)).map(|label| div().flex_shrink_0().text_xs().text_color(theme::muted()).child(label)))
+                // Só o membro numa máquina conectada aqui tem conversa para abrir.
+                .when_some(live.map(|(t, _)| t), |el, open| el.child(chrome::icon_button(SharedString::from(format!("group-open-{}", open.id())),
+                    IconName::MessageCircle, tip, cx).on_click(cx.listener(move |this, _, window, cx| this.open_member(&open, window, cx))))))
         });
         // Acesso completo pendente de cada membro daqui, com o "Liberar" ao lado.
-        let server = servers::norm(&sheet.server);
+        let server = here.clone();
         let mut pending: Vec<(String, PairExternalEntry)> = Vec::new();
-        for s in std::iter::once(&me).chain(peers.iter()).filter_map(|name| self.live(name)) {
+        for s in std::iter::once(&me).chain(peers.iter().filter(|p| !p.contains("::"))).filter_map(|name| self.target_session(&Target::new(&server, name))) {
             pending.extend(s.outside_pairs().iter().filter(|p| p.pending).map(|p| (s.name.clone(), p.clone())));
         }
         let pending = pending.into_iter().enumerate().fold(div().flex().flex_col().gap(px(2.)), |list, (i, (name, p))| {
-            let (target, alias) = (super::sidebar::Target::new(&server, &name), p.alias.clone());
+            let (target, alias) = (Target::new(&server, &name), p.alias.clone());
             list.child(div().flex().items_center().gap_3().px_2().py(px(6.)).rounded(px(8.)).bg(theme::warning().opacity(0.08))
                 .child(div().flex_1().min_w_0().flex().flex_col()
                     .child(div().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(name))
@@ -414,11 +499,11 @@ impl Hangar {
                 .child(Button::new(("group-release", i)).small().label(tr_shared("pair_release", &[("dono", &p.owner)]))
                     .on_click(cx.listener(move |this, _, window, cx| this.release_pair(target.clone(), alias.clone(), window, cx)))))
         });
-        let outside = self.live(&me).is_some_and(|s| !s.outside_pairs().is_empty());
+        let outside = self.sheet_live().is_some_and(|s| !s.outside_pairs().is_empty());
         let notices: Vec<String> = self.sheet_grants().iter().map(|g| tr_shared("pair_full_confirm", &[("sessao", &g.session), ("dono", &g.owner)])).collect();
         let add = if adding {
             let label = if busy { web("par_adicionando") } else if picked.is_empty() { web("par_escolha_sessoes") }
-                else { web_with("par_adicionar_nomes", "nomes", &picked.join(", ")) };
+                else { web_with("par_adicionar_nomes", "nomes", &picked_names) };
             div().flex().flex_col().gap_2()
                 .child(pick_list(self, "par_adicionar_aria", "par_vazio_fora_grupo", cx))
                 // Confirmar o "Adicionar" com esta frase à vista é o que libera o acesso completo.
@@ -463,7 +548,7 @@ impl Hangar {
             .child(muted(web("par_membros_hint")))
             .when(outside, |el| el.child(muted(tr_shared("pair_not_transitive", &[]))))
             // Esta sessão é a ponta do par: o "Sair do grupo" do rodapé desfaz o par para todos.
-            .children(self.anchored_owners(&super::sidebar::Target::new(&server, &me)).iter()
+            .children(self.anchored_owners(&Target::new(&server, &me)).iter()
                 .map(|dono| warn(tr_shared("pair_undo_anchor_body", &[("dono", dono)]))))
             .child(members)
             .child(pending)
