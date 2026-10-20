@@ -161,10 +161,13 @@ def test_delete_entering_the_connect_port_is_closed_by_the_rust(monkeypatch):
     monkeypatch.setattr(api_mod.closed_names, "record", lambda jsonl, name: recorded.append((jsonl, name)))
     replies = iter([(200, b'{"closed": true, "killed": true, "transcript": "/t/a.jsonl"}'), None,
                     (409, b'{"detail": {"code": "session_transfer_busy", "params": {}}}')])
-    monkeypatch.setattr(runtime_coordinator, "rust_claude", lambda *args: bridged.append(args) or next(replies))
+    monkeypatch.setattr(runtime_coordinator, "rust_claude", lambda *args, **kw: bridged.append((args, kw)) or next(replies))
+    _provider(monkeypatch, ct="claude", pi="pi")
 
-    def delete(port):
-        return asyncio.run(api_mod.kill_session("ct", request=_request(port, "/api/sessions/ct", body=b"", method="DELETE")))
+    def delete(port, name="ct"):
+        request = _request(port, f"/api/sessions/{name}", body=b"", method="DELETE")
+        request.scope["headers"] = [(b"user-agent", b"Hangar/iPad"), (b"x-hangar-req", b"r-1"), (b"x-forwarded-for", b"100.64.0.7")]
+        return asyncio.run(api_mod.kill_session(name, request=request))
     assert delete(api_mod.CONNECT_PORT)["ok"] is True
     assert (killed, recorded, cleaned) == ([True], [("/t/a.jsonl", "ct")], []), "fechada pelo Rust: aqui só as lojas daqui"
     delete(api_mod.CONNECT_PORT)
@@ -172,9 +175,41 @@ def test_delete_entering_the_connect_port_is_closed_by_the_rust(monkeypatch):
     with pytest.raises(api_mod._RustReply) as refused:
         delete(api_mod.CONNECT_PORT)
     assert refused.value.args[0] == 409 and len(killed) == 2, "recusa do Rust volta como veio, sem fechar aqui"
-    assert bridged == [("ct", "close", "POST", b"")] * 3
+    # Quem pediu chega ao diário do Rust: cliente, pedido e origem.
+    who = {"user-agent": "Hangar/iPad", "x-hangar-req": "r-1", "x-forwarded-for": "100.64.0.7"}
+    assert bridged == [(("ct", "close", "POST", b""), {"headers": who})] * 3
     delete(GUEST_PORT)
     assert len(bridged) == 3, "só o que entrou pelo Connect vai à ponte"
+    # Pi/omp/Kimi não são do Rust: com ele em `pending` a ponte responderia 503 em vez de fechar.
+    delete(api_mod.CONNECT_PORT, "pi")
+    assert len(bridged) == 3 and killed[3:] == [False], "Pi fecha pelo nome, sem passar pela ponte"
+
+
+def test_the_claude_bridge_carries_who_asked(monkeypatch):
+    seen = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            seen.append((self.path, self.headers.get("user-agent"), self.headers.get("x-hangar-req"),
+                         self.headers.get("x-forwarded-for"), self.headers.get("x-hangar-internal")))
+            self.send_response(200)
+            self.send_header("content-length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(list_bridge, "endpoint", lambda: (f"127.0.0.1:{server.server_port}", "s"))
+        _owner(monkeypatch)
+        who = {"user-agent": "Hangar/iPad", "x-hangar-req": "r-1", "x-forwarded-for": "100.64.0.7"}
+        assert runtime_coordinator.rust_claude("ct", "close", "POST", b"", headers=who) == (200, b"{}")
+        assert seen == [("/__hangar_server/claude/ct/close", "Hangar/iPad", "r-1", "100.64.0.7", "s")]
+    finally:
+        server.shutdown()
 
 
 def test_sends_from_python_paths_go_to_the_rust_and_return_its_code(monkeypatch):

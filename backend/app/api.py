@@ -2216,10 +2216,15 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
     closed = bool(request and internal_api._secret) and secrets.compare_digest(request.headers.get("x-hangar-rust-closed", "").encode(), internal_api._secret.encode())
     bridged = None
     # Entrou pelo Connect: o Claude aberto no Rust fecha lá, como o da 8765; 421 (`None`) segue aqui.
+    # Só Claude: com o Rust em `pending`, a ponte responderia 503 ao Pi/omp/Kimi, que fecham aqui.
     port = (request.scope.get("server") or (None, None))[1] if request is not None else None
-    if not closed and port == CONNECT_PORT and port != settings.port:
+    if not closed and port == CONNECT_PORT and port != settings.port and getattr(await _cached_info(name), "provider", None) == "claude":
         from app import runtime_coordinator
-        reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, "close", "POST", b"")
+        # Quem pediu vai junto, para o diário do Rust dizer cliente, pedido e origem.
+        origin = request.headers.get("x-forwarded-for") or (request.client.host if request.client else "")
+        who = {key: value for key, value in (("user-agent", request.headers.get("user-agent")),
+               ("x-hangar-req", request.headers.get("x-hangar-req")), ("x-forwarded-for", origin)) if value}
+        reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, "close", "POST", b"", headers=who)
         if reply is not None:
             if reply[0] >= 300:
                 raise _RustReply(*reply)

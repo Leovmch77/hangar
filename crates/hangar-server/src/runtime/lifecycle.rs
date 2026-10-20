@@ -226,7 +226,13 @@ pub(crate) fn claude_sidecar_dir()->Result<std::path::PathBuf,RuntimeError> {
 /// O sidecar da sessão não existe (só a ausência; ilegível não conta): o fechamento pelo nome o apaga
 /// antes de matar o cano.
 pub(super) fn claude_sidecar_absent(name:&str)->bool {
-    claude_sidecar_dir().is_ok_and(|dir|std::fs::symlink_metadata(super::codex_sidecar::path(&dir,name)).is_err_and(|error|error.kind()==std::io::ErrorKind::NotFound))
+    claude_sidecar_dir().is_ok_and(|dir|sidecar_absent_by(&super::codex_sidecar::path(&dir,name),super::queue::read_replaced))
+}
+/// Duas leituras que toleram a troca (`read_replaced`): no Windows quem lê no instante da troca recebe
+/// NotFound, e soltar a sessão por isso a deixaria órfã.
+fn sidecar_absent_by(path:&std::path::Path,read:impl Fn(&std::path::Path)->std::io::Result<Vec<u8>>)->bool {
+    let missing=||matches!(read(path),Err(error) if error.kind()==std::io::ErrorKind::NotFound);
+    missing() && missing()
 }
 
 /// O arquivo já existe: esta operação nunca cadastra nem prepara uma conta.
@@ -381,6 +387,21 @@ mod tests {
         assert_eq!(store.state().operations["spawn1"].status,Status::Unknown);
         assert_eq!(store.state().rows.len(),1);
         assert_eq!(store.state().runtime_state["terminal_write_barrier"]["operation_id"],"input");
+    }
+    /// No Windows quem lê no instante da troca do sidecar recebe NotFound: a ausência que some na segunda
+    /// leitura é a troca, não o fechamento pelo nome, e a sessão não é solta.
+    #[test]
+    fn a_sidecar_missing_only_during_its_replacement_is_not_absent() {
+        let reads=|answers:Vec<std::io::ErrorKind>| {
+            let answers=std::sync::Mutex::new(answers.into_iter());
+            move |_:&std::path::Path| match answers.lock().unwrap().next() { Some(kind)=>Err(kind.into()), None=>Ok(b"{}".to_vec()) }
+        };
+        let path=std::path::Path::new("cl.json");
+        use std::io::ErrorKind::{NotFound,PermissionDenied};
+        assert!(!sidecar_absent_by(path,reads(vec![NotFound])),"sumiu só na primeira leitura: é a troca");
+        assert!(sidecar_absent_by(path,reads(vec![NotFound,NotFound])),"ausente nas duas: fechada pelo nome");
+        assert!(!sidecar_absent_by(path,reads(vec![PermissionDenied,PermissionDenied])),"recusado não é ausente");
+        assert!(!sidecar_absent_by(path,reads(vec![])),"presente");
     }
     #[test]
     fn replacement_b_or_explicit_close_prevents_second_spawn_admission() {

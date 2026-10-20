@@ -1172,6 +1172,14 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                             if let Some(id)=operation_id {mode_failures.insert(id,failed.clone());}
                             // Sidecar apagado: a sessão foi fechada pelo nome e não há onde gravar; a religação a solta.
                             if failed.code!="lifecycle_sidecar_read" || !super::lifecycle::claude_sidecar_absent(&target.name) {enter_error(&mut error,&target,failed);}
+                            else {
+                                if crate::warn_limit::allow(Some(&target.key),"claude_sidecar_absent") {
+                                    tracing::warn!(key=%target.key,session=%target.name,"sidecar da sessão sumiu; a gravação do estado não foi feita");
+                                }
+                                if let Some(policy)=&engine.policy {
+                                    policy.diag.report("rust.claude_sidecar_absent",&target.name,"claude_sidecar_absent","o sidecar da sessão sumiu (fechada pelo nome); a gravação do estado não foi feita");
+                                }
+                            }
                         },
                     }
                 },

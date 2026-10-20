@@ -3809,8 +3809,12 @@ mod tests {
     /// Registro de teste sobre os processos falsos do cano, com a espera da reabertura automática curta.
     #[cfg(target_os="linux")]
     fn park_registry(home:&std::path::Path,processes:Arc<ParkProcesses>,configure:impl FnOnce(RuntimeRegistry)->RuntimeRegistry) -> (Arc<RuntimeRegistry>,crate::side::Hubs) {
+        park_registry_at("127.0.0.1:9".parse().unwrap(),home,processes,configure)
+    }
+    #[cfg(target_os="linux")]
+    fn park_registry_at(upstream:SocketAddr,home:&std::path::Path,processes:Arc<ParkProcesses>,configure:impl FnOnce(RuntimeRegistry)->RuntimeRegistry) -> (Arc<RuntimeRegistry>,crate::side::Hubs) {
         let env=crate::accounts::environment::AccountEnvironment::from_map([("HOME".to_owned(),home.to_string_lossy().into_owned())].into());
-        let registry=Arc::new(configure(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"fixture".into(),"instance".into()).with_processes(processes).with_codex_environment(env)));
+        let registry=Arc::new(configure(RuntimeRegistry::new(upstream,"fixture".into(),"instance".into()).with_processes(processes).with_codex_environment(env)));
         registry.bind_lifecycle();
         let hubs=crate::side::Hubs::default();registry.bind_hubs(hubs.downgrade());
         (registry,hubs)
@@ -3831,7 +3835,8 @@ mod tests {
             std::fs::create_dir_all(&dir).unwrap();let file=dir.join(format!("{name}.json"));std::fs::write(&file,sidecar.to_string()).unwrap();file
         });
         let processes=Arc::new(ParkProcesses {canos:std::sync::Mutex::new(vec![i64::from(cano.0.id())]),dir:home.path().into(),agent:Default::default()});
-        let (registry,_hubs)=park_registry(home.path(),processes,|registry|registry.with_respawn_base(Duration::from_millis(20)));
+        let (diag,reports)=diag_sink().await;
+        let (registry,_hubs)=park_registry_at(diag,home.path(),processes,|registry|registry.with_respawn_base(Duration::from_millis(20)));
         registry.open_claude_headless(name,false).await.unwrap().unwrap();
 
         for file in &files { std::fs::remove_file(file).unwrap(); }
@@ -3846,6 +3851,41 @@ mod tests {
         }
         let error=registry.live_sender(name).borrow().as_ref().and_then(|state|state.error.clone());
         assert!(error.is_none(),"a sessão fechada ficou com erro no canal: {error:?}");
+        // A gravação que o ator deixou de fazer (o sidecar sumiu) vai ao diário, sem virar erro.
+        let absent=||reports.lock().unwrap().iter().filter(|report|report["codigo"]=="claude_sidecar_absent" && report["sessao"]==name).count();
+        while absent()==0 {
+            assert!(std::time::Instant::now()<deadline,"a gravação engolida não foi ao diário: {:?}",reports.lock().unwrap());
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(absent(),1,"uma vez por sessão");
+    }
+
+    /// O `/internal/diag` do Python: guarda o corpo de cada aviso e responde 200.
+    #[cfg(target_os="linux")]
+    async fn diag_sink() -> (SocketAddr,Arc<std::sync::Mutex<Vec<Value>>>) {
+        use tokio::io::{AsyncBufReadExt,AsyncReadExt,AsyncWriteExt,BufReader};
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+        let reports=Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen=reports.clone();
+        tokio::spawn(async move {
+            while let Ok((socket,_))=listener.accept().await {
+                let seen=seen.clone();
+                tokio::spawn(async move {
+                    let (mut reader,mut length)=(BufReader::new(socket),0usize);
+                    loop {
+                        let mut line=String::new();
+                        if reader.read_line(&mut line).await.unwrap_or(0)==0 {return;}
+                        if line=="\r\n" {break;}
+                        if let Some(value)=line.to_ascii_lowercase().strip_prefix("content-length:") {length=value.trim().parse().unwrap_or(0);}
+                    }
+                    let mut body=vec![0;length];
+                    if reader.read_exact(&mut body).await.is_err() {return;}
+                    if let Ok(report)=serde_json::from_slice::<Value>(&body) {seen.lock().unwrap().push(report);}
+                    let _=reader.get_mut().write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+                });
+            }
+        });
+        (address,reports)
     }
 
     /// `close()` sem matar (troca de nome ou de conta pelo Python, parada do servidor) com um `claude_exit` que
