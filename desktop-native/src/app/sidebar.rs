@@ -1209,8 +1209,7 @@ impl Hangar {
                     (Write::Account { .. }, Err(error)) => Some(Notification::error(failed("sidebar_same_failed", &error))),
                     (Write::Delete, Ok(value)) => {
                         // Fechou, mas um par do grupo não foi avisado: o motivo aparece em vez de fechar mudo.
-                        value.get("warning").filter(|w| !w.is_null()).map(|w| Notification::warning(
-                            w.get("msg").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| w.to_string())))
+                        value.get("warning").filter(|w| !w.is_null()).map(|w| Notification::warning(crate::api::warning_text(w)))
                     }
                     (Write::Delete, Err(error)) => {
                         self.sidebar.deleting.remove(&target);

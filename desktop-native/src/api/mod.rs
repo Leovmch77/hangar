@@ -139,16 +139,40 @@ fn envelope_code(body: Option<&Value>) -> Option<String> {
     body?.get("detail")?.get("code")?.as_str().map(str::to_owned)
 }
 
-/// Recusa ou aviso de grupo `{code, params}`: a frase do web pelo código; lista de parâmetros vira texto com `; `, como no web.
+/// Recusa ou aviso de grupo `{code, params}`: a frase do web pelo código.
 pub fn group_text(envelope: &Value) -> Option<String> {
     let code = envelope.get("code")?.as_str()?;
     if !(code.starts_with("erro_grupo_") || matches!(code, "groups_need_rust_server" | "erro_contrato_mudou" | "erro_link_remoto")) { return None; }
-    let text = |v: &Value| v.as_str().map_or_else(|| v.to_string(), str::to_owned);
-    let params = envelope.get("params").and_then(Value::as_object).map(|p| p.iter().map(|(k, v)| (k.clone(), match v {
-        Value::Array(items) => items.iter().map(text).collect::<Vec<_>>().join("; "),
-        other => text(other),
-    })).collect()).unwrap_or_default();
+    envelope_text(envelope)
+}
+
+/// `{code, params}` pela frase do web; `None` = código sem frase.
+fn envelope_text(envelope: &Value) -> Option<String> {
+    let code = envelope.get("code")?.as_str()?;
+    let params = envelope.get("params").and_then(Value::as_object)
+        .map(|p| p.iter().map(|(k, v)| (k.clone(), param_text(v))).collect()).unwrap_or_default();
     crate::i18n::tr_web(code, &params)
+}
+
+/// Parâmetro como o `fmtParam` do web: lista com `; `, envelope traduzido (sem frase, o `msg`), `{sessao, erro}` como `sessao: erro`.
+fn param_text(v: &Value) -> String {
+    match v {
+        Value::Array(items) => items.iter().map(param_text).collect::<Vec<_>>().join("; "),
+        Value::String(s) => s.clone(),
+        Value::Object(o) if o.get("code").is_some_and(Value::is_string) => envelope_text(v)
+            .or_else(|| o.get("msg").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_else(|| o["code"].as_str().unwrap_or_default().to_owned()),
+        Value::Object(o) if o.contains_key("sessao") && o.contains_key("erro") => format!("{}: {}", param_text(&o["sessao"]), param_text(&o["erro"])),
+        other => other.to_string(),
+    }
+}
+
+/// Aviso de uma resposta que deu certo: a frase traduzida; código sem frase fica com o texto do servidor.
+pub fn warning_text(warning: &Value) -> String {
+    match warning {
+        Value::String(text) => text.clone(),
+        _ => envelope_text(warning).or_else(|| warning.get("msg").and_then(Value::as_str).map(str::to_owned)).unwrap_or_else(|| warning.to_string()),
+    }
 }
 
 /// A chave da frase de um código da abertura ou da troca de vida da sessão, e a da família dele.
@@ -1071,6 +1095,18 @@ mod tests {
         let warning = json!({"code": "erro_grupo_membro_nao_confirmado", "params": {"membros": ["casa::a", "casa::b"]}, "msg": "x"});
         let text = group_text(&warning).unwrap();
         assert!(text.contains("casa::a; casa::b"), "{text}");
+    }
+
+    #[test]
+    fn close_warning_translates_each_nested_reason_and_keeps_unknown_text() {
+        let need = crate::i18n::tr_web("groups_need_rust_server", &Default::default()).unwrap();
+        let warning = json!({"code": "erro_pareamento_saida_falhou", "msg": "aviso de saída falhou: s1: texto cru", "params": {"avisos": [
+            {"sessao": "s1", "erro": {"code": "groups_need_rust_server", "params": {}, "msg": "texto cru"}},
+            {"sessao": "s2", "erro": {"code": "codigo_sem_frase", "params": {}, "msg": "motivo do servidor"}}]}});
+        let text = warning_text(&warning);
+        assert!(text.contains(&format!("s1: {need}")), "{text}");
+        assert!(text.contains("s2: motivo do servidor") && !text.contains("texto cru"), "{text}");
+        assert_eq!(warning_text(&json!({"code": "codigo_sem_frase", "msg": "cru"})), "cru");
     }
 
     #[test]
