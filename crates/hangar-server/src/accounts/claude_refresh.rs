@@ -121,7 +121,7 @@ pub fn has_login(home: &Path) -> bool {
     let auth = oauth(home);
     let live = |field: &str| auth[field].as_f64().is_none_or(|ms| ms / 1000.0 > now());
     let present = |field: &str| auth[field].as_str().is_some_and(|s| !s.is_empty());
-    (present("accessToken") && auth["expiresAt"].is_number() && live("expiresAt"))
+    (present("accessToken") && live("expiresAt"))
         || (present("refreshToken") && live("refreshTokenExpiresAt"))
 }
 
