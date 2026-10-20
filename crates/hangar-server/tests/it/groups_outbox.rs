@@ -10,18 +10,26 @@ use hangar_server::groups::service::BoxFuture;
 use serde_json::json;
 
 /// Responde da fila de respostas e, vazia, com a última; guarda o que recebeu.
-struct Fake { answers: Mutex<VecDeque<Result<(), PeerError>>>, last: fn() -> Result<(), PeerError>, sent: Mutex<Vec<OutboxItem>>, called: tokio::sync::Notify }
+struct Fake {
+    answers: Mutex<VecDeque<Result<(), PeerError>>>, last: fn() -> Result<(), PeerError>, sent: Mutex<Vec<OutboxItem>>, called: tokio::sync::Notify,
+    failed: Mutex<Vec<(OutboxItem, String, bool)>>,
+}
 
 impl Fake {
     fn new(first: Vec<Result<(), PeerError>>, last: fn() -> Result<(), PeerError>) -> Arc<Fake> {
-        Arc::new(Fake { answers: Mutex::new(first.into()), last, sent: Mutex::default(), called: tokio::sync::Notify::new() })
+        Arc::new(Fake { answers: Mutex::new(first.into()), last, sent: Mutex::default(), called: tokio::sync::Notify::new(), failed: Mutex::default() })
     }
     fn ok() -> Arc<Fake> { Fake::new(vec![], || Ok(())) }
     fn down() -> Arc<Fake> { Fake::new(vec![], || Err(PeerError::Transport("lab inacessível".into()))) }
     fn sent(&self) -> Vec<OutboxItem> { self.sent.lock().unwrap().clone() }
+    fn failed(&self) -> Vec<(OutboxItem, String, bool)> { self.failed.lock().unwrap().clone() }
 }
 
 impl OutboxSend for Fake {
+    fn failed(&self, item: &OutboxItem, code: &str, _error: &PeerError, retry: bool) {
+        self.failed.lock().unwrap().push((item.clone(), code.to_owned(), retry));
+    }
+
     fn send<'a>(&'a self, item: &'a OutboxItem) -> BoxFuture<'a, Result<(), PeerError>> {
         Box::pin(async move {
             self.sent.lock().unwrap().push(item.clone());
@@ -294,6 +302,7 @@ async fn queue_cap_is_a_visible_error() {
 /// Segura o envio do `Push` até `gate` abrir; o `Dissolved` fica na fila (rede fora).
 struct Gate { gate: tokio::sync::Semaphore, started: tokio::sync::Notify, next: tokio::sync::Notify }
 impl OutboxSend for Gate {
+    fn failed(&self, _item: &OutboxItem, _code: &str, _error: &PeerError, _retry: bool) {}
     fn send<'a>(&'a self, item: &'a OutboxItem) -> BoxFuture<'a, Result<(), PeerError>> {
         Box::pin(async move {
             if !matches!(item, OutboxItem::Push { .. }) { self.next.notify_one(); return Err(PeerError::Transport("fora".into())); }
@@ -339,4 +348,33 @@ async fn enqueue_does_not_block_wait_during_write() {
     drain.join().unwrap();
     assert!(probe.is_ok(), "ler a fila esperou a escrita do disco");
     assert!(tokio::time::timeout(Duration::from_secs(5), outbox.wait("lab", "g", 1, DEADLINE)).await.is_ok());
+}
+
+/// Recusa definitiva tira o item da fila sem ninguém esperando (`Leave`, `Rename`): quem usa a
+/// fila é avisado com o item e o código. Nova tentativa (rede, token recusado) avisa uma vez por
+/// minuto por destino, não a cada volta da escada.
+#[tokio::test]
+async fn refusals_and_retries_reach_who_uses_the_queue() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fake = Fake::new(vec![Err(refused(404, Some("erro_grupo_inexistente")))], || Err(PeerError::Transport("fora".into())));
+    let outbox = open(&tmp, fake.clone(), &SHORT);
+    let leave = OutboxItem::Leave { owner: "rel-refusal".into(), gid: "g".into(), member: "a".into(), origin: "casa".into() };
+    let rename = OutboxItem::Rename { owner: "rel-refusal".into(), gid: "g".into(), from: "a".into(), to: "b".into(), origin: "casa".into() };
+    outbox.enqueue(vec![leave.clone(), rename.clone()]).unwrap();
+    for _ in 0..500 {
+        if fake.sent().len() >= 5 { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(fake.sent().len() >= 5, "a escada curta tenta de novo");
+    assert_eq!(fake.failed(), [(leave, "erro_grupo_inexistente".into(), false), (rename.clone(), "grupos.peer_inacessivel".into(), true)]);
+
+    let token = Fake::new(vec![], || Err(refused(401, None)));
+    let other = open(&tempfile::tempdir().unwrap(), token.clone(), &SHORT);
+    let rename = OutboxItem::Rename { owner: "rel-token".into(), gid: "g".into(), from: "a".into(), to: "b".into(), origin: "casa".into() };
+    other.enqueue(vec![rename.clone()]).unwrap();
+    for _ in 0..500 {
+        if token.sent().len() >= 3 { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(token.failed(), [(rename, "grupos.peer_token_recusado".into(), true)]);
 }

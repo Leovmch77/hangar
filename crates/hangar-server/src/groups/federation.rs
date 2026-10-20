@@ -91,7 +91,7 @@ pub fn forget(root: &Path) { ALL.lock().unwrap_or_else(|e| e.into_inner()).remov
 pub async fn of(st: &AppState, groups: &GroupService) -> Result<Arc<Federation>, Refusal> {
     let root = groups.pair_root().to_path_buf();
     if let Some(found) = existing(&root) { return Ok(found); }
-    let sender = Arc::new(Sender { peers: st.peers.clone(), dir: groups.dir() });
+    let sender = Arc::new(Sender { peers: st.peers.clone(), dir: groups.dir(), diag: st.diag.clone() });
     let opened = tokio::task::spawn_blocking(move || -> std::io::Result<Arc<Federation>> {
         let mut all = ALL.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(found) = all.get(&root) { return Ok(found.clone()); }
@@ -196,7 +196,7 @@ pub(super) fn members_from_sidecar(me: &str, name: &str, s: &Sidecar, outside: &
 
 // --- fila: o pedido HTTP de cada item --------------------------------------------------------
 
-struct Sender { peers: Arc<PeerClient>, dir: Arc<PairDir> }
+struct Sender { peers: Arc<PeerClient>, dir: Arc<PairDir>, diag: crate::diag::DiagClient }
 
 /// Corpo do `PUT /api/groups/{gid}` montado do registro na hora do envio: a versão que sai é
 /// sempre a atual, e só entra em `joining` quem ainda é membro naquela máquina.
@@ -233,6 +233,16 @@ impl OutboxSend for Sender {
             };
             self.peers.call_group(server, method, &path, Some(&body)).await.map(drop)
         })
+    }
+
+    fn failed(&self, item: &OutboxItem, code: &str, error: &PeerError, retry: bool) {
+        let (server, gid, kind) = (item.destination(), item.gid(), item.kind());
+        if retry {
+            return tracing::warn!(code, %server, %gid, kind, error = %error.text(server), "groups: o item da fila não saiu e fica nela");
+        }
+        tracing::warn!(code = "grupos.recusado", %server, %gid, kind, refusal = %code, "groups: a outra máquina recusou o item da fila");
+        // Sem quem espere (saída, renomeação, par de fora, dissolução), a recusa só aparece aqui.
+        self.diag.report("rust.groups_outbox_refused", &format!("{kind}:{server}:{gid}"), code, "a outra máquina recusou o item da fila, que saiu dela sem efeito");
     }
 }
 

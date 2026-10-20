@@ -45,6 +45,17 @@ impl OutboxItem {
         }
     }
 
+    /// O `kind` gravado no disco.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            OutboxItem::Push { .. } => "push",
+            OutboxItem::Dissolved { .. } => "dissolved",
+            OutboxItem::Leave { .. } => "leave",
+            OutboxItem::Rename { .. } => "rename",
+            OutboxItem::Outside { .. } => "outside",
+        }
+    }
+
     fn is_push_to(&self, to: &str, of: &str) -> bool {
         matches!(self, OutboxItem::Push { server, gid, .. } if server == to && gid == of)
     }
@@ -86,6 +97,9 @@ pub enum Verdict { Retry, Refused(String) }
 /// Entrega um item à máquina dele; o erro decide, por `verdict`, se a fila tenta de novo.
 pub trait OutboxSend: Send + Sync {
     fn send<'a>(&'a self, item: &'a OutboxItem) -> BoxFuture<'a, Result<(), PeerError>>;
+    /// O envio falhou com `code`: `retry` = o item fica na fila (chamado no máximo uma vez por
+    /// minuto por destino e código); senão a recusa definitiva já o tirou dela.
+    fn failed(&self, item: &OutboxItem, code: &str, error: &PeerError, retry: bool);
 }
 
 pub const MAX_PER_DESTINATION: usize = 1000;
@@ -369,18 +383,18 @@ impl Inner {
                 Ok(()) => Some(Delivery::Confirmed),
                 Err(error) => match verdict(&error) {
                     Verdict::Refused(code) => {
-                        tracing::warn!(code = "grupos.recusado", server = %dest, refusal = %code, "groups: a outra máquina recusou o item da fila");
+                        self.sender.failed(&entry.item, &code, &error, false);
                         Some(Delivery::Refused { code })
                     }
                     Verdict::Retry => {
-                        let quiet = match error {
-                            PeerError::Unknown => Some(("grupos.peer_desconhecido", "groups: máquina fora do peers.json, o item fica na fila")),
-                            PeerError::OldVersion => Some(("grupos.peer_versao_antiga", "groups: máquina sem grupo entre máquinas, o item fica na fila")),
-                            _ => None,
+                        let code = match error {
+                            PeerError::Unknown => "grupos.peer_desconhecido",
+                            PeerError::OldVersion => "grupos.peer_versao_antiga",
+                            PeerError::Refused { status: 401, .. } => "grupos.peer_token_recusado",
+                            PeerError::Transport(_) => "grupos.peer_inacessivel",
+                            _ => "grupos.peer_indisponivel",
                         };
-                        if let Some((code, text)) = quiet && crate::warn_limit::allow(Some(&dest), code) {
-                            tracing::warn!(code, server = %dest, "{text}");
-                        }
+                        if crate::warn_limit::allow(Some(&dest), code) { self.sender.failed(&entry.item, code, &error, true); }
                         None
                     }
                 },
