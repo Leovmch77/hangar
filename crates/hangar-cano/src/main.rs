@@ -17,24 +17,37 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::process::{ChildStderr, ChildStdin, Command};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use protocol::Tracker;
 
-async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R, limit: usize) -> io::Result<Option<Vec<u8>>> {
+enum Frame {
+    Line(Vec<u8>),
+    /// Linha acima do teto, já consumida até o `\n` sem ser guardada; o valor é o tamanho dela sem o `\n`.
+    Oversized(usize),
+}
+
+async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R, limit: usize) -> io::Result<Option<Frame>> {
     let mut frame = Vec::new();
+    let mut skipped: Option<usize> = None;
     loop {
         let bytes = reader.fill_buf().await?;
-        if bytes.is_empty() { return Ok(None); }
+        if bytes.is_empty() { return Ok(skipped.map(Frame::Oversized)); }
         let end = bytes.iter().position(|b| *b == b'\n');
         let take = end.map_or(bytes.len(), |n| n + 1);
-        if frame.len() + take > limit + 1 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "linha acima do teto"));
+        if let Some(size) = skipped.as_mut() {
+            *size += take;
+        } else if frame.len() + take > limit + 1 {
+            skipped = Some(frame.len() + take);
+            frame = Vec::new();
+        } else {
+            frame.extend_from_slice(&bytes[..take]);
         }
-        frame.extend_from_slice(&bytes[..take]);
         reader.consume(take);
-        if end.is_some() { return Ok(Some(frame)); }
+        if end.is_some() {
+            return Ok(Some(match skipped { Some(size) => Frame::Oversized(size - 1), None => Frame::Line(frame) }));
+        }
     }
 }
 
@@ -208,19 +221,30 @@ fn send_exit(st: &mut State, inner: &Arc<Inner>) {
 
 // ── filho (cano.py:67-101) ─────────────────────────────────────────────────────────────────
 
-async fn pump_stdout(
+async fn pump_stdout<R: AsyncRead + Unpin>(
     inner: Arc<Inner>,
-    out: ChildStdout,
+    out: R,
     stderr_task: tokio::task::JoinHandle<()>,
     mut rc: watch::Receiver<Option<i64>>,
+    kill: oneshot::Sender<()>,
 ) {
     let mut r = BufReader::new(out);
     loop {
         let buf = match read_frame(&mut r, protocol::MAX_FRAME).await {
             Ok(None) => break,
-            Ok(Some(buf)) => buf,
+            Ok(Some(Frame::Line(buf))) => buf,
+            // O eco de um tool_result enorme (`--replay-user-messages`) passa do teto: só ele se perde.
+            Ok(Some(Frame::Oversized(size))) => {
+                log(&format!("linha do claude acima do teto pulada: {size} bytes"));
+                continue;
+            }
             Err(e) => {
-                log(&format!("leitura do stdout do claude falhou: {e}"));
+                // Sem leitor o filho trava no pipe cheio e a sessão fica em `working`: derrubá-lo faz o
+                // `cano_saiu` chegar com o motivo na cauda do stderr.
+                let reason = format!("leitura do stdout do claude falhou: {e}");
+                log(&reason);
+                push_stderr(&mut inner.state(), &reason);
+                let _ = kill.send(());
                 break;
             }
         };
@@ -256,13 +280,16 @@ async fn pump_stderr(inner: Arc<Inner>, err: ChildStderr) {
         if line.is_empty() {
             continue;
         }
-        let mut st = inner.state();
-        if st.stderr_tail.len() == STDERR_TAIL {
-            st.stderr_tail.pop_front();
-        }
-        st.stderr_tail.push_back(line.to_owned());
-        st.send(protocol::stderr_line(line));
+        push_stderr(&mut inner.state(), line);
     }
+}
+
+fn push_stderr(st: &mut State, line: &str) {
+    if st.stderr_tail.len() == STDERR_TAIL {
+        st.stderr_tail.pop_front();
+    }
+    st.stderr_tail.push_back(line.to_owned());
+    st.send(protocol::stderr_line(line));
 }
 
 /// Código de saída como o `Popen.returncode`: sinal vira negativo, e no Windows o DWORD fica sem sinal.
@@ -291,7 +318,7 @@ where
     let mut r = BufReader::new(r);
     let Some(token) = &inner.token else { return };
     let header = match tokio::time::timeout(TOKEN_DEADLINE, read_frame(&mut r, 4096)).await {
-        Ok(Ok(Some(buf))) => buf,
+        Ok(Ok(Some(Frame::Line(buf)))) => buf,
         _ => return,
     };
     let header = String::from_utf8_lossy(&header);
@@ -388,7 +415,8 @@ async fn read_client<R: AsyncRead + Unpin>(
             r = read_frame(&mut r, protocol::MAX_ENVELOPE) => r,
             _ = alive.changed() => return,
         };
-        let buf = match read { Ok(Some(buf)) => buf, _ => return };
+        // Envelope acima do teto derruba o cliente, como antes: o servidor nunca manda um.
+        let buf = match read { Ok(Some(Frame::Line(buf))) => buf, _ => return };
         let Ok(envelope) = serde_json::from_slice::<serde_json::Value>(&buf) else { continue };
         if !envelope.is_object() { continue; }
         let (line, operation) = if envelope["type"] == "cano_input" {
@@ -568,8 +596,17 @@ async fn run(args: Args) -> i32 {
         pid,
     });
     let (rc_tx, rc_rx) = watch::channel(None);
+    let (kill_tx, mut kill_rx) = oneshot::channel();
     tokio::spawn(async move {
-        let code = match child.wait().await {
+        // Só um pedido explícito mata: o remetente caído (stdout em EOF) não conta.
+        let status = tokio::select! {
+            status = child.wait() => status,
+            Ok(()) = &mut kill_rx => {
+                let _ = child.start_kill();
+                child.wait().await
+            }
+        };
+        let code = match status {
             Ok(status) => exit_code(status),
             Err(e) => {
                 log(&format!("espera do claude falhou: {e}"));
@@ -579,7 +616,7 @@ async fn run(args: Args) -> i32 {
         let _ = rc_tx.send(Some(code));
     });
     let stderr_task = tokio::spawn(pump_stderr(inner.clone(), stderr));
-    tokio::spawn(pump_stdout(inner.clone(), stdout, stderr_task, rc_rx.clone()));
+    tokio::spawn(pump_stdout(inner.clone(), stdout, stderr_task, rc_rx.clone(), kill_tx));
     log(&format!("claude pid={pid}"));
     tokio::spawn(accept_loop(listener, inner.clone()));
     #[cfg(unix)]
@@ -644,6 +681,38 @@ mod tests {
         assert_eq!(a.listen, "tcp:127.0.0.1:1");
         assert_eq!(a.log, None);
         assert_eq!(a.argv, ["claude", "--log", "z"].map(OsString::from));
+    }
+
+    struct Broken;
+    impl AsyncRead for Broken {
+        fn poll_read(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>, _: &mut tokio::io::ReadBuf<'_>)
+            -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Err(io::Error::other("pipe quebrado")))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stdout_read_error_kills_the_child_and_the_reason_reaches_the_server() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (alive, _) = watch::channel(());
+        let mut state = State::default();
+        state.client = Some(Client { id: 1, tx, queued: Arc::new(AtomicUsize::new(0)), full_warned: false, _alive: alive });
+        let inner = Arc::new(Inner { state: Mutex::new(state), stdin: tokio::sync::Mutex::new(None),
+            delivered: Notify::new(), token: None, pid: 0 });
+        let (rc_tx, rc_rx) = watch::channel(None);
+        let (kill_tx, kill_rx) = oneshot::channel();
+        tokio::spawn(pump_stdout(inner, Broken, tokio::spawn(async {}), rc_rx, kill_tx));
+        let wait = Duration::from_secs(5);
+        assert!(tokio::time::timeout(wait, kill_rx).await.unwrap().is_ok(), "o filho preso no pipe cheio é derrubado");
+        let Some(Out::Line(line)) = tokio::time::timeout(wait, rx.recv()).await.unwrap() else { panic!("sem aviso") };
+        let line: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(line["type"], "cano_stderr");
+        assert!(line["linha"].as_str().unwrap().contains("pipe quebrado"), "{line}");
+        rc_tx.send(Some(-9)).unwrap();
+        let Some(Out::Exit(exit)) = tokio::time::timeout(wait, rx.recv()).await.unwrap() else { panic!("sem cano_saiu") };
+        let exit: serde_json::Value = serde_json::from_str(&exit).unwrap();
+        assert_eq!(exit["rc"], -9);
+        assert!(exit["stderr_tail"][0].as_str().unwrap().contains("pipe quebrado"), "{exit}");
     }
 
     #[test]
