@@ -34,7 +34,8 @@ use crate::session_write::{BODY_LIMIT, busy_body, detail_body, invalid_body, jso
 use crate::transcript::py::{py_repr, py_str};
 
 pub(super) use super::text::PREFIX;
-pub(super) const MIX_MSG: &str = "pareamento cross-server é 1:1 (uma sessão local + um peer remoto); uma sessão já pareada cross-server não entra em grupo local nem pareia com outro remoto";
+/// Toda recusa `Mix` vem do par 1:1 antigo com outra máquina (sidecar sem `fed`), que ainda não virou grupo.
+pub(super) const MIX_MSG: &str = "sessão em par 1:1 antigo com outra máquina não entra em grupo local nem recebe outro par; desfaça e refaça o par ou atualize o Hangar da outra máquina";
 const ORQ_MSG: &str = "o orquestrador não recebe mensagens; fale com o árbitro";
 /// `_group_unavailable` do Python.
 const UNAVAILABLE_MSG: &str = "os grupos estão indisponíveis agora";
@@ -416,23 +417,6 @@ pub(super) async fn contract(State(st): State<Arc<AppState>>, ConnectInfo(peer):
     let Some(link) = link else {
         return asked.refuse(StatusCode::NOT_FOUND, "erro_sessao_nao_pareada", "sessão não está pareada", json!({}));
     };
-    if link.fed.is_some() { return super::fed_notice::session_contract(&asked, &link).await; }
-    let path = asked.groups.contract_path(&link.gid);
-    let shown = path.to_string_lossy().into_owned();
-    // Ausente = contrato ainda vazio, como no Python; ilegível é falha, nunca "vazio".
-    let read = tokio::task::spawn_blocking(move || match std::fs::read_to_string(path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        other => other,
-    }).await;
-    match read {
-        Ok(Ok(content)) => asked.reply(StatusCode::OK, json!({"peers": link.peers, "path": shown, "content": content})),
-        Ok(Err(error)) => {
-            tracing::error!(code = "groups_contract_unreadable", session = %asked.name, %error, "groups: o contrato do grupo não foi lido");
-            asked.refuse(StatusCode::INTERNAL_SERVER_ERROR, "erro_grupo_indisponivel", UNAVAILABLE_MSG, json!({"detalhe": "groups_contract_unreadable"}))
-        }
-        Err(error) => {
-            tracing::error!(code = "groups_contract_unreadable", session = %asked.name, %error, "groups: a leitura do contrato não rodou");
-            asked.refuse(StatusCode::INTERNAL_SERVER_ERROR, "erro_grupo_indisponivel", UNAVAILABLE_MSG, json!({"detalhe": "groups_contract_unreadable"}))
-        }
-    }
+    // Também o grupo de uma máquina: a leitura leva o `mtime` que a gravação exige.
+    super::fed_notice::session_contract(&asked, &link).await
 }

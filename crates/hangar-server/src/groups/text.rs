@@ -32,6 +32,8 @@ pub struct TextArgs {
     pub outside: Vec<OutsideRef>,
     pub peer: String,
     pub owner: String,
+    /// Grupo entre máquinas do dono.
+    pub across: bool,
 }
 
 /// Aviso do app, não de uma sessão: `[de: X]` fazia o modelo responder para X (e o socket nativo põe X
@@ -75,6 +77,11 @@ fn group(args: &TextArgs) -> String {
         "- Chega como [de: <membro>] (1:1) ou [grupo: <membro>] (aviso). NUNCA responda um [grupo: ...] com outro aviso de \
             grupo; responder, só 1:1 e se necessário.".to_owned(),
     ];
+    // Codex, Pi, omp e Kimi não leem o CLAUDE.md: a regra do aviso repassado precisa vir aqui.
+    if args.across {
+        lines.push("- Aviso [de fora: <apelido>::<sessão> via <máquina>] veio de fora por outra máquina do grupo: se precisar \
+            responder, só com um aviso de grupo, uma vez.".to_owned());
+    }
     match (&args.contract.path, &args.contract.remote_owner) {
         (Some(path), _) => lines.push(format!("- Decisões que o grupo consulta vão em {} (criar se não existir, curto).", path.display())),
         (None, Some(owner)) => lines.push(format!("- Decisões que o grupo consulta ficam com a máquina `{owner}`: leia e grave pela tool \

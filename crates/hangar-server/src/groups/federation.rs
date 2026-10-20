@@ -34,8 +34,8 @@ use crate::session_write::{BODY_LIMIT, detail_body, json_response};
 
 pub use super::outbox::Outbox;
 
-/// Quanto a dona espera cada participante confirmar. Menor que o prazo total de 16 s do
-/// `PeerClient`: quem chamou a dona de outra máquina recebe a resposta antes de desistir dela.
+/// Quanto a dona espera cada participante confirmar. Menor que `peers::OWNER_WAIT_TIMEOUT`, o prazo
+/// de quem chamou a dona de outra máquina: a resposta chega antes de ele desistir dela.
 pub const JOIN_WAIT: Duration = Duration::from_secs(12);
 
 pub struct Federation {
@@ -380,6 +380,7 @@ fn base_record(dir: &PairDir, me: &str, gid: &str, outside: &HashSet<String>, al
     if locals.iter().any(|(_, s)| s.fed.as_ref().is_some_and(|f| f.owner != me)) {
         return Err(no(StatusCode::NOT_FOUND, "erro_grupo_inexistente", "grupo inexistente nesta máquina", json!({"gid": gid})));
     }
+    for (_, s) in &locals { legacy_refusal(s, outside)?; }
     let Some((_, first)) = locals.first() else { return Ok(None) };
     let mut record = GroupRecord { protocol: PROTOCOL, gid: gid.into(), owner: me.into(), version: 0,
         task: first.task.clone().unwrap_or_default(), members: Vec::new(), outside: Vec::new() };
@@ -403,6 +404,7 @@ fn plan_owner(dir: &PairDir, me: &str, ask: &JoinAsk, outside: &HashSet<String>,
             let Some(s) = local(&m.name) else { return Ok(String::new()) };
             if s.orq { return Err(orq_refusal()); }
             if s.fed.as_ref().is_some_and(|f| f.owner != me) { return Err(owners_refusal()); }
+            legacy_refusal(&s, outside)?;
             return Ok(s.gid);
         }
         Ok(records.iter().find(|r| r.owner == me && r.members.iter().any(|x| same(x, m))).map(|r| r.gid.clone()).unwrap_or_default())
@@ -486,6 +488,15 @@ fn orq_refusal() -> Refusal {
     no(StatusCode::CONFLICT, "erro_grupo_orq_entre_maquinas", "grupo de orquestração não se estende a outra máquina", json!({}))
 }
 
+/// Par 1:1 antigo com outra máquina do dono que não converteu (ela está fora ou em versão antiga):
+/// o grupo novo o deixaria para trás sem aviso.
+fn legacy_refusal(s: &Sidecar, outside: &HashSet<String>) -> Result<(), Refusal> {
+    let Some(peer) = s.peers.iter().find(|p| s.fed.is_none() && is_remote(p) && !outside.contains(*p)) else { return Ok(()) };
+    let server = peer.split_once("::").map_or(peer.as_str(), |(srv, _)| srv);
+    Err(no(StatusCode::CONFLICT, "erro_grupo_par_antigo",
+        &format!("há um par antigo com {server}: desfaça e refaça o par com {server} ou atualize o Hangar dela"), json!({"servidor": server})))
+}
+
 fn owners_refusal() -> Refusal {
     no(StatusCode::CONFLICT, "erro_grupo_fusao_entre_donos", "os grupos têm máquinas donas diferentes e não se juntam", json!({}))
 }
@@ -507,8 +518,9 @@ fn restore_sidecars(dir: &PairDir, before: &Snapshot) {
     }
 }
 
-fn remember(dir: &PairDir, me: &str) {
-    if matches!(dir.self_id(), Ok(None))
+/// Só depois de `identity_ok` passar: id gravado diferente aqui é troca sem grupo vivo, e vale o atual.
+pub(super) fn remember(dir: &PairDir, me: &str) {
+    if dir.self_id().ok().flatten().as_deref() != Some(me)
         && let Err(error) = dir.remember_self(me) {
         tracing::warn!(code = "groups_identity_not_saved", %error, "groups: o id desta máquina não foi gravado");
     }
@@ -549,7 +561,7 @@ fn apply_owner(dir: &PairDir, outbox: &Outbox, me: &str, plan: &OwnerPlan) -> Re
 
 /// Entrada no grupo, na dona. Quem não confirma no prazo sai do registro; ninguém confirmado e
 /// alguém de outra máquina pedido = 502 e o grupo volta ao que era.
-pub async fn owner_join(st: &AppState, groups: &GroupService, mut ask: JoinAsk) -> Result<JoinDone, Refusal> {
+pub async fn owner_join(st: &Arc<AppState>, groups: &Arc<GroupService>, mut ask: JoinAsk) -> Result<JoinDone, Refusal> {
     let me = groups.server_id().to_owned();
     if me.is_empty() { return Err(no(StatusCode::BAD_REQUEST, "erro_pareamento_server_id_ausente", NO_SERVER_ID, json!({}))); }
     let fed = of(st, groups).await?;
@@ -622,10 +634,15 @@ pub async fn owner_join(st: &AppState, groups: &GroupService, mut ask: JoinAsk) 
     for gone in &unconfirmed {
         if let Some(r) = super::fed_exit::remove_and_dissolve(st, groups, &gid, gone).await? { record = r; }
     }
-    // Avisos e acesso de fora depois de tudo gravado, só a quem ficou.
-    let alive: Vec<String> = plan.newcomers.iter().filter(|n| record.members.iter().any(|m| m.server == me && &&m.name == n)).cloned().collect();
-    tell_newcomers(st, groups, &me, &record, &alive).await;
+    // Acesso de fora depois de tudo gravado, só a quem ficou; é disco, e a falha volta a quem pediu.
     let access_failed = grant_locals(st, groups, &me, &record).await;
+    // O protocolo sai depois da resposta: uma sessão lenta faria quem pediu desistir do grupo já
+    // gravado. Falha vai ao diário daqui.
+    let alive: Vec<String> = plan.newcomers.iter().filter(|n| record.members.iter().any(|m| m.server == me && &&m.name == n)).cloned().collect();
+    if !alive.is_empty() {
+        let (st, groups, me, told) = (st.clone(), groups.clone(), me.clone(), record.clone());
+        tokio::spawn(async move { tell_newcomers(&st, &groups, &me, &told, &alive).await });
+    }
     Ok(JoinDone { gid, version: record.version, task: record.task.clone(), members: record.members.clone(), unconfirmed, access_failed })
 }
 
@@ -671,21 +688,29 @@ async fn undo_owner(groups: &GroupService, fed: &Federation, plan: &OwnerPlan) -
 
 /// Tira `who` do grupo `gid` desta dona: registro com versão nova, o membro fora dos `joining`
 /// pendentes no mesmo passo, sidecars daqui e o grupo empurrado de novo (inclusive à máquina dele,
-/// que pode ter aplicado o join atrasado). Devolve o registro novo; sem registro, `None`.
-pub async fn remove_member(st: &AppState, groups: &GroupService, gid: &str, who: &Member) -> Result<Option<GroupRecord>, Refusal> {
+/// que pode ter aplicado o join atrasado). Devolve o registro novo e quem daqui ficou sem ninguém
+/// (sidecar apagado); sem registro, `None`.
+pub async fn remove_member(st: &AppState, groups: &GroupService, gid: &str, who: &Member) -> Result<Option<(GroupRecord, Vec<String>)>, Refusal> {
     let me = groups.server_id().to_owned();
     let fed = of(st, groups).await?;
     let (dir, outbox, gid, who) = (Arc::new(pair_dir(groups)), fed.outbox.clone(), gid.to_owned(), who.clone());
-    let done = groups.locked(blocking(move || -> Result<Option<GroupRecord>, Refusal> {
+    let done = groups.locked(blocking(move || -> Result<Option<(GroupRecord, Vec<String>)>, Refusal> {
         let Some(mut record) = dir.record(&gid).map_err(store_refusal)?.filter(|r| r.owner == me) else { return Ok(None) };
         record.members.retain(|m| !same(m, &who));
         record.version += 1;
         dir.write_record(&record).map_err(store_refusal)?;
         outbox.cancel_joining(&who.server, &gid, &who.name).map_err(store_refusal)?;
         let gone = view(&me, &who);
+        let mut alone = Vec::new();
         for m in record.members.iter().filter(|m| m.server == me) {
             if let Some(mut s) = read(&dir, &m.name).filter(|s| s.gid == gid) {
                 s.peers.retain(|p| *p != gone);
+                // Sem peers o sidecar já não vale como grupo: a dissolução não o veria para apagar e avisar.
+                if s.peers.is_empty() && !s.orq {
+                    dir.clear_sidecar(&m.name).map_err(store_refusal)?;
+                    alone.push(m.name.clone());
+                    continue;
+                }
                 s.fed = Some(Fed { owner: me.clone(), local: true, version: record.version });
                 dir.write_sidecar(&m.name, &s).map_err(store_refusal)?;
             }
@@ -695,7 +720,7 @@ pub async fn remove_member(st: &AppState, groups: &GroupService, gid: &str, who:
         if who.server != me { servers.insert(who.server.clone()); }
         outbox.enqueue(servers.into_iter().map(|server| OutboxItem::Push { server, gid: gid.clone(), version: record.version, joining: Vec::new(), origin: me.clone() }).collect())
             .map_err(store_refusal)?;
-        Ok(Some(record))
+        Ok(Some((record, alone)))
     })).await??;
     groups.changed();
     Ok(done)
@@ -765,7 +790,7 @@ async fn tell_newcomers(st: &AppState, groups: &GroupService, me: &str, record: 
         let Some(mine) = record.members.iter().find(|m| m.server == me && &m.name == n) else { continue };
         let args = TextArgs { me: n.clone(), others: record.members.iter().filter(|m| !same(m, mine)).map(|m| view(me, m)).collect(),
             task: record.task.clone(), harness: BTreeMap::from([(n.clone(), if mine.provider.is_empty() { "claude".into() } else { mine.provider.clone() })]),
-            contract: contract.clone(), ..Default::default() };
+            contract: contract.clone(), across: true, ..Default::default() };
         let sent = match protocol_text(Kind::Group, &args) { Ok(text) => deliver_text(st, n, &text).await, Err(e) => Err(e) };
         if let Err(error) = sent {
             tracing::warn!(code = "groups_protocol_not_delivered", session = %n, error = %error["code"], "groups: o protocolo não chegou ao membro novo");
@@ -1123,16 +1148,36 @@ struct RemoteDone { gid: String, version: u64, #[serde(default)] task: String, m
 // --- subida ----------------------------------------------------------------------------------
 
 /// Na subida: a dona reenvia cada registro dela; a participante pede à dona cada grupo em que tem
-/// membro e aplica. Com o id trocado nada sai (o diário já disse por quê).
+/// membro e aplica. Com o id trocado a subida nem abre a fila (o diário já disse por quê).
 pub fn spawn(st: Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
     let groups = st.groups.clone()?;
     if groups.server_id().is_empty() { return None; }
     Some(tokio::spawn(async move {
         let me = groups.server_id().to_owned();
         let dir = Arc::new(pair_dir(&groups));
-        let Ok(fed) = of(&st, &groups).await else { return };
-        let read = { let (dir, me) = (dir.clone(), me.clone()); blocking(move || (identity_ok(&dir, &me).is_ok(), dir.records(), dir.sidecars())).await };
-        let Ok((true, Ok(records), Ok(sidecars))) = read else { return };
+        let read = { let (dir, me) = (dir.clone(), me.clone()); blocking(move || (identity_ok(&dir, &me).map(drop), dir.records(), dir.sidecars())).await };
+        let (records, sidecars) = match read {
+            Ok((Ok(()), Ok(records), Ok(sidecars))) => (records, sidecars),
+            Ok((Err(Refusal(_, body)), _, _)) => {
+                tracing::warn!(code = "groups_startup_skipped", detail = %body["detail"]["code"], "groups: a subida não reenviou nem pediu grupos");
+                return;
+            }
+            Ok((_, Err(error), _) | (_, _, Err(error))) => {
+                tracing::warn!(code = "groups_startup_skipped", %error, "groups: a subida não leu registros ou sidecars; nada reenviado");
+                return;
+            }
+            Err(Refusal(_, body)) => {
+                tracing::warn!(code = "groups_startup_skipped", detail = %body["detail"]["code"], "groups: a leitura da subida não rodou");
+                return;
+            }
+        };
+        let fed = match of(&st, &groups).await {
+            Ok(fed) => fed,
+            Err(Refusal(_, body)) => {
+                tracing::warn!(code = "groups_startup_skipped", detail = %body["detail"]["params"]["detalhe"], "groups: a fila não abriu na subida");
+                return;
+            }
+        };
         let pushes = super::outbox::restart_pushes(&records, &me);
         if !pushes.is_empty() {
             let outbox = fed.outbox.clone();
@@ -1180,14 +1225,17 @@ pub async fn serve_forwarded(st: Arc<AppState>, peer: SocketAddr, mut req: Reque
     let (method, path) = (req.method().clone(), req.uri().path().to_owned());
     let state = State(st);
     let info = ConnectInfo(peer);
-    if path.starts_with("/api/sessions/") { return session_group(state, info, req).await; }
-    if path.rsplit_once('/').is_some_and(|(_, tail)| super::fed_notice::owns_tail(tail)) {
-        return super::fed_notice::serve_forwarded(state.0, peer, req).await;
-    }
-    match (method, path.ends_with("/ops")) {
-        (axum::http::Method::POST, true) => ops(state, info, req).await,
-        (axum::http::Method::GET, false) => get_record(state, info, req).await,
-        (axum::http::Method::PUT, false) => put_record(state, info, req).await,
-        _ => reply(no(StatusCode::METHOD_NOT_ALLOWED, "erro_metodo_nao_permitido", "método não aceito nesta rota", json!({}))),
-    }
+    // O Python segura este pedido: recado a sessão dele volta na resposta, nunca chamado daqui.
+    super::bridge::deferring(async move {
+        if path.starts_with("/api/sessions/") { return session_group(state, info, req).await; }
+        if path.rsplit_once('/').is_some_and(|(_, tail)| super::fed_notice::owns_tail(tail)) {
+            return super::fed_notice::serve_forwarded(state.0, peer, req).await;
+        }
+        match (method, path.ends_with("/ops")) {
+            (axum::http::Method::POST, true) => ops(state, info, req).await,
+            (axum::http::Method::GET, false) => get_record(state, info, req).await,
+            (axum::http::Method::PUT, false) => put_record(state, info, req).await,
+            _ => reply(no(StatusCode::METHOD_NOT_ALLOWED, "erro_metodo_nao_permitido", "método não aceito nesta rota", json!({}))),
+        }
+    }).await
 }

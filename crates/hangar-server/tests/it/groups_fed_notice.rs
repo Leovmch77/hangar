@@ -111,6 +111,7 @@ async fn reach(m: &Machine, names: &[&str], n: usize) {
 async fn group(n: &Net) -> String {
     let (status, body) = call(n.casa.addr, "POST", "/api/sessions/s0/pair", Some(&json!({"peers": ["s1", "lab::s2", "vm::s3"]}))).await;
     assert_eq!(status, 200, "{body}");
+    reach(&n.casa, &["s0", "s1"], 1).await;
     reach(&n.lab, &["s2"], 1).await;
     reach(&n.vm, &["s3"], 1).await;
     body["gid"].as_str().unwrap().to_owned()
@@ -347,6 +348,7 @@ async fn owner_down_same_machine_still_delivers() {
     let n = net().await;
     let (status, body) = call(n.casa.addr, "POST", "/api/sessions/s0/pair", Some(&json!({"peers": ["lab::s2", "lab::s3"]}))).await;
     assert_eq!(status, 200, "{body}");
+    reach(&n.casa, &["s0"], 1).await;
     reach(&n.lab, &["s2", "s3"], 1).await;
     peers(&n.lab, &[("casa", closed_port().await), ("vm", n.vm.addr)]);
     let (status, body) = say(&n.lab, "s2", "oi").await;

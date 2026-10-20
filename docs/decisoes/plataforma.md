@@ -2381,6 +2381,16 @@ Antes, parear com `servidor::sessao` fazia um par 1:1 que não crescia, e `--gro
 - **Limites registrados.** Só o Claude reinjeta o protocolo depois de `/clear` ou compactação
   (Codex, Pi, omp e Kimi perdem). A sugestão de tarefa do grupo (`/api/pair/task-suggestion`,
   Python) só lê conversas desta máquina.
+- **Pela 8768, recado a sessão do Python volta na resposta.** `group.leave` da ponte e as rotas
+  `/api/groups/*` repassadas da porta do Connect rodam sob o contexto da ponte: recado a Pi, omp
+  ou Kimi não chama o `/input` do Python dentro do pedido dele. Na saída vem em `deliveries`; nas
+  rotas entre máquinas, em `hangar_deliveries` no corpo, que o Python tira da resposta e entrega
+  depois dela (falha vai ao diário como `grupos.entrega_adiada_falhou`). Limites aceitos: nessas
+  rotas o recado adiado conta como entregue em `failed`/`pulados`; o `orq` (`is-orchestrator`,
+  fase, promoção) ainda é perguntado ao Python dentro do pedido, porque a outra máquina não manda
+  esses fatos; e o protocolo ao membro novo e o aviso de saída que saem depois da resposta
+  (`tell_newcomers`, `local_apply`, `relay_outside`) chamam o Python direto, fora do pedido.
+  Prova: `bridged_leave_never_calls_python`, `connect_forwarded_deliver_defers_python_sessions`.
 
 ## Organização opcional do ditado no Rust
 

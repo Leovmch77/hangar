@@ -47,6 +47,8 @@ struct RouteFacts { orchestrators: Vec<String>, #[serde(default)] phases: std::c
 /// vieram no corpo, e o que só o Python faz (entregar a sessão que ele atende, promover o time) volta
 /// na resposta para ele fazer depois, num sentido.
 pub(crate) struct BridgeCtx {
+    /// Sem fatos (repasse da 8768), o `orq` ainda é perguntado ao Python; só as entregas esperam.
+    facts: bool,
     orchestrators: std::collections::HashSet<String>,
     phases: std::collections::HashMap<String, Value>,
     deliveries: std::sync::Mutex<Vec<Value>>,
@@ -57,6 +59,39 @@ tokio::task_local! { static CTX: Arc<BridgeCtx>; }
 
 /// O pedido da ponte em curso nesta tarefa, se há um.
 pub(crate) fn current() -> Option<Arc<BridgeCtx>> { CTX.try_with(Arc::clone).ok() }
+
+/// O pedido da ponte em curso que trouxe os fatos do `orq`.
+pub(crate) fn facts() -> Option<Arc<BridgeCtx>> { current().filter(|c| c.facts) }
+
+impl BridgeCtx {
+    fn new(facts: bool, orchestrators: Vec<String>, phases: std::collections::HashMap<String, Value>) -> Arc<BridgeCtx> {
+        Arc::new(BridgeCtx { facts, orchestrators: orchestrators.into_iter().collect(), phases, deliveries: Default::default(), post: Default::default() })
+    }
+
+    fn take_deliveries(&self) -> Vec<Value> { std::mem::take(&mut *self.deliveries.lock().unwrap_or_else(|e| e.into_inner())) }
+}
+
+/// Rota entre máquinas que o Python repassou da 8768: o recado a sessão que só ele atende volta no
+/// corpo (`hangar_deliveries`), para ele entregar depois de responder.
+pub(crate) async fn deferring(handler: impl std::future::Future<Output = Response>) -> Response {
+    let ctx = BridgeCtx::new(false, Vec::new(), Default::default());
+    let resp = CTX.scope(ctx.clone(), handler).await;
+    let deliveries = ctx.take_deliveries();
+    if deliveries.is_empty() { return resp; }
+    let (mut parts, body) = resp.into_parts();
+    let mut value = match to_bytes(body, MAX_REPLY).await.ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
+        Some(v) if v.is_object() => v,
+        _ => {
+            // Sem corpo para levar as entregas: elas se perderiam caladas.
+            tracing::error!(code = "groups_deferred_lost", count = deliveries.len(), "groups: recado adiado sem corpo de resposta para voltar ao Python");
+            return crate::session_write::json_response(StatusCode::INTERNAL_SERVER_ERROR,
+                crate::session_write::detail_body("erro_grupo_indisponivel", "os grupos estão indisponíveis agora", json!({"detalhe": "groups_deferred_lost"})));
+        }
+    };
+    value["hangar_deliveries"] = Value::Array(deliveries);
+    parts.headers.remove(header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(value.to_string()))
+}
 
 impl BridgeCtx {
     pub(crate) fn orchestrators(&self, names: &[String]) -> Vec<String> {
@@ -112,6 +147,7 @@ pub(crate) async fn route(st: Arc<AppState>, method: &str, name: &str, route: &s
         ("DELETE", "pair") => ("pair", |s, c, r| Box::pin(super::routes::unpair(s, c, r))),
         ("POST", "group-message") => ("group-message", |s, c, r| Box::pin(super::routes::group_message(s, c, r))),
         ("GET", "contract") => ("pair/contract", |s, c, r| Box::pin(super::routes::contract(s, c, r))),
+        ("PUT", "contract") => ("pair/contract", |s, c, r| Box::pin(super::fed_notice::session_contract_put(s, c, r))),
         ("POST", "pair-remote") => ("pair-remote", |s, c, r| Box::pin(super::legacy::pair_remote(s, c, r))),
         ("POST", "unpair-remote") => ("unpair-remote", |s, c, r| Box::pin(super::legacy::unpair_remote(s, c, r))),
         _ => return Err(fail("groups_bridge_invalid_request", "rota de grupo desconhecida")),
@@ -132,17 +168,20 @@ pub(crate) async fn route(st: Arc<AppState>, method: &str, name: &str, route: &s
 async fn execute(st: Arc<AppState>, groups: Arc<GroupService>, op: Operation) -> Result<Value, Failed> {
     match op {
         Operation::Route { method, name, route: path, body, facts } => {
-            let ctx = Arc::new(BridgeCtx { orchestrators: facts.orchestrators.into_iter().collect(), phases: facts.phases,
-                deliveries: Default::default(), post: Default::default() });
+            let ctx = BridgeCtx::new(true, facts.orchestrators, facts.phases);
             let mut out = CTX.scope(ctx.clone(), route(st, &method, &name, &path, body)).await?;
-            out["deliveries"] = Value::Array(std::mem::take(&mut *ctx.deliveries.lock().unwrap_or_else(|e| e.into_inner())));
+            out["deliveries"] = Value::Array(ctx.take_deliveries());
             out["post"] = Value::Array(std::mem::take(&mut *ctx.post.lock().unwrap_or_else(|e| e.into_inner())));
             Ok(out)
         }
         Operation::Leave { name, phases } => {
-            let (ex, tell) = super::exit::leave(&st, &groups, &name, Some(&KnownPhases(phases))).await.map_err(group_failed)?;
-            let warnings = notify_exit(&st, &groups, &name, &tell).await;
-            Ok(json!({"ex_peers": ex, "warnings": warnings}))
+            // A saída de grupo entre máquinas avisa quem ficou sozinho: Pi/omp/Kimi só o Python atende.
+            let ctx = BridgeCtx::new(true, Vec::new(), phases.clone());
+            let (ex, warnings) = CTX.scope(ctx.clone(), async {
+                let (ex, tell) = super::exit::leave(&st, &groups, &name, Some(&KnownPhases(phases))).await.map_err(group_failed)?;
+                Ok::<_, Failed>((ex, notify_exit(&st, &groups, &name, &tell).await))
+            }).await?;
+            Ok(json!({"ex_peers": ex, "warnings": warnings, "deliveries": ctx.take_deliveries()}))
         }
         Operation::Rename { old, new } => {
             match super::fed_exit::rename(&st, &groups, &old, &new).await {

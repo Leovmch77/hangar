@@ -134,6 +134,7 @@ async fn deliver_here(st: &AppState, groups: &GroupService, gid: &str, n: &Notic
         }
     }
     // shortcut: a entrega que estoura o prazo é abandonada e vai como pulada, mesmo se chegar depois.
+    // Ganha confirmação tardia quando o pulado falso levar quem mandou a repetir o aviso.
     let done = futures_util::future::join_all(sends.into_iter().map(|(label, send)| async move {
         let late = || envelope("erro_envio_falhou", "não deu pra enviar: groups_notice_timeout".into(), json!({"erro": "groups_notice_timeout"}));
         (label, tokio::time::timeout(wait, send).await.unwrap_or_else(|_| Err(late())))
@@ -388,8 +389,8 @@ pub(super) async fn owner_contract(State(st): State<Arc<AppState>>, ConnectInfo(
     m.answer(result)
 }
 
-/// `GET /pair/contract` de sessão num grupo entre máquinas: o arquivo local na dona; em outra
-/// máquina, pela dona (`path` vazio).
+/// `GET /pair/contract`: o arquivo local na dona (ausente = vazio, ilegível = 500); em outra máquina
+/// do grupo, pela dona (`path` vazio).
 pub(super) async fn session_contract(asked: &Asked, link: &Sidecar) -> Response {
     let me = asked.groups.server_id().to_owned();
     let owner = link.fed.as_ref().map_or_else(|| me.clone(), |f| f.owner.clone());

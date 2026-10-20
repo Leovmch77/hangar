@@ -81,15 +81,17 @@ pub async fn leave(st: &AppState, groups: &GroupService, name: &str) -> Option<R
     }
     let outbox = match of(st, groups).await { Ok(f) => f.outbox().clone(), Err(r) => return Some(Err(refused(r))) };
     let (dir, name) = (pair_dir(groups), name.to_owned());
-    Some(groups.locked(blocking(move || -> Result<Vec<String>, GroupError> {
+    let left = groups.locked(blocking(move || -> Result<Option<Vec<String>>, GroupError> {
         let read = |n: &str| dir.sidecar(n).ok().flatten();
-        let Some(link) = read(&name) else { return Ok(Vec::new()) };
-        let Some(plan) = local::plan_leave(&read, &name, false) else { return Ok(Vec::new()) };
+        let Some(link) = read(&name) else { return Ok(None) };
+        let Some(plan) = local::plan_leave(&read, &name, false) else { return Ok(None) };
         // O `Leave` entra junto da saída: um envio da dona no meio do caminho já o vê pendente.
         let item = link.fed.filter(|f| f.owner != me).map(|f| OutboxItem::Leave { owner: f.owner, gid: link.gid.clone(), member: name.clone(), origin: me });
         apply_and_enqueue(&dir, &outbox, &plan.clears, &plan.writes, &plan.before, item)?;
-        Ok(plan.ex_peers)
-    })).await.and_then(|r| r))
+        Ok(Some(plan.ex_peers))
+    })).await.and_then(|r| r);
+    if matches!(left, Ok(Some(_))) { groups.changed(); }
+    Some(left.map(Option::unwrap_or_default))
 }
 
 /// Dos ex-companheiros, quem o `notify_exit` ainda avisa: sem as máquinas do dono, que a dona avisa
@@ -186,9 +188,8 @@ pub async fn peer_left(st: &AppState, groups: &GroupService, link: &Sidecar, pee
 /// `remove_member` e, com uma máquina só com membros, a dissolução. Devolve o registro depois da
 /// saída (`None` sem registro desta dona).
 pub async fn remove_and_dissolve(st: &AppState, groups: &GroupService, gid: &str, who: &Member) -> Result<Option<GroupRecord>, Refusal> {
-    let Some(record) = remove_member(st, groups, gid, who).await? else { return Ok(None) };
-    if machines(&record) > 1 { return Ok(Some(record)); }
-    let dropped = dissolve(st, groups, gid, &who.server).await?;
+    let Some((record, mut dropped)) = remove_member(st, groups, gid, who).await? else { return Ok(None) };
+    if machines(&record) <= 1 { dropped.extend(dissolve(st, groups, gid, &who.server).await?); }
     for n in &dropped {
         let text = format!("{PREFIX} Você saiu do grupo de trabalho entre máquinas. Volte a operar independente; use hangar-send só quando o usuário pedir.");
         if let Err(error) = deliver_text(st, n, &text).await {

@@ -70,7 +70,9 @@ fn protocol(pair_dir: &Path, me: &str, d: &Map<String, Value>) -> Option<String>
     }
     let gid = d.get("gid").and_then(Value::as_str).unwrap_or_default();
     let path = (!gid.is_empty()).then(|| pair_dir.join(format!("grupo-{gid}.md")));
-    let contract = match d.get("fed").and_then(|f| serde_json::from_value::<Fed>(f.clone()).ok()) {
+    let fed = d.get("fed").and_then(|f| serde_json::from_value::<Fed>(f.clone()).ok());
+    let across = fed.is_some();
+    let contract = match fed {
         Some(fed) if fed.local => ContractLine { path, remote_owner: None },
         Some(fed) => ContractLine { path: None, remote_owner: Some(fed.owner) },
         // Par 1:1 antigo entre máquinas não sincroniza contrato.
@@ -79,7 +81,7 @@ fn protocol(pair_dir: &Path, me: &str, d: &Map<String, Value>) -> Option<String>
     };
     // O hook só existe no Claude Code: o harness de quem recebe é fixo.
     let harness = [(me.to_owned(), "claude".to_owned())].into();
-    Some(text::render(Kind::Group, &TextArgs { me: me.to_owned(), others, task, harness, contract, outside, ..Default::default() }))
+    Some(text::render(Kind::Group, &TextArgs { me: me.to_owned(), others, task, harness, contract, outside, across, ..Default::default() }))
 }
 
 /// Pares de fora entre os `peers`, pelo `external_pairs.json`. O par pode ter sido feito por outro

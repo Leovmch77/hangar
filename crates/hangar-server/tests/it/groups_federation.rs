@@ -151,7 +151,9 @@ async fn three_locals_plus_one_remote() {
     for name in ["s0", "s1", "s2"] {
         let s = sidecar(&n.casa, name).unwrap();
         assert_eq!(s["fed"], json!({"owner": "casa", "local": true, "version": 1}), "{name}");
-        assert_eq!(inputs(&n.casa, name), 1, "{name} recebe o protocolo");
+        // O protocolo sai depois da resposta.
+        let (python, path) = (n.casa.python.clone(), format!("/api/sessions/{name}/input"));
+        fake::wait_until(move || python.hits_to(&path) == 1).await;
     }
     assert_eq!(peers_of(&sidecar(&n.casa, "s0").unwrap()), ["lab::s3", "s1", "s2"]);
     let remote = sidecar(&n.lab, "s3").expect("lab grava o membro dela");
@@ -699,4 +701,83 @@ async fn outside_noop_does_not_touch_the_list() {
     let gone = hangar_server::groups::outbox::OutsideOp::Unlink(hangar_server::groups::model::OutsideRef { server: "casa".into(), address: "pc-x::Y".into() });
     federation::owner_outside(&n.casa.state, &groups, &gid, gone).await.ok().unwrap();
     assert_eq!(n.casa.changes.load(Ordering::SeqCst), before);
+}
+
+/// Id trocado sem grupo entre máquinas vivo: o grupo novo grava o id atual, e a operação seguinte
+/// não o recusa como troca.
+#[tokio::test(flavor = "multi_thread")]
+async fn id_change_without_groups_then_new_group_works() {
+    let n = net().await;
+    std::fs::create_dir_all(n.casa.pair.join("groups")).unwrap();
+    std::fs::write(n.casa.pair.join("groups/self.json"), json!({"server_id": "antigo"}).to_string()).unwrap();
+    let (status, body) = pair(&n.casa, "s0", json!({"peers": ["lab::s1"]})).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = pair(&n.casa, "s2", json!({"peers": ["s0"]})).await;
+    assert_eq!(status, 200, "{body}");
+    let saved: Value = serde_json::from_slice(&std::fs::read(n.casa.pair.join("groups/self.json")).unwrap()).unwrap();
+    assert_eq!(saved["server_id"], "casa");
+}
+
+/// Saída na participante grava na hora e a lista reemite sem esperar a dona.
+#[tokio::test(flavor = "multi_thread")]
+async fn participant_leave_touches_the_list() {
+    let n = net().await;
+    let (status, body) = pair(&n.casa, "s0", json!({"peers": ["lab::s1"]})).await;
+    assert_eq!(status, 200, "{body}");
+    let before = n.lab.changes.load(Ordering::SeqCst);
+    let (status, body) = call(n.lab.addr, "DELETE", "/api/sessions/s1/pair", None).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(sidecar(&n.lab, "s1").is_none());
+    assert!(n.lab.changes.load(Ordering::SeqCst) > before, "a saída avisa a lista");
+}
+
+/// Na dona, o protocolo ao membro novo sai depois da resposta: uma sessão lenta não estoura o prazo
+/// de quem pediu com o grupo já gravado.
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_answers_before_newcomer_notices() {
+    let n = net().await;
+    n.casa.python.hold_input(true);
+    let asked = tokio::time::timeout(Duration::from_secs(5), pair(&n.casa, "s0", json!({"peers": ["lab::s1"]}))).await;
+    n.casa.python.hold_input(false);
+    n.casa.python.release.notify_waiters();
+    let (status, body) = asked.expect("a dona responde sem esperar o aviso");
+    assert_eq!(status, 200, "{body}");
+    let python = n.casa.python.clone();
+    fake::wait_until(move || python.hits_to("/api/sessions/s0/input") == 1).await;
+}
+
+/// Subida com o id trocado e grupo entre máquinas vivo: a fila não abre, e nada sai com o id novo.
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_with_changed_id_does_not_open_the_queue() {
+    let n = net().await;
+    let (status, body) = pair(&n.casa, "s0", json!({"peers": ["lab::s1"]})).await;
+    assert_eq!(status, 200, "{body}");
+    federation::forget(&n.casa.pair);
+    let renamed = machine(&n.casa.root, "casa2").await;
+    federation::spawn(renamed.state.clone()).expect("máquina com id").await.unwrap();
+    assert!(federation::existing(&n.casa.pair).is_none(), "a fila não abriu com o id trocado");
+}
+
+/// `/deliver` pela porta do Connect: o recado à sessão que só o Python atende volta na resposta,
+/// para ele entregar depois, sem o Rust chamá-lo dentro do pedido dele.
+#[tokio::test(flavor = "multi_thread")]
+async fn connect_forwarded_deliver_defers_python_sessions() {
+    let n = net().await;
+    let (status, body) = pair(&n.casa, "s0", json!({"peers": ["lab::s1"]})).await;
+    assert_eq!(status, 200, "{body}");
+    let gid = body["gid"].as_str().unwrap().to_owned();
+    let python = n.lab.python.clone();
+    fake::wait_until(move || python.hits_to("/api/sessions/s1/input") == 1).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let private = listener.local_addr().unwrap();
+    let app = hangar_server::routes::terminal_router(n.lab.state.clone()).into_make_service_with_connect_info::<SocketAddr>();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let ask = json!({"protocol": 1, "origin": "casa", "sender": "s0", "text": "oi", "notice": "n1"});
+    let resp = client().post(format!("http://{private}/__hangar_server/forwarded")).header("x-hangar-path", format!("/api/groups/{gid}/deliver"))
+        .header("x-hangar-internal", SECRET).header("content-type", "application/json").body(ask.to_string()).send().await.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let got: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    assert_eq!(got["hangar_deliveries"], json!([{"name": "s1", "text": "[grupo: casa::s0] oi", "steer": false}]), "{got}");
+    assert_eq!(got["failed"], json!([]));
+    assert_eq!(inputs(&n.lab, "s1"), 1, "o Rust não chamou o Python");
 }

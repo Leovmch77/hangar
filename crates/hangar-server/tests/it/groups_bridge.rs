@@ -148,10 +148,40 @@ async fn bridged_leave_never_calls_python() {
         std::fs::write(srv.pair.join(format!("{me}.json")), json!({"peers": [other], "task": "t", "gid": "g1", "harness": {}, "orq": true}).to_string()).unwrap();
     }
     let out = result(&srv, "group.leave", json!({"name": "s0", "phases": {"g1": "live"}})).await;
-    assert_eq!(out, json!({"ex_peers": ["s1"], "warnings": []}));
+    assert_eq!(out, json!({"ex_peers": ["s1"], "warnings": [], "deliveries": []}));
     assert!(!srv.pair.join("s0.json").exists());
     assert!(srv.pair.join("s1.json").exists(), "execução viva mantém o grupo orq de um");
     assert!(srv.python.internal_bodies("orq/group-phase").is_empty(), "a fase veio no pedido");
+
+    // Grupo entre máquinas desta dona que se dissolve: o aviso de saída ao membro Pi, que só o
+    // Python atende, volta na resposta em vez de o Rust chamar o `/input` dele.
+    let fed = json!({"owner": "casa", "local": true, "version": 1});
+    for (me, other) in [("s0", "s1"), ("s1", "s0")] {
+        std::fs::write(srv.pair.join(format!("{me}.json")), json!({"peers": [other], "task": "t", "gid": "g2",
+            "harness": {"s1": "pi"}, "fed": fed}).to_string()).unwrap();
+    }
+    std::fs::create_dir_all(srv.pair.join("groups")).unwrap();
+    std::fs::write(srv.pair.join("groups/g2.json"), json!({"protocol": 1, "gid": "g2", "owner": "casa", "version": 1, "task": "t",
+        "members": [{"server": "casa", "name": "s0", "provider": "claude"}, {"server": "casa", "name": "s1", "provider": "pi"}], "outside": []}).to_string()).unwrap();
+    let out = result(&srv, "group.leave", json!({"name": "s0", "phases": {}})).await;
+    let deliveries = out["deliveries"].as_array().unwrap();
+    assert_eq!(deliveries.len(), 1, "{out}");
+    assert_eq!(deliveries[0]["name"], "s1");
+    assert!(deliveries[0]["text"].as_str().unwrap().contains("Você saiu do grupo de trabalho entre máquinas"), "{out}");
+    assert_eq!(srv.python.hits_to("/api/sessions/s1/input"), 0, "o Rust não chamou o Python dentro da ponte");
+    assert!(!srv.pair.join("s1.json").exists(), "ficou sozinho: o grupo acabou");
+}
+
+/// O `PUT /pair/contract` que chega pela porta do Connect segue pela ponte como as outras rotas.
+#[tokio::test(flavor = "multi_thread")]
+async fn contract_write_goes_through_the_bridge() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    group(&srv, "s0", &["s1"]).await;
+    let written = result(&srv, "group.route", json!({"method": "PUT", "name": "s0", "route": "contract", "body": {"content": "x\n", "mtime": null}})).await;
+    assert_eq!(written["status"], 200, "{written}");
+    let read = result(&srv, "group.route", json!({"method": "GET", "name": "s1", "route": "contract", "body": null})).await;
+    assert_eq!((read["body"]["content"].clone(), read["body"]["mtime"].clone()), (json!("x\n"), written["body"]["mtime"].clone()), "{read}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

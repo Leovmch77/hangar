@@ -333,3 +333,33 @@ async fn old_peer_unpair_after_owner_converted() {
     let lab = n.lab.pair.clone();
     fake::wait_until(move || !lab.join("s1.json").exists()).await;
 }
+
+/// Membro daqui ainda em par 1:1 antigo que não converteu: entrar no grupo novo perderia o par sem
+/// aviso; a recusa diz com que máquina é o par.
+#[tokio::test(flavor = "multi_thread")]
+async fn unconverted_legacy_member_is_refused() {
+    let n = net().await;
+    legacy(&n.casa, "s0", "lab::s1");
+    let (status, body) = call(n.casa.addr, "POST", "/api/sessions/s0/pair", Some(&json!({"peers": ["lab::s2"]}))).await;
+    assert_eq!((status, body["detail"]["code"].clone()), (409, json!("erro_grupo_par_antigo")), "{body}");
+    assert_eq!(body["detail"]["params"]["servidor"], "lab");
+    assert_eq!(sidecar(&n.casa, "s0").unwrap()["peers"], json!(["lab::s1"]));
+    assert!(records(&n.casa).is_empty() && sidecar(&n.lab, "s2").is_none());
+}
+
+/// O par antigo que chega pelo `/pair-remote` de uma máquina antiga vira grupo quando ela atualiza.
+#[tokio::test(flavor = "multi_thread")]
+async fn pair_remote_converts_after_the_peer_upgrades() {
+    let n = net().await;
+    convert::configure_retry(&n.casa.pair, vec![Duration::from_millis(100)]);
+    let upgraded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    peers(&n.casa, &[("lab", upgradable(n.lab.addr, upgraded.clone()).await)]);
+    legacy(&n.lab, "s1", "casa::s0");
+    let (status, body) = call(n.casa.addr, "POST", "/api/sessions/s0/pair-remote", Some(&json!({"initiator": "lab::s1", "task": "t"}))).await;
+    assert_eq!(status, 200, "{body}");
+    upgraded.store(true, std::sync::atomic::Ordering::SeqCst);
+    let casa = n.casa.pair.clone();
+    fake::wait_until(move || std::fs::read(casa.join("s0.json")).ok().and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        .is_some_and(|s| s["fed"]["owner"] == "casa")).await;
+    assert_converted(&n);
+}

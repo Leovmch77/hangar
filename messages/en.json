@@ -7815,6 +7815,7 @@
   "erro_grupo_fusao_entre_donos": "These groups belong to different owner machines and cannot be merged. Take the session out of one first.",
   "erro_grupo_orq_entre_maquinas": "An orchestration group does not take sessions from another machine.",
   "erro_grupo_mudou": "The group changed in the meantime. Try again.",
+  "erro_grupo_par_antigo": "One of the sessions still has an old pair with {servidor}. Undo and redo the pair with {servidor}, or update Hangar there.",
   "erro_contrato_mudou": "The contract changed since it was opened. Reload before saving.",
   "erro_link_remoto": "Only sessions on this same machine can be linked.",
   "erro_par_recusado": "The other machine refused the invite: {detalhe}",

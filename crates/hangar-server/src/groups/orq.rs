@@ -64,7 +64,7 @@ fn warn(code: &str, what: &'static str) {
 impl OrqFacts for PythonOrq {
     fn phase<'a>(&'a self, gid: &'a str) -> BoxFuture<'a, OrqPhase> {
         Box::pin(async move {
-            if let Some(ctx) = super::bridge::current() { return ctx.phase(gid); }
+            if let Some(ctx) = super::bridge::facts() { return ctx.phase(gid); }
             match self.post("orq/group-phase", json!({"gid": gid})).await {
                 Ok((200, reply)) => phase_of(reply.get("phase")),
                 Ok((status, _)) => { warn(&format!("groups_orq_phase_status:{status}"), "groups_orq_phase"); OrqPhase::Unknown }
@@ -76,7 +76,7 @@ impl OrqFacts for PythonOrq {
     fn promote<'a>(&'a self, name: &'a str, gid: &'a str) -> BoxFuture<'a, Result<(), PromoteError>> {
         Box::pin(async move {
             // Pela ponte do Python, quem promove é ele, depois da resposta.
-            if let Some(ctx) = super::bridge::current() { ctx.defer_promote(name, gid); return Ok(()); }
+            if let Some(ctx) = super::bridge::facts() { ctx.defer_promote(name, gid); return Ok(()); }
             // Sem resposta ou com 5xx o Python pode ter promovido antes de falhar; o join volta atrás
             // mesmo assim, e o diário guarda o gid para quem for conferir o time.
             let (status, reply) = match self.post("orq/promote", json!({"name": name, "gid": gid})).await {
@@ -112,7 +112,7 @@ pub(crate) fn list_unavailable(code: &str) -> Value {
 
 /// Os de `names` que são a linha do orquestrador (a recusa `_recusa_orq` do Python).
 pub async fn is_orchestrator(st: &AppState, names: &[String]) -> Result<Vec<String>, Value> {
-    if let Some(ctx) = super::bridge::current() { return Ok(ctx.orchestrators(names)); }
+    if let Some(ctx) = super::bridge::facts() { return Ok(ctx.orchestrators(names)); }
     let failed = |code: String| list_unavailable(&code);
     match PythonOrq::from_state(st).post("orq/is-orchestrator", json!({"names": names})).await {
         Ok((200, reply)) => serde_json::from_value(reply["names"].clone()).map_err(|_| failed("groups_orq_names_invalid".into())),

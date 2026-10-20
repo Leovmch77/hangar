@@ -7815,6 +7815,7 @@
   "erro_grupo_fusao_entre_donos": "Esses grupos são de máquinas donas diferentes e não se juntam. Tire a sessão de um deles antes.",
   "erro_grupo_orq_entre_maquinas": "Grupo de orquestração não aceita sessão de outra máquina.",
   "erro_grupo_mudou": "O grupo mudou nesse meio-tempo. Tente de novo.",
+  "erro_grupo_par_antigo": "Uma das sessões ainda tem um par antigo com {servidor}. Desfaça e refaça o par com {servidor} ou atualize o Hangar dela.",
   "erro_contrato_mudou": "O contrato mudou desde que foi aberto. Recarregue antes de salvar.",
   "erro_link_remoto": "Só dá para ligar sessões desta mesma máquina.",
   "erro_par_recusado": "A outra máquina recusou o convite: {detalhe}",

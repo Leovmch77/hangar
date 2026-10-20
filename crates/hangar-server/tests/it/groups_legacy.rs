@@ -207,6 +207,12 @@ async fn cross_routes_answer_like_python() {
             assert_eq!((status, body["detail"]["code"].clone()), (422, json!("erro_corpo_invalido")), "{name}");
             continue;
         }
+        // Diferença decidida: o texto da recusa `Mix` diz o que vale hoje (o par 1:1 antigo), não o do Python.
+        let mut body = body;
+        if body["detail"]["code"] == "erro_pareamento_mistura_cross" {
+            assert!(body["detail"]["msg"].as_str().unwrap().starts_with("sessão em par 1:1 antigo"), "{name}: {body}");
+            body["detail"]["msg"] = step["response"]["detail"]["msg"].clone();
+        }
         assert_eq!((status as u64, common::canon(&mask_network(&body))), (step["status"].as_u64().unwrap(), common::canon(&step["response"])), "{name}");
         let mut delivered: Vec<String> = before.iter().flat_map(|(k, b)| {
             let after = inputs(machines[k]);

@@ -70,6 +70,9 @@ pub(super) async fn pair_remote(State(st): State<Arc<AppState>>, ConnectInfo(pee
         return asked.refuse(StatusCode::BAD_GATEWAY, "erro_pareamento_aviso_falhou",
             &format!("pareamento desfeito: falha ao avisar '{name}': {}", error_text(&e)), json!({"nome": name, "erro": e}));
     }
+    // O par antigo vira grupo quando a outra máquina atualizar; quem pediu não espera por isso.
+    let (st, groups) = (asked.st.clone(), asked.groups.clone());
+    tokio::spawn(async move { super::convert::run_and_retry(&st, &groups).await });
     asked.reply(StatusCode::OK, json!({"ok": true, "members": members}))
 }
 

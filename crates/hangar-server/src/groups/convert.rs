@@ -14,7 +14,7 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 use super::exit::segment;
-use super::federation::{PushBody, Refusal};
+use super::federation::{PushBody, Refusal, remember};
 use super::local::is_remote;
 use super::model::{Fed, GroupRecord, Member, PROTOCOL, Sidecar};
 use super::outbox::OutboxItem;
@@ -67,7 +67,8 @@ pub async fn run_and_retry(st: &Arc<AppState>, groups: &Arc<GroupService>) {
         entry.running = Some(kick.clone());
         (kick, if entry.ladder.is_empty() { RETRY_LADDER.to_vec() } else { entry.ladder.clone() })
     };
-    // shortcut: a volta não é abortada com o servidor (um por processo em produção); só acaba sem par antigo.
+    // shortcut: a volta não é abortada com o servidor (um por processo em produção); só acaba sem par
+    // antigo. Ganha cancelamento quando o servidor puder parar e subir de novo no mesmo processo.
     tokio::spawn(retry(st.clone(), groups.clone(), root, kick, ladder));
 }
 
@@ -235,12 +236,6 @@ fn write_owner(dir: &PairDir, me: &str, name: &str, peer: &str, record: GroupRec
     }
     remember(dir, me);
     Ok(Written::Done)
-}
-
-fn remember(dir: &PairDir, me: &str) {
-    if matches!(dir.self_id(), Ok(None)) && let Err(error) = dir.remember_self(me) {
-        tracing::warn!(code = "groups_identity_not_saved", %error, "groups: o id desta máquina não foi gravado");
-    }
 }
 
 fn differs(name: &str) -> Refusal {

@@ -101,6 +101,13 @@ async fn routes_answer_like_python() {
             assert!(g.len() == 8 && g.bytes().all(|b| b.is_ascii_hexdigit()), "{name}: gid {g}");
             gid = g.to_owned();
         }
+        // A leitura do contrato passou a trazer a dona e o `mtime` (gravar exige o lido); o golden do Python não os tem.
+        let mut body = body;
+        if step["path"].as_str().unwrap().ends_with("/pair/contract") && status == 200 {
+            let map = body.as_object_mut().unwrap();
+            assert_eq!(map.remove("owner"), Some(json!("casa")), "{name}");
+            assert!(map.remove("mtime").is_some_and(|m| m.is_string()), "{name}");
+        }
         let actual = common::canon(&body).replace(&gid, golden_gid).replace(srv.pair.to_str().unwrap(), "<pair>");
         assert_eq!((status as u64, actual), (step["status"].as_u64().unwrap(), common::canon(&step["response"])), "{name}");
         let after = input_hits(&srv.python, &names);
@@ -491,4 +498,20 @@ async fn outside_grant_failure_is_a_coded_warning() {
     let (status, body) = call(srv.addr, "POST", "s1/pair", Some(&json!({"peers": ["s0"]})), OWNER).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["warning"]["code"], "erro_grupo_acesso_externo_falhou", "{body}");
+}
+
+/// Grupo de uma máquina: a leitura traz o `mtime` e a dona, e gravar com esse `mtime` passa.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_contract_read_then_write_with_mtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    assert_eq!(call(srv.addr, "POST", "s0/pair", Some(&json!({"peers": ["s1"]})), OWNER).await.0, 200);
+    let gid = srv.groups.link("s0").await.unwrap().unwrap().gid;
+    std::fs::write(srv.groups.contract_path(&gid), "antes\n").unwrap();
+    let (status, read) = call(srv.addr, "GET", "s0/pair/contract", None, OWNER).await;
+    assert_eq!((status, read["content"].clone(), read["owner"].clone()), (200, json!("antes\n"), json!("casa")), "{read}");
+    assert!(read["mtime"].is_string(), "{read}");
+    let (status, body) = call(srv.addr, "PUT", "s0/pair/contract", Some(&json!({"content": "depois\n", "mtime": read["mtime"]})), OWNER).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(std::fs::read_to_string(srv.groups.contract_path(&gid)).unwrap(), "depois\n");
 }

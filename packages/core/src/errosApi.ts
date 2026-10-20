@@ -334,6 +334,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_grupo_fusao_entre_donos: () => m.erro_grupo_fusao_entre_donos(),
   erro_grupo_orq_entre_maquinas: () => m.erro_grupo_orq_entre_maquinas(),
   erro_grupo_mudou: () => m.erro_grupo_mudou(),
+  erro_grupo_par_antigo: (p) => m.erro_grupo_par_antigo({ servidor: fmtParam(p.servidor) }),
   erro_contrato_mudou: () => m.erro_contrato_mudou(),
   erro_link_remoto: () => m.erro_link_remoto(),
   erro_par_repetido: () => m.erro_par_repetido(),

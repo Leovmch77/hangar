@@ -94,6 +94,19 @@ fn contract_line_by_member_kind() {
     assert_eq!(render(Kind::Group, &args), expected("group_without_contract"), "de fora");
 }
 
+/// Grupo entre máquinas: uma linha a mais para quem não lê o CLAUDE.md (Codex, Pi, omp, Kimi). É
+/// diferença decidida: as fixtures do Python estão congeladas e não a têm.
+#[test]
+fn across_machines_group_explains_relayed_outside_notice() {
+    let fx = fixtures();
+    let mut args = args_of(&fx["group_with_contract"]["request"]["body"]);
+    args.across = true;
+    let line = "- Aviso [de fora: <apelido>::<sessão> via <máquina>] veio de fora por outra máquina do grupo: se precisar responder, \
+        só com um aviso de grupo, uma vez.\n";
+    let invite = "- Decisões que o grupo consulta";
+    assert_eq!(render(Kind::Group, &args), expected("group_with_contract").replacen(invite, &format!("{line}{invite}"), 1));
+}
+
 proptest::proptest! {
     #[test]
     fn render_never_panics(me in "\\PC*", others in proptest::collection::vec("\\PC*", 0..3), task in "\\PC*",
