@@ -181,17 +181,29 @@ async fn dissolve(st: &AppState, groups: &GroupService, gid: &str, gone_servers:
     let outbox = of(st, groups).await?.outbox().clone();
     let outside: HashSet<String> = outside_addresses(st);
     let (dir, gid) = (groups.dir(), gid.to_owned());
-    let (dropped, orphan) = groups.locked(blocking(move || -> Result<(Vec<String>, Option<String>), Refusal> {
-        // Alguém pode ter entrado entre a saída e aqui.
-        let Some(record) = dir.record(&gid).map_err(store_refusal)?.filter(|r| r.owner == me && machines(r) <= 1) else { return Ok((Vec::new(), None)) };
-        // Sem membro daqui o grupo segue (ou acaba) noutra máquina: o contrato da dona vai ao arquivo.
-        let orphan = (!record.members.iter().any(|m| m.server == me)).then(|| gid.clone());
-        let mut servers: BTreeSet<String> = record.members.iter().map(|m| m.server.clone()).collect();
-        servers.extend(gone_servers);
-        servers.remove(&me);
+    let (dropped, orphan) = groups.locked(blocking(move || dissolve_here(&dir, &outbox, &me, &gid, &outside, gone_servers)))
+        .await.map_err(store_refusal)??;
+    groups.changed();
+    if let Some(gid) = orphan { groups.archive_contracts(&gid).await.map_err(store_refusal)?; }
+    Ok(dropped)
+}
+
+/// O disco e a fila da dissolução, sob o lock: devolve quem ficou sozinho e o gid cujo contrato vai
+/// ao arquivo.
+fn dissolve_here(dir: &PairDir, outbox: &Outbox, me: &str, gid: &str, outside: &HashSet<String>, gone_servers: BTreeSet<String>)
+    -> Result<(Vec<String>, Option<String>), Refusal> {
+    // Alguém pode ter entrado entre a saída e aqui.
+    let Some(record) = dir.record(gid).map_err(store_refusal)?.filter(|r| r.owner == me && machines(r) <= 1) else { return Ok((Vec::new(), None)) };
+    // Sem membro daqui o grupo segue (ou acaba) noutra máquina: o contrato da dona vai ao arquivo.
+    let orphan = (!record.members.iter().any(|m| m.server == me)).then(|| gid.to_owned());
+    let mut servers: BTreeSet<String> = record.members.iter().map(|m| m.server.clone()).collect();
+    servers.extend(gone_servers);
+    servers.remove(me);
+    let before: Snapshot = record.members.iter().filter(|m| m.server == me).map(|m| (m.name.clone(), read(dir, &m.name))).collect();
+    let done = (|| {
         let mut dropped = Vec::new();
         for m in record.members.iter().filter(|m| m.server == me) {
-            let Some(mut s) = read(&dir, &m.name).filter(|s| s.gid == gid) else { continue };
+            let Some(mut s) = read(dir, &m.name).filter(|s| s.gid == gid) else { continue };
             s.fed = None;
             s.peers.retain(|p| !is_remote(p) || outside.contains(p));
             if s.peers.is_empty() && !s.orq {
@@ -201,11 +213,53 @@ async fn dissolve(st: &AppState, groups: &GroupService, gid: &str, gone_servers:
                 dir.write_sidecar(&m.name, &s).map_err(store_refusal)?;
             }
         }
-        dir.remove_record(&gid).map_err(store_refusal)?;
-        outbox.enqueue(fan_out(servers, &gid, record.version + 1, &me, Fan::Dissolved)).map_err(store_refusal)?;
-        Ok((dropped, orphan))
-    })).await.map_err(store_refusal)??;
-    groups.changed();
-    if let Some(gid) = orphan { groups.archive_contracts(&gid).await.map_err(store_refusal)?; }
-    Ok(dropped)
+        dir.remove_record(gid).map_err(store_refusal)?;
+        outbox.enqueue(fan_out(servers, gid, record.version + 1, me, Fan::Dissolved)).map_err(store_refusal)?;
+        Ok(dropped)
+    })();
+    // Sem o `Dissolved` na fila as outras máquinas seguiriam no grupo: daqui ele volta como era.
+    if done.is_err() {
+        restore_logged(dir, &before);
+        if let Err(error) = dir.write_record(&record) {
+            tracing::error!(code = "groups_restore_failed", %gid, %error, "groups: o registro do grupo não voltou depois da dissolução que falhou");
+        }
+    }
+    Ok((done?, orphan))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::groups::outbox::OutboxSend;
+    use crate::groups::peers::PeerError;
+    use crate::groups::service::BoxFuture;
+
+    struct Down;
+    impl OutboxSend for Down {
+        fn send<'a>(&'a self, _item: &'a OutboxItem) -> BoxFuture<'a, Result<(), PeerError>> { Box::pin(async { Err(PeerError::Transport("fora".into())) }) }
+        fn failed(&self, _item: &OutboxItem, _code: &str, _error: &PeerError, _retry: bool) {}
+    }
+
+    /// A fila que não grava o `Dissolved` não deixa o grupo meio dissolvido: registro e sidecars
+    /// daqui ficam como estavam, e as outras máquinas nunca souberam.
+    #[tokio::test]
+    async fn dissolve_that_cannot_enqueue_changes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = PairDir::new(tmp.path().to_path_buf(), tmp.path().join("archive"));
+        let record = GroupRecord { protocol: PROTOCOL, gid: "g".into(), owner: "casa".into(), version: 3, task: String::new(),
+            members: vec![Member::new("casa", "s0", "claude"), Member::new("casa", "s3", "claude")], outside: Vec::new() };
+        dir.write_record(&record).unwrap();
+        let fed = Some(Fed { owner: "casa".into(), local: true, version: 3 });
+        for (name, peer) in [("s0", "s3"), ("s3", "s0")] {
+            dir.write_sidecar(name, &Sidecar { peers: vec![peer.into()], gid: "g".into(), fed: fed.clone(), ..Sidecar::default() }).unwrap();
+        }
+        let outbox = Outbox::open(tmp.path().join("groups"), std::sync::Arc::new(Down)).unwrap();
+        // O temporário da fila como pasta: a gravação dela falha.
+        std::fs::create_dir_all(tmp.path().join("groups/outbox.json.tmp/x")).unwrap();
+        let gone = BTreeSet::from(["lab".to_owned()]);
+        assert!(dissolve_here(&dir, &outbox, "casa", "g", &HashSet::new(), gone).is_err());
+        assert_eq!(dir.record("g").unwrap(), Some(record));
+        assert_eq!(read(&dir, "s0").and_then(|s| s.fed), fed);
+        assert!(outbox.pending().is_empty());
+    }
 }
