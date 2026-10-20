@@ -184,25 +184,3 @@ def associate_facts(name: str, gid: str) -> dict:
     return {"active_gid": active, "draft_gid": draft,
             "groups": {g: {"phase": runs.group_phase(g), "archived": any(pair._arquivo_dir().glob(f"regras-{g}-*.md"))}
                        for g in {gid, *([target[1]] if target else [])}}}
-
-
-def associate(name: str, gid: str, mtime: float) -> Context:
-    with pair._LOCK:
-        return _associate(name, gid, mtime)
-
-
-def _associate(name: str, gid: str, mtime: float) -> Context:
-    if not real_group(gid, orchestration=True):
-        raise ValueError("grupo de orquestração de destino não existe")
-    context = resolve(name)
-    if context.grouped:
-        if context.gid != gid:
-            raise ValueError("o time já pertence a outro grupo")
-        if abs(orq_md.ler_arquivo(context.path)[1] - mtime) > 1e-6:
-            raise orq_md.Conflito(str(context.path))
-        return context
-    source_text, _ = orq_md.ler_arquivo(context.path)
-    if not source_text or _GROUP.search(source_text):
-        raise ValueError("configure o time deste trabalho antes de associá-lo")
-    promote(name, gid, mtime)
-    return resolve(name)

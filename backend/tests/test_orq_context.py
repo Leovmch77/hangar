@@ -55,7 +55,8 @@ def test_promotion_preserves_record_and_redirects_source():
     context, mtime = save("planner")
     before = context.path.read_text()
     _orq_sidecar("arbiter")
-    grouped = oc.associate("planner", "real", mtime)
+    oc.promote("planner", "real", mtime)
+    grouped = oc.resolve("planner")
     assert grouped.grouped and grouped.gid == "real" and grouped.session_prefix == "planner"
     assert grouped.path.read_text() == before
     assert roles.ler(context.path.read_text()) == []
@@ -66,13 +67,11 @@ def test_promotion_preserves_record_and_redirects_source():
     assert [p.conta for p in roles.ler(oc.resolve("planner").path.read_text())] == ["chosen", "selected"]
 
 
-def test_promotion_requires_actual_group_and_fresh_mtime():
+def test_promotion_requires_fresh_mtime():
     context, mtime = save("planner")
-    with pytest.raises(ValueError, match="não existe"):
-        oc.associate("planner", "missing", mtime)
     _orq_sidecar("arbiter")
     with pytest.raises(orq_md.Conflito):
-        oc.associate("planner", "real", 0.0)
+        oc.promote("planner", "real", 0.0)
     assert context.path.is_file() and not roles.regras_path("real").exists()
 
 
@@ -82,7 +81,7 @@ def test_competing_contract_is_not_overwritten():
     target.write_text("another contract", encoding="utf-8")
     _orq_sidecar("arbiter")
     with pytest.raises(ValueError, match="outro contrato"):
-        oc.associate("planner", "real", mtime)
+        oc.promote("planner", "real", mtime)
     assert target.read_text() == "another contract" and context.path.is_file()
 
 
@@ -90,7 +89,7 @@ def test_write_started_before_promotion_conflicts():
     context, mtime = save("planner")
     text = context.path.read_text()
     _orq_sidecar("arbiter")
-    oc.associate("planner", "real", mtime)
+    oc.promote("planner", "real", mtime)
     with pytest.raises(orq_md.Conflito):
         oc.write(context, text, mtime)
 
@@ -98,7 +97,7 @@ def test_write_started_before_promotion_conflicts():
 def test_archived_group_is_not_treated_as_current():
     context, mtime = save("planner")
     link = _orq_sidecar("arbiter")
-    oc.associate("planner", "real", mtime)
+    oc.promote("planner", "real", mtime)
     link.unlink()
     pair._arquivo_dir().mkdir()
     roles.regras_path("real").rename(pair._arquivo_dir() / "regras-real-20261019-120000.md")
@@ -115,7 +114,7 @@ def test_archived_group_is_not_treated_as_current():
 def test_unknown_group_phase_does_not_clear_record(monkeypatch):
     context, mtime = save("planner")
     link = _orq_sidecar("arbiter")
-    oc.associate("planner", "real", mtime)
+    oc.promote("planner", "real", mtime)
     link.unlink()
     monkeypatch.setattr(runs, "group_phase", lambda gid: "unknown")
     with pytest.raises(oc.PromotionConflict, match="confirmar o encerramento"):

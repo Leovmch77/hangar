@@ -4115,12 +4115,16 @@ def _bridge_reply(out: dict) -> JSONResponse:
     return JSONResponse(out.get("body"), status_code=status)
 
 
-async def _group_route(method: str, name: str, route: str, body: BaseModel | None = None):
-    """Grupos são do Rust; aqui chega só o que entrou pela 8768 e segue num sentido. Sem o Rust não
-    há reserva Python."""
+def _require_rust_groups() -> None:
     if not groups_bridge.rust_owns_groups():
         raise HTTPException(503, detail=erro("groups_need_rust_server",
                                              "os grupos precisam do servidor Rust, que não está rodando"))
+
+
+async def _group_route(method: str, name: str, route: str, body: BaseModel | None = None):
+    """Grupos são do Rust; aqui chega só o que entrou pela 8768 e segue num sentido. Sem o Rust não
+    há reserva Python."""
+    _require_rust_groups()
     try:
         out = await asyncio.to_thread(groups_bridge.call, "group.route", method=method, name=name, route=route,
                                       body=body.model_dump() if body is not None else None)
@@ -4450,18 +4454,11 @@ class OrqGroupBody(_StrictBody):
 
 @app.post("/api/sessions/{name}/orq/grupo", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def orq_group_set(name: str, body: OrqGroupBody):
-    """Associa o time da planejadora ao grupo real, inclusive com um árbitro novo. No modo Rust os
-    fatos do `orq` vão no pedido e o Rust associa sob o lock de grupo, sem perguntar de volta."""
+    """Associa o time da planejadora ao grupo real, inclusive com um árbitro novo. Os fatos do `orq`
+    vão no pedido e o Rust associa sob o lock de grupo, sem perguntar de volta."""
+    _require_rust_groups()
     try:
-        if groups_bridge.rust_owns_groups():
-            facts = await asyncio.to_thread(orq_context.associate_facts, name, body.gid)
-            try:
-                out = await asyncio.to_thread(groups_bridge.call, "group.orq_associate", name=name,
-                                              gid=body.gid, mtime=body.mtime, facts=facts)
-            except groups_bridge.GroupsBridgeError as e:
-                raise _group_unavailable(e.code) from None
-            return _bridge_reply(out)
-        context = await asyncio.to_thread(orq_context.associate, name, body.gid, body.mtime)
+        facts = await asyncio.to_thread(orq_context.associate_facts, name, body.gid)
     except orq_md.Conflito:
         raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou",
                                              "o time mudou desde a leitura — recarregue"))
@@ -4469,9 +4466,12 @@ async def orq_group_set(name: str, body: OrqGroupBody):
         raise HTTPException(409, detail=erro("erro_orq_celula_invalida", str(e)))
     except OSError as e:
         raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou", str(e)))
-    return {"ok": True, "gid": context.gid, "grouped": context.grouped,
-            "session_prefix": context.session_prefix, "arquivo": str(context.path),
-            "mtime": (await asyncio.to_thread(orq_md.ler_arquivo, context.path))[1]}
+    try:
+        out = await asyncio.to_thread(groups_bridge.call, "group.orq_associate", name=name,
+                                      gid=body.gid, mtime=body.mtime, facts=facts)
+    except groups_bridge.GroupsBridgeError as e:
+        raise _group_unavailable(e.code) from None
+    return _bridge_reply(out)
 
 
 class ComecarBody(_StrictBody):

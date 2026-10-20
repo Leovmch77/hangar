@@ -8,14 +8,10 @@ peers = os OUTROS membros do grupo. gid = id estável do grupo — nomeia o arqu
 Formato legado {"peer": "x"} (1:1) é lido como {"peers": ["x"]}."""
 import hashlib
 import json
-import threading
 from pathlib import Path
 
 from app.config import settings
 from app.pqueue import _sanitize
-
-# Serializa a associação do time `orq` no modo `python` (`orq_context.associate`).
-_LOCK = threading.Lock()
 
 
 def _pair_dir() -> Path:

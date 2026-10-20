@@ -207,14 +207,22 @@ def test_bridge_failure_is_an_explicit_error():
 def test_associate_in_rust_mode_sends_the_orq_facts(monkeypatch, client):
     calls = _rust(monkeypatch, reply={"status": 200, "body": {"ok": True, "gid": "g1", "grouped": True}})
     monkeypatch.setattr(api.orq_context, "associate_facts", lambda name, gid: {"draft_gid": name + gid})
-
-    def no_local(*a):
-        raise AssertionError("no modo Rust o lock de grupo é do Rust")
-    monkeypatch.setattr(api.orq_context, "associate", no_local)
     r = client.post("/api/sessions/arb/orq/grupo", headers=H, json={"gid": "g1", "mtime": 1.5})
     assert r.status_code == 200, r.text
     assert r.json() == {"ok": True, "gid": "g1", "grouped": True}
     assert calls == [("group.orq_associate", {"name": "arb", "gid": "g1", "mtime": 1.5, "facts": {"draft_gid": "arbg1"}})]
+
+
+@pytest.mark.parametrize("mode", ["python", None])
+def test_orq_grupo_in_python_mode_refuses(monkeypatch, client, mode):
+    monkeypatch.setattr(runtime_coordinator, "_current", mode and SimpleNamespace(mode=mode))
+    monkeypatch.setattr(groups_bridge, "call", lambda *a, **k: pytest.fail("sem Rust não há ponte"))
+    _sidecar("arb", [], gid="g1", orq=True)
+    before = sorted(p.name for p in pair._pair_dir().iterdir())
+    r = client.post("/api/sessions/planner/orq/grupo", headers=H, json={"gid": "g1", "mtime": 1.5})
+    assert r.status_code == 503, r.text
+    assert r.json()["detail"]["code"] == "groups_need_rust_server"
+    assert sorted(p.name for p in pair._pair_dir().iterdir()) == before
 
 
 def test_rename_in_rust_mode_asks_rust_before_tmux(monkeypatch, client):

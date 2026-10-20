@@ -1,6 +1,4 @@
 """Rotas internas que o Rust usa nas operações de grupo: fatos da orquestração."""
-import json
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -80,25 +78,3 @@ def test_is_orchestrator(monkeypatch):
     monkeypatch.setattr(api_mod.orq_runs, "find", lambda name: {"name": name} if name.endswith("-orq") else None)
     r = _post("orq/is-orchestrator", {"names": ["a", "g1-orq", "b"]})
     assert r.json() == {"names": ["g1-orq"]}
-
-
-class _NoLock:
-    def __enter__(self):
-        raise AssertionError("pair._LOCK tomado")
-
-    def __exit__(self, *exc):
-        return False
-
-
-def _saved(name):
-    context = oc.resolve(name)
-    text = roles.escrever_papel("", roles.Papel("executor", "x*", "codex", "c", "", ""))
-    return oc.write(context, text, 0.0)
-
-
-def test_public_associate_still_takes_the_lock(monkeypatch):
-    mtime = _saved("planner")
-    (pair._pair_dir() / "arbiter.json").write_text(json.dumps({"peers": [], "task": "obra", "gid": "real", "orq": True}))
-    monkeypatch.setattr(pair, "_LOCK", _NoLock())
-    with pytest.raises(AssertionError, match="pair._LOCK"):
-        oc.associate("planner", "real", mtime)
