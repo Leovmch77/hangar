@@ -220,11 +220,13 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
     let mut legacy = Vec::new();
     for n in &everyone {
         if federated { break; }
-        match asked.groups.link(n).await.ok().flatten() {
+        match asked.groups.link(n).await {
             // Sessão daqui num grupo entre máquinas: entrar nele é pedir à dona dele.
-            Some(s) if s.fed.is_some() => federated = true,
-            Some(s) if s.peers.iter().any(|p| is_remote(p)) => legacy.push(n.clone()),
-            _ => {}
+            Ok(Some(s)) if s.fed.is_some() => federated = true,
+            Ok(Some(s)) if s.peers.iter().any(|p| is_remote(p)) => legacy.push(n.clone()),
+            Ok(_) => {}
+            // Ilegível não é solta: o par a gravaria por cima.
+            Err(error) => return asked.store_failed(&error),
         }
     }
     let mut held = held;
@@ -234,7 +236,10 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
         super::convert::run(&asked.st, &asked.groups, &legacy).await;
         held = match asked.enter().await { Ok(held) => held, Err(busy) => return busy };
         for n in &legacy {
-            if asked.groups.link(n).await.ok().flatten().is_some_and(|s| s.fed.is_some()) { federated = true; break; }
+            match asked.groups.link(n).await {
+                Ok(s) => if s.is_some_and(|s| s.fed.is_some()) { federated = true; break; },
+                Err(error) => return asked.store_failed(&error),
+            }
         }
     }
     if federated {
