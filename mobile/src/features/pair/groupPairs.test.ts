@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AggSession } from '@hangar/core';
-import { groupBadge, groupMembers, outsideRow, pairCandidates, pairTargets, ticketCode } from './groupPairs';
+import { groupBadge, groupBadges, groupMembers, outsideRow, pairCandidates, pickKey, pairTargets, ticketCode } from './groupPairs';
 
 const row = (name: string, extra: Partial<AggSession> = {}) => ({ name, state: 'idle', serverId: 's1', serverLabel: 'casa', serverColor: '#000', ...extra }) as AggSession;
 const ids = new Map([['s1', 'casa'], ['s2', 'lab']]);
@@ -21,17 +21,28 @@ describe('selo do grupo', () => {
     expect(ticketCode('tela nova')).toBeNull();
   });
 
+  const badgeOf = (s: AggSession, rows: AggSession[], identities = ids) => groupBadge(s, groupBadges(rows, identities).get(pickKey(s.serverId, s.name)));
+
   it('grupo de uma máquina mantém o rótulo antigo', () => {
-    expect(groupBadge(row('a', { pair_peers: ['b'], pair_task: 'tela X' }))).toEqual({ text: 'tela X', machines: 1 });
-    expect(groupBadge(row('a', { pair_peers: ['b', 'c'] }))).toEqual({ text: '3', machines: 1 });
-    expect(groupBadge(row('a'))).toBeNull();
+    const one = row('a', { pair_peers: ['b'], pair_task: 'tela X' });
+    expect(badgeOf(one, [one])).toEqual({ text: 'tela X', machines: 1 });
+    const three = row('a', { pair_peers: ['b', 'c'] });
+    expect(badgeOf(three, [three])).toEqual({ text: '3', machines: 1 });
+    expect(badgeOf(row('a'), [row('a')])).toBeNull();
   });
 
-  it('entre máquinas conta as máquinas, sem o membro de fora, e prefere o ticket', () => {
+  it('dona definida com todos os membros nesta máquina não vira "1 máquinas"', () => {
+    const a = row('a', { pair_gid: 'g', pair_owner: 'casa', pair_peers: ['b'] });
+    const b = row('b', { pair_gid: 'g', pair_owner: 'casa', pair_peers: ['a'] });
+    expect(badgeOf(a, [a, b])).toEqual({ text: 'b', machines: 1 });
+  });
+
+  it('entre máquinas conta as máquinas pelo modelo global, sem o membro de fora, e prefere o ticket', () => {
     const externals = [{ alias: 'ana', owner: 'Ana', session: 'web', address: 'https://x.ts.net:8443', level: 'view' as const, pending: false }];
-    const s = row('a', { pair_owner: 'casa', pair_peers: ['b', 'lab::c', 'vm::d', 'ana::web'], pair_externals: externals, pair_task: 'tela X' });
-    expect(groupBadge(s)).toEqual({ text: null, machines: 3 });
-    expect(groupBadge({ ...s, pair_task: 'PM-7 tela' })).toEqual({ text: 'PM-7', machines: 3 });
+    const a = row('a', { pair_gid: 'g', pair_owner: 'casa', pair_peers: ['b', 'lab::c', 'vm::d', 'ana::web'], pair_externals: externals, pair_task: 'tela X' });
+    const c = row('c', { serverId: 's2', serverLabel: 'lab', pair_gid: 'g', pair_owner: 'casa', pair_peers: ['casa::a', 'casa::b', 'vm::d'] });
+    expect(badgeOf(a, [a, c])).toEqual({ text: null, machines: 3 });
+    expect(badgeOf(c, [{ ...a, pair_task: 'PM-7 tela' }, c])).toEqual({ text: 'PM-7', machines: 3 });
   });
 });
 
@@ -59,7 +70,12 @@ describe('candidatas de todas as máquinas', () => {
   });
 
   it('o pedido qualifica só quem é de outra máquina', () => {
-    expect(pairTargets(['s1::b', 's2::z'], 's1', ids)).toEqual(['b', 'lab::z']);
+    expect(pairTargets(['s1::b', 's2::z'], 's1', ids)).toEqual({ names: ['b', 'lab::z'], unresolved: [] });
+  });
+
+  it('máquina sem identificador válido não vai como undefined::nome: a escolha sai do pedido', () => {
+    expect(pairTargets(['s1::b', 's3::w'], 's1', ids)).toEqual({ names: ['b'], unresolved: ['s3::w'] });
+    expect(pairTargets(['s2::z'], 's1', new Map([['s1', 'casa'], ['s2', 'casa']]))).toEqual({ names: [], unresolved: ['s2::z'] });
   });
 });
 

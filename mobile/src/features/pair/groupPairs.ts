@@ -1,4 +1,4 @@
-import { canPair, groupGlobal, pairExternals, type AggSession, type State } from '@hangar/core';
+import { canPair, groupGlobal, identityOf, type AggSession, type State } from '@hangar/core';
 
 /** Membro de fora (`alias::sessao`) é aberto pela entrada do par, não pelo servidor do grupo. */
 export function outsideRow(rows: AggSession[], peer: string): AggSession | null {
@@ -10,13 +10,26 @@ export function ticketCode(task: string | null | undefined): string | null {
   return task?.match(/^[A-Za-z][A-Za-z0-9_.]*-\d+(?![A-Za-z0-9_])/)?.[0] ?? null;
 }
 
-/** Selo do grupo na linha: entre máquinas leva o ticket ou o número de máquinas, como o nativo. */
-export function groupBadge(s: AggSession): { text: string | null; machines: number } | null {
+export type GroupBadge = { text: string | null; machines: number };
+
+/** Selo dos membros de grupo que atravessa máquinas, pelo modelo global (como o nativo e a PWA): o ticket ou o número de
+ * máquinas, só com duas ou mais. Chave: `pickKey`. */
+export function groupBadges(rows: AggSession[], identities: ReadonlyMap<string, string>): Map<string, GroupBadge> {
+  const out = new Map<string, GroupBadge>();
+  for (const g of groupGlobal(rows, identities)) {
+    const machines = new Set(g.members.flatMap((mb) => mb.kind === 'here' ? [`here:${mb.server}`] : mb.kind === 'missing' ? [`id:${mb.server_id}`] : []));
+    if (machines.size < 2) continue;
+    const badge = { text: ticketCode(g.label), machines: machines.size };
+    for (const mb of g.members) if (mb.kind === 'here') out.set(pickKey(mb.server, mb.name), badge);
+  }
+  return out;
+}
+
+/** Selo do grupo na linha: o de `groupBadges` quando atravessa máquinas; senão o rótulo de uma máquina só. */
+export function groupBadge(s: AggSession, crossMachines?: GroupBadge): GroupBadge | null {
+  if (crossMachines) return crossMachines;
   const peers = s.pair_peers ?? [];
   if (!peers.length) return null;
-  const outside = new Set(pairExternals(s).map((p) => `${p.alias}::${p.session}`));
-  const servers = new Set(peers.filter((p) => p.indexOf('::') > 0 && !outside.has(p)).map((p) => p.slice(0, p.indexOf('::'))));
-  if (s.pair_owner || servers.size) return { text: ticketCode(s.pair_task), machines: servers.size + 1 };
   // o rótulo do grupo (ex.: o ticket) diz mais que o nome do par; sem ele, o par ou o tamanho
   return { text: s.pair_task ?? (peers.length === 1 ? peers[0] : String(peers.length + 1)), machines: 1 };
 }
@@ -56,14 +69,21 @@ export function pairCandidates(
   return out;
 }
 
-/** Nomes do pedido ao servidor da âncora: outra máquina vai como `<identificador>::<nome>`. */
-export function pairTargets(picked: string[], serverId: string, identities: ReadonlyMap<string, string>): string[] {
-  return picked.map((key) => {
+/** Nomes do pedido ao servidor da âncora: outra máquina vai como `<identificador>::<nome>`. Máquina sem identificador
+ * válido não entra no pedido: a escolha volta em `unresolved`. */
+export function pairTargets(picked: string[], serverId: string, identities: ReadonlyMap<string, string>): { names: string[]; unresolved: string[] } {
+  const names: string[] = [];
+  const unresolved: string[] = [];
+  for (const key of picked) {
     const at = key.indexOf('::');
     const server = key.slice(0, at);
     const name = key.slice(at + 2);
-    return server === serverId ? name : `${identities.get(server)}::${name}`;
-  });
+    const id = server === serverId ? null : identityOf(server, identities);
+    if (server === serverId) names.push(name);
+    else if (id) names.push(`${id}::${name}`);
+    else unresolved.push(key);
+  }
+  return { names, unresolved };
 }
 
 export type MemberView = {

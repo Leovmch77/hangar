@@ -16,6 +16,7 @@ import { montarFeed } from '../../../../src/features/pair/pairFeed';
 import { groupMembers, pairCandidates, pairTargets, type MemberView } from '../../../../src/features/pair/groupPairs';
 import { useIdentities } from '../../../../src/features/pair/identities';
 import * as m from '../../../../src/paraglide/messages';
+import { haptic } from '../../../../src/ui/haptics';
 import { superficie } from '../../../../src/theme/superficie';
 
 export default function PairSheet() {
@@ -155,14 +156,21 @@ export default function PairSheet() {
     return pairCandidates(anchor, [{ serverId, label, rows: own }, ...others], identities, identitiesLoading);
   }, [current, serverId, name, routeServer, sessions, byServer, identities, identitiesLoading]);
   const members = useMemo(() => groupMembers(serverId, name, allRows, identities), [serverId, name, allRows, identities]);
-  const pickedNames = pairTargets(picked, serverId, identities);
+  const { names: pickedNames, unresolved } = pairTargets(picked, serverId, identities);
 
   function togglePick(peer: string) {
+    haptic.selection();
     setPicked((currentPicked) => currentPicked.includes(peer) ? currentPicked.filter((item) => item !== peer) : [...currentPicked, peer]);
   }
 
   // Grupo com par de acesso completo: quem entra fica aberto para o dono só se a pessoa disser.
   function confirmPair() {
+    // Escolhida numa máquina sem identificador válido não vai ao servidor: sai da seleção, com o motivo.
+    if (unresolved.length) {
+      setPicked((currentPicked) => currentPicked.filter((key) => !unresolved.includes(key)));
+      setActionError(m.grupo_recusa_sem_identificador());
+      return;
+    }
     const full = fullPairsByAlias(groupRows);
     if (!full.length) { void doPair(false); return; }
     const token = actionEpoch.current;

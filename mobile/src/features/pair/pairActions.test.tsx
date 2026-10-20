@@ -67,8 +67,11 @@ const mocks = vi.hoisted(() => {
   const undo = vi.fn();
   const markLeavingPair = vi.fn(() => undo);
   const anchoredPairs = vi.fn((_server: string, _name: string): unknown[] => []);
-  return { deferred, params, setPeers, useSessions, useServers, identities, back, alert, core, reset, undo, markLeavingPair, anchoredPairs };
+  const haptic = { selection: vi.fn(), success: vi.fn(), error: vi.fn() };
+  return { deferred, params, setPeers, useSessions, useServers, identities, back, alert, core, reset, undo, markLeavingPair, anchoredPairs, haptic };
 });
+
+vi.mock('../../ui/haptics', () => ({ haptic: mocks.haptic }));
 
 vi.mock('react-native', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -116,6 +119,7 @@ vi.mock('../../paraglide/messages', () => ({
   par_falhou_saida: () => 'Falhou a saída do grupo.',
   pair_undo_anchor_body: ({ dono }: { dono: string }) => `desfaz ${dono}`,
   pair_not_transitive: () => 'não transitivo',
+  grupo_recusa_sem_identificador: () => 'Essa máquina ainda não tem identificador.',
 }));
 
 import PairSheet from '../../../app/s/[server]/[name]/pair';
@@ -167,6 +171,32 @@ describe('PairSheet — sessão de outra máquina', () => {
 
     expect(mocks.core.pairSession).toHaveBeenCalledWith('fixture-a', ['fixture-b', 'lab::fixture-z'], '', false, mocks.useServers((s) => s.servers[0]));
     expect(mocks.back).toHaveBeenCalledTimes(1);
+  });
+
+  it('marcar uma candidata vibra como seleção', async () => {
+    mocks.haptic.selection.mockClear();
+    await mount();
+    click('pick');
+    expect(mocks.haptic.selection).toHaveBeenCalledTimes(1);
+  });
+
+  it('máquina sem identificador não vai como undefined::nome: a escolha sai e a recusa aparece', async () => {
+    const before = mocks.identities.identities;
+    mocks.identities.identities = new Map([['server-1', 'casa']]);
+    try {
+      await mount();
+      click('pick-remote');
+      click('pair');
+      await flush();
+      expect(mocks.core.pairSession).not.toHaveBeenCalled();
+      expect(container.textContent).toContain('Essa máquina ainda não tem identificador.');
+      click('pick');
+      click('pair');
+      await flush();
+      expect(mocks.core.pairSession).toHaveBeenCalledWith('fixture-a', ['fixture-b'], '', false, mocks.useServers((s) => s.servers[0]));
+    } finally {
+      mocks.identities.identities = before;
+    }
   });
 });
 

@@ -29,6 +29,8 @@ import { SessionSectionCard, SessionSectionHeader } from './SessionSection';
 import { PairInviteSheet, type PairTarget } from '../pair/PairInviteSheet';
 import { PairAcceptSheet, type PairAcceptTarget } from '../pair/PairAcceptSheet';
 import { leaveExternal } from '../pair/leaveExternal';
+import { groupBadges, pickKey } from '../pair/groupPairs';
+import { useIdentities } from '../pair/identities';
 import { ConversationList } from './ConversationList';
 import { RenameSheet } from './RenameSheet';
 import { WorktreeSheet } from '../worktrees/WorktreeSheet';
@@ -37,6 +39,7 @@ import { superficie } from '../../theme/superficie';
 
 // Erro LANÇADO pelo apiFetch — já vem com mensagem pronta. O `formataErro` é pro envelope do
 // corpo da resposta (o `warning` do excluir), e aplicado a um Error devolve o código cru.
+const NO_SERVERS: Server[] = [];
 const mensagemDe = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 // O formulário remonta a home ao trocar de máquina; a memória pertence à vista, não à gaveta.
@@ -76,6 +79,10 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
   }, []);
   const activeId = useServers((s) => s.activeId);
   const byServer = useSessions((s) => s.byServer);
+  // Grupo entre máquinas na lista: só então se lê o identificador de cada máquina, como a PWA.
+  const crossMachine = useMemo(() => rows.some((r) => r.pair_owner || r.pair_peers?.some((p) => p.includes('::'))), [rows]);
+  const { identities } = useIdentities(crossMachine ? servers : NO_SERVERS);
+  const crossBadges = useMemo(() => groupBadges(rows, identities), [rows, identities]);
   const [filtro, setFiltro] = useState('');
   const insets = useSafeAreaInsets();
   // chave `modo:id`: trocar o Agrupar por não herda o recolhido de um grupo de outro tipo
@@ -475,6 +482,7 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
               onResume={retomar}
               onWorktree={proprios.has(item.serverId) ? abrirWorktree : undefined}
               onPair={proprios.has(item.serverId) || item.outside ? fazerPar : undefined}
+              crossBadge={crossBadges.get(pickKey(item.serverId, item.name))}
             />
           </SessionSectionCard>
         )}

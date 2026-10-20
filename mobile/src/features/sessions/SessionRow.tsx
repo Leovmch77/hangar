@@ -11,7 +11,7 @@ import { Icon } from '../../ui/Icon';
 import { superficie } from '../../theme/superficie';
 import { SPACE } from '../../theme/scale';
 import { useWorktreeStatus } from '../worktrees/worktreeStatus';
-import { groupBadge } from '../pair/groupPairs';
+import { groupBadge, type GroupBadge } from '../pair/groupPairs';
 import { GroupGlyph } from '../pair/GroupGlyph';
 import * as m from '../../paraglide/messages';
 
@@ -61,13 +61,15 @@ interface Props {
   onWorktree?: (s: AggSession, path: string) => void;
   // Ausente em servidor de convite: lá a pessoa é convidada, não dona do par.
   onPair?: (s: AggSession, action: PairAction) => void;
+  // Selo do grupo entre máquinas pelo modelo global (`groupBadges` da lista); ausente = grupo de uma máquina só.
+  crossBadge?: GroupBadge;
 }
 
 // O iOS já vibra ao abrir o menu de contexto; o PopupMenu do Android não.
 const vibrarAoAbrir =
   Platform.OS === 'android' ? () => void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {}) : undefined;
 
-export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor, compact = false, selected, onPress, onGit, onExcluir, onRenomear, onResume, onWorktree, onPair }: Props) {
+export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor, compact = false, selected, onPress, onGit, onExcluir, onRenomear, onResume, onWorktree, onPair, crossBadge }: Props) {
   const { theme } = useUnistyles();
   // O orquestrador não se renomeia nem se fecha: o backend recusa, então a linha nem oferece.
   const orq = isOrq(s);
@@ -116,7 +118,7 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
     }
   };
   // Renomear/Git/Excluir moram no toque longo, gesto que o leitor de tela não alcança. Aqui elas viram ações do rotor/menu de acessibilidade da própria linha.
-  const badge = groupBadge(s);
+  const badge = groupBadge(s, crossBadge);
   const badgeText = badge ? (badge.text ?? m.grupo_selo_maquinas({ n: badge.machines })) : null;
   // O selo abre o painel do grupo; no leitor de tela vira ação da linha.
   const groupTitle = badge && onPair && !fora ? m.par_grupo_titulo({ n: (s.pair_peers?.length ?? 0) + 1 }) : null;
