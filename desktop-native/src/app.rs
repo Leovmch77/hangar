@@ -6517,6 +6517,18 @@ impl Hangar {
         cx.notify();
     }
 
+    fn toggle_plugin(&mut self, site: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let ids = crate::plugin_ui::pane_ids(&self.plugin_panes);
+        let active = crate::plugin_ui::active_pane(&ids, &self.plugin_shown, self.plugin_local_tab.as_deref());
+        let expanded = self.selected_key().and_then(|key| self.plugin_presentations.get(&key))
+            .is_some_and(|view| view.reserves_panel(!ids.is_empty()));
+        if expanded && active.as_deref() == Some(site) {
+            self.minimize_plugin(site.to_owned(), window, cx);
+        } else {
+            self.open_plugin(Some(site), window, cx);
+        }
+    }
+
     /// Hover dos mods depois de um evento novo ou de uma troca de aba: fica só o trecho ainda desenhado na faixa ou no
     /// painel da frente.
     fn keep_plugin_hovered(&mut self) { self.keep_plugin_hovered_without(None); }
@@ -6624,9 +6636,9 @@ impl Hangar {
     fn plugin_view(&self, cx: &mut Context<Self>) -> crate::plugin_ui::View<'_> {
         let entity = cx.entity().downgrade();
         let shown = entity.clone();
-        let opened = entity.clone();
-        let open: crate::plugin_ui::Show = std::rc::Rc::new(move |site: &str, window: &mut Window, cx: &mut App| {
-            let _ = opened.update(cx, |this, cx| this.open_plugin(Some(site), window, cx));
+        let toggled = entity.clone();
+        let toggle: crate::plugin_ui::Show = std::rc::Rc::new(move |site: &str, window: &mut Window, cx: &mut App| {
+            let _ = toggled.update(cx, |this, cx| this.toggle_plugin(site, window, cx));
         });
         let show: crate::plugin_ui::Show = std::rc::Rc::new(move |site: &str, _: &mut Window, cx: &mut App| {
             let site = site.to_owned();
@@ -6639,7 +6651,11 @@ impl Hangar {
                 let _ = entity.update(cx, |this, cx| this.submit_plugin_field(&site, &control, cx));
             })
         });
-        crate::plugin_ui::View { press: self.plugin_press(cx), panes: &self.plugin_panes, minimize: (!self.plugin_panes.is_empty()).then(|| self.plugin_minimize(cx)).flatten(), show, open, tabs_scroll: &self.plugin_tabs_scroll, columns: self.plugin_columns,
+        let ids = crate::plugin_ui::pane_ids(&self.plugin_panes);
+        let active = crate::plugin_ui::active_pane(&ids, &self.plugin_shown, self.plugin_local_tab.as_deref());
+        let expanded = self.selected_key().and_then(|key| self.plugin_presentations.get(&key))
+            .is_some_and(|view| view.reserves_panel(!ids.is_empty()));
+        crate::plugin_ui::View { press: self.plugin_press(cx), panes: &self.plugin_panes, minimize: (!self.plugin_panes.is_empty()).then(|| self.plugin_minimize(cx)).flatten(), show, toggle, active, expanded, tabs_scroll: &self.plugin_tabs_scroll, columns: self.plugin_columns,
             body_scrolls: self.selected_key().as_ref().and_then(|key| self.plugin_body_scrolls.get(key)),
             hover: Some(self.plugin_hover(cx)), hovered: &self.plugin_hovered, fields: &self.plugin_fields, submit }
     }
