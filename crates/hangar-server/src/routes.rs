@@ -89,6 +89,8 @@ pub struct AppState {
     pub groups: Option<Arc<crate::groups::service::GroupService>>,
     /// Outras máquinas do dono (`peers.json`), para os grupos entre máquinas.
     pub peers: Arc<crate::groups::peers::PeerClient>,
+    /// Id desta máquina entre as do dono (`CP_SERVER_ID`); vazio = sem id.
+    pub server_id: String,
     /// Voz ao vivo; o teste troca por um hub com pastas temporárias.
     pub voice: Arc<crate::voice::hub::VoiceHub>,
     /// Convites e par externo; `None` sem `HANGAR_SHARES_FILE` (o Python segue dono).
@@ -105,20 +107,29 @@ impl AppState {
     }
 
     pub fn new(cfg: Config) -> AppState {
-        Self::with_terminal_pool(cfg, crate::terminal_control::TerminalPool::new())
+        Self::with_server_id(cfg, String::new())
+    }
+
+    /// `server_id` = `HANGAR_SERVER_ID`, lido só no `main`.
+    pub fn with_server_id(cfg: Config, server_id: String) -> AppState {
+        Self::build(cfg, crate::terminal_control::TerminalPool::new(), server_id)
     }
 
     pub fn with_terminal_pool(cfg: Config, terminal: crate::terminal_control::TerminalPool) -> AppState {
+        Self::build(cfg, terminal, String::new())
+    }
+
+    fn build(cfg: Config, terminal: crate::terminal_control::TerminalPool, server_id: String) -> AppState {
         let costs = Arc::new(crate::costs::collect::Collector::new(
             crate::costs::index::default_dir(), crate::costs::pricing::default_dir(),
             crate::costs::areas::default_map_file(),
             Arc::new(crate::costs::collect::HttpScopes::new(cfg.upstream, cfg.internal_secret.clone())),
         ));
-        Self::with_parts(cfg, terminal, costs, Arc::new(crate::costs::fx::Fx::new()))
+        Self::with_parts(cfg, terminal, costs, Arc::new(crate::costs::fx::Fx::new()), server_id)
     }
 
     pub fn with_parts(cfg: Config, terminal: crate::terminal_control::TerminalPool,
-                      costs: Arc<crate::costs::collect::Collector>, fx: Arc<crate::costs::fx::Fx>) -> AppState {
+                      costs: Arc<crate::costs::collect::Collector>, fx: Arc<crate::costs::fx::Fx>, server_id: String) -> AppState {
         let http = proxy::client();
         let mods = crate::mods::state::Mods::default();
         let interactions = Arc::new(crate::interactions::InteractionStore::default());
@@ -149,9 +160,9 @@ impl AppState {
             Err(e) => { tracing::error!("{e}"); None }
         };
         if let Some(share) = &share { list.set_shares(share.clone()); }
-        let groups = crate::groups::from_env(list.env().dirs.as_ref(),
+        let groups = crate::groups::from_env(list.env().dirs.as_ref(), server_id.clone(),
             Arc::new(crate::groups::orq::PythonOrq::new(cfg.upstream, cfg.internal_secret.clone(), http.clone())), list.clone(), diag.clone());
-        AppState { accounts: crate::accounts::AccountService::new(crate::accounts::environment::AccountEnvironment::capture()), command_catalog: Arc::default(), groups, peers: Arc::new(crate::groups::peers_from_env()), auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, public_v6: None, diag,
+        AppState { accounts: crate::accounts::AccountService::new(crate::accounts::environment::AccountEnvironment::capture()), command_catalog: Arc::default(), groups, server_id, peers: Arc::new(crate::groups::peers_from_env()), auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, public_v6: None, diag,
             workspace_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             interactions, plugin,
             transcription: Arc::default(),

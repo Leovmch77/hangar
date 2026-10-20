@@ -97,7 +97,7 @@ async fn run() {
     // O Python segura o cano do stdin; fechou = pai morreu. Vale igual em Linux, Windows e macOS.
     let stop = hangar_server::parent_gone(tokio::io::stdin());
     #[allow(unused_mut)]
-    let mut state = hangar_server::routes::AppState::new(cfg);
+    let mut state = hangar_server::routes::AppState::with_server_id(cfg, std::env::var("HANGAR_SERVER_ID").unwrap_or_default());
     #[cfg(windows)]
     if state.cfg.listen.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED) {
         // Falhar aqui não derruba o servidor: fica como antes, só sem a guarda do IPv6.

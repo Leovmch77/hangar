@@ -133,7 +133,7 @@ impl Harness {
         let collector = Arc::new(Collector::new(index, base.join("pricing"), dir.path().join("areas.json"), Arc::new(HttpScopes::new(up_address, SECRET.into()))));
         let cfg = Config { listen: "127.0.0.1:0".parse().unwrap(), upstream: up_address,
             internal_secret: SECRET.into(), auth_token: OWNER.into(), log_path: None, trusted: TrustedHosts::parse("127.0.0.1") };
-        let mut state = AppState::with_parts(cfg, hangar_server::terminal_control::TerminalPool::new(), collector.clone(), fx);
+        let mut state = AppState::with_parts(cfg, hangar_server::terminal_control::TerminalPool::new(), collector.clone(), fx, String::new());
         state.origins_home = dir.path().join("home");
         state.side.locate = Arc::new(crate::fake::FakeLocate { upstream: up_address, http: hangar_server::proxy::client(), secret: SECRET.into() });
         for path in [state.origins_home.join(".claude/skills/minha-skill"), state.origins_home.join(".claude/plugins/cache/market/superpowers/1/skills/brainstorming")] {

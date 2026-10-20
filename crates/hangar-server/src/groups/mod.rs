@@ -29,15 +29,14 @@ use service::{GroupService, OrqFacts};
 use store::PairDir;
 
 /// Serviço do processo sobre o `.hangar-pair` da conta padrão (`settings.projects_dir.parent`, a
-/// pasta `claude` da lista). Arquivo de contratos e id da máquina vêm do Python
-/// (`HANGAR_PAIR_ARCHIVE`, `HANGAR_SERVER_ID`); sem as pastas da lista não há serviço.
-pub fn from_env(dirs: Option<&Dirs>, orq: Arc<dyn OrqFacts>, list: Arc<crate::list::bridge::ListBridge>, diary: crate::diag::DiagClient) -> Option<Arc<GroupService>> {
+/// pasta `claude` da lista). Arquivo de contratos vem do Python (`HANGAR_PAIR_ARCHIVE`) e o id da
+/// máquina de quem monta o `AppState` (o `main` lê `HANGAR_SERVER_ID`); sem as pastas da lista não há serviço.
+pub fn from_env(dirs: Option<&Dirs>, server_id: String, orq: Arc<dyn OrqFacts>, list: Arc<crate::list::bridge::ListBridge>, diary: crate::diag::DiagClient) -> Option<Arc<GroupService>> {
     let dirs = dirs?;
     let var = |key: &str| std::env::var(key).ok().filter(|v| !v.is_empty());
     // Mesmo padrão do `pair._arquivo_dir`: o cofre `~/.hangar`, não a conta.
     let archive = var("HANGAR_PAIR_ARCHIVE").map(PathBuf::from).unwrap_or_else(|| dirs.home.join(".hangar").join("pair-arquivo"));
     let dir = PairDir::new(dirs.claude.join(".hangar-pair"), archive);
-    let server_id = var("HANGAR_SERVER_ID").unwrap_or_default();
     // As outras máquinas guardam esta pelo id antigo; quem recusa as operações é quem as faz.
     match dir.identity_check(&server_id) {
         Ok(None) => {}
