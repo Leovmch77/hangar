@@ -620,7 +620,7 @@ pub async fn owner_join(st: &AppState, groups: &GroupService, mut ask: JoinAsk) 
     }
     let mut record = plan.record.clone();
     for gone in &unconfirmed {
-        if let Some(r) = remove_member(st, groups, &gid, gone).await? { record = r; }
+        if let Some(r) = super::fed_exit::remove_and_dissolve(st, groups, &gid, gone).await? { record = r; }
     }
     // Avisos e acesso de fora depois de tudo gravado, só a quem ficou.
     let alive: Vec<String> = plan.newcomers.iter().filter(|n| record.members.iter().any(|m| m.server == me && &&m.name == n)).cloned().collect();

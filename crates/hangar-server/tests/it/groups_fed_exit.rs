@@ -264,6 +264,43 @@ async fn dissolve_leaves_a_local_group_on_the_remaining_machine() {
     assert_eq!((s2["gid"].clone(), peers_of(&s2)), (json!(gid), vec!["s1".to_owned()]));
 }
 
+/// Sobrou só a participante: o contrato da dona vai para o arquivo, como o de um grupo que acabou.
+#[tokio::test(flavor = "multi_thread")]
+async fn dissolve_archives_the_owner_contract() {
+    let n = net().await;
+    let gid = pair(&n.casa, "s0", &["lab::s1", "lab::s2"]).await;
+    sidecar_becomes(&n.lab, "s2", |s| s.is_some()).await;
+    let contract = n.casa.pair.join(format!("grupo-{gid}.md"));
+    std::fs::write(&contract, "combinado").unwrap();
+    unpair(&n.casa, "s0").await;
+    assert!(record(&n.casa, &gid).is_none());
+    assert!(!contract.exists(), "o contrato saiu da pasta do grupo");
+    let archived: Vec<String> = std::fs::read_dir(n.casa.root.join("arquivo")).unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+    assert!(archived.iter().any(|f| f.starts_with(&format!("grupo-{gid}-"))), "{archived:?}");
+}
+
+/// Join parcial numa dona sem membro próprio: quem não confirmou sai e, sobrando uma máquina só
+/// com membros, o grupo dissolve como numa saída.
+#[tokio::test(flavor = "multi_thread")]
+async fn partial_join_on_owner_without_members_dissolves() {
+    let n = net().await;
+    let gid = pair(&n.casa, "s0", &["lab::s1", "vm::s2"]).await;
+    sidecar_becomes(&n.vm, "s2", |s| s.is_some()).await;
+    unpair(&n.casa, "s0").await;
+    // Registro com uma máquina só: o que fica de uma dissolução interrompida no meio.
+    let path = n.casa.pair.join("groups").join(format!("{gid}.json"));
+    let mut rec = record(&n.casa, &gid).unwrap();
+    rec["members"] = json!([member("lab", "s1")]);
+    std::fs::write(&path, rec.to_string()).unwrap();
+    // vm recusa `s9` (sessão inexistente lá); lab confirma `s3`.
+    let (status, body) = call(n.lab.addr, "POST", "/api/sessions/s1/pair", Some(&json!({"peers": ["s3", "vm::s9"]}))).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["warning"]["code"], "erro_grupo_membro_nao_confirmado", "{body}");
+    assert!(record(&n.casa, &gid).is_none(), "uma máquina só com membros: dissolve");
+    sidecar_becomes(&n.lab, "s1", |s| s.is_some_and(|s| s.get("fed").is_none() && peers_of(&s) == ["s3"])).await;
+}
+
 /// O par de fora de quem sai acaba como hoje; o grupo entre máquinas segue sem ele.
 #[tokio::test(flavor = "multi_thread")]
 async fn leave_ends_outside_pairs_as_today() {

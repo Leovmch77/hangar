@@ -123,6 +123,12 @@ impl GroupService {
 
     pub fn contract_path(&self, gid: &str) -> std::path::PathBuf { self.dir.contract_path(gid) }
 
+    /// Contratos de `gid` para o arquivo (a pasta que só este `PairDir` conhece). Faxina: fora do lock.
+    pub async fn archive_contracts(&self, gid: &str) -> Result<(), GroupError> {
+        let (dir, gid) = (self.dir.clone(), gid.to_owned());
+        blocking(move || dir.archive_contracts(&gid)).await
+    }
+
     /// A pasta `.hangar-pair`, onde o Python também guarda `external_pairs.json`.
     pub fn pair_root(&self) -> &std::path::Path { self.dir.root() }
 

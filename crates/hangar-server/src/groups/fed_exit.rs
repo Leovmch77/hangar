@@ -206,9 +206,11 @@ async fn dissolve(st: &AppState, groups: &GroupService, gid: &str, gone_server: 
     let outbox = of(st, groups).await?.outbox().clone();
     let outside: HashSet<String> = outside_addresses(st);
     let (dir, gid, gone_server) = (pair_dir(groups), gid.to_owned(), gone_server.to_owned());
-    let dropped = groups.locked(blocking(move || -> Result<Vec<String>, Refusal> {
+    let (dropped, orphan) = groups.locked(blocking(move || -> Result<(Vec<String>, Option<String>), Refusal> {
         // Alguém pode ter entrado entre a saída e aqui.
-        let Some(record) = dir.record(&gid).map_err(store_refusal)?.filter(|r| r.owner == me && machines(r) <= 1) else { return Ok(Vec::new()) };
+        let Some(record) = dir.record(&gid).map_err(store_refusal)?.filter(|r| r.owner == me && machines(r) <= 1) else { return Ok((Vec::new(), None)) };
+        // Sem membro daqui o grupo segue (ou acaba) noutra máquina: o contrato da dona vai ao arquivo.
+        let orphan = (!record.members.iter().any(|m| m.server == me)).then(|| gid.clone());
         let mut servers: BTreeSet<String> = record.members.iter().map(|m| m.server.clone()).collect();
         servers.insert(gone_server);
         servers.remove(&me);
@@ -228,8 +230,9 @@ async fn dissolve(st: &AppState, groups: &GroupService, gid: &str, gone_server: 
         let version = record.version + 1;
         outbox.enqueue(servers.into_iter().map(|server| OutboxItem::Dissolved { server, gid: gid.clone(), version, origin: me.clone() }).collect())
             .map_err(store_refusal)?;
-        Ok(dropped)
+        Ok((dropped, orphan))
     })).await.map_err(store_refusal)??;
     groups.changed();
+    if let Some(gid) = orphan { groups.archive_contracts(&gid).await.map_err(store_refusal)?; }
     Ok(dropped)
 }
