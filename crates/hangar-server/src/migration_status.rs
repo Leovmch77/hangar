@@ -103,7 +103,7 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
     if crate::accounts::http::matches(method, path) { return true; }
     if *method == Method::GET {
         if matches!(path, "/api/sessions" | "/api/sessions/events" | "/api/sessions/creation-progress" | "/api/costs" | "/api/cotacao" | "/api/uso" | "/api/migration/status" | "/api/presence"
-            | "/api/voice" | "/api/voice/settings" | "/api/voice/memory" | "/api/jev/aux/cliproxy" | "/api/jev/delivery") {
+            | "/api/voice" | "/api/voice/settings" | "/api/voice/memory" | "/api/jev/aux/cliproxy" | "/api/jev/delivery" | "/api/client-api") {
             return true;
         }
         let tail = path.strip_prefix("/api/sessions/").and_then(|r| r.split_once('/')).map(|(_, t)| t);

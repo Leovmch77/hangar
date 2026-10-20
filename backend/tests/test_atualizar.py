@@ -392,7 +392,7 @@ def test_aviso_do_instalador_chega_no_estado(repo, monkeypatch):
 
 
 def _preparo_gravado(repo, monkeypatch, *, lock_igual: bool, node_modules: bool,
-                     topologia: str = "systemd", fetch=lambda: []):
+                     topologia: str = "systemd", fetch=lambda **kw: []):
     chamadas = []
     class P:
         returncode = 0
@@ -433,6 +433,27 @@ def test_renovar_chromium_onde_o_script_ja_rodou_mesmo_com_download_falho(tmp_pa
     assert len(chamadas) == 1 and chamadas[0][0].endswith("install-chromium.sh")
 
 
+@pytest.mark.parametrize("texto,idade_h,roda", [
+    ("baixado: /x/chrome-headless-shell (1.2.3.4)\n", 2, False),
+    ("baixado: /x/chrome-headless-shell (1.2.3.4)\n", 25, True),
+    ("download falhou: sem rede\n", 2, True),
+])
+def test_renovar_chromium_no_maximo_uma_vez_por_dia(tmp_path, monkeypatch, texto, idade_h, roda):
+    chamadas = []
+    class P:
+        returncode = 0
+        stdout = stderr = ""
+    monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: (chamadas.append(args), P())[1])
+    monkeypatch.setattr(atualizar.sys, "platform", "linux")
+    monkeypatch.setattr(atualizar.Path, "home", lambda: tmp_path)
+    marca = tmp_path / ".hangar" / "native" / "chromium-ok"
+    marca.parent.mkdir(parents=True)
+    marca.write_text(texto)
+    agora = marca.stat().st_mtime + idade_h * 3600
+    atualizar._renovar_chromium(agora=agora)
+    assert (len(chamadas) == 1) is roda
+
+
 def test_preparar_sincroniza_o_uv_e_nao_chama_o_instalador(repo, monkeypatch):
     """O caminho do botão: dist + `uv sync`. Nada de `install.sh --update`."""
     cmds = _preparo_gravado(repo, monkeypatch, lock_igual=True, node_modules=True)
@@ -469,7 +490,7 @@ def test_preparar_sem_marca_assume_o_node_modules_do_instalador(repo, monkeypatc
         stderr = ""
     monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: (chamadas.append(args), P())[1])
     monkeypatch.setattr(atualizar, "_atualizar_dist", lambda **k: None)
-    monkeypatch.setattr(atualizar.rust_release, "fetch", lambda: [])
+    monkeypatch.setattr(atualizar.rust_release, "fetch", lambda **kw: [])
     monkeypatch.setattr(atualizar, "_renovar_chromium", lambda: None)
     monkeypatch.setattr(atualizar.shutil, "which", lambda nome: f"/bin/{nome}")
     (repo / "backend").mkdir(exist_ok=True)
@@ -491,13 +512,13 @@ def test_preparar_sem_node_modules_nao_instala_front(repo, monkeypatch):
 def test_preparar_baixa_os_binarios_e_a_falha_vira_aviso(repo, monkeypatch):
     """Sem os binários o Python atende sozinho: o download que falha avisa e não para o `uv sync`."""
     cmds = _preparo_gravado(repo, monkeypatch, lock_igual=True, node_modules=True,
-                            fetch=lambda: ["binários Rust não baixados: rede fora"])
+                            fetch=lambda **kw: ["binários Rust não baixados: rede fora"])
     assert any(c.endswith("uv sync") for c in cmds)
     assert "binários Rust não baixados: rede fora" in atualizar.estado()["avisos"]
 
 
 def test_preparar_sem_build_para_a_maquina_nao_avisa(repo, monkeypatch):
-    _preparo_gravado(repo, monkeypatch, lock_igual=True, node_modules=True, fetch=lambda: None)
+    _preparo_gravado(repo, monkeypatch, lock_igual=True, node_modules=True, fetch=lambda **kw: None)
     assert not atualizar.estado().get("avisos")
 
 
@@ -1403,6 +1424,259 @@ def test_build_local_que_falha_devolve_a_tela_anterior(repo, monkeypatch):
     aviso = atualizar._atualizar_dist()
     assert aviso and "erro X" in aviso
     assert (dist / "index.html").read_text(encoding="utf-8") == "tela da main"
+
+
+# ─── Tela pela chave das fontes (release `dist-commits`) ─────────────────────────────────────────
+
+def _fontes_da_tela(repo):
+    for pasta, nome in (("frontend", "a.ts"), ("packages/core", "b.ts"),
+                        ("messages", "en.json"), ("project.inlang", "settings.json")):
+        (repo / pasta).mkdir(parents=True, exist_ok=True)
+        (repo / pasta / nome).write_text(nome, encoding="utf-8")
+    for nome in ("package.json", "package-lock.json"):
+        (repo / nome).write_text("{}", encoding="utf-8")
+    (repo / "frontend" / "dist").mkdir()
+    (repo / "frontend" / "dist" / "index.html").write_text("velho", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "fontes")
+
+
+def _tar_da_tela(html: bytes = b"<html>novo</html>") -> bytes:
+    import io
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo("index.html")
+        info.size = len(html)
+        tar.addfile(info, io.BytesIO(html))
+    return buf.getvalue()
+
+
+def _npm_dublado(repo, monkeypatch):
+    chamadas = []
+    monkeypatch.setattr(atualizar.shutil, "which", lambda n: "/usr/bin/npm" if n == "npm" else None)
+    rodar_real = atualizar._rodar
+    def _build(args, cwd=None, timeout=0, log=None):
+        if args[0] != "/usr/bin/npm":
+            return rodar_real(args, cwd=cwd, timeout=timeout, log=log)
+        chamadas.append(args)
+        (repo / "frontend" / "dist" / "index.html").write_text("local", encoding="utf-8")
+        return subprocess.CompletedProcess(args, 0, "", "")
+    monkeypatch.setattr(atualizar, "_rodar", _build)
+    return chamadas
+
+
+@pytest.fixture
+def release_dist_commits(repo, monkeypatch):
+    """Servidor HTTP de verdade no lugar da release `dist-commits`: nome do arquivo → bytes."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    arquivos: dict[str, bytes] = {}
+
+    class _H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            corpo = arquivos.get(self.path.rsplit("/", 1)[1])
+            if corpo is None:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            # `_Cortado`: promete mais do que manda e fecha, como uma conexão que cai no meio.
+            self.send_header("Content-Length", str(len(corpo) + (1000 if isinstance(corpo, _Cortado) else 0)))
+            self.end_headers()
+            self.wfile.write(corpo)
+            self.close_connection = True
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _H)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    for v in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setattr(atualizar, "_DIST_COMMITS_URL", f"http://127.0.0.1:{srv.server_port}/dist-commits")
+    monkeypatch.setattr(atualizar, "_behind_top", lambda: True)
+    _fontes_da_tela(repo)
+    yield arquivos
+    srv.shutdown()
+    srv.server_close()
+    t.join(timeout=5)
+
+
+class _Cortado(bytes):
+    pass
+
+
+def _publicar(arquivos, chave, tar, sha=None):
+    import hashlib
+    arquivos[f"frontend-dist-{chave}.tar.gz"] = tar
+    arquivos[f"frontend-dist-{chave}.tar.gz.sha256"] = \
+        f"{sha or hashlib.sha256(tar).hexdigest()}  frontend-dist-{chave}.tar.gz\n".encode()
+
+
+def _diario(monkeypatch):
+    eventos = []
+    monkeypatch.setattr(atualizar.diag, "registrar",
+                        lambda evento, nivel="ok", **campos: eventos.append((evento, nivel, campos)))
+    return eventos
+
+
+def test_dist_atras_do_topo_baixa_a_tela_da_chave_sem_npm(repo, release_dist_commits, monkeypatch):
+    """Atrás do topo o `dist-latest` é de outro commit; a tela do commit alcançado vem pela chave."""
+    chamadas = _npm_dublado(repo, monkeypatch)
+    _publicar(release_dist_commits, atualizar._chave_da_tela("HEAD"), _tar_da_tela())
+    assert atualizar._atualizar_dist() is None
+    assert chamadas == []
+    assert (repo / "frontend" / "dist" / "index.html").read_text() == "<html>novo</html>"
+    assert (atualizar._DIST_VELHO() / "index.html").read_text() == "velho"
+    assert not list((repo / "frontend").glob(".dist-baixado.*"))
+
+
+def test_dist_atras_do_topo_sem_a_chave_publicada_compila_aqui(repo, release_dist_commits, monkeypatch):
+    """Chave não publicada é o caso normal (CI cancelado): nem aviso na tela nem no diário."""
+    eventos = _diario(monkeypatch)
+    chamadas = _npm_dublado(repo, monkeypatch)
+    assert atualizar._atualizar_dist() is None
+    assert chamadas == [["/usr/bin/npm", "--prefix", "frontend", "run", "build"]]
+    assert (repo / "frontend" / "dist" / "index.html").read_text() == "local"
+    assert eventos == []
+
+
+def _falha_da_tela_da_chave(repo, monkeypatch, arquivos, tar, sha=None):
+    """Falha que não é 404: compila aqui, registra no diário e não vira aviso da tela."""
+    eventos = _diario(monkeypatch)
+    chamadas = _npm_dublado(repo, monkeypatch)
+    _publicar(arquivos, atualizar._chave_da_tela("HEAD"), tar, sha=sha)
+    try:
+        resultado = atualizar._atualizar_dist()
+    except Exception as e:
+        pytest.fail(f"a falha do download derrubou a atualização: {e!r}")
+    assert resultado is None
+    assert len(chamadas) == 1
+    assert (repo / "frontend" / "dist" / "index.html").read_text() == "local"
+    assert not atualizar.estado().get("avisos")
+    assert [(e, n) for e, n, _ in eventos] == [("atualizacao.tela_da_chave", "aviso")]
+    return eventos[0][2]["codigo"]
+
+
+def test_dist_com_sha256_divergente_e_descartado_e_compila_aqui(repo, release_dist_commits, monkeypatch):
+    codigo = _falha_da_tela_da_chave(repo, monkeypatch, release_dist_commits, _tar_da_tela(), sha="0" * 64)
+    assert codigo == "sha256_divergente"
+
+
+def test_dist_com_a_conexao_cortada_no_meio_compila_aqui(repo, release_dist_commits, monkeypatch):
+    tar = _tar_da_tela()
+    codigo = _falha_da_tela_da_chave(repo, monkeypatch, release_dist_commits, _Cortado(tar),
+                                     sha=__import__("hashlib").sha256(tar).hexdigest())
+    assert codigo == "download_falhou"
+
+
+def test_dist_com_o_tar_truncado_compila_aqui(repo, release_dist_commits, monkeypatch):
+    tar = _tar_da_tela(b"x" * 50000)[:-30]
+    codigo = _falha_da_tela_da_chave(repo, monkeypatch, release_dist_commits, tar)
+    assert codigo == "download_falhou"
+
+
+def test_chave_do_dist_so_muda_com_as_fontes_da_tela(repo):
+    _fontes_da_tela(repo)
+    antes = atualizar._chave_da_tela("HEAD")
+    (repo / "a.txt").write_text("outro\n", encoding="utf-8")
+    _git(repo, "commit", "-qam", "fora da tela")
+    assert antes and atualizar._chave_da_tela("HEAD") == antes
+    (repo / "messages" / "en.json").write_text("mudou", encoding="utf-8")
+    _git(repo, "commit", "-qam", "texto")
+    assert atualizar._chave_da_tela("HEAD") not in (None, antes)
+
+
+def test_chave_do_dist_muda_com_o_lock_das_dependencias(repo):
+    """Mesmas fontes compiladas com outras dependências dão outra tela."""
+    _fontes_da_tela(repo)
+    antes = atualizar._chave_da_tela("HEAD")
+    (repo / "package-lock.json").write_text('{"lockfileVersion": 3}', encoding="utf-8")
+    _git(repo, "commit", "-qam", "lock")
+    assert atualizar._chave_da_tela("HEAD") not in (None, antes)
+
+
+def test_chave_do_dist_e_a_mesma_conta_do_ci(repo):
+    """O `publica-dist` do ci.yml e o motor têm de chegar à mesma chave, ou o download nunca acha."""
+    import re
+    import shutil as sh
+    if not (sh.which("bash") and sh.which("sha256sum")):
+        pytest.skip("sem bash/sha256sum")
+    ci = (atualizar.Path(atualizar.__file__).resolve().parents[2]
+          / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    linha = re.search(r"^\s*(chave=\$\(git rev-parse .*\))\s*$", ci, re.M)
+    assert linha, "o ci.yml não calcula a chave da tela"
+    _fontes_da_tela(repo)
+    p = subprocess.run(["bash", "-c", f'c=HEAD; {linha.group(1)}; printf %s "$chave"'],
+                       cwd=repo, capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    assert p.stdout == atualizar._chave_da_tela("HEAD")
+
+
+def test_preparar_baixa_dist_e_binario_juntos_e_guarda_os_dois_avisos(repo, monkeypatch):
+    import threading
+    juntos = threading.Barrier(2, timeout=5)   # em fila, o primeiro esperaria o segundo para sempre
+    class P:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: P())
+    monkeypatch.setattr(atualizar.shutil, "which", lambda nome: f"/bin/{nome}")
+    monkeypatch.setattr(atualizar, "_renovar_chromium", lambda: None)
+    monkeypatch.setattr(atualizar, "_atualizar_dist", lambda: (juntos.wait(), "tela não atualizada: X")[1])
+    monkeypatch.setattr(atualizar.rust_release, "fetch", lambda **kw: (juntos.wait(), ["binários: Y"])[1])
+    (repo / "backend").mkdir(exist_ok=True)
+    atualizar._preparar("systemd")
+    assert atualizar.estado()["avisos"] == ["tela não atualizada: X", "binários: Y"]
+
+
+def test_preparar_com_dist_que_explode_guarda_o_aviso_do_binario(repo, monkeypatch):
+    class P:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: P())
+    monkeypatch.setattr(atualizar.shutil, "which", lambda nome: f"/bin/{nome}")
+    monkeypatch.setattr(atualizar, "_renovar_chromium", lambda: None)
+    def _explode():
+        raise RuntimeError("build travou")
+    monkeypatch.setattr(atualizar, "_atualizar_dist", _explode)
+    monkeypatch.setattr(atualizar.rust_release, "fetch", lambda **kw: ["binários: Y"])
+    (repo / "backend").mkdir(exist_ok=True)
+    with pytest.raises(RuntimeError, match="build travou"):
+        atualizar._preparar("systemd")
+    assert atualizar.estado()["avisos"] == ["binários: Y"]
+
+
+@pytest.mark.parametrize("tela_explode", [True, False])
+def test_binario_baixado_junto_so_e_gravado_com_a_tela_no_lugar(repo, monkeypatch, tela_explode):
+    """Tela que falha leva à volta do checkout: o binário novo não pode ficar gravado sob o Python velho."""
+    class P:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    gravados = []
+    def _fetch(release=None, hold=None):
+        (gravados if hold is None else hold).append("hangar-server")
+        return []
+    monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: P())
+    monkeypatch.setattr(atualizar.shutil, "which", lambda nome: f"/bin/{nome}")
+    monkeypatch.setattr(atualizar, "_renovar_chromium", lambda: None)
+    def _tela():
+        if tela_explode:
+            raise RuntimeError("build travou")
+    monkeypatch.setattr(atualizar, "_atualizar_dist", _tela)
+    monkeypatch.setattr(atualizar.rust_release, "fetch", _fetch)
+    monkeypatch.setattr(atualizar.rust_release, "install_held", lambda hold: (gravados.extend(hold), [])[1], raising=False)
+    (repo / "backend").mkdir(exist_ok=True)
+    if tela_explode:
+        with pytest.raises(RuntimeError, match="build travou"):
+            atualizar._preparar("systemd")
+        assert gravados == []
+    else:
+        atualizar._preparar("systemd")
+        assert gravados == ["hangar-server"]
 
 
 def test_contagem_de_commits_que_falha_resgata_por_precaucao(repo, canal, monkeypatch):

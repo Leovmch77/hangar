@@ -66,11 +66,17 @@ fn sha256_hex(bytes: &[u8]) -> String {
     ring::digest::digest(&ring::digest::SHA256, bytes).as_ref().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Versão da API que este app exige do servidor: a que o servidor do mesmo commit fala.
+const REQUIRED_API: u32 = hangar_api::CLIENT_API;
+
+/// Release anterior ao campo e servidor anterior à rota contam como a primeira API.
+fn first_api() -> u32 { 1 }
+
 #[derive(Deserialize)]
-struct Manifest { version: String, files: HashMap<String, String> }
+struct Manifest { version: String, files: HashMap<String, String>, #[serde(default = "first_api")] requires_api: u32 }
 
 #[derive(Clone)]
-struct Offer { version: String, url: String, sha256: String, channel: String }
+struct Offer { version: String, url: String, sha256: String, channel: String, requires_api: u32 }
 
 /// Por que a procura não achou o que oferecer: a rede falhou, ou a máquina respondeu e a branch não tem o app.
 #[derive(Clone, Debug, PartialEq)]
@@ -97,7 +103,7 @@ async fn check(client: &reqwest::Client, channel: &str) -> Result<Option<Offer>,
     // Branch cujo build desta plataforma falhou: avisa como a release ausente, em vez de dizer "em dia".
     let Some(sha256) = manifest.files.get(name) else { return missing() };
     Ok(offered(&manifest.version, channel, CURRENT, BUILT_CHANNEL).then(|| Offer { version: manifest.version,
-        url: format!("{base}/{name}"), sha256: sha256.to_lowercase(), channel: channel.to_owned() }))
+        url: format!("{base}/{name}"), sha256: sha256.to_lowercase(), channel: channel.to_owned(), requires_api: manifest.requires_api }))
 }
 
 fn sibling(exe: &Path, suffix: &str) -> PathBuf {
@@ -229,24 +235,40 @@ fn cause(error: reqwest::Error) -> String {
     std::iter::successors(Some(&error as &dyn std::error::Error), |e| e.source()).map(ToString::to_string).collect::<Vec<_>>().join(": ")
 }
 
-async fn install(client: reqwest::Client, exe: Option<PathBuf>, offer: Offer) -> Result<(), String> {
+/// A oferta aceita contra o manifesto relido agora: a release republicada vale se couber na API que o plano aceitou;
+/// passou a exigir mais, a oferta acabou (`None`). Leitura que falha ou sem oferta mantém a aceita.
+fn still_offered(accepted: Offer, read: Result<Option<Offer>, CheckFail>) -> Option<Offer> {
+    match read {
+        Ok(Some(fresh)) if fresh.requires_api > accepted.requires_api => None,
+        Ok(Some(fresh)) => Some(fresh),
+        Ok(None) | Err(_) => Some(accepted),
+    }
+}
+
+/// `Ok(false)`: a oferta acabou antes da troca (a release passou a exigir mais) e nada foi mexido; sem aviso, o próximo
+/// ciclo refaz o plano.
+async fn install(client: reqwest::Client, exe: Option<PathBuf>, offer: Offer) -> Result<bool, String> {
     // A oferta pode ter horas e a release é republicada a cada push: o sha que vale é o do manifesto de agora.
-    let offer = check(&client, &offer.channel).await.ok().flatten().unwrap_or(offer);
+    let channel = offer.channel.clone();
+    let Some(offer) = still_offered(offer, check(&client, &channel).await) else { return Ok(false) };
     let exe = exe.ok_or_else(|| tr("app_update_swap_failed").replace("{reason}", "current_exe"))?;
     // O instalador pode ter posto esta versão no caminho do app com ele aberto: não há o que baixar nem trocar.
     let (disk, wanted) = (exe.clone(), offer.sha256.clone());
     let placed = tokio::task::spawn_blocking(move || std::fs::read(&disk).is_ok_and(|bytes| sha256_hex(&bytes) == wanted));
     if placed.await.unwrap_or(false) {
-        return relaunch(&exe).await.map_err(|reason| with_reason(tr("app_update_relaunch_failed"), &reason));
+        return relaunch(&exe).await.map(|()| true).map_err(|reason| with_reason(tr("app_update_relaunch_failed"), &reason));
     }
     let bytes = download(&client, &offer.url, RETRY_PAUSE).await?;
     // O CI sobe os binários antes do manifesto: no meio da publicação o binário já é o novo e o sha ainda o antigo.
-    let sha256 = if sha256_hex(&bytes) == offer.sha256 { offer.sha256 }
-        else { check(&client, &offer.channel).await.ok().flatten().map_or(offer.sha256, |fresh| fresh.sha256) };
+    let sha256 = if sha256_hex(&bytes) == offer.sha256 { offer.sha256 } else {
+        // O binário novo pode ser de uma release que já exige mais: sem ele não há o que trocar, nem erro de checksum.
+        let Some(fresh) = still_offered(offer, check(&client, &channel).await) else { return Ok(false) };
+        fresh.sha256
+    };
     // Dezenas de MB conferidos, gravados e copiados: fora das duas threads do runtime.
     let target = exe.clone();
     let old = tokio::task::spawn_blocking(move || swap(&target, &bytes, &sha256)).await.map_err(|e| e.to_string())??;
-    let Err(reason) = relaunch(&exe).await else { return Ok(()) };
+    let Err(reason) = relaunch(&exe).await else { return Ok(true) };
     rollback(&exe, &old).map_err(|e| tr("app_update_rollback_failed").replace("{reason}", &e.to_string()))?;
     Err(with_reason(tr("app_update_rolled_back"), &reason))
 }
@@ -296,14 +318,29 @@ impl Plan {
     fn visible(&self) -> bool { self.app || matches!(&self.server, ServerStep::Update) || matches!(&self.server, ServerStep::Held(h) if h.stops()) }
 }
 
-/// Servidor atrás: há commits a puxar, roda uma versão mais velha que o app que vai ficar, ou o disco não é o que está no
-/// ar. O `-dirty` sai da comparação: qualquer edição depois do boot deixaria o servidor "atrás" para sempre.
-fn behind(state: &Value, target: &str) -> bool {
+/// Servidor atrás: há atualização publicada a puxar, ou o disco não é o que está no ar. A versão do app não entra: quem
+/// diz se os dois se entendem é a API. O `-dirty` sai da comparação: qualquer edição depois do boot deixaria o servidor
+/// "atrás" para sempre.
+fn behind(state: &Value) -> bool {
     let flag = state["atualizacao_disponivel"].as_bool() == Some(true);
-    let older = state["versao_legivel"]["backend"].as_str().is_some_and(|running| newer(target, running));
     let clean = |v: &Value| v.as_str().map(|s| s.trim_end_matches("-dirty").to_owned());
     let restart = matches!((clean(&state["versoes"]["repo"]), clean(&state["versoes"]["backend"])), (Some(disk), Some(up)) if disk != up);
-    flag || older || restart
+    flag || restart
+}
+
+/// API do servidor que a atualização alcança; ausente ou ilegível (branch sem release do servidor) é 1.
+fn published_api(state: &Value) -> u32 {
+    state["api_publicado"].as_u64().and_then(|api| u32::try_from(api).ok()).unwrap_or_else(first_api)
+}
+
+/// `GET /api/client-api`. 404 é servidor anterior à rota; qualquer outra falha (o 503 do modo python inclusive) é
+/// desconhecido, que nunca vira 1.
+fn client_api(read: Result<Value, Failure>) -> Option<u32> {
+    match read {
+        Ok(value) => value["api"].as_u64().and_then(|api| u32::try_from(api).ok()),
+        Err(error) if error.status == Some(404) => Some(first_api()),
+        Err(_) => None,
+    }
 }
 
 /// Lido do mesmo `pre_voo` que o servidor usa para recusar o `iniciar`: o botão sabe antes do clique.
@@ -323,27 +360,27 @@ fn hold(state: &Value) -> Option<Hold> {
     None
 }
 
-/// O que o "Atualizar tudo" faz: `current` é a versão deste app, `offer` a da release, `server` o `GET /api/atualizacao` do
-/// servidor desta máquina (nenhum = não há servidor local).
-fn plan(current: &str, offer: Option<&str>, server: Option<&Value>) -> Plan {
-    let target = offer.unwrap_or(current);
-    let server = match server {
-        Some(state) if behind(state, target) => hold(state).map_or(ServerStep::Update, ServerStep::Held),
+/// O que o "Atualizar tudo" faz: `need` é a API que a release do app exige, `server` o `GET /api/atualizacao` do servidor
+/// desta máquina (nenhum = não há servidor local) e `run` a API no ar (a do local, ou a do ativo sem local; `None` =
+/// desconhecida). O botão só aparece quando um clique consegue concluir.
+fn plan(need: Option<u32>, server: Option<&Value>, run: Option<u32>) -> Plan {
+    let step = match server {
+        Some(state) if behind(state) => hold(state).map_or(ServerStep::Update, ServerStep::Held),
         _ => ServerStep::Skip,
     };
-    let stops = matches!(&server, ServerStep::Held(h) if h.stops());
-    Plan { app: offer.is_some() && !stops, server }
+    let Some(need) = need else { return Plan { server: step, app: false } };
+    // Todo servidor fala a API 1; desconhecido não promete mais que isso.
+    if install_after(need, run) {
+        let stops = matches!(&step, ServerStep::Held(h) if h.stops());
+        return Plan { app: !stops, server: step };
+    }
+    // O servidor publicado ainda não chega lá (build pendente, branch sem release): nada a oferecer, sem aviso.
+    if server.is_none_or(|state| need > published_api(state)) { return Plan { server: ServerStep::Skip, app: false }; }
+    Plan { app: run.is_some() && step == ServerStep::Update, server: step }
 }
 
-/// Servidor ativo mais velho que este app. O app só ganha versão quando um commit mexe no nativo e o servidor avança a
-/// cada commit, então servidor à frente é o normal. Sem o campo, o servidor é anterior a ele: justamente o mais velho.
-/// Campo nulo ou ilegível não afirma nada.
-fn outdated(state: &Value, app: &str) -> bool {
-    match state.get("versao_legivel").map(|v| v.get("backend")) {
-        None | Some(None) => true,
-        Some(Some(running)) => running.as_str().is_some_and(|running| newer(app, running)),
-    }
-}
+/// O servidor ativo não fala a API que este app exige. Desconhecida não afirma nada.
+fn outdated(run: Option<u32>) -> bool { run.is_some_and(|run| REQUIRED_API > run) }
 
 pub(crate) fn update_process_id(value: &Value) -> Option<i64> {
     (value["ok"].as_bool() == Some(true)).then(|| value["pid"].as_i64()).flatten().filter(|pid| *pid > 0)
@@ -355,6 +392,80 @@ pub(crate) fn restart_result_matches(state: &Value, pid: i64, request_id: Option
         None => state["pid"].as_i64() == Some(pid),
     }
 }
+
+/// Leituras sem resposta seguidas que encerram o acompanhamento (10 min a 2 s).
+const SILENT_READS: u32 = 300;
+/// Motor travado com pid vivo não prende o app para sempre.
+const FOLLOW_CEILING: Duration = Duration::from_secs(30 * 60);
+
+/// Motor respondendo nunca encerra por tempo; só o silêncio seguido ou o teto total. `step` é a leitura desta volta.
+/// Desfecho lido junto com o teto vale: o servidor já terminou.
+fn follow_limit(step: Option<&Follow>, silent: u32, elapsed: Duration) -> Option<&'static str> {
+    if matches!(step, Some(Follow::Done(_) | Follow::NotStarted)) { return None; }
+    if silent >= SILENT_READS { return Some("update_silent"); }
+    (elapsed >= FOLLOW_CEILING).then_some("update_too_long")
+}
+
+/// Na retomada, servidor sem estado nenhum é o app que morreu antes do `iniciar`: não há rodada a esperar.
+fn resumed_step(step: Follow) -> Follow {
+    if step == Follow::Waiting { Follow::NotStarted } else { step }
+}
+
+/// O desfecho é desta rodada quando o `ts` dele vem depois do desfecho anterior ao clique. Nunca pelo pid: no Windows o
+/// lançador do venv abre um filho, e o pid do estado não é o devolvido pelo `iniciar`.
+fn after_baseline(ts: Option<&str>, baseline: Option<&str>) -> bool {
+    let (Some(ts), Some(baseline)) = (ts, baseline) else { return baseline.is_none() };
+    match (chrono::DateTime::parse_from_rfc3339(ts), chrono::DateTime::parse_from_rfc3339(baseline)) {
+        (Ok(ts), Ok(baseline)) => ts > baseline,
+        _ => ts != baseline,
+    }
+}
+
+const INTENT: &str = "update-intent.json";
+const INTENT_LOCK: &str = "update-intent.lock";
+
+/// "Servidor e depois app", gravado antes do `iniciar`: fechar o app no meio não perde a instalação do app.
+#[derive(serde::Serialize, Deserialize, Clone, Debug, PartialEq)]
+struct Intent {
+    /// `Api::identity` do servidor desta máquina.
+    servidor: String,
+    app_version: String,
+    /// `ts` do desfecho anterior ao clique: o desfecho desta rodada vem depois dele.
+    #[serde(default)]
+    baseline: Option<String>,
+}
+
+/// Trava ao lado da intenção: duas instâncias do app nunca acompanham a mesma atualização.
+/// `Ok(None)`: outra instância segura a trava.
+fn intent_lock(dir: &Path) -> std::io::Result<Option<std::fs::File>> {
+    std::fs::create_dir_all(dir)?;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(INTENT_LOCK))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
+    }
+}
+
+fn intent_write(dir: &Path, intent: &Intent) -> std::io::Result<()> {
+    let tmp = dir.join(format!("{INTENT}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_vec(intent)?)?;
+    std::fs::rename(&tmp, dir.join(INTENT))
+}
+
+fn intent_read(dir: &Path) -> Option<Intent> { serde_json::from_slice(&std::fs::read(dir.join(INTENT)).ok()?).ok() }
+
+fn intent_delete(dir: &Path) { let _ = std::fs::remove_file(dir.join(INTENT)); }
+
+/// Só retoma a intenção do mesmo servidor e de um app ainda mais velho que a versão pedida: o app novo não herda a dele.
+fn intent_valid(intent: &Intent, identity: &str, current: &str) -> bool {
+    intent.servidor == identity && newer(&intent.app_version, current)
+}
+
+/// Depois do desfecho do servidor, o app só entra com a API que exige no ar; desconhecida nunca.
+fn install_after(need: u32, api: Option<u32>) -> bool { need <= first_api() || api.is_some_and(|api| need <= api) }
+
+static RESUME_TRIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[derive(Debug, PartialEq)]
 enum Outcome { Updated, UpdatedManual, Failed(String) }
@@ -368,7 +479,7 @@ fn follow(state: &Value, saw_running: bool, baseline: Option<&str>) -> Follow {
     let text = |key: &str| state[key].as_str().unwrap_or("").to_owned();
     match state["fase"].as_str() {
         Some("rodando") => Follow::Running { step: state["passo"].as_u64().unwrap_or(0), total: state["total"].as_u64().unwrap_or(0), text: text("texto") },
-        Some("pronto") if !saw_running && state["ts"].as_str() == baseline => Follow::NotStarted,
+        Some("pronto") if !saw_running && !after_baseline(state["ts"].as_str(), baseline) => Follow::NotStarted,
         Some("pronto") if state["ok"].as_bool() != Some(true) => {
             let reason = Some(text("erro").trim_end_matches('.').to_owned()).filter(|e| !e.is_empty()).unwrap_or_else(|| "?".into());
             Follow::Done(Outcome::Failed(reason))
@@ -408,10 +519,13 @@ pub struct Updater {
     /// O servidor desta máquina (endereço de loopback), dado pelo app sempre que a lista de servidores muda.
     local: Option<Api>,
     server: Option<Value>,
+    /// `GET /api/client-api` do servidor desta máquina (`None` = desconhecida).
+    server_api: Option<u32>,
     server_seq: u64,
     /// O servidor ativo, para o aviso de servidor desatualizado (pode ser o mesmo do `local`).
     active: Option<Api>,
     active_state: Option<Value>,
+    active_api: Option<u32>,
     active_seq: u64,
     run: Run,
     /// Procura do app em andamento e o desfecho da última, para a página Sobre.
@@ -424,6 +538,8 @@ pub struct Updater {
     channel_blocked: Option<String>,
     /// O assistente de instalação está rodando: nem procura nem troca o app no meio (spec "Destacado do app").
     suspended: bool,
+    /// Trava da intenção que este processo acompanha; com ela, só ele apaga o arquivo.
+    intent_lock: Option<std::fs::File>,
 }
 
 /// Linha "Canal de testes" da página Sobre: a main não mostra nada.
@@ -449,7 +565,7 @@ pub fn start(runtime: Arc<Runtime>, cx: &mut App) {
     let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).user_agent(concat!("hangar-native/", env!("HANGAR_NATIVE_RELEASE")))
         .build().unwrap_or_default();
     let entity = cx.new(|_| Updater { runtime, client, exe: std::env::current_exe().ok(), offer: None, local: None, server: None,
-        server_seq: 0, active: None, active_state: None, active_seq: 0, run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None, suspended: false });
+        server_api: None, server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0, run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None, suspended: false, intent_lock: None });
     let weak = entity.downgrade();
     cx.spawn(async move |cx| loop {
         let Ok(()) = weak.update(cx, |this, cx| {
@@ -465,6 +581,11 @@ pub fn start(runtime: Arc<Runtime>, cx: &mut App) {
 fn read_state(runtime: &Runtime, api: &Api, query: &'static [(&'static str, &'static str)], seconds: u64) -> tokio::task::JoinHandle<Result<Value, Failure>> {
     let api = api.clone();
     runtime.spawn(async move { api.server_read(&["atualizacao"], query, seconds).await })
+}
+
+fn read_api(runtime: &Runtime, api: &Api) -> tokio::task::JoinHandle<Option<u32>> {
+    let api = api.clone();
+    runtime.spawn(async move { client_api(api.server_read(&["client-api"], &[], 20).await) })
 }
 
 impl Updater {
@@ -501,8 +622,61 @@ impl Updater {
         if self.local.as_ref().map(Api::identity) != local.as_ref().map(Api::identity) { self.known_channel = None; }
         self.local = local;
         self.active = active;
+        self.resume(cx);
         self.refresh_server(cx);
         self.refresh_active(cx);
+    }
+
+    /// Ao abrir, com o servidor desta máquina conhecido: a intenção deixada por um app fechado no meio da atualização do
+    /// servidor volta a ser acompanhada, e o desfecho dela segue a mesma regra do clique.
+    fn resume(&mut self, cx: &mut Context<Self>) {
+        let Some(api) = self.local.clone() else { return };
+        if self.busy() || self.suspended || RESUME_TRIED.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
+        let Some(dir) = crate::appearance::dir() else { return };
+        // Outra instância segura a trava: ela decide.
+        let lock = match intent_lock(&dir) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => return,
+            Err(error) => return crate::log_line(&format!("trava da intenção de atualização: {error}")),
+        };
+        let Some(intent) = intent_read(&dir) else { return };
+        if !intent_valid(&intent, &api.identity(), CURRENT) { return intent_delete(&dir); }
+        self.intent_lock = Some(lock);
+        self.run = Run::Server { step: 0, total: 0, text: String::new() };
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            // Os avisos do desfecho saem numa janela.
+            let Some(handle) = cx.update(|cx| cx.windows().first().copied()) else {
+                let _ = this.update(cx, |this, cx| { this.run = Run::Idle; this.intent_lock = None; cx.notify(); });
+                return;
+            };
+            let _ = handle.update(cx, |_, window, cx| { let _ = this.update(cx, |this, cx|
+                this.follow_server(api, false, intent.baseline, true, window, cx)); });
+        }).detach();
+    }
+
+    /// Grava a intenção sob a trava antes do `iniciar`. Sem app a instalar depois não há o que retomar. `Err` = outra
+    /// instância acompanha uma atualização; qualquer outra falha segue sem intenção, como a gravação que falha.
+    fn begin_intent(&mut self, api: &Api, baseline: Option<String>) -> Result<(), ()> {
+        let (Some(offer), Some(dir)) = (self.offer.as_ref(), crate::appearance::dir()) else { return Ok(()) };
+        let lock = match intent_lock(&dir) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => return Err(()),
+            Err(error) => { crate::log_line(&format!("trava da intenção de atualização: {error}")); return Ok(()) }
+        };
+        let intent = Intent { servidor: api.identity(), app_version: offer.version.clone(), baseline };
+        match intent_write(&dir, &intent) {
+            Ok(()) => self.intent_lock = Some(lock),
+            Err(error) => crate::log_line(&format!("intenção de atualização não gravada: {error}")),
+        }
+        Ok(())
+    }
+
+    /// Desfecho de qualquer tipo: a intenção deste processo sai do disco e a trava é solta.
+    fn end_intent(&mut self) {
+        if let Some(_lock) = self.intent_lock.take() {
+            if let Some(dir) = crate::appearance::dir() { intent_delete(&dir); }
+        }
     }
 
     /// Procura versão nova do app agora. Falha não vira aviso na tela: fica no stderr e na linha da página Sobre.
@@ -556,7 +730,7 @@ impl Updater {
     pub fn set_suspended(&mut self, on: bool, cx: &mut Context<Self>) {
         if self.suspended == on { return; }
         self.suspended = on;
-        if !on { self.check_app(cx); }
+        if !on { self.check_app(cx); self.resume(cx); }
         cx.notify();
     }
 
@@ -577,7 +751,7 @@ impl Updater {
 
     pub fn channel_lines(&self) -> Vec<String> { app_channel(BUILT_CHANNEL, &self.channel()) }
 
-    pub fn server_outdated(&self) -> bool { self.active_state.as_ref().is_some_and(|state| outdated(state, CURRENT)) }
+    pub fn server_outdated(&self) -> bool { outdated(self.active_api) }
 
     /// Versão do servidor ativo e a deste app, para a explicação do aviso.
     pub fn outdated_versions(&self) -> (String, String) {
@@ -588,14 +762,16 @@ impl Updater {
     fn refresh_active(&mut self, cx: &mut Context<Self>) {
         self.active_seq += 1;
         let seq = self.active_seq;
-        let Some(api) = self.active.clone() else { self.active_state = None; cx.notify(); return };
-        let task = read_state(&self.runtime, &api, &[], 20);
+        let Some(api) = self.active.clone() else { (self.active_state, self.active_api) = (None, None); cx.notify(); return };
+        let (task, api_task) = (read_state(&self.runtime, &api, &[], 20), read_api(&self.runtime, &api));
         cx.spawn(async move |this, cx| {
             let result = task.await.unwrap_or_else(|e| Err(Failure::local(e.to_string())));
+            let running = api_task.await.ok().flatten();
             let _ = this.update(cx, |this, cx| {
                 if this.active_seq != seq { return; }
                 // Sem resposta não há o que afirmar sobre a versão: o aviso some.
                 this.active_state = result.ok();
+                this.active_api = running;
                 cx.notify();
             });
         }).detach();
@@ -604,21 +780,25 @@ impl Updater {
     fn busy(&self) -> bool { self.run.busy() }
 
     fn plan(&self) -> Plan {
-        if self.is_channel_blocked() { return Plan { server: ServerStep::Held(Hold::ChannelDraft), app: self.offer.is_some() }; }
-        let server = self.local.as_ref().and(self.server.as_ref());
-        plan(CURRENT, self.offer.as_ref().map(|o| o.version.as_str()), server)
+        let need = self.offer.as_ref().map(|o| o.requires_api);
+        // Sem servidor local, quem precisa entender o app novo é o servidor ativo.
+        let run = if self.local.is_some() { self.server_api } else { self.active_api };
+        if self.is_channel_blocked() { return Plan { server: ServerStep::Held(Hold::ChannelDraft), app: plan(need, None, run).app }; }
+        plan(need, self.local.as_ref().and(self.server.as_ref()), run)
     }
 
     fn refresh_server(&mut self, cx: &mut Context<Self>) {
         if self.busy() { return; }
         self.server_seq += 1;
         let seq = self.server_seq;
-        let Some(api) = self.local.clone() else { self.server = None; cx.notify(); return };
-        let task = read_state(&self.runtime, &api, &[], 20);
+        let Some(api) = self.local.clone() else { (self.server, self.server_api) = (None, None); cx.notify(); return };
+        let (task, api_task) = (read_state(&self.runtime, &api, &[], 20), read_api(&self.runtime, &api));
         cx.spawn(async move |this, cx| {
             let result = task.await.unwrap_or_else(|e| Err(Failure::local(e.to_string())));
+            let running = api_task.await.ok().flatten();
             let _ = this.update(cx, |this, cx| {
                 if this.server_seq != seq { return; }
+                this.server_api = running;
                 // Servidor local fora do ar: sem ele o botão cuida só do app.
                 this.receive_server(result.map_err(|e| eprintln!("estado do servidor desta máquina: {}", e.detail)).ok(), cx);
                 cx.notify();
@@ -627,6 +807,7 @@ impl Updater {
     }
 
     fn fail(&mut self, reason: String, cx: &mut Context<Self>) {
+        self.end_intent();
         self.run = Run::Failed(reason);
         cx.notify();
     }
@@ -699,6 +880,7 @@ impl Updater {
     fn start_server(&mut self, api: Api, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_channel_blocked() { self.fail(tr("settings_channel_pending"), cx); return; }
         let baseline = self.server.as_ref().and_then(|s| s["estado"]["ts"].as_str()).map(str::to_owned);
+        if self.begin_intent(&api, baseline.clone()).is_err() { return self.fail(tr("app_restart_busy"), cx); }
         self.run = Run::Server { step: 0, total: 0, text: String::new() };
         cx.notify();
         let task = { let api = api.clone(); self.runtime.spawn(async move { api.server_post(&["atualizacao", "iniciar"], 30).await }) };
@@ -707,9 +889,9 @@ impl Updater {
             let result = task.await.unwrap_or_else(|e| Err(Failure::local(e.to_string())));
             let _ = handle.update(cx, |_, window, cx| { let _ = this.update(cx, |this, cx| match result {
                 // O servidor grava "rodando" antes de responder: o próximo "pronto" é o desfecho.
-                Ok(value) if update_process_id(&value).is_some() => this.follow_server(api, true, baseline, window, cx),
+                Ok(value) if update_process_id(&value).is_some() => this.follow_server(api, true, baseline, false, window, cx),
                 Ok(_) => this.fail(tr("invalid_response"), cx),
-                Err(error) if error.uncertain => this.follow_server(api, false, baseline, window, cx),
+                Err(error) if error.uncertain => this.follow_server(api, false, baseline, false, window, cx),
                 // Recusa que o estado lido não previa: relê e decide pela mesma regra (branch → só o app).
                 Err(error) if error.status == Some(409) => this.recheck_after_refusal(api, error.detail, window, cx),
                 Err(error) => this.fail(tr("update_refused").replace("{reason}", &error.detail), cx),
@@ -723,6 +905,8 @@ impl Updater {
         cx.spawn(async move |this, cx| {
             let result = task.await.unwrap_or_else(|e| Err(Failure::local(e.to_string())));
             let _ = handle.update(cx, |_, window, cx| { let _ = this.update(cx, |this, cx| {
+                // Recusado, o servidor não roda nada desta vez: não há o que retomar.
+                this.end_intent();
                 this.run = Run::Idle;
                 this.receive_server(result.ok(), cx);
                 match this.plan() {
@@ -734,19 +918,29 @@ impl Updater {
     }
 
     /// Lê o estado a cada 2 s até o desfecho, sem depender do servidor ativo nem da conexão da janela; a queda durante o
-    /// reinício é esperada. Dez minutos sem desfecho encerram.
-    fn follow_server(&mut self, api: Api, saw_running: bool, baseline: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    /// reinício é esperada. Encerra pelo `follow_limit`. `resumed`: retomada ao abrir, em que o desfecho anterior à
+    /// intenção só a descarta, sem aviso.
+    fn follow_server(&mut self, api: Api, saw_running: bool, baseline: Option<String>, resumed: bool, window: &mut Window,
+        cx: &mut Context<Self>) {
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
-            let mut saw = saw_running;
-            for _ in 0..300 {
+            let (mut saw, mut silent, started) = (saw_running, 0, std::time::Instant::now());
+            loop {
                 let Ok(task) = this.update(cx, |this, _| read_state(&this.runtime, &api, &[], 10)) else { return };
                 let read = task.await.unwrap_or_else(|e| Err(Failure::local(e.to_string())));
+                silent = if read.is_ok() { 0 } else { silent + 1 };
                 let step = match &read {
-                    Ok(value) => Some(follow(&value["estado"], saw, baseline.as_deref())),
+                    Ok(value) => {
+                        let step = follow(&value["estado"], saw, baseline.as_deref());
+                        Some(if resumed { resumed_step(step) } else { step })
+                    }
                     Err(error) if matches!(error.status, Some(401 | 403)) => Some(Follow::Done(Outcome::Failed(tr("auth_error")))),
                     Err(_) => None,
                 };
+                if let Some(key) = follow_limit(step.as_ref(), silent, started.elapsed()) {
+                    let _ = this.update(cx, |this, cx| this.fail(tr(key), cx));
+                    return;
+                }
                 if matches!(step, Some(Follow::Running { .. })) { saw = true; }
                 let finished = handle.update(cx, |_, window, cx| this.update(cx, |this, cx| {
                     if let Ok(value) = &read { this.receive_server(Some(value.clone()), cx); }
@@ -754,6 +948,7 @@ impl Updater {
                         Some(Follow::Running { step, total, text }) => { this.run = Run::Server { step, total, text }; cx.notify(); false }
                         None if saw => { this.run = Run::Restarting; cx.notify(); false }
                         None | Some(Follow::Waiting) => false,
+                        Some(Follow::NotStarted) if resumed => { this.end_intent(); this.run = Run::Idle; cx.notify(); true }
                         Some(Follow::NotStarted) => { this.fail(tr("update_not_started"), cx); true }
                         Some(Follow::Done(outcome)) => { this.server_done(outcome, window, cx); true }
                     }
@@ -761,29 +956,55 @@ impl Updater {
                 if finished { return; }
                 cx.background_executor().timer(Duration::from_secs(2)).await;
             }
-            let _ = this.update(cx, |this, cx| this.fail(tr("update_silent"), cx));
         }).detach();
     }
 
+    /// A atualização pode ter parado num servidor mais velho que o app exige (manifesto mudou no meio, plataforma sem
+    /// build): relê a API no ar e a oferta antes de instalar.
     fn server_done(&mut self, outcome: Outcome, window: &mut Window, cx: &mut Context<Self>) {
         let manual = matches!(outcome, Outcome::UpdatedManual);
-        match outcome {
-            Outcome::Failed(reason) => return self.fail(tr("update_failed").replace("{reason}", &reason), cx),
-            Outcome::Updated | Outcome::UpdatedManual => {}
+        if let Outcome::Failed(reason) = outcome { return self.fail(tr("update_failed").replace("{reason}", &reason), cx); }
+        let Some(api) = self.local.clone() else { return self.server_updated(manual, None, window, cx) };
+        self.run = Run::Searching;
+        cx.notify();
+        let (client, channel) = (self.client.clone(), self.channel());
+        let task = self.runtime.spawn(async move {
+            let (running, found) = tokio::join!(api.server_read(&["client-api"], &[], 20), check(&client, &channel));
+            (client_api(running), found)
+        });
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let (running, found) = task.await.unwrap_or_else(|e| (None, Err(CheckFail::Network(e.to_string()))));
+            let _ = handle.update(cx, |_, window, cx| { let _ = this.update(cx, |this, cx| {
+                this.run = Run::Idle;
+                // Leitura que falha mantém a oferta guardada; o `install` relê o manifesto de qualquer jeito.
+                if let Ok(found) = found { this.offer = found; }
+                this.server_updated(manual, running, window, cx);
+            }); });
+        }).detach();
+    }
+
+    fn server_updated(&mut self, manual: bool, running: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(offer) = self.offer.clone() {
+            if install_after(offer.requires_api, running) { return self.install_app(window, cx); }
+            // O servidor atualizou; o app espera, calado, que o próximo ciclo refaça o plano com a API real.
+            crate::log_line(&format!("update: app {} exige a API {} e o servidor está na {:?}; o app fica para o próximo ciclo",
+                offer.version, offer.requires_api, running));
         }
-        self.run = Run::Idle;
-        if self.offer.is_some() { return self.install_app(window, cx); }
         let version = self.server.as_ref().and_then(|s| s["versao_legivel"]["backend"].as_str()).unwrap_or("?").to_owned();
         let text = if manual { tr("update_done_manual") } else { tr("update_done").replace("{version}", &version) };
         window.push_notification(Notification::success(text).id::<Updater>(), cx);
+        self.end_intent();
+        cx.notify();
         self.refresh_server(cx);
         self.refresh_active(cx);
     }
 
     fn install_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(offer) = self.offer.clone() else { self.run = Run::Idle; cx.notify(); return };
+        let Some(offer) = self.offer.clone() else { self.end_intent(); self.run = Run::Idle; cx.notify(); return };
         // Canal trocado depois da procura: a oferta é da branch anterior; procura de novo em vez de instalá-la.
         if offer.channel != self.channel() {
+            self.end_intent();
             self.offer = None;
             self.run = Run::Idle;
             return self.check_app(cx);
@@ -795,7 +1016,15 @@ impl Updater {
         cx.spawn(async move |this, cx| {
             let result = task.await.unwrap_or_else(|e| Err(e.to_string()));
             let _ = this.update(cx, |this, cx| match result {
-                Ok(()) => cx.quit(),
+                Ok(true) => { this.end_intent(); cx.quit() }
+                Ok(false) => {
+                    this.end_intent();
+                    crate::log_line("a release do app passou a exigir mais que a oferta aceita: nada foi trocado");
+                    this.offer = None;
+                    this.run = Run::Idle;
+                    this.check_app(cx);
+                    cx.notify();
+                }
                 Err(reason) => {
                     // O motivo não cabe na barra: vai no aviso e fica no tooltip do "Tentar de novo".
                     let _ = handle.update(cx, |_, window, cx| window.push_notification(Notification::error(reason.clone()).id::<Updater>(), cx));
@@ -920,10 +1149,10 @@ mod tests {
     fn update_channel_draft_holds_only_its_local_server_update() {
         let local = Api::new("http://127.0.0.1:8765", "synthetic-token").unwrap();
         let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None,
-            offer: Some(Offer { version: "9999.0.0.0".into(), url: String::new(), sha256: String::new(), channel: "main".into() }),
-            local: Some(local.clone()), server: Some(server(serde_json::json!({"atualizacao_disponivel": true}))),
-            server_seq: 0, active: None, active_state: None, active_seq: 0, run: Run::Idle, checking: false, checked: None,
-            checked_channel: None, known_channel: None, channel_blocked: Some(local.identity()), suspended: false };
+            offer: Some(Offer { version: "9999.0.0.0".into(), url: String::new(), sha256: String::new(), channel: "main".into(), requires_api: 2 }),
+            local: Some(local.clone()), server: Some(server(serde_json::json!({"atualizacao_disponivel": true}))), server_api: Some(2),
+            server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0, run: Run::Idle, checking: false, checked: None,
+            checked_channel: None, known_channel: None, channel_blocked: Some(local.identity()), suspended: false, intent_lock: None };
         assert_eq!(updater.plan(), Plan { server: ServerStep::Held(Hold::ChannelDraft), app: true });
         assert!(!Hold::ChannelDraft.stops());
         updater.channel_blocked = Some("http://other-machine:8765".into());
@@ -932,9 +1161,26 @@ mod tests {
         updater.channel_blocked = None;
         assert_eq!(updater.plan().server, ServerStep::Update);
         updater.channel_blocked = Some(local.identity());
+        updater.channel_blocked = Some(local.identity());
+        updater.server_api = Some(1);
+        assert!(!updater.plan().app, "servidor preso pelo canal não recebe app que exige mais que ele");
+        updater.server_api = Some(2);
         updater.offer = None;
         assert!(!updater.plan().app);
         assert!(!updater.plan().visible());
+    }
+
+    #[test]
+    fn remote_only_uses_the_active_server_api() {
+        let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None,
+            offer: Some(Offer { version: "9999.0.0.0".into(), url: String::new(), sha256: String::new(), channel: "main".into(), requires_api: REQUIRED_API }),
+            local: None, server: None, server_api: None, server_seq: 0, active: None, active_state: None, active_api: Some(REQUIRED_API), active_seq: 0,
+            run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None, suspended: false, intent_lock: None };
+        assert!(updater.plan().app);
+        assert!(!updater.server_outdated());
+        updater.active_api = Some(REQUIRED_API - 1);
+        assert!(!updater.plan().app);
+        assert!(updater.server_outdated());
     }
 
     #[test]
@@ -972,8 +1218,9 @@ mod tests {
     #[test]
     fn channel_follows_the_last_state_read_from_the_local_server() {
         let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None, offer: None,
-            local: None, server: None, server_seq: 0, active: None, active_state: None, active_seq: 0, run: Run::Idle, checking: false,
-            checked: None, checked_channel: None, known_channel: Some("hangar-server-parte1".into()), channel_blocked: None, suspended: false };
+            local: None, server: None, server_api: None, server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0,
+            run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: Some("hangar-server-parte1".into()),
+            channel_blocked: None, suspended: false, intent_lock: None };
         assert_eq!(updater.channel(), "main", "sem servidor local não há canal");
         updater.local = Some(Api::new("http://127.0.0.1:8765", "synthetic-token").unwrap());
         assert_eq!(updater.channel(), "hangar-server-parte1", "leitura que falhou mantém o último canal");
@@ -1009,71 +1256,138 @@ mod tests {
 
     const APP: &str = "0.1.0.100";
 
-    #[test]
-    fn plan_updates_only_the_app_when_the_server_is_current() {
-        let s = server(serde_json::json!({"versao_legivel": {"backend": "0.1.0.110"}}));
-        assert_eq!(plan(APP, Some("0.1.0.110"), Some(&s)), Plan { server: ServerStep::Skip, app: true });
-        assert_eq!(plan(APP, Some("0.1.0.110"), None), Plan { server: ServerStep::Skip, app: true }, "sem servidor local");
-        assert!(!plan(APP, None, Some(&s)).visible(), "nada a fazer: botão some");
-    }
+    const SKIP_NO_APP: Plan = Plan { server: ServerStep::Skip, app: false };
 
     #[test]
-    fn plan_updates_a_behind_server_first() {
-        let s = server(serde_json::json!({"atualizacao_disponivel": true}));
-        assert_eq!(plan(APP, Some("0.1.0.110"), Some(&s)), Plan { server: ServerStep::Update, app: true });
-        let only = plan(APP, None, Some(&s));
+    fn plan_without_an_offer_updates_only_a_behind_server() {
+        let behind = server(serde_json::json!({"atualizacao_disponivel": true}));
+        let only = plan(None, Some(&behind), Some(2));
         assert_eq!(only, Plan { server: ServerStep::Update, app: false });
         assert!(only.visible(), "servidor atrás sem app novo ainda mostra o botão");
+        assert!(!plan(None, Some(&server(serde_json::json!({}))), Some(2)).visible(), "nada a fazer: botão some");
     }
 
     #[test]
-    fn plan_sees_a_server_older_than_the_offered_app_even_when_not_behind_main() {
-        let s = server(serde_json::json!({"versao_legivel": {"backend": "0.1.0.105"}}));
-        assert_eq!(plan(APP, Some("0.1.0.110"), Some(&s)).server, ServerStep::Update);
-        assert_eq!(plan("0.1.0.105", None, Some(&s)).server, ServerStep::Skip);
+    fn plan_a_compatible_app_goes_alone_or_after_a_behind_server() {
+        let current = server(serde_json::json!({}));
+        assert_eq!(plan(Some(2), Some(&current), Some(2)), Plan { server: ServerStep::Skip, app: true });
+        // Contagem de versão não é mais motivo para mexer no servidor.
+        let older = server(serde_json::json!({"versao_legivel": {"backend": "0.0.0.1"}}));
+        assert_eq!(plan(Some(2), Some(&older), Some(2)), Plan { server: ServerStep::Skip, app: true });
+        let behind = server(serde_json::json!({"atualizacao_disponivel": true}));
+        assert_eq!(plan(Some(2), Some(&behind), Some(3)), Plan { server: ServerStep::Update, app: true });
+    }
+
+    #[test]
+    fn plan_an_app_needing_a_published_newer_server_updates_the_server_first() {
+        let behind = server(serde_json::json!({"atualizacao_disponivel": true, "api_publicado": 3}));
+        assert_eq!(plan(Some(3), Some(&behind), Some(2)), Plan { server: ServerStep::Update, app: true });
+        let current = server(serde_json::json!({"api_publicado": 3}));
+        assert!(!plan(Some(3), Some(&current), Some(2)).visible(), "sem atualização do servidor o app não cabe");
+        let held = server(serde_json::json!({"atualizacao_disponivel": true, "api_publicado": 3, "pre_voo": {"sujo": 1}}));
+        assert!(!plan(Some(3), Some(&held), Some(2)).app, "servidor preso não chega à api do app");
+    }
+
+    #[test]
+    fn plan_hides_an_app_whose_server_is_not_published_yet() {
+        let behind = server(serde_json::json!({"atualizacao_disponivel": true, "api_publicado": 2}));
+        let p = plan(Some(3), Some(&behind), Some(2));
+        assert_eq!(p, SKIP_NO_APP);
+        assert!(!p.visible());
+    }
+
+    #[test]
+    fn plan_on_a_branch_without_a_server_release_hides_an_app_needing_more() {
+        // Sem `api_publicado` o servidor publicado conta como 1.
+        let behind = server(serde_json::json!({"atualizacao_disponivel": true}));
+        assert_eq!(plan(Some(2), Some(&behind), Some(1)), SKIP_NO_APP);
+        assert_eq!(plan(Some(2), Some(&server(serde_json::json!({"api_publicado": "x"}))), Some(1)), SKIP_NO_APP, "ilegível = 1");
+    }
+
+    #[test]
+    fn plan_remote_only_offers_only_what_the_active_server_runs() {
+        assert_eq!(plan(Some(2), None, Some(2)), Plan { server: ServerStep::Skip, app: true });
+        assert_eq!(plan(Some(3), None, Some(2)), SKIP_NO_APP);
+        assert_eq!(plan(Some(2), None, None), SKIP_NO_APP);
+    }
+
+    #[test]
+    fn plan_with_an_unknown_server_api_offers_only_an_app_needing_1() {
+        let behind = server(serde_json::json!({"atualizacao_disponivel": true, "api_publicado": 3}));
+        assert_eq!(plan(Some(2), Some(&behind), None), Plan { server: ServerStep::Update, app: false });
+        assert_eq!(plan(Some(1), Some(&behind), None), Plan { server: ServerStep::Update, app: true });
+        assert_eq!(plan(Some(1), None, None), Plan { server: ServerStep::Skip, app: true });
+    }
+
+    #[test]
+    fn an_offer_republished_needing_more_api_expires() {
+        let offer = |sha: &str, api: u32| Offer { version: "1".into(), url: String::new(), sha256: sha.into(), channel: "main".into(), requires_api: api };
+        let sha = |found: Option<Offer>| found.map(|o| o.sha256);
+        assert_eq!(sha(still_offered(offer("a", 2), Ok(Some(offer("b", 2))))), Some("b".into()), "republicada na mesma API: vale a nova");
+        assert_eq!(sha(still_offered(offer("a", 2), Ok(Some(offer("b", 3))))), None, "passou a exigir mais: a oferta acabou");
+        assert_eq!(sha(still_offered(offer("a", 2), Err(CheckFail::Network("x".into())))), Some("a".into()), "leitura que falha");
+        assert_eq!(sha(still_offered(offer("a", 2), Ok(None))), Some("a".into()));
+    }
+
+    #[test]
+    fn manifest_without_requires_api_needs_api_1() {
+        let old: Manifest = serde_json::from_value(serde_json::json!({"version": "0.1.0.1", "files": {}})).unwrap();
+        assert_eq!(old.requires_api, 1);
+        let new: Manifest = serde_json::from_value(serde_json::json!({"version": "0.1.0.1", "files": {}, "requires_api": 4})).unwrap();
+        assert_eq!(new.requires_api, 4);
+    }
+
+    #[test]
+    fn client_api_reads_404_as_1_and_any_other_failure_as_unknown() {
+        let failed = |status: Option<u16>| Err(Failure { status, ..Failure::local("x") });
+        assert_eq!(client_api(Ok(serde_json::json!({"api": 2}))), Some(2));
+        assert_eq!(client_api(failed(Some(404))), Some(1), "servidor anterior à rota");
+        assert_eq!(client_api(failed(Some(503))), None, "modo python");
+        assert_eq!(client_api(failed(None)), None, "rede");
+        assert_eq!(client_api(Ok(serde_json::json!({}))), None, "resposta sem o campo");
     }
 
     #[test]
     fn plan_ignores_dirty_but_not_a_pending_restart() {
         let dirty = server(serde_json::json!({"versoes": {"repo": "dist-latest-3-gabc-dirty"}}));
-        assert_eq!(plan(APP, None, Some(&dirty)).server, ServerStep::Skip);
+        assert_eq!(plan(None, Some(&dirty), Some(2)).server, ServerStep::Skip);
         let restart = server(serde_json::json!({"versoes": {"repo": "dist-latest-4-gdef"}}));
-        assert_eq!(plan(APP, None, Some(&restart)).server, ServerStep::Update);
+        assert_eq!(plan(None, Some(&restart), Some(2)).server, ServerStep::Update);
     }
 
     #[test]
     fn plan_leaves_a_work_branch_or_local_changes_alone_and_updates_the_app() {
         let branch = server(serde_json::json!({"atualizacao_disponivel": true, "pre_voo": {"branch": "feat-x", "branch_de_trabalho": true}}));
-        assert_eq!(plan(APP, Some("0.1.0.110"), Some(&branch)),
+        assert_eq!(plan(Some(2), Some(&branch), Some(2)),
             Plan { server: ServerStep::Held(Hold::WorkBranch("feat-x".into(), "main".into())), app: true });
         let target = server(serde_json::json!({"atualizacao_disponivel": true, "pre_voo": {"branch": "outra", "alvo": "teste", "branch_de_trabalho": true}}));
-        assert_eq!(plan(APP, Some("0.1.0.110"), Some(&target)).server,
+        assert_eq!(plan(Some(2), Some(&target), Some(2)).server,
             ServerStep::Held(Hold::WorkBranch("outra".into(), "teste".into())));
         for extra in [serde_json::json!({"sujo": 2}), serde_json::json!({"ahead": 1}), serde_json::json!({"divergiu": true})] {
             let s = server(serde_json::json!({"atualizacao_disponivel": true, "pre_voo": extra}));
-            assert_eq!(plan(APP, Some("0.1.0.110"), Some(&s)), Plan { server: ServerStep::Held(Hold::LocalChanges), app: true });
+            assert_eq!(plan(Some(2), Some(&s), Some(2)), Plan { server: ServerStep::Held(Hold::LocalChanges), app: true });
         }
-        assert!(!plan(APP, None, Some(&branch)).visible(), "sem app novo e servidor bloqueado: nada a fazer");
+        assert!(!plan(None, Some(&branch), Some(2)).visible(), "sem app novo e servidor bloqueado: nada a fazer");
     }
 
     #[test]
     fn plan_stops_everything_while_missing_tools_or_already_running() {
         let missing = server(serde_json::json!({"atualizacao_disponivel": true, "pre_voo": {"pode": false, "faltando": ["npm", "uv"]}}));
-        let p = plan(APP, Some("0.1.0.110"), Some(&missing));
+        let p = plan(Some(2), Some(&missing), Some(2));
         assert_eq!(p, Plan { server: ServerStep::Held(Hold::Missing("npm, uv".into())), app: false });
         assert!(p.visible(), "mostra o motivo");
         let running = server(serde_json::json!({"atualizacao_disponivel": true, "estado": {"fase": "rodando"}}));
-        assert_eq!(plan(APP, Some("0.1.0.110"), Some(&running)), Plan { server: ServerStep::Held(Hold::Running), app: false });
+        assert_eq!(plan(Some(2), Some(&running), Some(2)), Plan { server: ServerStep::Held(Hold::Running), app: false });
+        let reaching = server(serde_json::json!({"atualizacao_disponivel": true, "api_publicado": 3, "estado": {"fase": "rodando"}}));
+        assert!(plan(Some(3), Some(&reaching), Some(2)).visible(), "o motivo aparece também para o app que exige o servidor novo");
     }
 
     #[test]
-    fn outdated_only_when_the_server_is_older_than_the_app() {
-        assert!(outdated(&serde_json::json!({"versao_legivel": {"backend": "0.1.0.90"}}), APP));
-        assert!(!outdated(&serde_json::json!({"versao_legivel": {"backend": "0.1.0.100"}}), APP), "igual");
-        assert!(!outdated(&serde_json::json!({"versao_legivel": {"backend": "0.1.0.140"}}), APP), "servidor à frente é o normal");
-        assert!(outdated(&serde_json::json!({"versoes": {}}), APP), "servidor anterior ao campo");
-        assert!(!outdated(&serde_json::json!({"versao_legivel": {"backend": null}}), APP), "nulo não afirma nada");
-        assert!(!outdated(&serde_json::json!({"versao_legivel": {"backend": "2026.09.27-abc"}}), APP), "ilegível não afirma nada");
+    fn outdated_only_when_the_active_server_api_is_below_what_the_app_requires() {
+        assert!(outdated(Some(REQUIRED_API - 1)));
+        assert!(!outdated(Some(REQUIRED_API)), "igual");
+        assert!(!outdated(Some(REQUIRED_API + 1)), "servidor à frente é o normal");
+        assert!(!outdated(None), "desconhecido não acende o aviso");
     }
 
     #[test]
@@ -1089,6 +1403,100 @@ mod tests {
         assert_eq!(follow(&state(serde_json::json!({"fase": "pronto", "ok": false, "erro": "npm ci falhou.", "ts": "t1"})), true, Some("t0")),
             Follow::Done(Outcome::Failed("npm ci falhou".into())));
         assert_eq!(follow(&Value::Null, true, Some("t0")), Follow::Waiting);
+    }
+
+    #[test]
+    fn follow_never_gives_up_on_a_live_engine_but_keeps_two_ceilings() {
+        let every = Duration::from_secs(2);
+        // Leituras respondidas zeram o silêncio: 400 `rodando` seguidos (13 min) não encerram.
+        let running = Follow::Running { step: 1, total: 5, text: String::new() };
+        for read in 1..=400 { assert_eq!(follow_limit(Some(&running), 0, every * read), None, "leitura {read}"); }
+        assert_eq!(follow_limit(None, 299, every * 299), None);
+        assert_eq!(follow_limit(None, 300, every * 300), Some("update_silent"), "300 leituras sem resposta seguidas");
+        let ceiling = Duration::from_secs(30 * 60);
+        assert_eq!(follow_limit(Some(&running), 0, ceiling), Some("update_too_long"), "motor travado com pid vivo");
+        // O desfecho lido junto com o teto vale: o servidor já atualizou.
+        assert_eq!(follow_limit(Some(&Follow::Done(Outcome::Updated)), 0, ceiling), None);
+        assert_eq!(follow_limit(Some(&Follow::NotStarted), 0, ceiling), None);
+    }
+
+    #[test]
+    fn a_resumed_follow_without_any_server_state_drops_the_intent() {
+        // O app morreu entre gravar a intenção e o `iniciar`, e o servidor nunca teve estado.
+        assert_eq!(resumed_step(follow(&Value::Null, false, Some("t0"))), Follow::NotStarted);
+        assert_eq!(resumed_step(Follow::Done(Outcome::Updated)), Follow::Done(Outcome::Updated));
+    }
+
+    #[test]
+    fn only_another_holder_of_the_intent_lock_blocks_the_update() {
+        let dir = intent_dir("lock-error");
+        std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+        // Um arquivo no lugar da pasta: criar a trava falha, e isso não é outra instância.
+        std::fs::write(&dir, b"").unwrap();
+        assert!(intent_lock(&dir).is_err());
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    fn intent_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hangar-intent-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn sample_intent() -> Intent {
+        Intent { servidor: "http://127.0.0.1:8765".into(), app_version: "0.1.0.200".into(), baseline: Some("t0".into()) }
+    }
+
+    #[test]
+    fn intent_is_written_resumed_and_deleted_under_one_lock() {
+        let dir = intent_dir("cycle");
+        let lock = intent_lock(&dir).unwrap().expect("primeira trava");
+        assert!(intent_lock(&dir).unwrap().is_none(), "segunda instância não retoma");
+        // Gravada antes do `iniciar`.
+        intent_write(&dir, &sample_intent()).unwrap();
+        let read = intent_read(&dir).expect("retomada lê a intenção");
+        assert_eq!(read, sample_intent());
+        let ours = serde_json::json!({"fase": "pronto", "ok": true, "ts": "t1"});
+        assert_eq!(follow(&ours, false, read.baseline.as_deref()), Follow::Done(Outcome::Updated));
+        assert!(install_after(2, Some(2)), "mesmo desfecho com a API suficiente: instala o app");
+        intent_delete(&dir);
+        assert_eq!(intent_read(&dir), None);
+        drop(lock);
+        assert!(intent_lock(&dir).unwrap().is_some(), "a trava sai com quem a segurava");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn intent_resumes_only_for_the_same_server_and_an_app_still_older() {
+        let intent = sample_intent();
+        assert!(intent_valid(&intent, "http://127.0.0.1:8765", "0.1.0.100"));
+        assert!(!intent_valid(&intent, "http://127.0.0.1:9000", "0.1.0.100"), "identity diferente");
+        assert!(!intent_valid(&intent, "http://127.0.0.1:8765", "0.1.0.200"), "o app novo não herda a dele");
+        assert!(!intent_valid(&intent, "http://127.0.0.1:8765", "0.1.0.300"));
+        // Desfecho velho (ts da intenção, sem rodando visto) não é o desta rodada.
+        let old = serde_json::json!({"fase": "pronto", "ok": true, "ts": "t0"});
+        assert_eq!(follow(&old, false, intent.baseline.as_deref()), Follow::NotStarted);
+    }
+
+    #[test]
+    fn a_resumed_round_is_the_outcome_after_the_intent_whatever_the_pid() {
+        // No Windows o lançador do venv abre um filho: o pid do estado nunca é o devolvido pelo `iniciar`.
+        let intent: Intent = serde_json::from_value(serde_json::json!({"servidor": "s", "app_version": "0.1.0.200",
+            "pid": 111, "baseline": "2026-10-19T10:00:00-03:00"})).unwrap();
+        let after = serde_json::json!({"fase": "pronto", "ok": true, "pid": 222, "ts": "2026-10-19T10:05:00-03:00"});
+        assert_eq!(follow(&after, false, intent.baseline.as_deref()), Follow::Done(Outcome::Updated));
+        assert!(install_after(2, Some(2)), "releitura da API passa: instala");
+        let before = serde_json::json!({"fase": "pronto", "ok": true, "pid": 222, "ts": "2026-10-19T09:59:00-03:00"});
+        assert_eq!(follow(&before, false, intent.baseline.as_deref()), Follow::NotStarted, "desfecho anterior à intenção");
+    }
+
+    #[test]
+    fn the_app_installs_after_the_server_only_with_the_api_it_requires() {
+        assert!(install_after(2, Some(2)));
+        assert!(install_after(2, Some(3)));
+        assert!(!install_after(3, Some(2)), "servidor parou num binário mais velho");
+        assert!(!install_after(2, None), "desconhecida não basta para quem exige mais que a 1");
+        assert!(install_after(1, None), "a API 1 todo servidor atende, mesmo com a leitura falhando");
     }
 
     #[test]

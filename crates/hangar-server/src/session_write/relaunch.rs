@@ -35,6 +35,9 @@ fn terminal_field(headers: &axum::http::HeaderMap, bytes: &[u8]) -> Option<bool>
     }
 }
 
+/// O app mostra só `params.erro`: sem o código junto, as falhas de terminal são todas a mesma frase genérica.
+fn with_code(error: &RuntimeError) -> String { format!("{} ({})", error.message, error.code) }
+
 /// O `HTTPException` do `_trocar_modo`: recusa e falha de troca são 409 `erro_troca_modo`, como no Python,
 /// inclusive terminal que não fechou ou processo que não saiu (o código de origem vai em `params.code`); só
 /// a troca interrompida por pânico, sem fase conhecida, é 500 com o código.
@@ -43,9 +46,11 @@ pub fn mode_refusal(error: &RuntimeError) -> (StatusCode, Value) {
     if error.code == PANICKED {
         return (StatusCode::INTERNAL_SERVER_ERROR, super::detail_body(&error.code, &error.message, json!({})));
     }
-    let mut params = json!({"erro": error.message});
+    // A recusa que já é a frase da troca (`erro_troca_modo`) dispensa o código; as outras o levam à vista.
+    let shown = if error.code == "erro_troca_modo" { error.message.clone() } else { with_code(error) };
+    let mut params = json!({"erro": shown});
     if crate::runtime::codex_relaunch::kill_phase(error) || error.code == crate::runtime::codex_relaunch::STARTING { params["code"] = json!(error.code); }
-    (StatusCode::CONFLICT, super::detail_body("erro_troca_modo", &format!("não troquei de modo: {}", error.message), params))
+    (StatusCode::CONFLICT, super::detail_body("erro_troca_modo", &format!("não troquei de modo: {shown}"), params))
 }
 
 /// O `_reload_session` do Codex: com terminal é 409; fase incerta é 500 com o código; o reinício que
@@ -88,7 +93,7 @@ pub async fn mode(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
         Some(Relaunched::Codex(Ok(value))) => (StatusCode::OK, value),
         Some(Relaunched::Codex(Err(error))) => mode_refusal(&error),
         Some(Relaunched::Claude(Ok(reopened), _)) => (StatusCode::OK, reopened.answer(json!({"ok": true, "terminal": terminal}))),
-        Some(Relaunched::Claude(Err(failure), _)) => claude_refusal("não troquei de modo", &failure),
+        Some(Relaunched::Claude(Err(failure), _)) => claude_refusal(CLAUDE_MODE, &failure),
     };
     // A identidade da sessão mudou (ou pode ter mudado no meio de uma falha).
     st.list.invalidate();
@@ -119,9 +124,8 @@ pub async fn reload(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         Some(Relaunched::Codex(Err(error))) => reload_refusal(&error),
         Some(Relaunched::Claude(Ok(reopened), _)) => (StatusCode::OK, reopened.answer(json!({"ok": true}))),
         Some(Relaunched::Claude(Err(failure), from_terminal)) if failure.ended_without_terminal(from_terminal) =>
-            (StatusCode::BAD_GATEWAY, super::detail_body("erro_recarregar_sem_terminal", &failure.error.message,
-                json!({"erro": failure.error.message, "code": failure.error.code}))),
-        Some(Relaunched::Claude(Err(failure), _)) => claude_refusal("não recarreguei", &failure),
+            reload_ended_without_terminal(&failure),
+        Some(Relaunched::Claude(Err(failure), _)) => claude_refusal(CLAUDE_RELOAD, &failure),
     };
     st.list.invalidate();
     let mut response = json_response(status, body);
@@ -167,13 +171,28 @@ pub(crate) async fn during_life_change<T>(st:&AppState,name:&str,work:impl Futur
     result
 }
 
+/// O terminal não reabriu e a sessão seguiu sem ele: o aviso leva o código de origem, como as outras recusas.
+fn reload_ended_without_terminal(failure: &ReopenFailure) -> (StatusCode, Value) {
+    let error = &failure.error;
+    let shown = with_code(error);
+    (StatusCode::BAD_GATEWAY, super::detail_body("erro_recarregar_sem_terminal", &shown, json!({"erro": shown, "code": error.code})))
+}
+
+/// Código do aviso e a frase dele, por ação recusada.
+pub type ClaudeAction = (&'static str, &'static str);
+pub const CLAUDE_MODE: ClaudeAction = ("erro_troca_modo", "não troquei de modo");
+pub const CLAUDE_RELOAD: ClaudeAction = ("erro_recarregar", "não recarreguei");
+pub const CLAUDE_RESUME: ClaudeAction = ("erro_retomar", "não retomei a conversa");
+
 /// O `HTTPException` do `_trocar_modo`/`_reload_terminal` do Claude: ocupada é o motivo com a frase do app;
-/// o resto é 409 `erro_troca_modo` com o código de origem em `params.code`.
-pub fn claude_refusal(verb: &str, failure: &ReopenFailure) -> (StatusCode, Value) {
+/// o resto é 409 com o código da ação e o código de origem em `params.code`.
+pub fn claude_refusal(action: ClaudeAction, failure: &ReopenFailure) -> (StatusCode, Value) {
+    let verb = action.1;
     let error = &failure.error;
     if let Some(busy) = super::busy_refusal(error) { return busy; }
-    (StatusCode::CONFLICT, super::detail_body("erro_troca_modo", &format!("{verb}: {}", error.message),
-        json!({"erro": error.message, "code": error.code})))
+    let shown = with_code(error);
+    (StatusCode::CONFLICT, super::detail_body(action.0, &format!("{verb}: {shown}"),
+        json!({"erro": shown, "code": error.code})))
 }
 
 #[cfg(test)]
@@ -192,6 +211,45 @@ mod tests {
             let (status, body) = mode_refusal(&RuntimeError::new(code, "O terminal ainda está encerrando; não abri outro processo."));
             assert_eq!((status, body["detail"]["code"].as_str(), body["detail"]["params"]["code"].as_str()), (StatusCode::CONFLICT, Some("erro_troca_modo"), Some(code)));
         }
+    }
+
+    /// O aviso do app mostra só `params.erro`: a frase genérica de um erro de terminal leva o código junto.
+    #[test]
+    fn a_claude_refusal_shows_the_real_code_in_the_message() {
+        let failure = ReopenFailure { error: RuntimeError::new("lifecycle_native_read", "operação terminal conservada no diário"), stopped: false, landed: None };
+        let (status, body) = claude_refusal(CLAUDE_MODE, &failure);
+        assert_eq!((status, body["detail"]["code"].as_str(), body["detail"]["params"]["code"].as_str()), (StatusCode::CONFLICT, Some("erro_troca_modo"), Some("lifecycle_native_read")));
+        assert!(body["detail"]["params"]["erro"].as_str().unwrap().contains("lifecycle_native_read"), "{body}");
+        assert!(body["detail"]["msg"].as_str().unwrap().contains("lifecycle_native_read"), "{body}");
+        // O Codex também: só a recusa que já é a frase da troca dispensa o código.
+        let body = mode_refusal(&RuntimeError::new("codex_terminal_starting_x", "frase genérica")).1;
+        assert!(body["detail"]["params"]["erro"].as_str().unwrap().contains("codex_terminal_starting_x"), "{body}");
+        assert!(body["detail"]["msg"].as_str().unwrap().contains("codex_terminal_starting_x"), "{body}");
+        assert!(!mode_refusal(&RuntimeError::new("erro_troca_modo", "frase")).1["detail"]["msg"].as_str().unwrap().contains("(erro_troca_modo)"));
+    }
+
+    /// Recarregar e retomar dizem o que falhou com a frase deles, que o app traduz pelo código.
+    #[test]
+    fn reload_and_resume_refusals_name_their_own_action() {
+        let failure = ReopenFailure { error: RuntimeError::new("relaunch_confirmation", "o Claude não voltou"), stopped: false, landed: None };
+        let pt = include_str!("../../../../messages/pt.json");
+        let en = include_str!("../../../../messages/en.json");
+        for (action, code, verb) in [(CLAUDE_RELOAD, "erro_recarregar", "não recarreguei: "), (CLAUDE_RESUME, "erro_retomar", "não retomei a conversa: ")] {
+            let body = claude_refusal(action, &failure).1;
+            assert_eq!(body["detail"]["code"], code);
+            assert!(body["detail"]["msg"].as_str().unwrap().starts_with(verb), "{body}");
+            assert_eq!(body["detail"]["params"]["code"], "relaunch_confirmation");
+            for messages in [pt, en] { assert!(messages.contains(&format!("\"{code}\": ")), "{code} sem frase nos idiomas"); }
+        }
+    }
+
+    #[test]
+    fn a_reload_that_ended_without_terminal_shows_the_real_code() {
+        let failure = ReopenFailure { error: RuntimeError::new("relaunch_confirmation", "o Claude não voltou"), stopped: true, landed: None };
+        let (status, body) = reload_ended_without_terminal(&failure);
+        assert_eq!((status, body["detail"]["code"].as_str()), (StatusCode::BAD_GATEWAY, Some("erro_recarregar_sem_terminal")));
+        assert!(body["detail"]["params"]["erro"].as_str().unwrap().contains("relaunch_confirmation"), "{body}");
+        assert!(body["detail"]["msg"].as_str().unwrap().contains("relaunch_confirmation"), "{body}");
     }
 
     #[test]

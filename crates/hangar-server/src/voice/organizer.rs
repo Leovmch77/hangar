@@ -199,6 +199,7 @@ Resultados
   encurtar nem trocar o sentido: achados, erros, pendências, ressalvas e decisões ficam. Opções (A, B…): fale todas, com a
   consequência de cada uma e a recomendação, sem escolher por ele. Não transforme afirmação em pergunta nem acrescente pergunta,
   oferta ('quer que eu mande?') ou 'pode ser?'.
+- Texto longo chega em partes: fale cada uma como continuação da anterior.
 - 'Chegou um resultado da…' é aviso de outra sessão, nunca como resposta ao que ele disse: fale-o à parte, com o nome da
   sessão e o 'não da' quando houver, sem emendar no assunto ('É, pois é…').
 - A única exceção à fala fiel é o aviso automático do Codex, em inglês, seguido de um JSON: o que começa por
@@ -1361,32 +1362,113 @@ impl<T> SendGate<T> {
     }
 }
 
-/// O que a voz fala por conta própria (resumo de resultado, confirmação do Jev) espera o usuário terminar: falar por
-/// cima corta o que ele dizia. Fala pronta com voz no microfone no último `SILENCE` fica guardada e sai, na ordem, no
-/// primeiro silêncio. Ruído ou eco contínuos no microfone não podem segurar para sempre: depois de `MAX_HOLD` a fila sai.
+/// Tudo o que o Hangar põe na voz (resposta do organizador, resumo, aviso, confirmação) passa por aqui: nada sai com ele
+/// falando nem com a voz no meio de outra fala, e cada pedaço sai sozinho, depois de a voz terminar o anterior. Pausa de
+/// pensamento não abre a vez: a transcrição dele precisa de `TALK_SILENCE` calada, além do microfone. Ruído contínuo só no
+/// microfone (sem transcrição) não segura além de `MAX_HOLD`.
 #[derive(Default)]
-pub struct SpeechHold { queue: VecDeque<String>, since: Option<Instant>, last_voice: Option<Instant> }
+pub struct SpeechHold { queue: VecDeque<(u64, String)>, since: Option<Instant>, last_voice: Option<Instant>, last_speech: Option<Instant>,
+    /// Último pedaço da fala da própria voz e se ela ainda não fechou essa fala.
+    voice_at: Option<Instant>, voice_open: bool,
+    /// O pedaço entregue: grupo, quando, e se a voz já começou a falá-lo.
+    playing: Option<(u64, Instant, bool)>, started: Option<u64>, groups: u64 }
 
 pub const MAX_HOLD: Duration = Duration::from_secs(20);
+/// Maior pedaço entregue à voz de uma vez: o Codex corta no meio o que passa de ~1.000 tokens (~4 KB).
+pub const SPEECH_CHUNK: usize = 3200;
+/// Silêncio da transcrição dele que encerra a fala para o que o Hangar fala: 77% das retomadas vêm em menos de 2 s.
+pub const TALK_SILENCE: Duration = Duration::from_secs(2);
+/// Pedaço entregue sem a voz começar a falá-lo para de segurar a fila.
+pub const SPEECH_START_WAIT: Duration = Duration::from_secs(8);
+/// Voz sem pedaço novo da própria fala há isso já parou, mesmo sem o fechamento.
+pub const VOICE_GAP: Duration = Duration::from_secs(3);
+/// Fala dele com menos palavras ('uhum', 'tá') não corta a leitura: só a segura.
+const CUT_WORDS: usize = 3;
 
 impl SpeechHold {
+    /// Microfone acima do limiar.
     pub fn heard_voice(&mut self, now: Instant) { self.last_voice = Some(now); }
-    fn quiet(&self, now: Instant) -> bool { self.last_voice.is_none_or(|at| now.saturating_duration_since(at) >= SILENCE) }
-    /// `Some` = pode falar já; `None` = ficou guardada (atrás das que já esperavam, para não trocar a ordem).
-    pub fn offer(&mut self, text: String, now: Instant) -> Option<String> {
-        if self.queue.is_empty() && self.quiet(now) { return Some(text); }
-        self.since.get_or_insert(now);
-        self.queue.push_back(text);
-        None
+    /// Pedaço da transcrição da fala dele.
+    pub fn heard_speech(&mut self, now: Instant) { (self.last_voice, self.last_speech) = (Some(now), Some(now)); }
+    /// Fala dele fechada. Com uma leitura em partes começada, fala de verdade (não 'uhum') corta o resto dela, que volta
+    /// para quem chamou levar ao organizador.
+    pub fn user_said(&mut self, text: &str, now: Instant) -> Option<String> {
+        self.heard_speech(now);
+        let group = self.started.filter(|_| text.split_whitespace().count() >= CUT_WORDS)?;
+        let (cut, kept): (VecDeque<_>, VecDeque<_>) = self.queue.drain(..).partition(|(g, _)| *g == group);
+        self.queue = kept;
+        if self.queue.is_empty() { self.since = None; }
+        (self.started, self.playing) = (None, None);
+        (!cut.is_empty()).then(|| cut.into_iter().map(|(_, t)| t).collect::<Vec<_>>().join("\n\n"))
     }
-    /// As guardadas, quando o usuário parou de falar ou a espera passou de `MAX_HOLD`.
-    pub fn due(&mut self, now: Instant) -> Vec<String> {
-        let overdue = self.since.is_some_and(|at| now.saturating_duration_since(at) >= MAX_HOLD);
-        if self.queue.is_empty() || !(self.quiet(now) || overdue) { return Vec::new(); }
-        self.since = None;
-        self.queue.drain(..).collect()
+    /// Pedaço da fala da própria voz.
+    pub fn voice_delta(&mut self, now: Instant) {
+        (self.voice_at, self.voice_open) = (Some(now), true);
+        if let Some(playing) = self.playing.as_mut() { playing.2 = true; }
     }
-    pub fn pending(&self) -> (usize, usize) { (self.queue.len(), self.queue.iter().map(String::len).sum()) }
+    /// A voz fechou a fala.
+    pub fn voice_done(&mut self) {
+        self.voice_open = false;
+        if self.playing.is_some_and(|(_, _, heard)| heard) { self.playing = None; }
+    }
+    fn voice_busy(&self, now: Instant) -> bool {
+        let speaking = self.voice_open && self.voice_at.is_some_and(|at| now.saturating_duration_since(at) < VOICE_GAP);
+        speaking || self.playing.is_some_and(|(_, at, heard)| !heard && now.saturating_duration_since(at) < SPEECH_START_WAIT)
+    }
+    fn quiet(&self, now: Instant) -> bool {
+        self.last_voice.is_none_or(|at| now.saturating_duration_since(at) >= SILENCE)
+            && self.last_speech.is_none_or(|at| now.saturating_duration_since(at) >= TALK_SILENCE)
+    }
+    /// Entra na fila, atrás das outras, em pedaços que a voz fala inteiros.
+    pub fn push(&mut self, text: &str, now: Instant) {
+        self.groups += 1;
+        let (group, before) = (self.groups, self.queue.len());
+        self.queue.extend(speech_chunks(text, SPEECH_CHUNK).into_iter().map(|chunk| (group, chunk)));
+        if self.queue.len() > before { self.since.get_or_insert(now); }
+    }
+    /// O próximo pedaço a falar, um por vez: com ele calado e a voz livre.
+    pub fn due(&mut self, now: Instant) -> Option<String> {
+        if self.queue.is_empty() || self.voice_busy(now) { return None; }
+        let noise_only = self.last_speech.is_none_or(|at| now.saturating_duration_since(at) >= TALK_SILENCE);
+        let overdue = noise_only && self.since.is_some_and(|at| now.saturating_duration_since(at) >= MAX_HOLD);
+        if !(self.quiet(now) || overdue) { return None; }
+        let (group, text) = self.queue.pop_front()?;
+        (self.playing, self.started) = (Some((group, now, false)), Some(group));
+        self.since = (!self.queue.is_empty()).then_some(now);
+        Some(text)
+    }
+    pub fn pending(&self) -> (usize, usize) { (self.queue.len(), self.queue.iter().map(|(_, t)| t.len()).sum()) }
+}
+
+/// O aviso automático do Codex (pedido de aprovação ou de resposta no app) não é resultado: a voz não o fala.
+pub fn speakable(text: &str) -> bool {
+    let text = text.trim_start();
+    !text.is_empty() && !text.starts_with("I need your approval to continue") && !text.starts_with("I need your input. Please respond in the app")
+}
+
+/// O que faltou falar de uma leitura que ele cortou falando; vai ao organizador para continuar só se ele pedir.
+pub fn reading_cut_note(rest: &str) -> String {
+    let rest: String = rest.chars().take(12_000).collect();
+    format!("A leitura que a voz fazia foi interrompida pela fala dele; ficou sem falar este trecho. Não o leia por conta \
+        própria; se ele pedir para continuar, continue daqui:\n{rest}")
+}
+
+/// Texto em pedaços de até `max` bytes, quebrados entre parágrafos; parágrafo maior que isso, entre palavras.
+pub fn speech_chunks(text: &str, max: usize) -> Vec<String> {
+    fn add(chunks: &mut Vec<String>, current: &mut String, piece: &str, sep: &str, max: usize) {
+        if !current.is_empty() && current.len() + sep.len() + piece.len() > max { chunks.push(std::mem::take(current)); }
+        if !current.is_empty() { current.push_str(sep); }
+        current.push_str(piece);
+    }
+    let (mut chunks, mut current) = (Vec::new(), String::new());
+    for paragraph in text.split("\n\n").map(str::trim).filter(|p| !p.is_empty()) {
+        if paragraph.len() <= max { add(&mut chunks, &mut current, paragraph, "\n\n", max); continue; }
+        for (n, word) in paragraph.split_whitespace().enumerate() {
+            add(&mut chunks, &mut current, word, if n == 0 { "\n\n" } else { " " }, max);
+        }
+    }
+    if !current.is_empty() { chunks.push(current); }
+    chunks
 }
 
 /// Espera calada depois de um pedido falado a partir da qual o Hangar confirma que ouviu.
@@ -1799,7 +1881,7 @@ mod tests {
         assert!(!pwa.contains("tela do Hangar") && pwa.contains("trocar a sessão da tela"), "aparelho sem ferramentas de tela");
         // Nada do perfil nem da memória vai à voz; e ela continua curta.
         assert!(!full.contains("Fatos lembrados") && !full.contains("[m"));
-        assert!(full.chars().count() < 5_000, "{}", full.chars().count());
+        assert!(full.chars().count() < 5_200, "{}", full.chars().count());
     }
 
     #[test]
@@ -2505,31 +2587,81 @@ mod tests {
     fn speech_waits_for_the_user_to_finish() {
         let now = Instant::now();
         let mut hold = SpeechHold::default();
-        assert_eq!(hold.offer("a".into(), now), Some("a".into()), "ninguém falando: sai já");
-        hold.heard_voice(now);
-        assert_eq!(hold.offer("resultado".into(), now + Duration::from_millis(300)), None, "ele está falando: guarda");
-        assert!(hold.due(now + Duration::from_millis(800)).is_empty(), "ainda dentro do silêncio exigido");
-        hold.heard_voice(now + Duration::from_millis(900));
-        assert_eq!(hold.offer("outro".into(), now + SILENCE * 2), None, "fila não fura: espera a da frente");
-        assert_eq!(hold.due(now + Duration::from_millis(900) + SILENCE), vec!["resultado".to_owned(), "outro".to_owned()], "parou: sai na ordem");
-        assert!(hold.due(now + SILENCE * 5).is_empty());
+        hold.push("a", now);
+        assert_eq!(hold.due(now).as_deref(), Some("a"), "ninguém falando: sai já");
+        hold.voice_delta(now);
+        hold.voice_done();
+        hold.heard_speech(now);
+        hold.push("resultado", now + Duration::from_millis(300));
+        assert_eq!(hold.due(now + SILENCE), None, "pausa curta de quem pensa não abre a vez");
+        hold.push("outro", now + SILENCE);
+        let talked = now + Duration::from_millis(1500);
+        hold.heard_speech(talked);
+        assert_eq!(hold.due(talked + TALK_SILENCE - Duration::from_millis(100)), None);
+        assert_eq!(hold.due(talked + TALK_SILENCE).as_deref(), Some("resultado"), "parou: sai a da frente");
+        assert_eq!(hold.due(talked + TALK_SILENCE), None, "uma por vez: a próxima espera a voz falar esta");
+        hold.voice_delta(talked + TALK_SILENCE);
+        assert_eq!(hold.due(talked + TALK_SILENCE * 2), None, "a voz ainda fala");
+        hold.voice_done();
+        assert_eq!(hold.due(talked + TALK_SILENCE * 2).as_deref(), Some("outro"));
     }
 
     #[test]
-    fn noise_never_holds_speech_forever() {
+    fn voice_that_never_starts_does_not_hold_forever() {
+        let now = Instant::now();
+        let mut hold = SpeechHold::default();
+        hold.push("a", now);
+        hold.push("b", now);
+        assert_eq!(hold.due(now).as_deref(), Some("a"));
+        assert_eq!(hold.due(now + SPEECH_START_WAIT - Duration::from_millis(1)), None);
+        assert_eq!(hold.due(now + SPEECH_START_WAIT).as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn noise_never_holds_speech_forever_but_speech_does() {
         let now = Instant::now();
         let mut hold = SpeechHold::default();
         hold.heard_voice(now);
-        assert_eq!(hold.offer("resultado".into(), now), None);
+        hold.push("resultado", now);
         let mut at = now;
         while at < now + MAX_HOLD - Duration::from_millis(500) {
             at += Duration::from_millis(500);
             hold.heard_voice(at);
-            assert!(hold.due(at).is_empty(), "voz contínua segura até o teto");
+            assert!(hold.due(at).is_none(), "voz contínua segura até o teto");
         }
         hold.heard_voice(now + MAX_HOLD);
-        assert_eq!(hold.due(now + MAX_HOLD), vec!["resultado".to_owned()], "passou do teto: sai mesmo com voz");
-        assert_eq!(hold.pending(), (0, 0));
+        assert_eq!(hold.due(now + MAX_HOLD).as_deref(), Some("resultado"), "só microfone: passou do teto, sai");
+        let mut talking = SpeechHold::default();
+        talking.push("resposta", now);
+        talking.heard_speech(now + MAX_HOLD);
+        assert!(talking.due(now + MAX_HOLD).is_none(), "ele falando de verdade nunca é atropelado pelo teto");
+    }
+
+    #[test]
+    fn real_speech_cuts_the_rest_of_a_reading_but_a_backchannel_does_not() {
+        let now = Instant::now();
+        let mut hold = SpeechHold::default();
+        let reading = ["um ".repeat(1000), "dois ".repeat(600), "três ".repeat(600)].join("\n\n");
+        hold.push(&reading, now);
+        hold.push("Chegou um resultado da hangar.", now);
+        assert!(hold.due(now).is_some_and(|t| t.starts_with("um")));
+        let waiting = hold.pending();
+        assert_eq!(hold.user_said("uhum", now), None, "sinal de escuta só segura");
+        assert_eq!(hold.pending(), waiting);
+        let rest = hold.user_said("espera, isso eu já sei", now).unwrap();
+        assert!(rest.contains("dois") && rest.contains("três"), "o resto da leitura volta inteiro");
+        assert_eq!(hold.pending().0, 1, "o aviso de outra coisa continua na fila");
+    }
+
+    #[test]
+    fn chunks_keep_every_word_and_fit_the_limit() {
+        let text = format!("{}\n\nCurto.\n\n{}", "a ".repeat(2000), "Opção A: testar. Opção B: publicar.");
+        let chunks = speech_chunks(&text, 1000);
+        assert!(chunks.iter().all(|c| c.len() <= 1000), "{:?}", chunks.iter().map(String::len).collect::<Vec<_>>());
+        let words = |s: &str| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(words(&chunks.join(" ")), words(&text));
+        assert_eq!(speech_chunks("  \n\n ", 1000), Vec::<String>::new());
+        assert_eq!(speech_chunks("Uma frase.", 1000), vec!["Uma frase.".to_owned()]);
     }
 
     #[test]

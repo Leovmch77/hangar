@@ -123,6 +123,7 @@ mod accounts_claude_login;
 mod accounts_codex_login;
 mod accounts_lifecycle;
 mod accounts_preparation;
+mod client_api;
 mod contract_codex_routes;
 mod contract_costs_areas;
 mod contract_costs_index;

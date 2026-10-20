@@ -80,6 +80,17 @@ def test_downloads_both_checked_and_executable(release, tmp_path):
     assert not [p for p in dest.iterdir() if p.name.endswith(".tmp")]
 
 
+def test_held_download_writes_nothing_until_installed(release, tmp_path):
+    url, pasta, _ = release
+    _publish(pasta, {"hangar-server": SERVER, "hangar-cano": CANO})
+    dest, hold = tmp_path / "bin", []
+    assert rust_release.fetch(url, dest, hold=hold) == []
+    assert not (dest / "hangar-server").exists() and not (dest / "hangar-cano").exists()
+    assert rust_release.install_held(hold) == []
+    assert (dest / "hangar-server").read_bytes() == SERVER
+    assert (dest / "hangar-cano").read_bytes() == CANO
+
+
 def test_same_release_again_downloads_only_the_manifest(release, tmp_path):
     url, pasta, pedidos = release
     _publish(pasta, {"hangar-server": SERVER, "hangar-cano": CANO})

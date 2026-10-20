@@ -362,11 +362,14 @@ jobs:
             || gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
           protocol=$(sed -n 's/^pub const INTERNAL_PROTOCOL: u32 = \([0-9][0-9]*\);.*/\1/p' ../hangar-server/src/lib.rs)
           test -n "$protocol" || { echo "::error::INTERNAL_PROTOCOL não encontrado em crates/hangar-server/src/lib.rs"; exit 1; }
+          # Versão da API que este servidor atende; o app compara com a que exige antes de se atualizar.
+          api=$(sed -n 's/^pub const CLIENT_API: u32 = \([0-9][0-9]*\);.*/\1/p' ../hangar-api/src/lib.rs)
+          test -n "$api" || { echo "::error::CLIENT_API não encontrado em crates/hangar-api/src/lib.rs"; exit 1; }
           gh release upload "$tag" hangar-server-* hangar-cano-* --repo "$GITHUB_REPOSITORY" --clobber
-          python3 - "$tag" "$PLATFORM" "$protocol" <<'EOF'
-          import hashlib, json, os, pathlib, random, shutil, subprocess, sys, time
+          python3 - "$tag" "$PLATFORM" "$protocol" "$api" <<'EOF'
+          import hashlib, json, os, pathlib, random, re, shutil, subprocess, sys, time
 
-          tag, plat, protocol = sys.argv[1:]
+          tag, plat, protocol, api = sys.argv[1:]
           repo, sha = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"]
           LATEST = "server-latest.json"
 
@@ -384,12 +387,33 @@ jobs:
               name = "hangar-server" if f.name.startswith("hangar-server-") else "hangar-cano"
               files[f"{plat}/{name}"] = {"name": f.name, "sha256": hashlib.sha256(f.read_bytes()).hexdigest()}
           put(pathlib.Path(f"server-{plat}.json"),
-              {"platform": plat, "commit": sha, "protocol": int(protocol), "files": files})
+              {"platform": plat, "commit": sha, "protocol": int(protocol), "api": int(api), "files": files})
+
+          apis = {}
+          def api_at(commit):
+              # Fonte antiga ou semente sem `api`: vale a constante no commit dela, nunca um 1 por esquecimento.
+              # Só o commit sem o arquivo ou sem a constante é de antes do contrato (api 1).
+              if not commit:
+                  sys.exit("entrada sem commit: não há de onde ler o CLIENT_API")
+              if commit not in apis:
+                  r = subprocess.run(["gh", "api", "-H", "Accept: application/vnd.github.raw",
+                                      f"repos/{repo}/contents/crates/hangar-api/src/lib.rs?ref={commit}"],
+                                     capture_output=True, text=True)
+                  if r.returncode and "HTTP 404" not in r.stderr:
+                      sys.exit(f"não consegui ler o CLIENT_API do commit {commit}: {r.stderr.strip()}")
+                  m = re.search(r"^pub const CLIENT_API: u32 = (\d+);", r.stdout if not r.returncode else "", re.M)
+                  apis[commit] = int(m.group(1)) if m else 1
+              return apis[commit]
 
           def read():
               d = pathlib.Path("lido")
               shutil.rmtree(d, ignore_errors=True)
-              gh("release", "download", tag, "--pattern", "server-*.json", "--dir", str(d))
+              try:
+                  gh("release", "download", tag, "--pattern", "server-*.json", "--dir", str(d))
+              except subprocess.CalledProcessError as e:
+                  # Outro sistema no meio do --clobber: o arquivo listado já foi trocado.
+                  print(f"::warning::leitura das fontes falhou (rc {e.returncode}); tentando de novo")
+                  return None
               latest = d / LATEST
               old = json.loads(latest.read_bytes()) if latest.exists() else {}
               return old, {p.name: p.read_bytes() for p in sorted(d.glob("server-*.json")) if p.name != LATEST}
@@ -398,7 +422,10 @@ jobs:
           for attempt in range(12):
               if attempt:
                   time.sleep(random.uniform(2, 8))
-              old, raw = read()
+              got = read()
+              if got is None:
+                  continue
+              old, raw = got
               # Semente primeiro: a fonte do próprio sistema, quando existe, vale por cima dela.
               by_plat = {}
               for n, b in sorted(raw.items(), key=lambda kv: not kv[0].startswith("server-seed-")):
@@ -428,6 +455,7 @@ jobs:
                   entry = {"commit": s["commit"]}
                   if s["protocol"] is not None:   # semente: quem lê busca o protocolo pelo commit
                       entry["protocol"] = s["protocol"]
+                  entry["api"] = s["api"] if s.get("api") is not None else api_at(s["commit"])
                   merged["platforms"][s["platform"]] = entry
               try:
                   put(out, merged)
@@ -435,7 +463,8 @@ jobs:
                   continue   # outro sistema regravando o manifesto no mesmo instante
               # Se nenhuma fonte mudou entre a leitura e a gravação, quem chegar depois compõe por cima com a fonte
               # dele; se mudou, esta gravação pode ter deixado outro sistema de fora e é refeita.
-              if read()[1] == raw:
+              again = read()
+              if again is not None and again[1] == raw:
                   print(out.read_text())
                   break
           else:

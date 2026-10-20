@@ -1068,6 +1068,8 @@ export interface Atualizacao {
   /** Commits em origin/main que ainda não estão aqui. */
   atras?: number;
   atualizacao_disponivel: boolean;
+  /** API de cliente do servidor publicado para esta máquina; ausente em servidor anterior = 1. */
+  api_publicado?: number;
   mudancas: AtualizacaoMudanca[];
   passos: AtualizacaoPasso[];
   pre_voo: AtualizacaoPreVoo;

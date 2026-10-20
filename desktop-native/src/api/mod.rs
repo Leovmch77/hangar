@@ -152,7 +152,7 @@ fn session_life_key(code: &str) -> Option<(&str, Option<&'static str>)> {
         | "erro_plano_fora_da_tela" | "erro_recarregar_so_sem_terminal" | "erro_nome_em_uso" | "erro_cwd_inexistente"
         | "erro_config_dir_invalido" | "erro_fora_da_pasta" | "erro_motor_invalido" | "erro_motor_sem_claude" | "erro_permissao_invalida"
         | "erro_permissao_so_claude" | "erro_provedor_offline" | "erro_provider_sessao_invalido" | "erro_conta_reconciliacao_falhou"
-        | "erro_grupo_limpeza_falhou" => Some((code, None)),
+        | "erro_grupo_limpeza_falhou" | "erro_troca_modo" | "erro_recarregar" | "erro_retomar" | "erro_recarregar_sem_terminal" => Some((code, None)),
         _ => family.map(|key| (code, Some(key))),
     }
 }
@@ -1113,6 +1113,14 @@ mod tests {
         assert!(text != "x" && text.contains("xhigh"), "{text}");
         let text = failure_detail(Some(json!({"detail": {"code": "erro_cwd_inexistente", "params": {"cwd": "/sumiu"}, "msg": "x"}})), 400);
         assert!(text != "x" && text.contains("/sumiu"), "{text}");
+    }
+
+    #[test]
+    fn claude_life_change_refusals_use_the_web_sentence() {
+        for code in ["erro_troca_modo", "erro_recarregar", "erro_retomar", "erro_recarregar_sem_terminal"] {
+            let text = failure_detail(Some(json!({"detail": {"code": code, "params": {"erro": "pane sumiu (lifecycle_kill)"}, "msg": "x"}})), 409);
+            assert!(text != "x" && text.contains("pane sumiu (lifecycle_kill)"), "{code}: {text}");
+        }
     }
 
     #[test]

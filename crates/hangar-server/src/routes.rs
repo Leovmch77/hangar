@@ -497,6 +497,7 @@ fn public_routes(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router 
     session_routes(pass_any)
         .route("/api/hangar-terminals/{ident}/term", get(crate::term::hangar_ws).fallback(pass_any))
         .route("/__hangar_server/health", get(health))
+        .route("/api/client-api", get(client_api).fallback(pass_any))
         // As rotas privadas não existem nesta porta.
         .route("/__hangar_server/{*rest}", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/api/sessions/{name}/artifacts", get(crate::artifacts::route).fallback(pass_any))
@@ -597,6 +598,18 @@ async fn health(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response
     let mut resp = ([(header::CONTENT_TYPE, "application/json")], body).into_response();
     cors(&headers, resp.headers_mut());
     resp
+}
+
+/// `GET /api/client-api`: só o dono.
+async fn client_api(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+    let (fwd, owner) = gate(&st, peer, &req);
+    let mut resp = if owner { client_api_reply() } else { crate::share_reach::unauthorized(&st, &fwd.client_ip) };
+    cors(req.headers(), resp.headers_mut());
+    resp
+}
+
+pub(crate) fn client_api_reply() -> Response {
+    ([(header::CONTENT_TYPE, "application/json")], serde_json::json!({"api": hangar_api::CLIENT_API}).to_string()).into_response()
 }
 
 /// Quem pede e se é o dono, resolvidos uma vez por pedido.

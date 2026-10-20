@@ -23,6 +23,14 @@ jobs:
             echo "sem base comparável (primeiro push da branch); nada a conferir"; exit 0
           fi
           bash scripts/check-passo-de-atualizacao.sh "$de..HEAD"
+      # Mudança na API que o app nativo consome sem subir o CLIENT_API (no PR, contra a base).
+      - name: CLIENT_API
+        run: |
+          de="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$de" ] || ! git cat-file -e "$de" 2>/dev/null; then
+            echo "sem base comparável (primeiro push da branch); nada a conferir"; exit 0
+          fi
+          bash scripts/check-client-api.sh "$de..HEAD"
 
   statusline:
     strategy:
@@ -196,6 +204,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      # O checkout só dá as árvores das fontes para a chave da `dist-commits`.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: dist
@@ -221,3 +231,32 @@ jobs:
           # A tag anda junto: `git describe --match dist-latest` na maquina e o que da nome a versao.
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/dist-latest" \
             -f sha="${{ github.sha }}" -F force=true >/dev/null
+      # A mesma tela pela chave das fontes (`_chave_da_tela` no atualizar.py faz a mesma conta):
+      # o atualizador que para num commit do meio, sem build próprio aqui, acha a tela de qualquer
+      # commit com as mesmas fontes. Ficam as 50 chaves mais novas.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          c="${{ github.sha }}"
+          chave=$(git rev-parse "$c:frontend" "$c:packages" "$c:messages" "$c:project.inlang" "$c:package.json" "$c:package-lock.json" | sha256sum | cut -d' ' -f1)
+          nome="frontend-dist-$chave.tar.gz"
+          gh release view dist-commits --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create dist-commits --repo "$GITHUB_REPOSITORY" --latest=false \
+                 --title 'frontend compilado por chave das fontes' \
+                 --notes 'frontend-dist-<chave>.tar.gz: chave = sha256 das arvores frontend, packages, messages, project.inlang e de package.json e package-lock.json da raiz no commit. O atualizador baixa daqui quando para antes do topo.'
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/dist-commits" --jq .id)
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases/$id/assets" > assets.json
+          # Só pula com os DOIS: sem o `.sha256` o motor nunca aceita a chave, então reenvia o par.
+          if jq -e --arg n "$nome" 'add | (any(.name == $n) and any(.name == ($n + ".sha256")))' assets.json >/dev/null; then
+            echo "chave $chave já publicada"
+          else
+            cp frontend-dist.tar.gz "$nome"
+            sha256sum "$nome" > "$nome.sha256"
+            gh release upload dist-commits "$nome" "$nome.sha256" --repo "$GITHUB_REPOSITORY" --clobber
+          fi
+          jq -r --arg n "$nome" 'add | map(select((.name | endswith(".tar.gz")) and .name != $n))
+                 | sort_by(.created_at) | reverse | .[49:][] | .name' assets.json \
+            | while read -r velho; do
+                gh release delete-asset dist-commits "$velho" --repo "$GITHUB_REPOSITORY" -y || true
+                gh release delete-asset dist-commits "$velho.sha256" --repo "$GITHUB_REPOSITORY" -y || true
+              done

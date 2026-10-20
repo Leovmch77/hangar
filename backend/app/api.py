@@ -692,6 +692,16 @@ async def session_defaults_forward(request: Request):
                                   "/__hangar_server/forwarded")
 
 
+@app.get("/api/client-api")
+async def client_api_pelo_rust(request: Request):
+    """O número é do Rust (`hangar_api::CLIENT_API`). Aqui chega o dono pelo Connect, que segue pela
+    ponte; sem o Rust é 503 com código, nunca um número que o Python não conhece."""
+    if _convidado(request):
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+    return await _repasse_ao_rust(request, erro("client_api_need_rust_server", "a versão da API precisa do servidor Rust"),
+                                  "/__hangar_server/forwarded")
+
+
 @app.middleware("http")
 async def _correlaciona_diag(request: Request, call_next):
     """Põe o id do front no contexto, pra o diário poder LIGAR as duas pontas.
@@ -5672,21 +5682,22 @@ def _origem_do_terminal_ok(request: Request) -> bool:
 # ─── Atualizar ─────────────────────────────────────────────────────────────────────────────────
 
 _ALVOS_AUSENTES_AVISADOS: set[str] = set()
-# Por alvo: (instante, até onde o código pode ir, binário instalado diferente do publicado). Rede e o
-# hash do binário não cabem no polling de 2 s da tela.
-_PUBLICADO: dict[str, tuple[float, str, bool]] = {}
+# Por alvo: (instante, até onde o código pode ir, binário instalado diferente do publicado, API de
+# cliente do publicado). Rede e o hash do binário não cabem no polling de 2 s da tela.
+_PUBLICADO: dict[str, tuple[float, str, bool, int]] = {}
 _PUBLICADO_TTL_S = 300
 
 
-def _publicado(destino: str, procurar: bool) -> tuple[str, bool]:
-    """O commit do binário Rust publicado para este sistema e se o instalado aqui é outro."""
+def _publicado(destino: str, procurar: bool) -> tuple[str, bool, int]:
+    """O commit do binário Rust publicado para este sistema, se o instalado aqui é outro e a API de
+    cliente que ele fala."""
     agora = time.monotonic()
     guardado = _PUBLICADO.get(destino)
     if guardado and not procurar and agora - guardado[0] < _PUBLICADO_TTL_S:
-        return guardado[1], guardado[2]
+        return guardado[1], guardado[2], guardado[3]
     ate, release = atualizar.pinned_target(destino)
     # Sem como conferir, a lista mostra o topo, como antes; é o motor que avisa o motivo.
-    valor = (ate or f"origin/{destino}", atualizar.rust_release.stale(release))
+    valor = (ate or f"origin/{destino}", atualizar.rust_release.stale(release), atualizar.published_api(release))
     _PUBLICADO[destino] = (agora, *valor)
     return valor
 
@@ -5741,7 +5752,7 @@ async def get_atualizacao(procurar: bool = False):
             atualizar._git("fetch", "origin", timeout=120)
         pre = atualizar.checar()
         # Só até o commit do binário Rust publicado: o código depois dele rodaria com o binário de antes.
-        ate, servidor_velho = _publicado(atualizar.alvo(), procurar)
+        ate, servidor_velho, api_publicado = _publicado(atualizar.alvo(), procurar)
         mudancas = _mudancas_pendentes(ate)
         # Checkout fora da branch do alvo (campo esvaziado na branch de teste, ou branch já contida
         # na main) não tem commit a puxar, mas tem troca a fazer.
@@ -5759,6 +5770,7 @@ async def get_atualizacao(procurar: bool = False):
             "atras": len(mudancas),
             "atualizacao_disponivel": disponivel,
             "servidor_desatualizado": servidor_velho,
+            "api_publicado": api_publicado,
             "mudancas": mudancas,
             "passos": [{"id": s["id"], "titulo": s["titulo"], "texto": s["texto"]}
                        for s in atualizacoes.pendentes()],
