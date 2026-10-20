@@ -12,10 +12,10 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::exit::segment;
+use super::exit::{notify_exit, segment};
 use super::local::JoinRefusal;
 use super::routes::Bridged;
-use super::service::{GroupError, GroupService, PromoteError};
+use super::service::{BoxFuture, GroupError, GroupService, OrqFacts, OrqPhase, PromoteError};
 use crate::routes::AppState;
 
 const MAX_BODY: usize = 1 << 20;
@@ -26,10 +26,28 @@ const MAX_REPLY: usize = 4 << 20;
 enum Operation {
     #[serde(rename = "group.route")]
     Route { method: String, name: String, route: String, #[serde(default)] body: Value },
+    /// Fechamento que não passou pelo `delete` do Rust (Connect, convidado): a fase do `orq` de cada
+    /// gid vem no pedido, lida pelo Python antes de chamar.
+    #[serde(rename = "group.leave")]
+    Leave { name: String, phases: std::collections::HashMap<String, Value> },
     #[serde(rename = "group.rename")]
     Rename { old: String, new: String },
     #[serde(rename = "group.orq_associate")]
     OrqAssociate { name: String, gid: String, mtime: f64, facts: TeamFacts },
+}
+
+/// Fases que o Python mandou; gid sem fase = `Unknown`, que mantém o grupo vivo.
+struct KnownPhases(std::collections::HashMap<String, Value>);
+
+impl OrqFacts for KnownPhases {
+    fn phase<'a>(&'a self, gid: &'a str) -> BoxFuture<'a, OrqPhase> {
+        Box::pin(async move { super::orq::phase_of(self.0.get(gid)) })
+    }
+
+    /// A saída nunca promove.
+    fn promote<'a>(&'a self, _name: &'a str, _gid: &'a str) -> BoxFuture<'a, Result<(), PromoteError>> {
+        Box::pin(async { Err(PromoteError::Unavailable("groups_bridge_no_promote".into())) })
+    }
 }
 
 pub(crate) struct Failed { pub(crate) code: String, detail: String }
@@ -77,6 +95,11 @@ pub(crate) async fn route(st: Arc<AppState>, method: &str, name: &str, route: &s
 async fn execute(st: Arc<AppState>, groups: Arc<GroupService>, op: Operation) -> Result<Value, Failed> {
     match op {
         Operation::Route { method, name, route: path, body } => route(st, &method, &name, &path, body).await,
+        Operation::Leave { name, phases } => {
+            let ex = groups.leave_with(&name, &KnownPhases(phases)).await.map_err(group_failed)?;
+            let warnings = notify_exit(&st, &groups, &name, &ex).await;
+            Ok(json!({"ex_peers": ex, "warnings": warnings}))
+        }
         Operation::Rename { old, new } => {
             groups.rename(&old, &new).await.map_err(group_failed)?;
             super::link_return::renamed(&st, &old, &new).await;
@@ -173,17 +196,24 @@ fn mark(text: &str, (open, close): (&str, &str)) -> Option<String> {
 fn io_changed(e: std::io::Error) -> TeamError { TeamError::Changed(e.to_string()) }
 
 /// `orq_md.ler_arquivo`: (texto, mtime); ausente = ("", 0.0).
+/// Texto e mtime do mesmo arquivo aberto, mesmo com um rename no meio da leitura.
 fn read(path: &std::path::Path) -> std::io::Result<(String, f64)> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok((text, mtime(path)?)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((String::new(), 0.0)),
-        Err(e) => Err(e),
-    }
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((String::new(), 0.0)),
+        Err(e) => return Err(e),
+    };
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok((text, seconds(file.metadata()?.modified()?)))
 }
+
+fn seconds(at: std::time::SystemTime) -> f64 { at.duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()) }
 
 fn mtime(path: &std::path::Path) -> std::io::Result<f64> {
     match std::fs::metadata(path) {
-        Ok(m) => Ok(m.modified()?.duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())),
+        Ok(m) => Ok(seconds(m.modified()?)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0.0),
         Err(e) => Err(e),
     }

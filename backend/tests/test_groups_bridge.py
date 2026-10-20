@@ -149,6 +149,32 @@ def test_kill_in_rust_mode_leaves_the_group_to_rust(monkeypatch):
     assert registry.SessionRegistry._clear_pair("a") == [] and calls == []
 
 
+def test_close_that_skipped_the_rust_leaves_with_the_orq_facts(monkeypatch, client):
+    """Connect (8768) e convidado não passam pelo `delete` do Rust: a saída vai pela ponte, com a fase."""
+    from app import internal_api
+    from app.adapters.orq import runs
+    internal_api.set_secret("s3gredo")
+    monkeypatch.setattr(runs, "group_phase", lambda gid: "live")
+    pair.PairLink("a").set(["b"], "", "g1", {}, orq=True)
+    not_notified = {"sessao": "srv::x", "erro": {"code": "erro_peer_nao_avisado", "params": {}, "msg": "srv inacessível"}}
+    calls = _rust(monkeypatch, reply={"ex_peers": ["srv::x"], "warnings": [not_notified]})
+    monkeypatch.setattr(api, "_recusa_orq", lambda n: None)
+    monkeypatch.setattr(api.registry, "kill", lambda n, closed_by_rust=False: [])
+    monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
+    monkeypatch.setattr(api.share_bridge, "revoke_session", lambda n: None)
+    try:
+        r = client.delete("/api/sessions/a", headers=H)
+        assert r.status_code == 200, r.text
+        assert calls == [("group.leave", {"name": "a", "phases": {"g1": "live"}})]
+        assert r.json()["warning"]["params"]["avisos"] == [not_notified]
+        # Repassado pelo Rust, quem sai do grupo é ele: nada pela ponte.
+        calls.clear()
+        r = client.delete("/api/sessions/a", headers={**H, "x-hangar-rust-leaves": "s3gredo"})
+        assert (r.status_code, calls) == (200, [])
+    finally:
+        internal_api.set_secret(None)
+
+
 def test_pair_route_forwards_status_and_body(monkeypatch, client):
     calls = _rust(monkeypatch, reply={"status": 409, "body": {"detail": {"code": "erro_pareamento_tarefa_existente"}}})
     r = client.post("/api/sessions/a/pair", json={"peer": "b", "task": "y"}, headers=H)

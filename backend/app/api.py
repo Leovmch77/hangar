@@ -2194,6 +2194,21 @@ def _jsonl_of_session(name: str) -> str | None:
         return None
 
 
+def _orq_phases(name: str) -> dict:
+    from app.adapters.orq import runs
+    link = PairLink(name).get() or {}
+    return {link["gid"]: runs.group_phase(link["gid"])} if link.get("orq") else {}
+
+
+def _rust_leave(name: str, phases: dict) -> list[dict]:
+    try:
+        out = groups_bridge.call("group.leave", name=name, phases=phases)
+    except groups_bridge.GroupsBridgeError as e:
+        _log.warning("kill(%s): o Rust não tirou a sessão do grupo: %s", name, e.code)
+        return [{"sessao": name, "erro": erro("erro_grupo_indisponivel", "os grupos estão indisponíveis agora", detalhe=e.code)}]
+    return out.get("warnings") if isinstance(out.get("warnings"), list) else []
+
+
 @app.delete("/api/sessions/{name}", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def kill_session(name: str, by: str | None = None, request: Request = None):
     # 500 quando a sessao SOBREVIVE ao kill — mesmo padrao do /rename logo abaixo, que ja confere e
@@ -2203,7 +2218,12 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
     # dele ninguém sabe quem ficou.
     await asyncio.to_thread(_recusa_orq, name)
     # Marca do Rust: ele já encerrou o Codex com terminal dele (e o grupo); aqui só as lojas daqui.
-    closed = bool(request and internal_api._secret) and secrets.compare_digest(request.headers.get("x-hangar-rust-closed", "").encode(), internal_api._secret.encode())
+    marked = lambda h: bool(request and internal_api._secret) and secrets.compare_digest(request.headers.get(h, "").encode(), internal_api._secret.encode())
+    closed = marked("x-hangar-rust-closed")
+    # Fechamento que não passou pelo Rust (Connect, convidado): a saída do grupo vai pela ponte, com
+    # a fase do `orq` lida aqui antes, para o Rust não perguntar de volta.
+    phases = None if closed or marked("x-hangar-rust-leaves") or not groups_bridge.rust_owns_groups() \
+        else await asyncio.to_thread(_orq_phases, name)
     # No modo Rust quem sai do grupo e avisa as outras máquinas é ele, depois deste fechamento.
     link = None if closed or groups_bridge.rust_owns_groups() else await asyncio.to_thread(lambda: PairLink(name).get())
     # Fechada pelo Rust a sessão já saiu da lista: o transcript vem no cabeçalho dele.
@@ -2213,6 +2233,8 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
         jsonl = await asyncio.to_thread(_jsonl_of_session, name)
     try:
         errs = await asyncio.to_thread(registry.kill, name, closed_by_rust=closed) or []
+        if phases is not None:
+            errs = [*errs, *await asyncio.to_thread(_rust_leave, name, phases)]
     except KillFailed as e:
         raise HTTPException(500, e.detail or str(e)) from None
     finally:

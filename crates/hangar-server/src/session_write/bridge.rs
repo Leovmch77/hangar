@@ -121,6 +121,8 @@ pub async fn codex(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
 /// Marca do `DELETE` que o Rust já encerrou e repassa: o valor é o segredo interno, e o Python, ao vê-la,
 /// limpa só as lojas dele, sem voltar ao Rust.
 pub const RUST_CLOSED: &str = "x-hangar-rust-closed";
+/// Marca do `DELETE` que o Rust só repassa e cuja saída do grupo ele faz depois; o valor é o segredo interno.
+pub const RUST_LEAVES: &str = "x-hangar-rust-leaves";
 /// Transcript (percent-encoded) da sessão que o Rust encerrou, junto da marca.
 pub const CLOSED_TRANSCRIPT: &str = "x-hangar-closed-transcript";
 
@@ -133,6 +135,7 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     // Só o próprio Rust põe a marca: a que vier de fora sai antes de qualquer decisão.
     req.headers_mut().remove(RUST_CLOSED);
     req.headers_mut().remove(CLOSED_TRANSCRIPT);
+    req.headers_mut().remove(RUST_LEAVES);
     let name = super::session_name(req.uri().path());
     // Sem vigia (sem as pastas da lista), `kill_codex_terminal` é `None`.
     // Fechada de propósito não volta no próximo reboot, de qualquer agente.
@@ -153,6 +156,8 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     match closed {
         // Quem fecha é o Python; a saída do grupo é daqui, depois do fechamento que deu certo (BRG-25).
         None => {
+            // Marca com o segredo: o Python não pede a saída pela ponte, que seria ida e volta.
+            if let Ok(mark) = axum::http::HeaderValue::from_str(&st.cfg.internal_secret) { req.headers_mut().insert(RUST_LEAVES, mark); }
             let response = crate::routes::pass(&st, req, &fwd).await;
             return leave_after_forward(&st, &name, response).await;
         }

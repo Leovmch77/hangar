@@ -45,6 +45,16 @@ impl PythonOrq {
     }
 }
 
+/// `runs.group_phase` em JSON: `null` = não começou; ausente ou outro valor = não se sabe.
+pub(crate) fn phase_of(phase: Option<&Value>) -> OrqPhase {
+    match phase {
+        Some(Value::Null) => OrqPhase::NotStarted,
+        Some(phase) if phase == "live" => OrqPhase::Live,
+        Some(phase) if phase == "ended" => OrqPhase::Ended,
+        _ => OrqPhase::Unknown,
+    }
+}
+
 fn warn(code: &str, what: &'static str) {
     if crate::warn_limit::allow(None, what) {
         tracing::warn!(code, what, "groups: o Python não respondeu o fato da orquestração");
@@ -55,12 +65,7 @@ impl OrqFacts for PythonOrq {
     fn phase<'a>(&'a self, gid: &'a str) -> BoxFuture<'a, OrqPhase> {
         Box::pin(async move {
             match self.post("orq/group-phase", json!({"gid": gid})).await {
-                Ok((200, reply)) => match reply.get("phase") {
-                    Some(Value::Null) => OrqPhase::NotStarted,
-                    Some(phase) if phase == "live" => OrqPhase::Live,
-                    Some(phase) if phase == "ended" => OrqPhase::Ended,
-                    _ => OrqPhase::Unknown,
-                },
+                Ok((200, reply)) => phase_of(reply.get("phase")),
                 Ok((status, _)) => { warn(&format!("groups_orq_phase_status:{status}"), "groups_orq_phase"); OrqPhase::Unknown }
                 Err(code) => { warn(&code, "groups_orq_phase"); OrqPhase::Unknown }
             }

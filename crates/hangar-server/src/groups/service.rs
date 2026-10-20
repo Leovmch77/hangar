@@ -146,6 +146,11 @@ impl GroupService {
     /// Devolve os ex-companheiros. O contrato é arquivado depois de soltar o lock: faxina não
     /// desfaz uma saída que já valeu.
     pub async fn leave(&self, name: &str) -> Result<Vec<String>, GroupError> {
+        self.leave_with(name, &*self.orq).await
+    }
+
+    /// `leave` com a fase do `orq` de outra fonte: a que o Python mandou no pedido, sem pergunta de volta.
+    pub async fn leave_with(&self, name: &str, orq: &dyn OrqFacts) -> Result<Vec<String>, GroupError> {
         let (peers, archive, wrote) = {
             let _guard = self.lock.lock().await;
             let dir = self.dir.clone();
@@ -153,7 +158,7 @@ impl GroupService {
             // A fase só interessa a sidecar `orq`; `Live` e `Unknown` contam como viva.
             let link = blocking({ let (dir, owner) = (dir.clone(), owner.clone()); move || reader(&dir)(&owner) }).await?;
             let alive = match link {
-                Some(s) if s.orq => matches!(self.orq.phase(&s.gid).await, OrqPhase::Live | OrqPhase::Unknown),
+                Some(s) if s.orq => matches!(orq.phase(&s.gid).await, OrqPhase::Live | OrqPhase::Unknown),
                 _ => false,
             };
             blocking(move || -> Result<(Vec<String>, Option<String>, bool), GroupError> {

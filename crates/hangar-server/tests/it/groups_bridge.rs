@@ -129,6 +129,23 @@ async fn bridged_request_never_goes_back_to_python() {
     assert_eq!((status, body["ok"].clone(), body["error"]["code"].clone()), (200, json!(false), json!("groups_bridge_invalid_request")));
 }
 
+/// Fechamento que não passou pelo `delete` do Rust (Connect, convidado): a fase do `orq` vem no
+/// pedido e a saída não pergunta nada de volta ao Python.
+#[tokio::test(flavor = "multi_thread")]
+async fn bridged_leave_never_calls_python() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    std::fs::create_dir_all(&srv.pair).unwrap();
+    for (me, other) in [("s0", "s1"), ("s1", "s0")] {
+        std::fs::write(srv.pair.join(format!("{me}.json")), json!({"peers": [other], "task": "t", "gid": "g1", "harness": {}, "orq": true}).to_string()).unwrap();
+    }
+    let out = result(&srv, "group.leave", json!({"name": "s0", "phases": {"g1": "live"}})).await;
+    assert_eq!(out, json!({"ex_peers": ["s1"], "warnings": []}));
+    assert!(!srv.pair.join("s0.json").exists());
+    assert!(srv.pair.join("s1.json").exists(), "execução viva mantém o grupo orq de um");
+    assert!(srv.python.internal_bodies("orq/group-phase").is_empty(), "a fase veio no pedido");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn rename_op() {
     let dir = tempfile::tempdir().unwrap();

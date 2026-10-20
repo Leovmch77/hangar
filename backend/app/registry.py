@@ -2609,7 +2609,7 @@ class SessionRegistry:
         # kill nem a criação — mas LOGA: engolir calado deixava o badge-fantasma indiagnosticável.
         from app import groups_bridge
         if groups_bridge.rust_owns_groups():
-            # Quem tira do grupo é o Rust, depois do fechamento que repassou: pedir daqui seria ida e volta.
+            # Quem tira do grupo é o Rust: depois do fechamento que repassou, ou pelo `kill_session` com os fatos.
             return []
         try:
             pair_leave(name)
