@@ -41,10 +41,6 @@ pub const JOIN_WAIT: Duration = Duration::from_secs(12);
 pub struct Federation {
     outbox: Outbox,
     wait: Duration,
-    /// Maior versão aplicada por (dona, gid), também depois de o último sidecar sair: um envio
-    /// atrasado de antes da dissolução não recria ninguém.
-    // shortcut: só em memória; um envio atrasado que chegue depois de reiniciar o servidor é aceito pela versão dos sidecars, que já não existem.
-    seen: Mutex<HashMap<(String, String), u64>>,
 }
 
 impl Federation {
@@ -65,6 +61,9 @@ pub fn existing(root: &Path) -> Option<Arc<Federation>> {
     ALL.lock().unwrap_or_else(|e| e.into_inner()).get(root).cloned()
 }
 
+/// Esquece a federação aberta de `root`: o próximo uso reabre do disco, como depois de reiniciar.
+pub fn forget(root: &Path) { ALL.lock().unwrap_or_else(|e| e.into_inner()).remove(root); }
+
 fn pair_dir(groups: &GroupService) -> PairDir {
     // O arquivo de contratos não é usado aqui: arquivar é da saída (`GroupService`).
     PairDir::new(groups.pair_root().to_path_buf(), PathBuf::new())
@@ -80,7 +79,7 @@ pub async fn of(st: &AppState, groups: &GroupService) -> Result<Arc<Federation>,
         if let Some(found) = all.get(&root) { return Ok(found.clone()); }
         let (wait, ladder) = SETTINGS.lock().unwrap_or_else(|e| e.into_inner()).get(&root).cloned().unwrap_or((JOIN_WAIT, Vec::new()));
         let outbox = Outbox::open_with_ladder(root.join("groups"), sender, ladder)?;
-        let fed = Arc::new(Federation { outbox, wait, seen: Mutex::default() });
+        let fed = Arc::new(Federation { outbox, wait });
         all.insert(root, fed.clone());
         Ok(fed)
     }).await;
@@ -338,11 +337,14 @@ pub struct JoinAsk {
     pub expected: BTreeMap<String, String>,
 }
 
-pub struct JoinDone { pub gid: String, pub version: u64, pub task: String, pub members: Vec<Member>, pub unconfirmed: Vec<Member> }
+pub struct JoinDone { pub gid: String, pub version: u64, pub task: String, pub members: Vec<Member>, pub unconfirmed: Vec<Member>,
+    /// Acesso de fora não gravado na dona (`grant_members`).
+    pub access_failed: Vec<String> }
 
 impl JoinDone {
     fn to_json(&self) -> Value {
-        json!({"protocol": PROTOCOL, "gid": self.gid, "version": self.version, "task": self.task, "members": self.members, "unconfirmed": self.unconfirmed})
+        json!({"protocol": PROTOCOL, "gid": self.gid, "version": self.version, "task": self.task, "members": self.members, "unconfirmed": self.unconfirmed,
+            "access_failed": self.access_failed})
     }
 }
 
@@ -600,8 +602,8 @@ pub async fn owner_join(st: &AppState, groups: &GroupService, mut ask: JoinAsk) 
     // Avisos e acesso de fora depois de tudo gravado, só a quem ficou.
     let alive: Vec<String> = plan.newcomers.iter().filter(|n| record.members.iter().any(|m| m.server == me && &&m.name == n)).cloned().collect();
     tell_newcomers(st, groups, &me, &record, &alive).await;
-    grant_locals(st, groups, &me, &record).await;
-    Ok(JoinDone { gid, version: record.version, task: record.task.clone(), members: record.members.clone(), unconfirmed })
+    let access_failed = grant_locals(st, groups, &me, &record).await;
+    Ok(JoinDone { gid, version: record.version, task: record.task.clone(), members: record.members.clone(), unconfirmed, access_failed })
 }
 
 /// Volta o grupo ao de antes do join: sidecars daqui, registros e uma versão nova às máquinas que
@@ -749,16 +751,15 @@ async fn tell_newcomers(st: &AppState, groups: &GroupService, me: &str, record: 
 }
 
 /// Membro daqui que entrou num grupo com par de fora daqui ganha "ver e recado" (só nesta máquina).
-async fn grant_locals(st: &AppState, groups: &GroupService, me: &str, record: &GroupRecord) {
-    let Some(share) = &st.share else { return };
+/// Devolve as falhas de disco, que quem pediu vê como aviso com código.
+async fn grant_locals(st: &AppState, groups: &GroupService, me: &str, record: &GroupRecord) -> Vec<String> {
+    let Some(share) = &st.share else { return Vec::new() };
     let mut members: Vec<String> = record.members.iter().filter(|m| m.server == me).map(|m| m.name.clone()).collect();
     if let Some(first) = members.first().cloned()
         && let Ok(Some(s)) = groups.link(&first).await {
         members.extend(s.peers.into_iter().filter(|p| is_remote(p)));
     }
-    for failed in crate::share::pair_routes::grant_members(share, &members).await {
-        tracing::warn!(code = "groups_outside_grant_failed", error = %failed, "groups: acesso de fora ao membro novo não gravado");
-    }
+    crate::share::pair_routes::grant_members(share, &members).await
 }
 
 // --- a participante --------------------------------------------------------------------------
@@ -794,9 +795,9 @@ pub async fn local_apply(st: &AppState, groups: &GroupService, gid: &str, body: 
     let outside = outside_addresses(st);
     let dir = Arc::new(pair_dir(groups));
     let applied = {
-        let (dir, fed, me, gid) = (dir.clone(), fed.clone(), me.clone(), gid.to_owned());
+        let (dir, me, gid) = (dir.clone(), me.clone(), gid.to_owned());
         let renamed = renamed.clone();
-        groups.locked(blocking(move || apply_push(&dir, &fed, &me, &gid, &body, &renamed, &leaving, &joining, &harness, &outside))).await??
+        groups.locked(blocking(move || apply_push(&dir, &me, &gid, &body, &renamed, &leaving, &joining, &harness, &outside))).await??
     };
     let (version, names, newcomers, dropped) = match applied {
         Applied::Done { version, names, newcomers, dropped } => (version, names, newcomers, dropped),
@@ -805,7 +806,13 @@ pub async fn local_apply(st: &AppState, groups: &GroupService, gid: &str, body: 
     groups.changed();
     if !newcomers.is_empty() {
         let record = record_view(&dir, &me, gid, &names);
-        if let Some(record) = &record { tell_newcomers(st, groups, &me, record, &newcomers).await; grant_locals(st, groups, &me, record).await; }
+        if let Some(record) = &record {
+            tell_newcomers(st, groups, &me, record, &newcomers).await;
+            // A dona não lê a resposta do PUT: a falha daqui fica no diário desta máquina.
+            for failed in grant_locals(st, groups, &me, record).await {
+                tracing::warn!(code = super::routes::ACCESS_FAILED, error = %failed, "groups: acesso de fora ao membro novo não gravado");
+            }
+        }
     }
     for n in &dropped {
         let text = format!("{PREFIX} Você saiu do grupo de trabalho entre máquinas. Volte a operar independente; use hangar-send só quando o usuário pedir.");
@@ -830,17 +837,39 @@ fn record_view(dir: &PairDir, me: &str, gid: &str, names: &[String]) -> Option<G
     Some(GroupRecord { protocol: PROTOCOL, gid: gid.into(), owner: f.owner, version: f.version, task: s.task.unwrap_or_default(), members, outside: Vec::new() })
 }
 
+/// Maior versão aplicada por `dona::gid`, também depois de o último sidecar sair: um envio atrasado
+/// de antes da dissolução não recria ninguém, nem depois de reiniciar. Fora de `.json` para o
+/// `records()` não o ler como registro.
+fn applied_path(dir: &PairDir) -> PathBuf { dir.groups_dir().join("applied.versions") }
+
+fn read_applied(dir: &PairDir) -> BTreeMap<String, u64> {
+    match std::fs::read(applied_path(dir)) {
+        Ok(raw) => serde_json::from_slice(&raw).unwrap_or_else(|error| {
+            tracing::warn!(code = "groups_applied_unreadable", %error, "groups: versões aplicadas ilegíveis, valem as dos sidecars");
+            BTreeMap::new()
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(error) => {
+            tracing::warn!(code = "groups_applied_unreadable", %error, "groups: versões aplicadas ilegíveis, valem as dos sidecars");
+            BTreeMap::new()
+        }
+    }
+}
+
+fn write_applied(dir: &PairDir, applied: &BTreeMap<String, u64>) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir.groups_dir())?;
+    super::store::replace_atomic(&applied_path(dir), &serde_json::to_vec(applied).map_err(std::io::Error::other)?)
+}
+
 #[allow(clippy::too_many_arguments)]
-fn apply_push(dir: &PairDir, fed: &Federation, me: &str, gid: &str, body: &PushBody, renamed: &HashMap<String, String>, leaving: &HashSet<String>,
+fn apply_push(dir: &PairDir, me: &str, gid: &str, body: &PushBody, renamed: &HashMap<String, String>, leaving: &HashSet<String>,
     joining: &[String], harness: &BTreeMap<String, String>, outside: &HashSet<String>) -> Result<Applied, Refusal> {
     identity_ok(dir, me)?;
     let all = dir.sidecars().map_err(store_refusal)?;
     let ours: Vec<(String, Sidecar)> = all.iter().filter(|(_, s)| s.gid == gid && s.fed.as_ref().is_some_and(|f| f.owner == body.owner)).cloned().collect();
-    let seen_key = (body.owner.clone(), gid.to_owned());
-    let stored = {
-        let seen = fed.seen.lock().unwrap_or_else(|e| e.into_inner());
-        ours.iter().filter_map(|(_, s)| s.fed.as_ref().map(|f| f.version)).chain(seen.get(&seen_key).copied()).max().unwrap_or(0)
-    };
+    let seen_key = format!("{}::{gid}", body.owner);
+    let mut applied = read_applied(dir);
+    let stored = ours.iter().filter_map(|(_, s)| s.fed.as_ref().map(|f| f.version)).chain(applied.get(&seen_key).copied()).max().unwrap_or(0);
     if body.version < stored || (body.version == stored && stored > 0) { return Ok(Applied::Ignored(stored)); }
     let mut writes: Vec<(String, Sidecar)> = Vec::new();
     let mut clears: Vec<String> = Vec::new();
@@ -890,11 +919,13 @@ fn apply_push(dir: &PairDir, fed: &Federation, me: &str, gid: &str, body: &PushB
         }
     }
     let before: Snapshot = clears.iter().chain(writes.iter().map(|(n, _)| n)).map(|n| (n.clone(), read(dir, n))).collect();
-    if let Err(error) = write_sidecars(dir, &clears, &writes) {
+    applied.insert(seen_key, body.version);
+    // A versão só vale gravada junto dos sidecars: sem ela, a dona reenvia e a mesma versão aplica de novo.
+    let written = write_sidecars(dir, &clears, &writes).map_err(store_refusal).and_then(|()| write_applied(dir, &applied).map_err(store_refusal));
+    if let Err(refused) = written {
         restore_sidecars(dir, &before);
-        return Err(store_refusal(error));
+        return Err(refused);
     }
-    fed.seen.lock().unwrap_or_else(|e| e.into_inner()).insert(seen_key, body.version);
     if !body.dissolved { remember(dir, me); }
     Ok(Applied::Done { version: body.version, names, newcomers, dropped })
 }
@@ -1023,15 +1054,16 @@ pub(super) async fn pair(asked: Asked, held: Option<IngressPass>, others: Vec<St
         if asked.st.peers.base_url(&owner).is_none() { return respond(unregistered(&owner)); }
         let body = json!({"op": "join", "protocol": PROTOCOL, "origin": me, "members": candidates, "task": task, "replace_task": replace_task, "expected": expected});
         match asked.st.peers.call_group(&owner, reqwest::Method::POST, &format!("/api/groups/{}/ops", segment(&gid)), Some(&body)).await {
-            Ok(done) => serde_json::from_value::<RemoteDone>(done).map(|d| JoinDone { gid: d.gid, version: d.version, task: d.task, members: d.members, unconfirmed: d.unconfirmed })
+            Ok(done) => serde_json::from_value::<RemoteDone>(done).map(|d| JoinDone { gid: d.gid, version: d.version, task: d.task, members: d.members,
+                unconfirmed: d.unconfirmed, access_failed: d.access_failed })
                 .map_err(|_| no(StatusCode::BAD_GATEWAY, "erro_grupo_dono_indisponivel", "a dona respondeu fora do formato", json!({"servidor": owner}))),
             Err(error) => Err(peer_refusal(&owner, error)),
         }
     };
     let done = match result { Ok(done) => done, Err(r) => return respond(r) };
     let unconfirmed: Vec<String> = done.unconfirmed.iter().map(key).collect();
-    let warning = if unconfirmed.is_empty() { Value::Null } else {
-        json!({"code": "erro_grupo_membro_nao_confirmado", "params": {"membros": unconfirmed},
+    let warning = if unconfirmed.is_empty() { super::routes::access_warning(&done.access_failed) } else {
+        json!({"code": "erro_grupo_membro_nao_confirmado", "params": {"membros": unconfirmed, "acesso": done.access_failed},
             "msg": format!("não confirmado: {}", unconfirmed.join(", "))})
     };
     let members: Vec<String> = done.members.iter().map(|m| view(&me, m)).collect();
@@ -1039,7 +1071,8 @@ pub(super) async fn pair(asked: Asked, held: Option<IngressPass>, others: Vec<St
 }
 
 #[derive(Deserialize)]
-struct RemoteDone { gid: String, version: u64, #[serde(default)] task: String, members: Vec<Member>, #[serde(default)] unconfirmed: Vec<Member> }
+struct RemoteDone { gid: String, version: u64, #[serde(default)] task: String, members: Vec<Member>, #[serde(default)] unconfirmed: Vec<Member>,
+    #[serde(default)] access_failed: Vec<String> }
 
 // --- subida ----------------------------------------------------------------------------------
 

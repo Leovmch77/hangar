@@ -270,17 +270,22 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
         let msg = format!("pareamento desfeito: falha ao avisar as sessões ({})", failures_text(&errs));
         return asked.refuse(StatusCode::BAD_GATEWAY, "erro_pareamento_desfeito", &msg, json!({"avisos": errs}));
     }
-    // Falhar aqui só deixa o membro novo invisível para quem é de fora: o lado seguro.
-    if let Some(share) = &asked.st.share {
-        for failed in crate::share::pair_routes::grant_members(share, &members).await {
-            tracing::warn!(code = "groups_outside_grant_failed", session = %asked.name, error = %failed, "groups: acesso de fora ao membro novo não gravado");
-        }
-    }
-    let warning = if errs.is_empty() { Value::Null } else {
-        envelope("erro_pareamento_aviso_parcial", format!("aviso falhou em: {}", failures_text(&errs)), json!({"avisos": errs}))
+    // Falhar aqui só deixa o membro novo invisível para quem é de fora: o lado seguro, mas visível.
+    let denied = match &asked.st.share { Some(share) => crate::share::pair_routes::grant_members(share, &members).await, None => Vec::new() };
+    let warning = if errs.is_empty() { access_warning(&denied) } else {
+        envelope("erro_pareamento_aviso_parcial", format!("aviso falhou em: {}", failures_text(&errs)), json!({"avisos": errs, "acesso": denied}))
     };
     asked.reply(StatusCode::OK, json!({"ok": true, "members": members, "gid": gid, "warning": warning}))
 }
+
+/// Acesso de fora não gravado ao membro novo; `Null` sem falha.
+pub(super) fn access_warning(denied: &[String]) -> Value {
+    if denied.is_empty() { return Value::Null; }
+    tracing::warn!(code = ACCESS_FAILED, failed = denied.len(), "groups: acesso de fora ao membro novo não gravado");
+    envelope(ACCESS_FAILED, format!("o acesso de quem é de fora não foi gravado para: {}", denied.join("; ")), json!({"acesso": denied}))
+}
+
+pub(super) const ACCESS_FAILED: &str = "erro_grupo_acesso_externo_falhou";
 
 /// `linked_at` das filhas em `link-returns.json`. Falhar não desfaz a ligação, que já está no grupo.
 async fn record_linked(st: &AppState, children: Vec<String>) {
@@ -390,7 +395,20 @@ pub(super) async fn contract(State(st): State<Arc<AppState>>, ConnectInfo(peer):
     };
     let path = asked.groups.contract_path(&link.gid);
     let shown = path.to_string_lossy().into_owned();
-    // Ausente ou ilegível = contrato ainda vazio, como o `except OSError` do Python.
-    let content = tokio::task::spawn_blocking(move || std::fs::read_to_string(path).unwrap_or_default()).await.unwrap_or_default();
-    asked.reply(StatusCode::OK, json!({"peers": link.peers, "path": shown, "content": content}))
+    // Ausente = contrato ainda vazio, como no Python; ilegível é falha, nunca "vazio".
+    let read = tokio::task::spawn_blocking(move || match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        other => other,
+    }).await;
+    match read {
+        Ok(Ok(content)) => asked.reply(StatusCode::OK, json!({"peers": link.peers, "path": shown, "content": content})),
+        Ok(Err(error)) => {
+            tracing::error!(code = "groups_contract_unreadable", session = %asked.name, %error, "groups: o contrato do grupo não foi lido");
+            asked.refuse(StatusCode::INTERNAL_SERVER_ERROR, "erro_grupo_indisponivel", UNAVAILABLE_MSG, json!({"detalhe": "groups_contract_unreadable"}))
+        }
+        Err(error) => {
+            tracing::error!(code = "groups_contract_unreadable", session = %asked.name, %error, "groups: a leitura do contrato não rodou");
+            asked.refuse(StatusCode::INTERNAL_SERVER_ERROR, "erro_grupo_indisponivel", UNAVAILABLE_MSG, json!({"detalhe": "groups_contract_unreadable"}))
+        }
+    }
 }

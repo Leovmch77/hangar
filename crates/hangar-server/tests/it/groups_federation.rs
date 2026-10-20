@@ -513,3 +513,53 @@ async fn participant_put_does_not_enter_the_session_gate() {
     assert_eq!(status, 200, "{answer}");
     assert!(sidecar(&n.lab, "s1").is_some());
 }
+
+/// A versão aplicada sobrevive a reiniciar: um envio velho atrasado não recria quem a dissolução tirou.
+#[tokio::test(flavor = "multi_thread")]
+async fn older_version_after_restart_is_ignored() {
+    let n = net().await;
+    let all = json!([member("casa", "s0"), member("lab", "s1")]);
+    assert_eq!(push(&n.lab, "g1", json!({"protocol": 1, "owner": "casa", "version": 1, "members": all, "joining": ["s1"]})).await.0, 200);
+    assert_eq!(push(&n.lab, "g1", json!({"protocol": 1, "owner": "casa", "version": 3, "dissolved": true})).await.0, 200);
+    federation::forget(&n.lab.pair);
+    let (status, answer) = push(&n.lab, "g1", json!({"protocol": 1, "owner": "casa", "version": 2, "members": all, "joining": ["s1"]})).await;
+    assert_eq!((status, answer["ignored"].clone()), (200, json!(true)), "{answer}");
+    assert!(sidecar(&n.lab, "s1").is_none(), "envio velho não recria depois de reiniciar");
+}
+
+/// Subida: a dona reenvia cada registro dela, e a participante pede à dona cada grupo em que tem membro.
+#[tokio::test(flavor = "multi_thread")]
+async fn startup_resends_and_asks_the_owner() {
+    let n = net().await;
+    let (status, body) = pair(&n.casa, "s0", json!({"peers": ["lab::s1"]})).await;
+    assert_eq!(status, 200, "{body}");
+    let gid = body["gid"].as_str().unwrap().to_owned();
+    let bump = |version: u64, task: &str| {
+        let mut rec = record(&n.casa, &gid).unwrap();
+        rec["version"] = json!(version);
+        rec["task"] = json!(task);
+        std::fs::write(n.casa.pair.join("groups").join(format!("{gid}.json")), rec.to_string()).unwrap();
+    };
+    // O envio da versão 2 se perdeu (a dona caiu antes): a subida da dona reenvia.
+    bump(2, "nova");
+    federation::spawn(n.casa.state.clone()).expect("dona com id").await.unwrap();
+    let lab = n.lab.pair.clone();
+    fake::wait_until(move || std::fs::read(lab.join("s1.json")).ok().and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        .is_some_and(|s| s["task"] == "nova" && s["fed"]["version"] == 2)).await;
+    // A participante subiu sem ter recebido a versão 3: pede à dona.
+    bump(3, "mais nova");
+    federation::spawn(n.lab.state.clone()).expect("participante com id").await.unwrap();
+    let s1 = sidecar(&n.lab, "s1").unwrap();
+    assert_eq!((s1["task"].clone(), s1["fed"]["version"].clone()), (json!("mais nova"), json!(3)));
+}
+
+/// Na dona, o acesso de fora ao membro novo que não grava volta a quem pediu como aviso com código.
+#[tokio::test(flavor = "multi_thread")]
+async fn outside_grant_failure_reaches_the_caller() {
+    let n = net().await;
+    let share_id = outside_pair(&n.casa, "s0", "pc-ana", "Y");
+    n.casa.share.store.revoke(&share_id).unwrap();
+    let (status, body) = pair(&n.casa, "s0", json!({"peers": ["s1", "lab::s2"]})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["warning"]["code"], "erro_grupo_acesso_externo_falhou", "{body}");
+}

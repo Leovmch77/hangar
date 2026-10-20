@@ -462,3 +462,33 @@ async fn orq_pair_without_peer_creates_a_group_of_one_without_protocol() {
     assert!(srv.groups.link("s1").await.unwrap().unwrap().orq);
     assert_eq!(input_hits(&srv.python, &["s0", "s1"]), [0, 0]);
 }
+
+/// Contrato ausente é vazio (como no Python); ilegível é 500 com código, nunca "vazio".
+#[tokio::test(flavor = "multi_thread")]
+async fn unreadable_contract_is_500_with_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    assert_eq!(call(srv.addr, "POST", "s0/pair", Some(&json!({"peers": ["s1"]})), OWNER).await.0, 200);
+    let (status, body) = call(srv.addr, "GET", "s0/pair/contract", None, OWNER).await;
+    assert_eq!((status, body["content"].clone()), (200, json!("")), "{body}");
+    let gid = srv.groups.link("s0").await.unwrap().unwrap().gid;
+    std::fs::create_dir_all(srv.groups.contract_path(&gid)).unwrap();
+    let (status, body) = call(srv.addr, "GET", "s0/pair/contract", None, OWNER).await;
+    assert_eq!((status, body["detail"]["code"].clone(), body["detail"]["params"]["detalhe"].clone()),
+        (500, json!("erro_grupo_indisponivel"), json!("groups_contract_unreadable")), "{body}");
+}
+
+/// O acesso de quem é de fora ao membro novo que não grava aparece na resposta, com código.
+#[tokio::test(flavor = "multi_thread")]
+async fn outside_grant_failure_is_a_coded_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    seed_outside(&srv, "s0", "pc-ana", "Y", "https://a.tail.ts.net:8443");
+    srv.groups.external_link("s0", "pc-ana::Y", Default::default(), ["pc-ana::Y".to_owned()].into()).await.unwrap();
+    // Convite revogado com o registro do par ainda no disco: dar o acesso falha.
+    let id = srv.share.pairs.all()[0].share_id.clone();
+    srv.share.store.revoke(&id).unwrap();
+    let (status, body) = call(srv.addr, "POST", "s1/pair", Some(&json!({"peers": ["s0"]})), OWNER).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["warning"]["code"], "erro_grupo_acesso_externo_falhou", "{body}");
+}

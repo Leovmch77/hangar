@@ -599,7 +599,7 @@ dona sai "não confirmado".
   `join_from_participant_does_not_deadlock`; `older_version_is_ignored`;
   `asymmetric_peers_refuses_put`; `removed_member_is_cancelled_in_pending_push`;
   `outside_pair_on_fed_group_links_at_owner`.
-- [ ] **Step 2: Rodar e ver falhar.**
+- [x] **Step 2: Rodar e ver falhar.**
 - [x] **Step 3: Implementar.**
 - [x] **Step 4: Rodar.** Esperado: PASS.
 - [ ] **Step 5: Portas de fora**: conferir que a 8768 repassa `/api/groups/*` e `GET …/group` (ou
