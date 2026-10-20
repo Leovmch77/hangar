@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Alert, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { sairConta, apagarConta, accountDeletedNotice, credentialAuth, type Credencial, type Server } from '@hangar/core';
+import { sairConta, apagarConta, accountHolders, accountDeletedNotice, credentialAuth, type AccountHolders, type Credencial, type Server } from '@hangar/core';
 import { Pill } from '../config/PageHeader';
 import { ClaudeAccountLogin } from './ClaudeAccountLogin';
 import * as m from '../../paraglide/messages';
@@ -11,6 +11,15 @@ export type ClaudeAccountActionsProps = {
   credential: Credencial;
   onChanged: () => void | Promise<void>;
 };
+
+function releaseLines(h: AccountHolders): string {
+  const lines: string[] = [];
+  if (h.sessoes.length) lines.push(m.contas_liberar_sessoes({ lista: h.sessoes.join(', ') }));
+  if (h.processos.length) lines.push(m.contas_liberar_processos({ lista: h.processos.map(p => m.contas_liberar_processo({
+    nome: p.sessao ? m.contas_liberar_processo_terminal({ sessao: p.sessao }) : p.nome ?? '?', pid: p.pid,
+  })).join(', ') }));
+  return lines.join('\n');
+}
 
 export function ClaudeAccountActions({ server, credential, onChanged }: ClaudeAccountActionsProps) {
   const key = JSON.stringify([server.id, server.baseUrl, server.token, credential.id]);
@@ -40,21 +49,32 @@ export function ClaudeAccountActions({ server, credential, onChanged }: ClaudeAc
     let accepted = false;
     locked.current = true; setBusy(true); setError('');
     const release = () => { if (active()) { locked.current = false; setBusy(false); } };
-    async function execute(keep = true) {
-      if (accepted || !active()) return;
+    // `free`: segunda chamada, depois de a pessoa aceitar liberar o que prende a conta.
+    async function execute(keep = true, free = false) {
+      if ((accepted && !free) || !active()) return;
       accepted = true;
+      let asking = false;
       try {
         if (remove) {
           if (!name) return;
-          const result = await apagarConta(target, name.slice('.claude-'.length), keep);
+          const result = await apagarConta(target, name.slice('.claude-'.length), keep, free);
           if (result.ok !== true) throw new Error(m.erro_desconhecido());
           if (!active()) return;
           Alert.alert(accountDeletedNotice(account.nome, keep, result));
         } else await sairConta(target, account.nome_natural);
         if (active()) await changed.current();
       } catch (e) {
+        const holders = remove && !free ? accountHolders(e) : null;
+        if (holders && active()) {
+          asking = true;
+          Alert.alert(m.contas_liberar_titulo({ nome: account.nome }), releaseLines(holders), [
+            cancel,
+            { text: m.contas_liberar_confirmar(), style: 'destructive', onPress: () => void execute(keep, true) },
+          ], { cancelable: true, onDismiss: release });
+          return;
+        }
         if (active()) setError(e instanceof Error ? e.message : remove ? m.erro_desconhecido() : m.contas_sair_erro());
-      } finally { release(); }
+      } finally { if (!asking) release(); }
     }
     const cancel = { text: m.comum_cancelar(), style: 'cancel' as const, onPress: release };
     if (remove) Alert.alert(m.contas_apagar_pergunta({ nome: account.nome }), m.contas_apagar_opcoes_desc(), [

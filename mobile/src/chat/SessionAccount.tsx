@@ -142,7 +142,7 @@ export function SessionAccount({ serverId, name }: { serverId: string; name: str
   const shownTargets = current.targets.filter(target => !displayedSession || !isCurrentAccount(target, displayedSession));
   const requestSwitch = (target: SwitchTarget) => {
     if (!server || refused || !session || session.provider !== 'claude' || session.guest_kind === 'pair'
-      || !idle || operation.current || target.full || !isCurrent()) return;
+      || !idle || operation.current || target.full || target.login === false || !isCurrent()) return;
     const pending = { phase: 'confirm' as 'confirm' | 'post' };
     operation.current = pending;
     setConfirming(true);
@@ -217,8 +217,8 @@ export function SessionAccount({ serverId, name }: { serverId: string; name: str
                 : <>
                   <Text accessibilityRole="header" style={styles.caption}>{m.mobile_account_order()}</Text>
                   {shownTargets.map(target => <SessionAccountCard key={target.path} label={target.label} credential={target.credential} path={target.path}
-                    pct={target.pct} full={target.full} unconfirmed={target.unconfirmed}
-                    disabled={target.full || !idle || applying || confirming} onPress={() => requestSwitch(target)} />)}
+                    pct={target.pct} full={target.full} unconfirmed={target.unconfirmed} noLogin={target.login === false}
+                    disabled={target.full || target.login === false || !idle || applying || confirming} onPress={() => requestSwitch(target)} />)}
                 </>}
           </>}
     </>}

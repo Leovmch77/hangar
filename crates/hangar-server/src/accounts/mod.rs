@@ -15,6 +15,7 @@ pub mod http;
 pub mod preparation;
 pub mod quotas;
 pub mod claude_refresh;
+pub(crate) mod release;
 pub use catalog::AccountService;
 pub mod locks;
 pub mod types;

@@ -1423,11 +1423,26 @@ export async function apagarProvedorKimi(alvo: Server | null, nome: string): Pro
   await apiFetch(rota, init);
 }
 
+/** O que prende a conta na recusa 409 da exclusão (`erro_sessao_usa_conta`/`erro_processos_usam_conta`). */
+export interface AccountHolders {
+  sessoes: string[];
+  processos: { pid: number; nome: string | null; sessao: string | null }[];
+}
+
+/** Os detalhes da recusa 409 de exclusão quando o servidor diz o que prende a conta; `null` em servidor antigo. */
+export function accountHolders(error: unknown): AccountHolders | null {
+  const envelope = (error as { envelope?: { params?: Record<string, unknown> } } | null)?.envelope;
+  const params = envelope?.params;
+  if (!params || !Array.isArray(params.sessoes) || !Array.isArray(params.processos)) return null;
+  return { sessoes: params.sessoes as string[], processos: params.processos as AccountHolders['processos'] };
+}
+
 // Apaga a conta no servidor; com `keepTranscripts` as conversas vão antes para a conta padrão.
-// Recusa 409 se houver sessão viva usando-a.
-export async function apagarConta(alvo: Server | null, nome: string, keepTranscripts = true): Promise<AccountDeleteResult> {
+// Recusa 409 se houver sessão viva usando-a. `release`: a pessoa confirmou levar as sessões para outra
+// conta e encerrar o que prende esta.
+export async function apagarConta(alvo: Server | null, nome: string, keepTranscripts = true, release = false): Promise<AccountDeleteResult> {
   const init = { method: 'DELETE' };
-  const rota = `/api/claude-configs/${encodeURIComponent(nome)}${keepQuery(keepTranscripts)}`;
+  const rota = `/api/claude-configs/${encodeURIComponent(nome)}${keepQuery(keepTranscripts)}${release ? '&release=1' : ''}`;
   // Copiar as conversas passa fácil dos 8s padrão.
   if (alvo) return apiFetchForServer<AccountDeleteResult>(alvo, rota, init, 120_000);
   return apiFetch<AccountDeleteResult>(rota, init);
@@ -3698,8 +3713,9 @@ export function recarregarSessao(name: string, server?: Server | null): Promise<
 }
 
 /** Conta Claude para onde a conversa pode ir: `pct` é a janela de cota mais cheia (null = sem leitura);
- *  `low` pede confirmação com aviso, `full` não aceita a conversa. */
-export interface AccountTarget { path: string; label: string; pct: number | null; low: boolean; full: boolean }
+ *  `low` pede confirmação com aviso, `full` não aceita a conversa. `login: false` = conta sem login, não
+ *  aceita (ausente em servidor antigo). */
+export interface AccountTarget { path: string; label: string; pct: number | null; low: boolean; full: boolean; login?: boolean }
 
 /** Contas de destino da sessão, sem a atual e com a de mais folga primeiro. */
 export function listAccountTargets(name: string, server?: Server | null): Promise<AccountTarget[]> {

@@ -131,10 +131,11 @@ import { useSessionServer } from '../lib/sessionServer';
       {:else}
         {#each accounts as conta (conta.path)}
           <!-- Conta perto do limite aparece, mas não aceita a conversa: o primeiro turno reenvia o contexto inteiro. -->
-          <button class="item" onclick={() => pick(() => onTrocarConta?.(conta))} disabled={contaBloqueada || conta.full}>
+          <button class="item" onclick={() => pick(() => onTrocarConta?.(conta))} disabled={contaBloqueada || conta.full || conta.login === false}>
             <span class="txt">
               <span class="label">{conta.label}</span>
-              <span class="sub">{conta.pct === null ? m.conta_cota_sem_leitura()
+              <span class="sub">{conta.login === false ? m.conta_sem_login_rotulo()
+                : conta.pct === null ? m.conta_cota_sem_leitura()
                 : conta.full ? m.conta_cota_cheia({ pct: String(Math.round(conta.pct)) })
                 : conta.low ? m.conta_cota_acabando({ pct: String(Math.round(conta.pct)) })
                 : m.conta_cota_uso({ pct: String(Math.round(conta.pct)) })}</span>

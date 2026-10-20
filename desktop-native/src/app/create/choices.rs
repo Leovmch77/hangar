@@ -200,7 +200,7 @@ impl SearchableListItem for AccountChoice {
 /// Uma resposta de conta: criar (o POST e a lista relida) ou apagar (nome, caminho, o DELETE e a lista relida).
 pub(in crate::app) enum AccountDone {
     Added(Result<Value, Failure>, Option<Result<Value, Failure>>),
-    Deleted(String, String, Result<Value, Failure>, Option<Result<Value, Failure>>),
+    Deleted(String, String, Result<crate::api::Removed, Failure>, Option<Result<Value, Failure>>),
 }
 
 fn configs_of(result: Result<Value, Failure>) -> Result<Vec<ConfigDir>, String> {
@@ -833,7 +833,8 @@ impl NewSession {
         cx.notify();
     }
 
-    fn delete_account(&mut self, cx: &mut Context<Self>) {
+    /// `release`: o servidor leva as sessões para outra conta e encerra os processos presos antes de apagar.
+    fn delete_account(&mut self, release: bool, cx: &mut Context<Self>) {
         let (Some(name), Some(path)) = (self.deletable(), self.config.clone()) else { return };
         if self.account_busy { return; }
         self.account_seq += 1;
@@ -841,8 +842,10 @@ impl NewSession {
         (self.account_busy, self.notice, self.created_path) = (true, None, None);
         let keep = if self.keep_transcripts { "1" } else { "0" };
         self.request(cx, move |api, send| Box::pin(async move {
-            let deleted = api.server_send_query(reqwest::Method::DELETE, &["claude-configs", &name], &[("keep_transcripts", keep)], None, 120).await;
-            let list = if deleted.is_ok() { Some(api.server_read(&["claude-configs"], &[], 15).await) } else { None };
+            let mut query = vec![("keep_transcripts", keep)];
+            if release { query.push(("release", "1")); }
+            let deleted = api.remove_account(&["claude-configs", &name], &query, 120).await;
+            let list = if matches!(deleted, Ok(crate::api::Removed::Done(_))) { Some(api.server_read(&["claude-configs"], &[], 15).await) } else { None };
             send(CreateReply::Account(seq, AccountDone::Deleted(name, path, deleted, list))).await
         }));
         cx.notify();
@@ -867,8 +870,11 @@ impl NewSession {
     fn account_done(&mut self, seq: u64, done: AccountDone, window: &mut Window, cx: &mut Context<Self>) {
         if seq != self.account_seq { return; }
         self.account_busy = false;
+        if matches!(done, AccountDone::Deleted(..)) { self.holders = None; }
         match done {
             AccountDone::Added(Err(error), _) | AccountDone::Deleted(_, _, Err(error), _) => self.notice = Some((Hangar::fetch_failure(&error), true)),
+            // A confirmação continua aberta, agora perguntando se libera o que prende a conta.
+            AccountDone::Deleted(_, _, Ok(crate::api::Removed::Held(holders)), _) => self.holders = Some(holders),
             AccountDone::Added(Ok(created), list) => match list.map(configs_of) {
                 Some(Ok(list)) => {
                     let path = created.get("path").and_then(Value::as_str).map(str::to_owned);
@@ -889,7 +895,7 @@ impl NewSession {
                 }
                 _ => self.notice = Some((tr("create_account_list_failed"), false)),
             },
-            AccountDone::Deleted(name, path, Ok(deleted), list) => {
+            AccountDone::Deleted(name, path, Ok(crate::api::Removed::Done(deleted)), list) => {
                 self.confirming = false;
                 // A caixa fica travada enquanto o DELETE corre: o valor dela ainda é o que foi pedido.
                 let kept = crate::app::accounts::kept_transcripts_notice(&name, self.keep_transcripts, &deleted);
@@ -1005,19 +1011,31 @@ impl NewSession {
                     .on_click(cx.listener(|this, _, window, cx| this.open_account_line(window, cx))))
                 .when_some(deletable, |el, name| el.child(small("create-account-delete", tr("create_delete")).disabled(busy)
                     .accessibility_label(tr("create_delete_account_aria").replace("{nome}", &name))
-                    .on_click(cx.listener(|this, _, _, cx| { (this.confirming, this.keep_transcripts, this.notice) = (true, true, None); cx.notify(); })))))
+                    .on_click(cx.listener(|this, _, _, cx| { (this.confirming, this.keep_transcripts, this.notice, this.holders) = (true, true, None, None); cx.notify(); })))))
             .when_some(selected_quota, |el, q| el.child(self.render_quota("create-claude-quota".into(), q)))
-            .when_some(self.deletable().filter(|_| self.confirming), |el, name| el.child(div().flex().items_center().gap(px(8.))
+            .when_some(self.deletable().filter(|_| self.confirming && self.holders.is_none()), |el, name| el.child(div().flex().items_center().gap(px(8.))
                 .child(div().flex_1().min_w_0().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal()
                     .child(format!("{} ", tr("create_delete_start"))).child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(name))
                     .child(if self.keep_transcripts { "?".to_owned() } else { format!(" {}", tr("create_delete_end")) })
                     .flex().flex_wrap().gap_x(px(0.)))
                 .child(Button::new("create-account-delete-yes").outline().text_color(theme::danger()).border_color(theme::danger())
                     .label(if self.account_busy { "…".into() } else { tr("create_delete") }).disabled(busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.delete_account(cx))))
+                    .on_click(cx.listener(|this, _, _, cx| this.delete_account(false, cx))))
                 .child(small("create-account-delete-no", tr("create_cancel")).disabled(busy)
                     .on_click(cx.listener(|this, _, _, cx| { this.confirming = false; cx.notify(); })))))
-            .when(self.confirming && self.deletable().is_some(), |el| el.child(
+            .when_some(self.deletable().filter(|_| self.confirming).zip(self.holders.as_ref()), |el, (name, holders)| {
+                let (title, lines) = crate::app::accounts::release_prompt(&name, holders);
+                el.child(div().id("create-account-release").flex().flex_col().gap(px(6.)).text_size(px(12.5)).whitespace_normal()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).text_color(theme::text()).child(title))
+                    .children(lines.into_iter().map(|line| div().text_color(theme::muted()).child(line)))
+                    .child(div().flex().items_center().gap(px(8.))
+                        .child(Button::new("create-account-release-yes").outline().text_color(theme::danger()).border_color(theme::danger())
+                            .label(if self.account_busy { "…".into() } else { crate::i18n::tr_shared("contas_liberar_confirmar", &[]) }).disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.delete_account(true, cx))))
+                        .child(small("create-account-release-no", tr("create_cancel")).disabled(busy)
+                            .on_click(cx.listener(|this, _, _, cx| { (this.confirming, this.holders) = (false, None); cx.notify(); })))))
+            })
+            .when(self.confirming && self.holders.is_none() && self.deletable().is_some(), |el| el.child(
                 Checkbox::new("create-account-keep").small().label(crate::i18n::tr_shared("contas_juntar_conversas", &[]))
                     .checked(self.keep_transcripts).disabled(busy)
                     .on_click(cx.listener(|this, checked: &bool, _, cx| { this.keep_transcripts = *checked; cx.notify(); }))))

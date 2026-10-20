@@ -286,6 +286,23 @@ pub(super) fn kept_transcripts_notice(name: &str, keep: bool, body: &serde_json:
     }
 }
 
+/// Título e linhas da pergunta de liberar uma conta presa: as sessões que vão para outra conta e os processos encerrados.
+pub(super) fn release_prompt(name: &str, holders: &crate::api::AccountHolders) -> (String, Vec<String>) {
+    use crate::i18n::tr_shared;
+    let processes: Vec<String> = holders.processes.iter().map(|p| {
+        let name = match &p.session {
+            Some(session) => tr_shared("contas_liberar_processo_terminal", &[("sessao", session)]),
+            None => p.name.clone().unwrap_or_else(|| "?".into()),
+        };
+        tr_shared("contas_liberar_processo", &[("nome", &name), ("pid", &p.pid.to_string())])
+    }).collect();
+    let lines = [
+        (!holders.sessions.is_empty()).then(|| tr_shared("contas_liberar_sessoes", &[("lista", &holders.sessions.join(", "))])),
+        (!processes.is_empty()).then(|| tr_shared("contas_liberar_processos", &[("lista", &processes.join(", "))])),
+    ];
+    (tr_shared("contas_liberar_titulo", &[("nome", name)]), lines.into_iter().flatten().collect())
+}
+
 /// Por que o login não foi conferido, como o `motivoLoginIndisponivel` do core: web, celular e app dizem o mesmo. O Codex
 /// sem CLI já tem frase própria; sem causa (preparo, conta ocupada) não há o que dizer.
 fn login_unchecked(login: Option<&Login>) -> Option<String> {
@@ -569,7 +586,7 @@ fn proxy_account_targets(session: &SessionInfo, list: &[Credential], engine: &En
         let label = c.alias.clone().filter(|a| !a.is_empty()).unwrap_or_else(||
             if a.label.is_empty() { a.email.clone() } else { a.label.clone() });
         Some(super::sidebar::AccountTarget { path: String::new(), label, pct, low: pct.is_some_and(|p| p >= 95.),
-            full: pct.is_some_and(|p| p >= 99.), engine_account: Some(a.account.clone()) })
+            full: pct.is_some_and(|p| p >= 99.), engine_account: Some(a.account.clone()), login: None })
     }).collect()
 }
 
@@ -1485,5 +1502,19 @@ mod tests {
             "auth_method": "unknown", "codex_sync": "partial", "login": {"estado": "indisponivel", "loggedIn": null}}));
         let (list, engines) = ([codex], HashMap::new());
         assert!(group_of(&list[0], &model_names(&list, &engines)) == Some(Group::Subscriptions));
+    }
+
+    /// O processo sem nome mostra "?", e o que mora num terminal é chamado pelo terminal; lista vazia não vira linha.
+    #[test]
+    fn release_prompt_names_sessions_and_processes() {
+        use crate::api::{AccountHolders, HeldProcess};
+        use crate::i18n::tr_shared;
+        let holders = AccountHolders { sessions: vec![], processes: vec![
+            HeldProcess { pid: 1, name: None, session: None }, HeldProcess { pid: 2, name: Some("claude".into()), session: Some("term-x".into()) }] };
+        let (_, lines) = super::release_prompt("c5", &holders);
+        let terminal = tr_shared("contas_liberar_processo_terminal", &[("sessao", "term-x")]);
+        let items = [tr_shared("contas_liberar_processo", &[("nome", "?"), ("pid", "1")]),
+            tr_shared("contas_liberar_processo", &[("nome", &terminal), ("pid", "2")])];
+        assert_eq!(lines, [tr_shared("contas_liberar_processos", &[("lista", &items.join(", "))])]);
     }
 }

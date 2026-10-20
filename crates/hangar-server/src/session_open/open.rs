@@ -423,6 +423,13 @@ async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: Option<V
     // O Kimi não lê a conta Claude: nem trava nem reconciliação.
     let reads_account = spec.provider != AgentProvider::Kimi;
     let hangar_account = hangar_account.filter(|_| reads_account);
+    // Sem login o Claude sobe e fica mudo: recusa antes de subir qualquer coisa.
+    if spec.provider == AgentProvider::Claude && let Some(dir) = hangar_account
+        && !crate::accounts::claude_refresh::has_login(Path::new(dir)) {
+        let label = claude::hangar_account(Path::new(dir)).unwrap_or_default();
+        return Err(OpenError { params: json!({"conta": label}),
+            ..OpenError::new(409, "erro_conta_sem_login", format!("a conta {label} não está logada; faça login nela antes de abrir uma sessão")) });
+    }
     let _guard = match reads_account {
         true => Some(crate::accounts::claude_refresh::acquire_for_session(&locks, &key, Instant::now() + Duration::from_secs(5)).await
             .map_err(|e| match e {

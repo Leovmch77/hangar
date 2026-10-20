@@ -177,11 +177,12 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
             }
-            // Par externo, botões dos mods e abertura de sessão: a frase do web pelo código; o `detalhe`
+            // Par externo, botões dos mods, abertura de sessão e conta presa: a frase do web pelo código; o `detalhe`
             // de uma recusa e o rótulo do botão vêm nos parâmetros.
             if let Some(code) = fields.get("code").and_then(Value::as_str)
                 .filter(|code| code.starts_with("erro_par_") || code.starts_with("erro_mod_") || code.starts_with("session_open_")
-                    || matches!(*code, "erro_resume_so_claude" | "erro_session_id_invalido")) {
+                    || matches!(*code, "erro_resume_so_claude" | "erro_session_id_invalido" | "erro_conta_sem_login" | "erro_sem_conta_destino"
+                        | "erro_liberar_sessao" | "erro_liberar_conta")) {
                 let params = fields.get("params").and_then(Value::as_object).map(|p| p.iter()
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
@@ -704,6 +705,19 @@ impl Api {
         Self::checked(r, true).await?.json().await.map_err(|_| Failure::transport(true))
     }
 
+    /// DELETE de conta: o 409 de conta em uso com a lista do que a prende volta como `Removed::Held`.
+    pub async fn remove_account(&self, path: &[&str], query: &[(&str, &str)], seconds: u64) -> Result<Removed, Failure> {
+        let r = self.client.delete(self.server_url(path, query)).timeout(Duration::from_secs(seconds)).send().await
+            .map_err(|_| Failure::transport(true))?;
+        if r.status() == StatusCode::CONFLICT {
+            let body = r.json::<Value>().await.ok();
+            if let Some(holders) = body.as_ref().and_then(account_holders) { return Ok(Removed::Held(holders)); }
+            let code = envelope_code(body.as_ref());
+            return Err(Failure { status: Some(409), detail: failure_detail(body, 409).chars().take(500).collect(), retry_after: None, uncertain: false, code });
+        }
+        Self::checked(r, true).await?.json().await.map(Removed::Done).map_err(|_| Failure::transport(true))
+    }
+
     /// Rota do hub de sincronização: a sessão ali é o cookie `cp_sync`, não o token. Devolve também o `cp_sync=…` que a
     /// resposta trouxer, pra quem chama guardar em memória e mandar de volta.
     pub async fn hub(&self, method: reqwest::Method, path: &[&str], query: &[(&str, &str)], body: Option<Value>, cookie: Option<&str>,
@@ -869,6 +883,32 @@ pub struct History { pub events: Option<Vec<ChatEvent>>, pub etag: Option<String
 
 /// Resultado de retomar do arquivo: a sessão nova, ou o nome da viva que já tem a conversa aberta.
 pub enum Resumed { New(SessionInfo), Live(String) }
+
+/// O que prende uma conta Claude que o servidor recusou apagar: sessões do Hangar e processos presos.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+pub struct AccountHolders {
+    #[serde(default, rename = "sessoes")] pub sessions: Vec<String>,
+    #[serde(default, rename = "processos")] pub processes: Vec<HeldProcess>,
+}
+
+/// `session` é a sessão de terminal que hospeda o processo, quando ele mora numa.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+pub struct HeldProcess {
+    pub pid: u64,
+    #[serde(default, rename = "nome")] pub name: Option<String>,
+    #[serde(default, rename = "sessao")] pub session: Option<String>,
+}
+
+/// Apagar conta: feito, ou recusado com o que a prende, para a tela perguntar se libera (`release=1`).
+pub enum Removed { Done(Value), Held(AccountHolders) }
+
+/// A lista da recusa por conta em uso; servidor antigo não a manda, e lista vazia não tem o que liberar.
+pub fn account_holders(body: &Value) -> Option<AccountHolders> {
+    let detail = body.get("detail")?;
+    if !matches!(detail.get("code")?.as_str()?, "erro_sessao_usa_conta" | "erro_processos_usam_conta") { return None; }
+    let holders: AccountHolders = serde_json::from_value(detail.get("params")?.clone()).ok()?;
+    (!holders.sessions.is_empty() || !holders.processes.is_empty()).then_some(holders)
+}
 
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct ShareCreated { pub link: String, pub expires_at: f64 }
@@ -1344,5 +1384,21 @@ mod tests {
             ("POST /api/sessions/a%20b/queue/e%201/steer".to_owned(), None),
             ("POST /api/sessions/a%20b/queue/reorder".to_owned(), Some(json!({"id": "e 1", "before_id": null}))),
         ]);
+    }
+
+    /// A recusa de conta em uso com a lista vira o que perguntar; sem lista (servidor antigo) ou vazia, erro comum.
+    #[test]
+    fn account_in_use_refusal_carries_its_holders() {
+        let held = json!({"detail": {"code": "erro_processos_usam_conta", "msg": "x", "params": {"pids": [1572, 42180],
+            "sessoes": ["web"], "processos": [{"pid": 1572, "nome": "claude.exe", "sessao": null}, {"pid": 42180, "nome": null, "sessao": "term-login-1"}]}}});
+        assert_eq!(account_holders(&held), Some(AccountHolders { sessions: vec!["web".into()], processes: vec![
+            HeldProcess { pid: 1572, name: Some("claude.exe".into()), session: None },
+            HeldProcess { pid: 42180, name: None, session: Some("term-login-1".into()) }] }));
+        let old = json!({"detail": {"code": "erro_sessao_usa_conta", "msg": "x", "params": {"nome": "web"}}});
+        assert_eq!(account_holders(&old), None);
+        let empty = json!({"detail": {"code": "erro_sessao_usa_conta", "params": {"sessoes": [], "processos": []}}});
+        assert_eq!(account_holders(&empty), None);
+        let other = json!({"detail": {"code": "erro_conta_cheia", "params": {"sessoes": ["web"]}}});
+        assert_eq!(account_holders(&other), None);
     }
 }

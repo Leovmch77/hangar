@@ -8,7 +8,7 @@
   import { getCodexAccountsForServer, createSessionForServer, codexAccountMessage, defaultCodexAccount, patchConfig,
     getConfigForServer, patchConfigForServer, type CodexAccount } from '@hangar/core';
   import IconFolder from './icons/IconFolder.svelte';
-  import { getSessions, listClaudeConfigs, getClaudeAccountSuggestion, getEngines, getProviders, criarConta, apagarConta, accountDeletedNotice,
+  import { getSessions, listClaudeConfigs, getClaudeAccountSuggestion, getEngines, getProviders, criarConta, apagarConta, accountHolders, type AccountHolders, accountDeletedNotice,
            getArchivePorCwd, resumeArchivedConversation, getArchiveHistory, getBastao, passarBastao,
            getCreationProgress, type CreationProgress,
            type ModelOption, type Motor, type CliProxyAccount, type SessionOpeningExtras, type ArchiveEntry,
@@ -33,6 +33,7 @@
   import type { SessionInfo, ConfigDirInfo, Provider, WorktreeChoice } from '@hangar/core';
   import { criarSeletorNativo } from '../lib/pastaNativa.svelte';
   import * as m from '../paraglide/messages';
+  import { releaseLines } from '../lib/accountRelease';
 
   interface Props {
     open: boolean;
@@ -577,14 +578,17 @@
   let confirmandoApagar = $state(false);
   // Marcado por padrão: apagar a conta leva as conversas para a conta padrão.
   let manterConversas = $state(true);
+  // O que prende a conta, quando a exclusão foi recusada: a confirmação passa a oferecer liberar.
+  let prendendo = $state<AccountHolders | null>(null);
   // Abrir, fechar ou trocar a conta da confirmação volta a guardar: a escolha vale só ali.
   $effect.pre(() => {
     void nomeDaSelecionada;
     void confirmandoApagar;
     manterConversas = true;
+    prendendo = null;
   });
 
-  async function apagar() {
+  async function apagar(liberar = false) {
     const nome = nomeDaSelecionada;
     if (!nome) return;
     // Caminho capturado ANTES do await, junto com o nome: `selectedConfig` é o que a tela mostra e
@@ -600,7 +604,7 @@
       // null de propósito: o sheet já fez selectServer(id) no pickTarget — o alvo É o ativo,
       // então o caminho global (com self-heal de 401) é o certo aqui.
       const manter = manterConversas;
-      const resultado = await apagarConta(null, nome, manter);
+      const resultado = await apagarConta(null, nome, manter, liberar);
       if (seq !== cfgSeq || targetServer !== serverId) return;
       confirmandoApagar = false;
       const apagada = accountDeletedNotice(nome, manter, resultado);
@@ -631,6 +635,8 @@
       carregarModelos();
     } catch (e) {
       if (seq !== cfgSeq || targetServer !== serverId) return;
+      const presa = liberar ? null : accountHolders(e);
+      if (presa) { prendendo = presa; return; }
       contaErro = true;
       avisoConta = e instanceof Error ? e.message : m.criar_apagar_conta_erro();
     } finally {
@@ -1470,7 +1476,20 @@
               {/if}
             </p>
           {/if}
-          {#if confirmandoApagar && nomeDaSelecionada}
+          {#if confirmandoApagar && nomeDaSelecionada && prendendo}
+            <div class="conta-row conta-nova" role="alertdialog" aria-label={m.contas_liberar_titulo({ nome: nomeDaSelecionada })}>
+              <p class="conta-hint conta-confirma">
+                <strong>{m.contas_liberar_titulo({ nome: nomeDaSelecionada })}</strong>
+                {#each releaseLines(prendendo) as linha (linha)}
+                  <span class="conta-confirma-aviso">{linha}</span>
+                {/each}
+              </p>
+              <button type="button" class="ghost-btn conta-add conta-perigo" onclick={() => apagar(true)}
+                disabled={contaOcupada}>{contaOcupada ? '…' : m.contas_liberar_confirmar()}</button>
+              <button type="button" class="ghost-btn conta-add"
+                onclick={() => (confirmandoApagar = false)} disabled={contaOcupada}>{m.criar_cancelar()}</button>
+            </div>
+          {:else if confirmandoApagar && nomeDaSelecionada}
             <div class="conta-row conta-nova">
               <p class="conta-hint conta-confirma">
                 {m.contas_apagar_pergunta({ nome: nomeDaSelecionada })}
@@ -1483,7 +1502,7 @@
                   <span class="conta-confirma-aviso" id="conta-perde-conversas" role="status">{m.contas_apagar_conversas_aviso()}</span>
                 {/if}
               </p>
-              <button type="button" class="ghost-btn conta-add conta-perigo" onclick={apagar}
+              <button type="button" class="ghost-btn conta-add conta-perigo" onclick={() => apagar()}
                 disabled={contaOcupada}>{contaOcupada ? '…' : m.criar_apagar()}</button>
               <button type="button" class="ghost-btn conta-add"
                 onclick={() => (confirmandoApagar = false)} disabled={contaOcupada}>{m.criar_cancelar()}</button>

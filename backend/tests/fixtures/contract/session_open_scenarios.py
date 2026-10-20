@@ -89,7 +89,8 @@ def terminal_session(name: str, command: str, env: dict | None = None, **extra) 
 
 ENGINE = {f"{H}/.claude/engines.json": {"kimi": {"base_url": "https://api.example.invalid/anthropic",
                                                   "api_key": "sk-fake", "model": "k3-256k"}}}
-HANGAR_ACCOUNT = {"files": {f"{C}/.hangar-conta": "", f"{C}/.claude.json": {"numStartups": 1}},
+HANGAR_ACCOUNT = {"files": {f"{C}/.hangar-conta": "", f"{C}/.claude.json": {"numStartups": 1},
+                            f"{C}/.credentials.json": {"claudeAiOauth": {"accessToken": "fake-c", "refreshToken": "fake-c"}}},
                   "dirs": [f"{C}/projects"]}
 QUOTA_FULL = {"quotas": [
     {"id": f"claude:{H}/.claude", "label": "default", "provedor": "claude", "ativa": True, "estado": "lida",

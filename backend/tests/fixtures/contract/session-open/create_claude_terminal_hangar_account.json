@@ -30,6 +30,12 @@
         "<ROOT>/home/.claude-conta2/.hangar-conta": "",
         "<ROOT>/home/.claude-conta2/.claude.json": {
           "numStartups": 1
+        },
+        "<ROOT>/home/.claude-conta2/.credentials.json": {
+          "claudeAiOauth": {
+            "accessToken": "fake-c",
+            "refreshToken": "fake-c"
+          }
         }
       },
       "dirs": [

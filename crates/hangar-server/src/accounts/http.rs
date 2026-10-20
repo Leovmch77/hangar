@@ -299,6 +299,11 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
     } else {
         true
     };
+    // `release=1`: quem confirmou na tela manda levar as sessões e encerrar o que prende a conta.
+    let release = match crate::query::bool_param(&query, "release") {
+        Ok(release) => release && provider == Provider::Claude,
+        Err(response) => return *response,
+    };
     let account = match service.resolve(provider, &id) {
         Ok(account) => account,
         Err(err) => return error(err),
@@ -307,6 +312,9 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
         Ok(key) => key,
         Err(_) => return error(AccountError::io()),
     };
+    if release && let Err(err) = super::release::release(&state, &account, &key).await {
+        return error(err);
+    }
     let guard = match service
         .locks
         .acquire(&key, GuardMode::Exclusive, std::time::Instant::now())
@@ -349,7 +357,16 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
     )
     .await;
     match tokio::task::spawn_blocking(move || {
-        service.delete(provider, &account, &guard, &facts, keep)
+        service.delete(provider, &account, &guard, &facts, keep).map_err(|mut err| {
+            // A tela mostra o que prende a conta e pergunta se libera (`release=1`).
+            if provider == Provider::Claude && matches!(err.code, "erro_processos_usam_conta" | "erro_sessao_usa_conta")
+                && let Value::Object(params) = &mut err.params
+                && let Value::Object(held) = super::release::describe(&facts)
+            {
+                params.extend(held);
+            }
+            err
+        })
     })
     .await
     {
