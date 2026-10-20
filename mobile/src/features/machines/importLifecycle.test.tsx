@@ -24,9 +24,13 @@ vi.mock('../../stores/sessions', () => ({
   useSessions: { getState: () => ({ setForeground: () => {} }) },
   setMachineDiscovery: (fn: typeof mocks.connected) => { mocks.connected = fn; },
 }));
-vi.mock('../../stores/aparencia', () => ({ aplicarTemaSalvo: () => {}, useAparencia: { getState: () => ({}) } }));
+vi.mock('../../stores/aparencia', () => ({ aplicarTemaSalvo: () => {}, useAparencia: Object.assign((select: (s: object) => unknown) => select({}), { getState: () => ({}) }) }));
 vi.mock('../../theme/aplicarMaterial', () => ({ aplicarMaterial: () => {} }));
 vi.mock('../../features/voice/LiveVoiceRoot', () => ({ LiveVoiceRoot: () => null }));
+vi.mock('../../features/push/expoPush', () => ({
+  installNotificationHandler: () => {}, pushRegistrationKey: () => '', useNotificationNavigation: () => {},
+  registerExpoPush: async () => {}, retryExpoPushIfDenied: async () => {},
+}));
 vi.mock('sonner-native', () => ({ Toaster: () => null, toast: Object.assign(mocks.warning, { error: mocks.error }) }));
 vi.mock('expo-router', () => ({
   useRouter: () => ({ replace: mocks.replace }), useSegments: () => mocks.segments,
