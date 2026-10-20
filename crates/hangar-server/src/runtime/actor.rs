@@ -942,9 +942,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                             save_view(&queue,target.generation,sample,&state_gate,state_version,&view,true).await?;
                             let cursor = capture_cursor(&target,&view).await?;
                             queue.exec(target.generation,&format!("cursor:{wire}"),sample,Action::BindDispatch { id:wire.clone(),cursor:cursor.clone() }).await.map_err(io_failure)?;
-                            if authoritative.operations.get(&logical_id).is_none_or(|op|op.status == Status::Prepared) {
-                                queue.exec(target.generation,&format!("logical-cursor:{wire}"),sample,Action::BindDispatch { id:logical_id.clone(),cursor }).await.map_err(io_failure)?;
-                            }
+                            queue.exec(target.generation,&format!("logical-cursor:{wire}"),sample,Action::BindDispatchIfPrepared { id:logical_id.clone(),cursor }).await.map_err(io_failure)?;
                             queue.exec(target.generation,&format!("dispatch:{wire}"),sample,Action::BeginDispatch { id:wire.clone(),wire_id:wire.clone(),staged:false }).await.map_err(io_failure)?;
                             queue.exec(target.generation,&format!("logical-dispatch:{wire}"),sample,Action::BeginDispatch { id:logical_id.clone(),wire_id:wire.clone(),staged:false }).await.map_err(io_failure)?;
                             Ok(())

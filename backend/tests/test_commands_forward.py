@@ -24,12 +24,20 @@ def command_port(monkeypatch, tmp_path):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             seen.append((self.path, self.headers.get("x-hangar-path"), self.headers.get("x-hangar-internal")))
+            self.reply()
+
+        def reply(self):
             body = json.dumps({"fixture": "commands-response"}).encode()
             self.send_response(207)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def do_PUT(self):
+            body = self.rfile.read(int(self.headers.get("content-length", "0")))
+            seen.append((self.path, self.headers.get("x-hangar-path"), self.headers.get("x-hangar-internal"), json.loads(body)))
+            self.reply()
 
         def log_message(self, *args):
             pass
@@ -69,4 +77,28 @@ def test_claude_commands_requires_auth_before_forwarding(command_port):
     client, seen = command_port
     response = client.get("/api/sessions/commands-migration-absent/commands")
     assert response.status_code == 401
+    assert not seen
+
+
+@pytest.mark.parametrize("method", ["GET", "PUT"])
+def test_session_defaults_forwards_from_connect(command_port, method):
+    client, seen = command_port
+    body = {"defaults": {"model": "opus", "effort": "high", "permission": "bypassPermissions"}}
+    response = client.request(method, "/api/session-defaults?provider=claude", json=body if method == "PUT" else None,
+                              headers={"Authorization": "Bearer commands-fixture"})
+    assert response.status_code == 207
+    assert seen[0][:3] == ("/__hangar_server/forwarded?provider=claude", "/api/session-defaults", "fixture-private")
+    if method == "PUT":
+        assert seen[0][3] == body
+
+
+@pytest.mark.parametrize("method", ["GET", "PUT"])
+def test_session_defaults_needs_auth_and_rust(command_port, monkeypatch, method):
+    from app import runtime_coordinator
+    client, seen = command_port
+    assert client.request(method, "/api/session-defaults?provider=claude").status_code == 401
+    monkeypatch.setattr(runtime_coordinator.current(), "mode", "python")
+    response = client.request(method, "/api/session-defaults?provider=claude", headers={"Authorization": "Bearer commands-fixture"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "session_defaults_unavailable"
     assert not seen

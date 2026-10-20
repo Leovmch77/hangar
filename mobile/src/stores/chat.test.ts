@@ -404,6 +404,118 @@ test('(b) reset zera tudo e recarrega o history novo', async () => {
   expect(created[0].url).not.toContain('last_event_id=old%3A2');
 });
 
+test.each(['claude', 'codex'])('reset do %s apaga a conversa e o eco de /clear antes do histórico responder', async (provider) => {
+  historyResponses = [[ev({ id: 'old:1', kind: 'assistant_msg', text: 'Conversa anterior' })]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const source = created[0];
+  source.trigger('state', JSON.stringify({ session: 'sess', provider, state: 'working' }));
+  source.trigger('preview', JSON.stringify({ text: 'Prévia anterior', md: true }));
+  chat.use.setState({ pending: [{ id: 'clear', text: ' /clear ' }, { id: 'next', text: 'Mensagem aguardando' }] });
+  const requests = fetchManual();
+
+  source.trigger('reset', '{}');
+  expect(chat.use.getState()).toMatchObject({ events: [], preview: '', stateEvent: null, loading: true,
+    pending: [{ id: 'next', text: 'Mensagem aguardando' }] });
+  // O índice antigo também sai: o primeiro evento da conversa nova pode reutilizar um ID.
+  source.trigger('message', JSON.stringify(ev({ id: 'old:1', text: 'Mensagem nova' })));
+  expect(chat.use.getState().events.map((e) => e.text)).toEqual(['Mensagem nova']);
+  requests[0].responder(null, { status: 503 });
+  await tick();
+  expect(chat.use.getState().events.map((e) => e.text)).toEqual(['Mensagem nova']);
+  expect(chat.use.getState().loading).toBe(false);
+  expect(chat.use.getState().error).not.toBe('');
+  chat.release();
+});
+
+test.each([
+  { tail: [], live: [ev({ id: 'new:1', text: 'Ao vivo' })], texts: ['Ao vivo'] },
+  { tail: [ev({ id: 'new:0', text: 'Anterior' })], live: [ev({ id: 'new:1', text: 'Ao vivo' })], texts: ['Anterior', 'Ao vivo'] },
+  { tail: [ev({ id: 'new:1', text: 'Versão antiga' })], live: [ev({ id: 'new:1', text: 'Versão atual' }), ev({ id: 'new:2', text: 'Seguinte' })],
+    texts: ['Versão atual', 'Seguinte'] },
+])('histórico após reset preserva as mensagens SSE: $texts', async ({ tail, live, texts }) => {
+  historyResponses = [[ev({ id: 'old:1', text: 'Conversa anterior' })]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const requests = fetchManual();
+  created[0].trigger('reset', '{}');
+  for (const message of live) created[0].trigger('message', JSON.stringify(message));
+  requests[0].responder(tail);
+  await tick();
+  expect(chat.use.getState().events.map((e) => e.text)).toEqual(texts);
+  expect(chat.use.getState().loading).toBe(false);
+  chat.release();
+});
+
+test('histórico após reset confirma só a fila correspondente entre os eventos ao vivo', async () => {
+  historyResponses = [[]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const requests = fetchManual();
+  created[0].trigger('reset', '{}');
+  const common = ev({ id: 'common', kind: 'assistant_msg', text: 'Evento comum' });
+  for (const message of [common, ev({ id: 'queued-x', text: 'Primeira mensagem' }), ev({ id: 'queued-y', text: 'Outra mensagem' })]) {
+    created[0].trigger('message', JSON.stringify(message));
+  }
+  requests[0].responder([common, ev({ id: 'real', text: 'Primeira mensagem' })]);
+  await tick();
+  expect(chat.use.getState().events.map((e) => e.id)).toEqual(['common', 'real', 'queued-y']);
+  chat.release();
+});
+
+test.each(['real', 'confirmed', 'removed'])('histórico atrasado e replay não devolvem fila retirada por %s', async (reason) => {
+  historyResponses = [[]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const requests = fetchManual();
+  const source = created[0];
+  source.trigger('reset', '{}');
+  const common = ev({ id: 'common', kind: 'assistant_msg' });
+  const queued = ev({ id: 'queued-x', text: 'Primeira mensagem' });
+  for (const message of [common, queued, ev({ id: 'queued-y', text: 'Outra mensagem' })]) {
+    source.trigger('message', JSON.stringify(message));
+  }
+  if (reason === 'real') source.trigger('message', JSON.stringify(ev({ id: 'real', text: queued.text })));
+  else if (reason === 'confirmed') source.trigger('queue_confirmed', JSON.stringify({ ...queued, queued_confirmed: true }));
+  else source.trigger('queue', JSON.stringify({ entries: [], removed: ['x'], actions: true }));
+  requests[0].responder([common, queued]);
+  await tick();
+  const ids = reason === 'real' ? ['common', 'queued-y', 'real'] : ['common', 'queued-y'];
+  expect(chat.use.getState().events.map((e) => e.id)).toEqual(ids);
+  source.trigger('message', JSON.stringify(queued));
+  expect(chat.use.getState().events.map((e) => e.id)).toEqual(ids);
+  source.trigger('reset', '{}');
+  source.trigger('message', JSON.stringify(queued));
+  requests[1].responder([]);
+  await tick();
+  expect(chat.use.getState().events.map((e) => e.id)).toEqual(['queued-x']);
+  chat.release();
+});
+
+test('/clear aceito só retira seu eco quando o servidor confirma a troca de conversa', async () => {
+  historyResponses = [[ev({ id: 'old:1', kind: 'assistant_msg', text: 'Conversa anterior' })]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const requests = fetchManual();
+  const sending = chat.send('/clear');
+  expect(chat.use.getState().events).toHaveLength(1);
+  requests[0].responder(null);
+  await sending;
+  expect(chat.use.getState().pending.map((p) => p.text)).toEqual(['/clear']);
+
+  created[0].trigger('reset', '{}');
+  requests[1].responder([]);
+  await tick();
+  expect(chat.use.getState().events).toEqual([]);
+  expect(chat.use.getState().pending).toEqual([]);
+  chat.release();
+});
+
 test('(c) preview some quando o assistant_msg real chega', async () => {
   historyResponses = [[]];
   const chat = chatStore('srv1', 'sess');
@@ -1440,6 +1552,20 @@ test('ACK retira os chips de áudio enviados e conserva os ditados depois', asyn
   expect(readDraft('srv1', 'sess')?.recordings).toEqual([{ id: 'voice-2', serverPath: '/uploaded/new.m4a' }]);
 });
 
+test.each([null, 400, 503])('citação sem rascunho conserva edição nova durante envio com status %s', async (status) => {
+  const text = 'Mensagem com citação';
+  const requests = fetchManual();
+  const sending = chatStore('srv1', 'sess').send(text, 8);
+  expect(readDraft('srv1', 'sess')).toMatchObject({ text: '', revision: 8,
+    submission: { text, draftRevision: 8 } });
+  writeDraft('srv1', 'sess', { ...readDraft('srv1', 'sess')!, text: 'Próxima mensagem', revision: 9 });
+  const result = status === null ? sending : expect(sending).rejects.toMatchObject({ status });
+  requests[0].responder(null, status === null ? undefined : { status });
+  await result;
+  expect(readDraft('srv1', 'sess')).toMatchObject({ text: 'Próxima mensagem', revision: 9,
+    submission: status === null ? null : { text, draftRevision: 8, status: status === 400 ? 'rejected' : 'unknown' } });
+});
+
 test('ACK limpa campo da mesma revisão e conserva demais metadados do rascunho', async () => {
   writeDraft('srv1', 'sess', { version: 1, text: 'legenda', revision: 7, transcript: '/first',
     attachments: [{ uri: 'file:///own/image', name: 'image.jpg', mime: 'image/jpeg', kind: 'image' }], submission: null });
@@ -1466,6 +1592,29 @@ test('history recuperado reconcilia eco preservado sem duplicar user_msg', async
 });
 
 describe('primeiro plano', () => {
+  test.each([
+    { live: ev({ id: 'live', text: 'Ao vivo' }), tail: [ev({ id: 'rest' })], ids: ['rest', 'live'] },
+    { live: ev({ id: 'old', text: 'Versão ao vivo' }), tail: [ev({ id: 'rest' })], ids: ['rest', 'old'] },
+    { live: ev({ id: 'live', text: 'Ao vivo' }),
+      tail: [ev({ id: 'real', text: 'Mesmo texto' }), ev({ id: 'queued-new', text: 'Mesmo texto' })],
+      ids: ['real', 'queued-new', 'live'] },
+  ])('retry sem costura conserva os eventos recebidos durante a consulta: $ids', async ({ live, tail, ids }) => {
+    const requests = fetchManual();
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    requests[0].responder([ev({ id: 'old', text: 'Conversa anterior' })]);
+    await tick();
+    const source = created[0];
+    chat.retry();
+    expect(source.close).not.toHaveBeenCalled();
+    source.trigger('message', JSON.stringify(live));
+    requests[1].responder(tail);
+    await tick();
+    expect(chat.use.getState().events.map((e) => e.id)).toEqual(ids);
+    expect(chat.use.getState().events.at(-1)?.text).toBe(live.text);
+    chat.release();
+  });
+
   test('fundo fecha stream e timers sem perder conversa; volta sincroniza uma vez sem duplicar', async () => {
     const pedidos = fetchManual();
     const chat = chatStore('srv1', 'sess');

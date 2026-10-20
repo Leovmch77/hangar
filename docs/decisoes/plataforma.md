@@ -2882,6 +2882,16 @@ defeitos achados nele (todos consertados no Rust, decisão do usuário) estão n
   no modo `python`, abrir e reabrir respondem 503 com código. Ficam no Python, registrados: texto que
   nasce nele (grupo, par, broadcast) acorda Claude/Codex sem terminal pedindo ao Rust, e a
   transferência Claude→Codex (inativa no serviço).
+- **O padrão salvo é do lançador, não das telas (19/10/2026).** A caixinha "padrão" da tela de
+  criar gravava modelo, esforço e permissão só no desktop; o #233 levou o registro ao servidor
+  (`~/.hangar/session-defaults.json`, rota `/api/session-defaults`), mas só desktop e app o liam, e
+  `hangar-send`, MCP, voz e terminal abriam sem ele. O usuário: "padrão só do app desktop não é
+  padrão". Agora o `resolve_open()` lê o registro pelo escopo (provedor, motor, conta do motor) e
+  preenche o que o pedido não disse. Ordem: pedido → padrão salvo → criadora → conta. A permissão
+  da criadora vence o salvo só com `inherit: true` (`--inherit`); conta e com/sem terminal seguem
+  herdados como antes. Convidado não recebe o padrão do dono. Registro ilegível vira aviso e a
+  abertura segue sem ele. No Codex com terminal o modo salvo entra como o herdado (o pedido
+  explícito continua recusado).
 
 ## WebSocket do dono com token não confere Origin (17/10/2026)
 

@@ -253,6 +253,11 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
 - **Markdown NUNCA aparece cru.** Todo `.md` exibido passa por `renderMarkdown`. Um `<pre>` com
   `**` e `##` à mostra é bug, não estilo.
 - **Tela ou lista nova trata os quatro estados: carregando, vazio, erro e sucesso.**
+- **O padrão de criação marcado no desktop é do servidor.** Modelo, esforço e permissão são
+  publicados em `/api/session-defaults`, por provedor, motor e conta do motor; o APK lê o mesmo
+  registro. Importar o arquivo local antigo nunca sobrepõe um padrão publicado ou removido.
+  Falha de leitura bloqueia a criação e mostra o erro. Evidência em
+  [frontend.md](docs/decisoes/frontend.md#padrões-de-criação-compartilhados-com-o-apk-19102026).
 - **Config e opção moram em MODAL, não em painel docado.** Só o `DesktopSessionContext` fica
   docado. Tela de config usa **container query**, nunca media query — quem aperta a linha é a
   largura do painel.
@@ -637,7 +642,9 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   voz, `hangar-send`, MCP, `orq`, outro servidor, `claude`/`codex`/`pi`/`omp`/`kimi` digitados no
   terminal) manda um `SessionOpenRequest`; `resolve_open()` decide conta, modo, modelo, plugin e
   com/sem terminal (os padrões que as telas preenchiam moram aqui) e grava o `SessionSpec` da sessão
-  em `~/.hangar/session-specs/<chave>.json`. Reabrir é `reopen_session(spec ⊕ SessionChange)`;
+  em `~/.hangar/session-specs/<chave>.json`. Modelo, esforço e permissão omitidos vêm do padrão
+  salvo no servidor (`~/.hangar/session-defaults.json`), que vence a criadora; `inherit: true` traz
+  a permissão dela; convidado não recebe. Reabrir é `reopen_session(spec ⊕ SessionChange)`;
   retomar do Arquivo e `/resume` passam pelas mesmas guardas da criação. Com o servidor fora, o
   comando de terminal `hangar-server open` abre igual e o servidor adota depois; `-p`, pipe,
   `--resume` explícito, subcomando e flag desconhecida seguem com o CLI cru. Depois de reboot ou

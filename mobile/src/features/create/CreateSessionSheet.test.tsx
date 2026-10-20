@@ -12,7 +12,7 @@ const calls = vi.hoisted(() => ({
   activeId: 'server-b', startPending: null as Promise<void> | null,
   target: null as null | { id: string; label: string; baseUrl: string; token: string },
   accounts: vi.fn(),
-  providers: vi.fn(),
+  providers: vi.fn(), defaults: vi.fn(),
   mutate: vi.fn(),
   contextFetch: vi.fn(),
   models: vi.fn(),
@@ -144,6 +144,7 @@ vi.mock('@hangar/core', async (original) => ({
   getEnginesForServer: calls.engines,
   // Sonda de providers da folha nova: sem ela o teste fazia fetch de verdade para b.local.
   getProvidersForServer: calls.providers,
+  getSessionDefaultsForServer: calls.defaults,
   setServiceTier: calls.mutate, setModelEffort: calls.mutate, setCodexModel: calls.mutate,
   setEngineModel: calls.mutate, setPiModel: calls.mutate, setKimiModel: calls.mutate,
   setPermissionMode: calls.mutate,
@@ -172,6 +173,7 @@ vi.mock('../../paraglide/messages', () => ({
   contas_nao_conectada: () => 'contas_nao_conectada', cota_conta_parada: () => 'cota_conta_parada',
   cota_precisa_entrar: () => 'cota_precisa_entrar', cota_sem_cota: () => 'cota_sem_cota',
   criar_abre_padrao: ({ erro }: { erro: string }) => `criar_abre_padrao:${erro}`, criar_avancado: () => 'criar_avancado',
+  native_create_default_failed: ({ erro }: { erro: string }) => `default_failed:${erro}`,
   criar_caminho_placeholder: () => 'criar_caminho_placeholder', criar_claude_sua_conta: () => 'criar_claude_sua_conta',
   criar_conta_aria: () => 'criar_conta_aria', criar_criando: () => 'criar_criando', criar_ja_existe: () => 'criar_ja_existe',
   criar_lista_reduzida: () => 'criar_lista_reduzida', criar_modelos_erro: () => 'criar_modelos_erro',
@@ -299,6 +301,7 @@ describe('CreateSessionSheet Codex', () => {
     calls.accounts.mockReset().mockResolvedValue([connected]);
     calls.mutate.mockReset();
     calls.providers.mockReset().mockResolvedValue({});
+    calls.defaults.mockReset().mockResolvedValue(null);
     calls.models.mockReset().mockResolvedValue({ models: [], reduced: false });
     calls.prepare.mockReset().mockResolvedValue({ status: 'ready', trust_pending: false, issues: [] });
     calls.preparation.mockReset();
@@ -384,6 +387,119 @@ describe('CreateSessionSheet Codex', () => {
     await act(async () => Promise.resolve());
     return { container, root };
   }
+
+  it('APK usa modelo, esforço e Bypass salvos no servidor pelo desktop', async () => {
+    calls.configs.mockResolvedValue([{ path: '/account', label: 'Conta', active: true }]);
+    calls.models.mockResolvedValue({ models: [{ id: 'opus', name: 'Opus' }], reduced: false });
+    calls.defaults.mockResolvedValue({ model: 'opus', effort: 'high', permission: 'bypassPermissions' });
+    const { container, root } = await renderSheet(false, false);
+    try {
+      await send(container);
+      expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({
+        model: 'opus', effort: 'high', permission_mode: 'bypassPermissions',
+      }));
+    } finally { act(() => root.unmount()); }
+  });
+
+  it('padrão do servidor vence a última escolha local, mas permite trocar nesta abertura', async () => {
+    localStorage.setItem('create.choices.v1:server-b', JSON.stringify({ provider: 'claude', model: 'sonnet', effort: 'low' }));
+    calls.models.mockResolvedValue({ models: [{ id: 'opus', name: 'Opus' }, { id: 'sonnet', name: 'Sonnet' }], reduced: false });
+    calls.defaults.mockResolvedValue({ model: 'opus', effort: 'high', permission: 'bypassPermissions' });
+    const { container, root } = await renderSheet(false, false);
+    try {
+      expect(button(container, 'composer_session_settings')?.textContent).toContain('Opus');
+      await openOptions(container);
+      await act(async () => button(container, 'bypassPermissions')!.click());
+      await act(async () => button(container, 'manual')!.click());
+      await send(container);
+      expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ model: 'opus', effort: 'high', permission_mode: 'manual' }));
+    } finally { act(() => root.unmount()); }
+  });
+
+  it('falha ao ler o padrão bloqueia a criação e permite tentar novamente', async () => {
+    calls.defaults.mockRejectedValueOnce(new Error('read-failed'));
+    const { container, root } = await renderSheet(false, false);
+    try {
+      expect(container.textContent).toContain('default_failed:read-failed');
+      await send(container);
+      expect(calls.create).not.toHaveBeenCalled();
+      await act(async () => button(container, 'native_retry')!.click());
+      await send(container);
+      expect(calls.create).toHaveBeenCalledOnce();
+    } finally { act(() => root.unmount()); }
+  });
+
+  it('motor do Claude não impede abrir uma sessão de outro provedor', async () => {
+    calls.engines.mockResolvedValue({ motores: { proxy: { label: 'Proxy', model: 'sol' } } });
+    calls.defaults.mockImplementation(async (_server, provider, engine) => {
+      if (provider !== 'claude' && engine) throw new Error('invalid-scope');
+      return null;
+    });
+    const { container, root } = await renderSheet(false, false);
+    try {
+      await openOptions(container);
+      await act(async () => button(container, 'criar_claude_sua_conta')!.click());
+      await act(async () => button(container, 'Proxy')!.click());
+      await act(async () => button(container, 'Pi')!.click());
+      await send(container);
+      expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider: 'pi', engine: null }));
+    } finally { act(() => root.unmount()); }
+  });
+
+  it.each([false, true])('busca conserva resultados das outras raízes quando uma falha (compacto=%s)', async (compact) => {
+    calls.roots.mockResolvedValue([{ name: 'Repo', path: '/repo' }, { name: 'Outros', path: '/other' }]);
+    calls.scan.mockImplementation(async (_server, root) => root === '/other'
+      ? { entries: [], error: 'permission_denied' } : { entries: [{ name: 'destino', path: '/repo/destino' }] });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const { CwdPicker } = await import('./CwdPicker');
+    await act(async () => root.render(createElement(CwdPicker, { server, onPick: vi.fn(), compact, autoSelect: false })));
+    try {
+      const search = container.querySelector<HTMLTextAreaElement>('[aria-label="native_create_search"]')!;
+      await act(async () => { search.value = 'destino'; search.dispatchEvent(new Event('input', { bubbles: true })); });
+      expect(button(container, 'destino')).toBeDefined();
+      expect(container.textContent).toContain('Outros: sem_permissao');
+      calls.scan.mockResolvedValue({ entries: [] });
+      await act(async () => button(container, 'native_retry')!.click());
+      expect(container.textContent).not.toContain('Outros: sem_permissao');
+    } finally { act(() => root.unmount()); }
+  });
+
+  it.each([false, true])('limpar busca com raiz inacessível restaura o estado vazio da pasta (compacto=%s)', async (compact) => {
+    calls.roots.mockResolvedValue([{ name: 'Repo', path: '/repo' }, { name: 'Outros', path: '/other' }]);
+    calls.scan.mockImplementation(async (_server, root) => root === '/other'
+      ? { entries: [], error: 'permission_denied' } : { entries: [] });
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const { CwdPicker } = await import('./CwdPicker');
+    await act(async () => root.render(createElement(CwdPicker, { server, onPick: vi.fn(), compact, autoSelect: false })));
+    try {
+      const search = container.querySelector<HTMLTextAreaElement>('[aria-label="native_create_search"]')!;
+      await act(async () => { search.value = 'destino'; search.dispatchEvent(new Event('input', { bubbles: true })); });
+      expect(container.textContent).toContain('Outros: sem_permissao');
+      await act(async () => { search.value = ''; search.dispatchEvent(new Event('input', { bubbles: true })); });
+      expect(container.textContent).toContain('native_create_no_subfolders');
+      expect(container.textContent).not.toContain('Outros: sem_permissao');
+    } finally { act(() => root.unmount()); }
+  });
+
+  it.each([false, true])('busca encontra pasta em outra aba e preserva a raiz (compacto=%s)', async (compact) => {
+    calls.roots.mockResolvedValue([{ name: 'Repo', path: '/repo' }, { name: 'Outros', path: '/other' }]);
+    calls.scan.mockImplementation(async (_server, root) => ({ entries: root === '/other'
+      ? [{ name: 'destino', path: '/other/destino', is_git: true }] : [] }));
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const onPick = vi.fn();
+    const { CwdPicker } = await import('./CwdPicker');
+    await act(async () => root.render(createElement(CwdPicker, { server, onPick, compact, autoSelect: false })));
+    try {
+      const search = container.querySelector<HTMLTextAreaElement>('[aria-label="native_create_search"]')!;
+      await act(async () => { search.value = 'destino'; search.dispatchEvent(new Event('input', { bubbles: true })); });
+      expect(button(container, 'destino')).toBeDefined();
+      await act(async () => button(container, 'destino')!.click());
+      expect(onPick).toHaveBeenLastCalledWith('/other/destino', '/other');
+    } finally { act(() => root.unmount()); }
+  });
 
   it.each([
     ['roots', 'active', false], ['roots', 'active', true], ['roots', 'focus', false], ['roots', 'focus', true],

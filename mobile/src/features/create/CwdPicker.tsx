@@ -76,6 +76,11 @@ export function CwdPicker({
   const [scanFailed, setScanFailed] = useState(false);
   const [scanTry, setScanTry] = useState(0);
   const [query, setQuery] = useState('');
+  const searching = !!query.trim();
+  const [searchRows, setSearchRows] = useState<{ entry: FsEntry; root: FsRoot }[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchErrors, setSearchErrors] = useState<string[]>([]);
+  const [searchTry, setSearchTry] = useState(0);
   const [searchFocused, setSearchFocused] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualPath, setManualPath] = useState('');
@@ -175,14 +180,34 @@ export function CwdPicker({
     return () => { retry.cancel(); controller.abort(); };
   }, [activeRoot, path, server, rootsLoading, scanTry, startScanRetry]);
 
+  // A busca lê cada raiz uma vez por tentativa, sem reiniciar os pedidos a cada letra.
+  useEffect(() => {
+    if (!searching || rootsLoading || !roots.length) return;
+    const controller = new AbortController();
+    setSearchRows([]);
+    setSearchErrors([]);
+    setSearchLoading(true);
+    void Promise.all(roots.map(async (root) => {
+      try {
+        const result = await scanDirForServer(server, root.path, root.path, controller.signal);
+        if (controller.signal.aborted) return;
+        if (result.error) throw new Error(scanMessage(result.error));
+        setSearchRows((current) => [...current, ...result.entries.map((entry) => ({ entry, root }))]);
+      } catch (cause) {
+        if (!controller.signal.aborted) setSearchErrors((current) => [...current, `${root.name}: ${loadErrorText(cause, m.arquivo_ler_falhou())}`]);
+      }
+    })).finally(() => { if (!controller.signal.aborted) setSearchLoading(false); });
+    return () => controller.abort();
+  }, [searching, rootsLoading, roots, server, searchTry]);
+
   // Raiz escolhida já é a pasta, como no menu do PC; o painel continua aberto para descer nela.
   const selectRoot = (r: FsRoot) => {
     setActiveRoot(r);
     setPath(r.path);
-    setQuery('');
     onPick(r.path, r.path);
   };
-  const drill = (p: string) => {
+  const drill = (p: string, root = activeRoot) => {
+    setActiveRoot(root);
     setPath(p);
     setQuery('');
   };
@@ -196,8 +221,13 @@ export function CwdPicker({
   };
 
   const q = query.trim().toLowerCase();
-  const filtered = !q || !activeRoot ? entries
-    : entries.filter((e) => e.name.toLowerCase().includes(q) || relPath(activeRoot.path, e.path).toLowerCase().includes(q));
+  const rootsByPath = new Map(searchRows.map(({ entry, root }) => [entry.path, root]));
+  const rootFor = (entry: FsEntry) => searching ? rootsByPath.get(entry.path) ?? activeRoot! : activeRoot!;
+  const filtered = !q ? entries : [...new Map(searchRows
+    .filter(({ entry, root }) => entry.name.toLowerCase().includes(q) || relPath(root.path, entry.path).toLowerCase().includes(q))
+    .map(({ entry }) => [entry.path, entry])).values()];
+  const listLoading = searching ? searchLoading && !filtered.length : scanning;
+  const listError = searching ? null : scanError;
   // Buscando, a lista é plana: o nome da worktree precisa aparecer mesmo com o grupo fechado.
   const items = useMemo((): Item[] => q ? filtered.map((entry) => ({ kind: 'folder', entry })) : groupFolders(filtered, repos).flatMap((row) => {
     const sized = row.visible.length + row.merged.length > 0;
@@ -269,7 +299,7 @@ export function CwdPicker({
       <Text style={[styles.cNote, { color: alert ? theme.tokens.status.error : c.faint }]}
             accessibilityRole={alert ? 'alert' : undefined}>{text}</Text>
     );
-    const inSub = !!activeRoot && path !== '' && path !== activeRoot.path;
+    const inSub = !searching && !!activeRoot && path !== '' && path !== activeRoot.path;
     const manualValid = !!manualPath.trim();
 
     const cRows = !activeRoot ? (
@@ -277,16 +307,16 @@ export function CwdPicker({
         {note(scanError, true)}
         {scanFailed ? textRetry(() => setScanTry((n) => n + 1)) : null}
       </View> : null
-    ) : scanning ? (
+    ) : listLoading ? (
       <View style={styles.cSkeletons}>
         {[120, 168, 96].map((w) => <View key={w} style={[styles.cSkeleton, { width: w, backgroundColor: c.border }]} />)}
       </View>
-    ) : scanError ? (
+    ) : listError ? (
       <View style={styles.cState}>
-        {note(scanError, scanFailed)}
+        {note(listError, scanFailed)}
         {scanFailed ? textRetry(() => setScanTry((n) => n + 1)) : null}
       </View>
-    ) : filtered.length === 0 ? (
+    ) : filtered.length === 0 && (!searching || !searchErrors.length) ? (
       note(q ? m.native_create_no_results() : m.native_create_no_subfolders())
     ) : (
       <FlatList
@@ -305,19 +335,22 @@ export function CwdPicker({
           return (
             <View style={[styles.cRowWrap, on && { backgroundColor: c.accentDim }]}>
               <Pressable
-                onPress={() => choose(e.path, activeRoot.path)}
+                onPress={() => choose(e.path, rootFor(e).path)}
                 accessibilityRole="button"
                 accessibilityLabel={e.name}
                 accessibilityState={{ selected: on }}
                 style={({ pressed }) => [styles.cRow, pressed && !on && { backgroundColor: c.hover }]}
               >
                 <Icon name="Folder" size={16} color={c.faint} />
-                <Text style={[styles.cName, { color: c.text }]} numberOfLines={1} ellipsizeMode="tail">{e.name}</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.cName, { color: c.text }]} numberOfLines={1} ellipsizeMode="tail">{e.name}</Text>
+                  {searching ? <Text style={[styles.cPath, { color: c.muted }]} numberOfLines={1}>{rootFor(e).name} · {relPath(rootFor(e).path, e.path)}</Text> : null}
+                </View>
                 {e.is_git ? <Icon name="GitBranch" size={12} color={c.faint} /> : null}
                 {when ? <Text style={[styles.cWhen, { color: c.faint }]}>{when}</Text> : null}
               </Pressable>
               {item.group ? groupButton(item.group) : null}
-              <Pressable onPress={() => drill(e.path)} style={({ pressed }) => [styles.cDrill, pressed && { backgroundColor: c.hover }]}
+              <Pressable onPress={() => drill(e.path, rootFor(e))} style={({ pressed }) => [styles.cDrill, pressed && { backgroundColor: c.hover }]}
                          accessibilityRole="button" accessibilityLabel={m.native_create_open({ nome: e.name })}>
                 <Icon name="ChevronRight" size={14} color={c.faint} />
               </Pressable>
@@ -381,6 +414,11 @@ export function CwdPicker({
         ) : null}
 
         <View style={styles.cRows}>{cRows}</View>
+        {searching && searchErrors.length ? <View style={styles.cState}>
+          {note(searchErrors.join('\n'), true)}
+          {textRetry(() => setSearchTry((n) => n + 1))}
+        </View> : null}
+        {searching && searchLoading && filtered.length ? note(m.comum_carregando()) : null}
 
         <View style={styles.cFooter}>
           {activeRoot ? (
@@ -455,7 +493,7 @@ export function CwdPicker({
       <Text style={styles.muted} accessibilityRole="alert">{scanError}</Text>
       {scanFailed ? retry(() => setScanTry((n) => n + 1)) : null}
     </View> : null
-  ) : scanning ? (
+  ) : listLoading ? (
     // Cinco linhas de esqueleto: nome e detalhe, como o render_rows do PC.
     <View style={styles.skeletonList}>
       {[0, 1, 2, 3, 4].map((i) => (
@@ -465,12 +503,12 @@ export function CwdPicker({
         </View>
       ))}
     </View>
-  ) : scanError ? (
+  ) : listError ? (
     <View style={styles.state}>
-      <Text style={scanFailed ? styles.error : styles.muted} accessibilityRole="alert">{scanError}</Text>
+      <Text style={scanFailed ? styles.error : styles.muted} accessibilityRole="alert">{listError}</Text>
       {scanFailed ? retry(() => setScanTry((n) => n + 1)) : null}
     </View>
-  ) : filtered.length === 0 ? (
+  ) : filtered.length === 0 && (!searching || !searchErrors.length) ? (
     <Text style={styles.muted}>{q ? m.native_create_no_results() : m.native_create_no_subfolders()}</Text>
   ) : (
     <FlatList
@@ -487,7 +525,7 @@ export function CwdPicker({
         return (
           <View style={styles.rowWrap}>
             <Pressable
-              onPress={() => choose(e.path, activeRoot.path)}
+              onPress={() => choose(e.path, rootFor(e).path)}
               accessibilityRole="button"
               accessibilityLabel={e.name}
               accessibilityState={{ selected: on }}
@@ -495,14 +533,14 @@ export function CwdPicker({
             >
               <Text style={styles.rowName} numberOfLines={1}>{e.name}</Text>
               <View style={styles.meta}>
-                <Text style={styles.rowPath} numberOfLines={1}>{relPath(activeRoot.path, e.path)}</Text>
+                <Text style={styles.rowPath} numberOfLines={1}>{searching ? `${rootFor(e).name} · ` : ''}{relPath(rootFor(e).path, e.path)}</Text>
                 {e.is_git ? <Text style={styles.badge}>git</Text> : null}
                 {e.has_claude_md ? <Text style={styles.badge}>CLAUDE.md</Text> : null}
                 {when ? <Text style={styles.when}>{when}</Text> : null}
               </View>
             </Pressable>
             {item.group ? groupButton(item.group) : null}
-            <Pressable onPress={() => drill(e.path)} style={({ pressed }) => [styles.drill, pressed && styles.rowPressed]}
+            <Pressable onPress={() => drill(e.path, rootFor(e))} style={({ pressed }) => [styles.drill, pressed && styles.rowPressed]}
                        accessibilityRole="button" accessibilityLabel={m.native_create_open({ nome: e.name })}>
               <Icon name="ChevronRight" size={16} color={theme.tokens.text.secondary} />
             </Pressable>
@@ -549,6 +587,11 @@ export function CwdPicker({
       ) : null}
 
       <View style={styles.rows}>{rows}</View>
+      {searching && searchErrors.length ? <View style={styles.state}>
+        <Text style={styles.error} accessibilityRole="alert">{searchErrors.join('\n')}</Text>
+        {retry(() => setSearchTry((n) => n + 1))}
+      </View> : null}
+      {searching && searchLoading && filtered.length ? <Text style={styles.muted}>{m.comum_carregando()}</Text> : null}
 
       <View style={styles.footer}>
         {activeRoot ? (

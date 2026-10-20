@@ -25,6 +25,8 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
     let method = req.method();
     let owned = if method == Method::GET && path == crate::claude_customizations::CATALOG_PATH {
         Owned::Catalog
+    } else if matches!(*method, Method::GET | Method::PUT) && path == "/api/session-defaults" {
+        Owned::SessionDefaults
     } else if method == Method::GET && path == "/api/jev/delivery" {
         Owned::JevDelivery
     } else if method == Method::GET && path == "/api/client-api" {
@@ -66,6 +68,7 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
         Owned::Groups(guest) => crate::groups::federation::serve_forwarded(st, peer, req, guest).await,
         Owned::ClientApi => crate::routes::client_api_reply(),
         Owned::Catalog => crate::claude_customizations::public_catalog(&st, req).await,
+        Owned::SessionDefaults => crate::session_defaults::serve(&st, req).await,
         Owned::Conductor => crate::orq_conductor::serve(&st, req).await,
         Owned::Commands => crate::commands::serve(&st, req).await,
         Owned::Mermaid => crate::mermaid::serve(&st, req).await,
@@ -103,4 +106,4 @@ fn live_resume(method: &Method, path: &str) -> Option<String> {
 }
 
 /// As rotas do Rust que aceitam o repasse.
-enum Owned { Groups(bool), Conductor, Catalog, Commands, Mermaid, Plans, Worktrees, JevDelivery, ClientApi,ArchiveResume(String, String), Resume(String), Media(String, bool) }
+enum Owned { Groups(bool), Conductor, Catalog, SessionDefaults, Commands, Mermaid, Plans, Worktrees, JevDelivery, ClientApi, ArchiveResume(String, String), Resume(String), Media(String, bool) }

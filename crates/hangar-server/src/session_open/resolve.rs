@@ -57,6 +57,8 @@ pub trait OpenFacts {
     /// `Ok(None)` = não existe; registro da criadora ilegível é erro, nunca "não encontrada".
     fn creator(&self, name: &str) -> Result<Option<CreatorFacts>, OpenError>;
     fn defaults(&self) -> ServerDefaults;
+    /// Padrão de modelo, esforço e permissão marcado para provedor, motor e conta do motor.
+    fn saved_defaults(&self, provider: AgentProvider, engine: &str, engine_account: &str) -> Result<Option<crate::session_defaults::Defaults>, String>;
     /// Contas Codex com login conectado.
     fn codex_logins(&self) -> Result<Vec<CodexLogin>, OpenError>;
     /// Linhas Claude do cache de cotas, sem ler a rede.
@@ -137,6 +139,20 @@ fn truthy(value: &Option<String>) -> bool { value.as_deref().is_some_and(|v| !v.
 fn conflict(msg: impl Into<String>) -> OpenError { OpenError::new(409, "erro_criacao_sessao", msg) }
 
 pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &dyn OpenFacts) -> Result<Resolved, OpenError> {
+    let mut used_saved_choice = false;
+    match resolve_with(request, caller, facts, true, &mut used_saved_choice) {
+        // Modelo ou esforço salvos que deixaram de valer (catálogo mudou) não travam toda abertura.
+        Err(error) if used_saved_choice => {
+            let mut resolved = resolve_with(request, caller, facts, false, &mut used_saved_choice)?;
+            resolved.warnings.push(format!("o modelo ou esforço do padrão salvo não vale para esta abertura ({}); ficou sem eles", error.msg));
+            Ok(resolved)
+        }
+        other => other,
+    }
+}
+
+fn resolve_with(request: &SessionOpenRequest, caller: &OpenCaller, facts: &dyn OpenFacts, saved_choice: bool,
+                used_saved_choice: &mut bool) -> Result<Resolved, OpenError> {
     let guest = matches!(caller, OpenCaller::Guest { .. });
     let mut warnings = Vec::new();
     // O omitido vem da criadora; `inherit: false` deixa tudo no padrão da conta. O convidado
@@ -160,6 +176,42 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
                 (chosen, Some(if remembered { "remembered" } else { "default" }))
             }
         },
+    };
+    // O padrão salvo pelo dono preenche o que o pedido não disse e vence a criadora; a permissão
+    // dela só vale quando o pedido traz `inherit: true`.
+    let saved = if guest { None } else {
+        match facts.saved_defaults(provider, request.engine.as_deref().unwrap_or_default(), request.engine_account.as_deref().unwrap_or_default()) {
+            Ok(saved) => saved,
+            Err(reason) => {
+                warnings.push(format!("não consegui ler o padrão salvo da abertura ({reason}); ele não foi aplicado"));
+                None
+            }
+        }
+    };
+    let saved_permission = saved.as_ref().filter(|_| request.permission_mode.is_none())
+        .map(|saved| saved.permission.clone()).filter(|mode| !mode.is_empty());
+    // Com `inherit: true` o modo da criadora vem primeiro e o salvo só cobre a falta dele.
+    let saved_first = request.inherit != Some(true);
+    // O Codex com terminal recusa modo pedido; o salvo segue como o herdado.
+    let saved_codex_mode = saved_permission.as_deref().filter(|_| provider == AgentProvider::Codex).and_then(PermissionMode::codex);
+    let filled;
+    let request = match &saved {
+        Some(saved) => {
+            let mut pick = |asked: &Option<String>, value: &str| match asked.clone().filter(|v| !v.is_empty()) {
+                Some(asked) => Some(asked),
+                None if saved_choice && !value.is_empty() => { *used_saved_choice = true; Some(value.to_owned()) }
+                None => asked.clone(),
+            };
+            filled = SessionOpenRequest {
+                model: pick(&request.model, &saved.model),
+                effort: pick(&request.effort, &saved.effort),
+                permission_mode: request.permission_mode.clone()
+                    .or_else(|| saved_permission.clone().filter(|_| saved_first && provider != AgentProvider::Codex)),
+                ..request.clone()
+            };
+            &filled
+        }
+        None => request,
     };
     let explicit_account = request.config_dir.is_some();
     let mut config_dir = request.config_dir.clone();
@@ -202,7 +254,7 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
                         None => warnings.push(format!("não consegui ler o modo de permissão de '{creator}'; vale o padrão da conta")),
                     }
                 }
-                if permission.is_none() && provider == AgentProvider::Codex
+                if permission.is_none() && (saved_codex_mode.is_none() || !saved_first) && provider == AgentProvider::Codex
                     && matches!(info.provider, AgentProvider::Claude | AgentProvider::Codex)
                 {
                     inherited_codex_mode = creator_codex_mode(info);
@@ -212,6 +264,11 @@ pub fn resolve_open(request: &SessionOpenRequest, caller: &OpenCaller, facts: &d
                 }
             }
         }
+    }
+
+    let inherited_codex_mode = if saved_first { saved_codex_mode.or(inherited_codex_mode) } else { inherited_codex_mode.or(saved_codex_mode) };
+    if permission.is_none() && provider == AgentProvider::Claude {
+        permission = saved_permission.filter(|_| !saved_first);
     }
 
     // A padrão herdada é a mesma escolha de ninguém ter pedido conta: desconectada, troca igual.

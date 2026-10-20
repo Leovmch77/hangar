@@ -307,8 +307,11 @@ impl RuntimeFeed {
         // Sem terminal, o cartão é só o do canal nativo (que o motor responde): o `ask:`/`perm:` do plugin
         // seria respondido com 409, e o `ask.ts` encerra a própria pergunta quando o nativo vence.
         let [preview, thinking, tool] = texts;
+        // A prévia daqui é o texto exato do bloco, não a tela pintada: o começo da resposta gravada é ela
+        // mesma lida antes do commit, em qualquer tamanho.
         let preview = match hub.committed() {
             Some(committed) if super::preview::is_committed(&preview, &committed) => String::new(),
+            Some(committed) if { let n = super::preview::norm(&preview); !n.is_empty() && committed.starts_with(&n) } => String::new(),
             _ => preview,
         };
         // A sugestão só muda por fato novo; vazia desde o início não é mudança.
@@ -794,6 +797,30 @@ mod tests {
         let _feed = spawn(&f, Some(live_rx));
         let got = collect(&mut rx, Duration::from_millis(50)).await;
         assert_eq!(of(&got, "preview")[0].2["text"], "", "prévia igual à resposta gravada sai vazia");
+    }
+
+    /// O feed lê o canal depois de o transcript já ter entregado a resposta: o começo curto dela, que a regra
+    /// de 16 caracteres deixaria passar, ressuscitaria a bolha no app, que ignora o vazio durante `working`.
+    #[tokio::test(start_paused = true)]
+    async fn a_short_start_of_the_committed_answer_goes_out_empty() {
+        let f = fixture();
+        let mut rx = f.lease.hub.tx.subscribe();
+        f.lease.hub.set_committed(0, crate::state::preview::norm("Vou medir o `hangar-server` desta máquina."), false);
+        let (_tx, live_rx) = channel(Some(LiveState { preview: "Vou med".into(), ..live("working") }));
+        let _feed = spawn(&f, Some(live_rx));
+        let got = collect(&mut rx, Duration::from_millis(50)).await;
+        assert_eq!(of(&got, "preview")[0].2["text"], "", "o começo da resposta gravada sai vazio");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_short_preview_that_diverges_from_the_committed_answer_goes_out() {
+        let f = fixture();
+        let mut rx = f.lease.hub.tx.subscribe();
+        f.lease.hub.set_committed(0, crate::state::preview::norm("Vou medir o `hangar-server` desta máquina."), false);
+        let (_tx, live_rx) = channel(Some(LiveState { preview: "Vou ver".into(), ..live("working") }));
+        let _feed = spawn(&f, Some(live_rx));
+        let got = collect(&mut rx, Duration::from_millis(50)).await;
+        assert_eq!(of(&got, "preview")[0].2["text"], "Vou ver", "resposta nova que diverge da gravada aparece");
     }
 
     #[tokio::test(start_paused = true)]

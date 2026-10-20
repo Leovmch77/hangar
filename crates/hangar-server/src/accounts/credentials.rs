@@ -12,7 +12,7 @@ use axum::{
 use serde_json::{Map, Value, json};
 use std::{sync::Arc, time::Duration};
 
-const CODEX_AUTH_DEADLINE: Duration = Duration::from_secs(3);
+pub(super) const CODEX_AUTH_DEADLINE: Duration = Duration::from_secs(3);
 
 fn unavailable_auth() -> Value {
     json!({"method":"unknown","status":"unavailable","email":null,"plan":null})
@@ -116,7 +116,7 @@ async fn codex_snapshot(state: &crate::routes::AppState, account: &super::catalo
         }
     };
     // A leitura segue em segundo plano e guarda o resultado; a lista não espera por ela.
-    let auth = match tokio::time::timeout(CODEX_AUTH_DEADLINE, read).await {
+    let auth = match tokio::time::timeout(service.codex_auth_deadline, read).await {
         Ok(auth) => auth,
         Err(_) => {
             tracing::warn!(code = "codex_auth_deadline", account = %account.id, "leitura de autenticação Codex excedeu o prazo");

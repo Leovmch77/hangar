@@ -129,6 +129,13 @@ async fn run(case: &Value, python: std::net::SocketAddr) -> (Answer, Answer) {
                 ("PATH".into(), bin.to_string_lossy().into_owned()),
             ].into()),
         );
+        // O node falso leva segundos para subir com a máquina cheia: o prazo de produção (3 s) só no caso que mede
+        // o prazo, onde o CLI falso nunca responde. O teto da leitura fica acima dele, como em produção.
+        if case["name"] != "codex_estoura_prazo" {
+            state.accounts.codex_auth_deadline = std::time::Duration::from_secs(30);
+        }
+        state.accounts.codex_auth_read_timeout = std::time::Duration::from_secs(60);
+        state.accounts.claude_auth.cli_timeout = Some(std::time::Duration::from_secs(60));
         state
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -60,6 +60,12 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **A tarefa Windows acompanha o processo até ele terminar.** Reinício controlado não encerra
   a árvore inteira: sessões e atualizador sobrevivem. A vigia confirma falha HTTP, respeita
   instalação/atualização e só inicia outra instância após confirmar a parada da anterior.
+- **O backend abre o próprio log (`python -m app.main --log <arquivo>`), nunca pelo `>` do cmd.**
+  O `>` abre sem escrita compartilhada, e qualquer neto que sobreviva ao backend com a cópia
+  herdada (jest, `kubectl port-forward`, navegador de teste de uma sessão) fazia a subida seguinte
+  da tarefa morrer antes do Python, sem uma linha no log. O `open` do Python compartilha escrita;
+  preso mesmo assim, o log vai para `hangar-backend.N.log` e o backend sobe. O front segue no
+  `cmd`. Evidência em [Log do backend preso por neto](#log-do-backend-preso-por-neto-20102026).
 - **Tarefa do backend/front nasce com `-Priority 4` (normal).** O padrão do Agendador é 7
   (abaixo do normal) e passa para os filhos: backend e sessões perdiam a CPU para qualquer
   programa, passavam dos 3 s da vigia e eram derrubados.
@@ -863,3 +869,25 @@ a porta para quem pede só IPv4, então ficaram os dois sockets. No Linux o `0.0
 dual-stack de outro processo, e o segundo socket colidiria com o primeiro: a guarda é só do Windows.
 No socket dual-stack o cliente IPv4 chega como `::ffff:a.b.c.d`; o `ipv4_peer` em `routes.rs` devolve o
 IPv4 antes das rotas, que decidem "local" e proxy confiável por ele.
+
+## Log do backend preso por neto (20/10/2026)
+
+Dois usuários do Windows ficaram com o backend fora do ar depois de um reinício (auto-update das
+07:55 num, das 20:24 no outro). A tarefa `hangar-backend` rodava
+`cmd /c "python -m app.main > hangar-backend.log 2>&1"` e cada tentativa saía com código 1 sem
+escrever nada. O `cmd` não abria `%LOCALAPPDATA%\hangar\logs\privado\hangar-backend.log` ("está
+sendo usado por outro processo"): o Restart Manager mostrou quem segurava a cópia herdada do
+backend morto — dois `jest` travados, cinco `kubectl port-forward`, um `ts-node-dev` e um `next dev`
+numa máquina; um Edge headless de teste (perfil temporário) na outra. Todos nascidos de sessões.
+O backend subia normalmente rodado à mão, fora da tarefa.
+
+A tarefa agora roda `python -m app.main --log <arquivo>` sem o `cmd`, e o `app.main` abre o log com o
+`open` do Python, que no Windows compartilha leitura e escrita: a cópia herdada por um neto não
+impede o próximo `open`. Os descritores 1 e 2 vão para o mesmo arquivo, então a saída do
+hangar-server e dos outros filhos continua lá. Preso mesmo assim (o handle de um `cmd` antigo, na
+primeira subida depois da atualização), a saída vai para `hangar-backend.1.log` … `.5.log`; sem
+nenhum, o backend sobe sem log e o diário registra `backend.log_indisponivel`. O log abre antes dos
+imports do `app.main`, para um erro de importação ou de configuração na subida também cair nele (o
+`>` do cmd capturava isso). O instalador acompanha a escrita mais recente entre `hangar-backend*.log`
+(`Get-LogBackend`). `test_main_log.py` prova as duas coisas no Windows: um segundo
+`open` com o primeiro aberto, e o nome alternativo diante de um handle sem `FILE_SHARE_WRITE`.

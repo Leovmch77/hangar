@@ -13,7 +13,7 @@ use super::claude::PluginBridge;
 use super::open::{Born, OpenHost};
 use super::resolve::{CodexCatalogError, CodexLogin, CreatorFacts, OpenFacts, ProviderCatalog, ServerDefaults};
 use super::terminal::{Mux, MuxOutput, TerminalEnv};
-use super::{OpenCaller, OpenError, ServiceTier, SessionOpenRequest};
+use super::{AgentProvider, OpenCaller, OpenError, ServiceTier, SessionOpenRequest};
 
 const SCOPE: [&str; 6] = ["systemd-run", "--user", "--scope", "--collect", "-q", "--"];
 
@@ -152,6 +152,9 @@ impl OpenFacts for Facts {
     fn providers(&self) -> Result<ProviderCatalog, OpenError> { self.local.providers() }
     fn creator(&self, name: &str) -> Result<Option<CreatorFacts>, OpenError> { self.local.creator(name) }
     fn defaults(&self) -> ServerDefaults { self.local.defaults() }
+    fn saved_defaults(&self, provider: AgentProvider, engine: &str, engine_account: &str) -> Result<Option<crate::session_defaults::Defaults>, String> {
+        self.local.saved_defaults(provider, engine, engine_account)
+    }
     fn codex_logins(&self) -> Result<Vec<CodexLogin>, OpenError> { self.local.codex_logins() }
     fn claude_quotas(&self) -> Vec<Value> {
         self.record.lock().unwrap().rust_bridge.push(json!({"bridge": "accounts", "op": "quotas", "args": {"cached_only": true}}));

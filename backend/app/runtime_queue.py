@@ -21,7 +21,7 @@ _RECENT_CALLS = 256
 _FINAL = {"accepted", "rejected", "confirmed"}
 _TARGETED = {"prepare", "bind_dispatch", "begin_dispatch", "finish", "late_rpc_resolution", "confirm_occurrence"}
 # Ações cujo resultado é a operação inteira. Mesmo conjunto de `OPERATION_RECEIPTS` em queue.rs.
-_OPERATION_RECEIPTS = {"prepare", "bind_dispatch", "begin_dispatch", "mark_writing", "finish", "late_rpc_resolution"}
+_OPERATION_RECEIPTS = {"prepare", "bind_dispatch", "bind_dispatch_if_prepared", "begin_dispatch", "mark_writing", "finish", "late_rpc_resolution"}
 _RECEIPT_METADATA = {"native", "message_id", "native_status", "cleanup", "code", "stage",
                      "preserve_binding", "queued", "already_confirmed", "disposition", "draft",
                      # A repetição da reabertura em bypass só se reconhece por estes campos.
