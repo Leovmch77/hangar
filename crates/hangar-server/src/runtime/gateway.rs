@@ -1368,8 +1368,17 @@ impl RuntimeRegistry {
             Err(error)=>Err(error.clone()),
             Ok(_)=>cano::connect(&target.binding).await,
         };
+        // Cano vivo da chave (não o subido aqui) que não atendeu: o ator nasce religando a ele, nunca sem ator.
+        let adopted_live = connection.is_err() && target.provider == "claude" && matches!(launched,Ok(None)) && {
+            let (pid,key) = (target.binding.pid,target.key.clone());
+            tokio::task::spawn_blocking(move||process::liveness(pid,&key)==process::Liveness::Ours).await.unwrap_or(false)
+        };
         let connection = match connection {
-            Ok(connection)=>connection,
+            Ok(connection)=>Some(connection),
+            Err(error) if adopted_live=>{
+                tracing::info!(key=%target.key,session=%target.name,code=%error.code,"cano vivo não atendeu a abertura; o ator nasce religando");
+                None
+            },
             Err(error)=>{
                 if let Err(stop) = queue.shutdown().await {
                     tracing::warn!(key=%target.key,code=%error.code,stop=?stop.kind(),"fila não fechou depois da falha ao conectar no cano");
@@ -1409,7 +1418,8 @@ impl RuntimeRegistry {
             };
             let process=procs.recipe(pid).map_err(|_|failure("lifecycle_process_read"))?;
             let argv_sid=super::claude_relaunch::Recipe::argument_conversation(&process)?;
-            if argv_sid!=sid && !connection.snapshot.init.as_ref().and_then(|raw|serde_json::from_str::<Value>(raw).ok()).is_some_and(|event|event["session_id"]==sid) {return Err(failure("relaunch_conversation"));}
+            // Sem conexão não há retrato para conferir; a conversa que ele trouxer ao religar passa pela troca de conversa do ator.
+            if argv_sid!=sid && connection.as_ref().is_some_and(|connection|!connection.snapshot.init.as_ref().and_then(|raw|serde_json::from_str::<Value>(raw).ok()).is_some_and(|event|event["session_id"]==sid)) {return Err(failure("relaunch_conversation"));}
             let mut recipe=super::claude_relaunch::Recipe::capture(procs.as_ref(),i64::from(target.binding.pid),pid,birth,&argv_sid,false)?;
             recipe.preserve_settings(target.state_path.parent().ok_or_else(||failure("relaunch_settings_copy"))?)?;
             Some(Arc::new(recipe))
@@ -1424,12 +1434,16 @@ impl RuntimeRegistry {
         // de a tarefa do ator existir: a primeira faixa publicada já encontra a sessão no `Mods`.
         // A vida no `Mods` é única no servidor; o processo é a chave durável mais o cano, que o renomear mantém.
         let life = engine.mods_life();
-        let handle = RuntimeActor::spawn_with(target.clone(),queue,connection,engine,|handle| {
+        let attach = |handle:&RuntimeHandle| {
             if target.provider == "claude" && let Some(mods) = &self.mods {
                 let process = format!("{}:{}:{}",target.key,target.binding.pid,target.binding.escuta);
                 mods.attach_process(&target.name,&process,life,Arc::new(handle.clone()));
             }
-        });
+        };
+        let handle = match connection {
+            Some(connection)=>RuntimeActor::spawn_with(target.clone(),queue,connection,engine,attach),
+            None=>RuntimeActor::spawn_unconnected_with(target.clone(),queue,engine,attach),
+        };
         if let Ok(mut parked)=self.barrier(&target.key).await.parked.lock() {*parked=None;}
         self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,handle:EntryHandle::Headless(handle.clone()),
             lease_path:target.lease_path.clone(),name:target.name.clone(),mods_life:life,provider:target.provider.clone(),account_key:Some(account_guard.key.clone()),relaunch:claude_recipe,settings_owner:None,
@@ -3895,7 +3909,7 @@ mod tests {
     async fn a_respawn_admitted_after_the_close_cancelled_does_not_reopen_the_closed_session() {
         let home=tempfile::tempdir().unwrap();
         let (key,name)=("c3".repeat(16),"cl-close-race");
-        let (cano,escuta,accepts,_cut,server)=serving_cano(home.path(),&key,|_|false).await;
+        let (cano,escuta,accepts,_cut,_,server)=serving_cano(home.path(),&key,|_|false).await;
         let sidecar=json!({"name":name,"key":key,"cwd":home.path(),"session_id":"a","headless":true,"initialized":true,"permission_mode":"manual",
             "cano":{"pid":cano.0.id(),"escuta":escuta,"token":"fixture","versao":2}});
         // O `close` sem matar deixa o sidecar: só a vaga da religação pode impedir a volta.
@@ -3938,22 +3952,23 @@ mod tests {
     }
 
     /// Cano de verdade da chave e um servidor que atende várias conexões: `refuse(n)` fecha a n-ésima (a
-    /// primeira é 1) logo depois do pedido; `cut` derruba a conexão servida.
+    /// primeira é 1) logo depois do pedido; `cut` derruba a conexão servida; `lines` anota o que chega depois do retrato.
     #[cfg(target_os="linux")]
     #[allow(clippy::type_complexity)]
     async fn serving_cano(dir:&std::path::Path,key:&str,refuse:fn(usize)->bool)
-        -> (Reaped,String,Arc<std::sync::atomic::AtomicUsize>,Arc<tokio::sync::Notify>,tokio::task::JoinHandle<()>) {
+        -> (Reaped,String,Arc<std::sync::atomic::AtomicUsize>,Arc<tokio::sync::Notify>,Arc<std::sync::Mutex<Vec<String>>>,tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader};
         let (child,_,_,unused)=park_cano(dir,key).await;
         unused.abort();
         let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
         let (accepts,cut)=(Arc::new(std::sync::atomic::AtomicUsize::new(0)),Arc::new(tokio::sync::Notify::new()));
-        let (counted,cutting)=(accepts.clone(),cut.clone());
+        let lines=Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (counted,cutting,seen)=(accepts.clone(),cut.clone(),lines.clone());
         let server=tokio::spawn(async move {
             let mut connections=tokio::task::JoinSet::new();
             while let Ok((socket,_))=listener.accept().await {
                 let n=counted.fetch_add(1,std::sync::atomic::Ordering::SeqCst)+1;
-                let cutting=cutting.clone();
+                let (cutting,seen)=(cutting.clone(),seen.clone());
                 connections.spawn(async move {
                     let mut socket=BufReader::new(socket);let mut line=String::new();
                     if socket.read_line(&mut line).await.unwrap_or(0)==0 || refuse(n) {return;}
@@ -3961,12 +3976,12 @@ mod tests {
                     if socket.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.is_err() {return;}
                     loop {
                         line.clear();
-                        tokio::select! { _=cutting.notified()=>break, read=socket.read_line(&mut line)=>if read.unwrap_or(0)==0 {break} }
+                        tokio::select! { _=cutting.notified()=>break, read=socket.read_line(&mut line)=>if read.unwrap_or(0)==0 {break} else {seen.lock().unwrap().push(line.clone())} }
                     }
                 });
             }
         });
-        (child,format!("tcp:{address}"),accepts,cut,server)
+        (child,format!("tcp:{address}"),accepts,cut,lines,server)
     }
 
     /// Conversa aberta (`request_reopen`) numa sessão sem terminal saudável com religação marcada para
@@ -3976,7 +3991,7 @@ mod tests {
     async fn request_reopen_wakes_the_scheduled_reconnect_of_a_healthy_headless_claude() {
         let home=tempfile::tempdir().unwrap();
         let (key,name)=("b2".repeat(16),"cl-reopen-wake");
-        let (cano,escuta,accepts,cut,server)=serving_cano(home.path(),&key,|n|n==2).await;
+        let (cano,escuta,accepts,cut,_,server)=serving_cano(home.path(),&key,|n|n==2).await;
         let dir=home.path().join(".hangar/claude-headless");std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(format!("{name}.json")),json!({"name":name,"key":key,"cwd":home.path(),"session_id":"a","headless":true,"initialized":true,
             "permission_mode":"manual","cano":{"pid":cano.0.id(),"escuta":escuta,"token":"fixture","versao":2}}).to_string()).unwrap();
@@ -4005,6 +4020,113 @@ mod tests {
         assert_eq!(generation,1,"religar não é reabrir");
         let snapshot=handle.snapshot().await.unwrap();
         assert!(snapshot["error"].is_null(),"religada sem erro: {snapshot}");
+        registry.close(&key,1).await.unwrap();
+        server.abort();
+    }
+
+    /// Sessão sem terminal com o cano vivo da chave (`refuse` decide quais conexões ele recusa) e a subida do
+    /// servidor sobre ela.
+    #[cfg(target_os="linux")]
+    #[allow(clippy::type_complexity)]
+    async fn boot_over_live_cano(home:&std::path::Path,key:&str,name:&str,initialized:bool,refuse:fn(usize)->bool,configure:impl FnOnce(RuntimeRegistry)->RuntimeRegistry)
+        -> (Reaped,Arc<std::sync::atomic::AtomicUsize>,Arc<std::sync::Mutex<Vec<String>>>,tokio::task::JoinHandle<()>,Arc<RuntimeRegistry>,crate::side::Hubs) {
+        let (cano,escuta,accepts,_cut,lines,server)=serving_cano(home,key,refuse).await;
+        let dir=home.join(".hangar/claude-headless");std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{name}.json")),json!({"name":name,"key":key,"cwd":home,"session_id":"a","headless":true,"initialized":initialized,
+            "permission_mode":"manual","cano":{"pid":cano.0.id(),"escuta":escuta,"token":"fixture","versao":2}}).to_string()).unwrap();
+        let processes=Arc::new(ParkProcesses {canos:std::sync::Mutex::new(vec![i64::from(cano.0.id())]),dir:home.into(),agent:Default::default()});
+        let (registry,hubs)=park_registry(home,processes,configure);
+        registry.clone().register_claude_headless().await;
+        (cano,accepts,lines,server,registry,hubs)
+    }
+
+    /// Mensagem pelo caminho do app (`route_write`), sem esperar a confirmação que o cano falso não manda.
+    #[cfg(target_os="linux")]
+    async fn send_text(registry:&Arc<RuntimeRegistry>,name:&str,id:&str,text:&str) -> Result<RuntimeReply,RuntimeError> {
+        let crate::session_write::Write::Rust(pass,target)=crate::session_write::route_write(registry,name,crate::session_write::WriteRoute::Input,Duration::from_secs(5)).await
+            else {panic!("a escrita não chegou ao ator do Rust")};
+        let _pass=pass;
+        let command=RuntimeCommand {operation_id:id.into(),kind:OperationKind::Input,payload:json!({"text":text,"pre_transcript":false})};
+        tokio::time::timeout(Duration::from_millis(500),target.handle.command(command)).await.unwrap_or_else(|_|Err(failure("fixture_no_ack")))
+    }
+
+    /// Subida com o cano vivo da chave que recusa a primeira conexão: a sessão nasce com ator, saudável e sem
+    /// aviso, religa na tentativa seguinte e entrega o que chega depois.
+    #[cfg(target_os="linux")]
+    #[tokio::test]
+    async fn boot_with_live_unreachable_cano_keeps_retrying() {
+        let home=tempfile::tempdir().unwrap();
+        let (key,name)=("d4".repeat(16),"cl-boot-retry");
+        let (_cano,accepts,lines,server,registry,_hubs)=boot_over_live_cano(home.path(),&key,name,true,|n|n==1,|registry|registry).await;
+        let handle=registry.handle(&key,1).await.expect("cano vivo na subida nunca fica sem ator");
+        let snapshot=handle.snapshot().await.unwrap();
+        assert!(snapshot["error"].is_null() && snapshot["view"]["alive"]!=false,"nasce saudável: {snapshot}");
+        assert!(registry.runtime_lost(name).await.is_none(),"sem código de sessão perdida");
+        let deadline=std::time::Instant::now()+Duration::from_secs(20);
+        while accepts.load(std::sync::atomic::Ordering::SeqCst)<2 {
+            assert!(std::time::Instant::now()<deadline,"a religação não tentou de novo");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let view=handle.view().await.unwrap();
+        assert!(view["public_state"]["problema"].is_null(),"religar não mostra aviso: {view}");
+        let _=send_text(&registry,name,"depois","oi-depois-da-subida").await;
+        let delivered=||lines.lock().unwrap().iter().filter(|line|line.contains("oi-depois-da-subida")).count();
+        while delivered()==0 {
+            assert!(std::time::Instant::now()<deadline,"a sessão religada não entregou");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(delivered(),1,"entregue uma vez");
+        assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst),2,"uma religação só");
+        registry.close(&key,1).await.unwrap();
+        server.abort();
+    }
+
+    /// Escrita que chega na subida antes da primeira conexão ao cano vivo: espera na fila e sai quando ele atende.
+    #[cfg(target_os="linux")]
+    #[tokio::test]
+    async fn boot_write_before_the_first_connection_waits_and_is_delivered() {
+        let home=tempfile::tempdir().unwrap();
+        let (key,name)=("e5".repeat(16),"cl-boot-write");
+        let hour=Duration::from_secs(3600);
+        let (_cano,accepts,lines,server,registry,_hubs)=boot_over_live_cano(home.path(),&key,name,true,|n|n<=2,
+            |registry|registry.with_reconnect_waits(vec![Duration::ZERO,hour],vec![Duration::ZERO,hour],hour)).await;
+        let deadline=std::time::Instant::now()+Duration::from_secs(20);
+        while accepts.load(std::sync::atomic::Ordering::SeqCst)<2 {
+            assert!(std::time::Instant::now()<deadline,"a primeira tentativa do ator não saiu");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let delivered=||lines.lock().unwrap().iter().filter(|line|line.contains("oi-antes-de-conectar")).count();
+        let reply=send_text(&registry,name,"antes","oi-antes-de-conectar").await.expect("a escrita entra no ator");
+        assert_eq!(reply.disposition,Disposition::Deferred,"sem conexão, fica na fila: {reply:?}");
+        while delivered()==0 {
+            assert!(std::time::Instant::now()<deadline,"a mensagem da fila não saiu ao conectar");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(delivered(),1,"entregue uma vez");
+        assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst),3,"a mensagem antecipou a tentativa marcada");
+        registry.close(&key,1).await.unwrap();
+        server.abort();
+    }
+
+    /// Sessão que ainda não tinha inicializado e cujo cano não atendeu na subida: o `initialize` sai na
+    /// primeira conexão, uma vez.
+    #[cfg(target_os="linux")]
+    #[tokio::test]
+    async fn boot_without_initialization_initializes_on_the_first_connection() {
+        let home=tempfile::tempdir().unwrap();
+        let (key,name)=("f6".repeat(16),"cl-boot-init");
+        let (_cano,accepts,lines,server,registry,_hubs)=boot_over_live_cano(home.path(),&key,name,false,|n|n==1,|registry|registry).await;
+        let initializes=||lines.lock().unwrap().iter().filter(|line|line.contains("initialize")).count();
+        let deadline=std::time::Instant::now()+Duration::from_secs(20);
+        while initializes()==0 {
+            assert!(std::time::Instant::now()<deadline,"o initialize não saiu ao conectar (conexões: {})",accepts.load(std::sync::atomic::Ordering::SeqCst));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(initializes(),1,"uma vez");
+        assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst),2);
         registry.close(&key,1).await.unwrap();
         server.abort();
     }

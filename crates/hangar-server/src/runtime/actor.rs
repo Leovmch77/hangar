@@ -656,17 +656,23 @@ impl RuntimeActor {
     /// esperam na caixa.
     pub fn spawn_with(target:RuntimeTarget,queue:QueueActor,connection:impl Into<RuntimeConnection>,engine:RuntimeEngine,
         before:impl FnOnce(&RuntimeHandle)) -> RuntimeHandle {
-        Self::start(target,queue,connection.into(),engine,before,None)
+        Self::start(target,queue,Some(connection.into()),engine,before,None)
+    }
+
+    /// Claude sem terminal cujo cano vivo não atendeu a abertura: o ator nasce como depois de uma queda do
+    /// socket (fila segurando, religação marcada) e hidrata e inicializa na primeira conexão.
+    pub fn spawn_unconnected_with(target:RuntimeTarget,queue:QueueActor,engine:RuntimeEngine,before:impl FnOnce(&RuntimeHandle)) -> RuntimeHandle {
+        Self::start(target,queue,None,engine,before,None)
     }
 
     /// Codex com terminal: o WebSocket do app-server adotado. A queda do socket reconecta ao mesmo
     /// processo (revalidado em `adoption`), sem religar, subir nem matar nada.
     pub fn spawn_adopted(target:RuntimeTarget,queue:QueueActor,connection:WebSocketConnection,engine:RuntimeEngine,
         adoption:super::codex_terminal::Adoption) -> RuntimeHandle {
-        Self::start(target,queue,RuntimeConnection::WebSocket(connection),engine,|_|{},Some(adoption))
+        Self::start(target,queue,Some(RuntimeConnection::WebSocket(connection)),engine,|_|{},Some(adoption))
     }
 
-    fn start(target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnection,engine:RuntimeEngine,
+    fn start(target:RuntimeTarget,queue:QueueActor,connection:Option<RuntimeConnection>,engine:RuntimeEngine,
         before:impl FnOnce(&RuntimeHandle),adoption:Option<super::codex_terminal::Adoption>) -> RuntimeHandle {
         let (sender,receiver) = mpsc::channel(64);
         let events = engine.publisher.clone().unwrap_or_else(||broadcast::channel(256).0);
@@ -733,21 +739,23 @@ impl Drop for ClearOnDrop {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnection,mut engine:RuntimeEngine,
+async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<RuntimeConnection>,mut engine:RuntimeEngine,
     mut receiver:mpsc::Receiver<Message>,internal:mpsc::Sender<Message>,closed:Arc<AtomicBool>,events:broadcast::Sender<RuntimeEvent>,
     adoption:Option<super::codex_terminal::Adoption>) -> Result<(),RuntimeError> {
     let start = Instant::now();
     let initial = queue.initial_state().clone();
     engine.restore(&initial);
     // Socket novo nunca herda `connected`/`subscribed` da vista salva: inicializa e assina de novo.
-    let adopted = matches!(connection,RuntimeConnection::WebSocket(_));
+    let adopted = matches!(connection,Some(RuntimeConnection::WebSocket(_)));
+    let unconnected = connection.is_none();
     let (snapshot,io) = match connection {
-        RuntimeConnection::Cano(connection) => (Some(connection.snapshot.clone()),connection.start(target.generation,128)),
-        RuntimeConnection::WebSocket(connection) => {
+        Some(RuntimeConnection::Cano(connection)) => (Some(connection.snapshot.clone()),connection.start(target.generation,128)),
+        Some(RuntimeConnection::WebSocket(connection)) => {
             // Sem `launch`, religar e matar recusam: o app-server adotado não é do ator.
             engine.launch = None;
             (None,connection.start(target.generation,128))
         }
+        None => (None,super::codex_terminal::closed_io()),
     };
     let mut io = io.hold_lease(queue.lease());
     let queue = Arc::new(queue);
@@ -839,7 +847,17 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
     let mut hold_waiters:Vec<oneshot::Sender<Result<TurnHold,RuntimeError>>> = Vec::new();
     // O snapshot é do cano; no WebSocket o estado vem do próprio app-server depois de conectar.
     if let Some(snapshot) = snapshot { effects.extend(engine.hydrate(snapshot)?); }
-    if adopted || engine.view()["initialized"] != true || target.provider == "codex" && engine.view()["ready"] != true {
+    // Sem conexão na abertura: o mesmo estado da queda do socket, e a inicialização que faltar sai ao conectar.
+    let mut boot_pending = false;
+    if unconnected {
+        io_open = false;
+        let sample = clock(start);
+        (cano_lost,lost_at,stall_dirty) = (true,sample.epoch_s,true);
+        cano_check_at = Some(sample.monotonic_s + engine.reconnect_waits.check.as_secs_f64());
+        effects.extend(engine.transport_lost("",&BTreeSet::new())?);
+        reconnect.schedule(sample.monotonic_s,false);
+        boot_pending = engine.view()["initialized"] != true;
+    } else if adopted || engine.view()["initialized"] != true || target.provider == "codex" && engine.view()["ready"] != true {
         let mut id = if target.provider=="claude" {format!("bootstrap:{}:{}:{}:{}",target.key,target.generation,target.binding.pid,target.metadata["cano"]["process_birth"])} else {format!("bootstrap:{}:{}",target.key,target.generation)};
         // Vida nova do ator na mesma geração (reabertura): a subida da vida anterior já fechou e não pode ser
         // reenviada; esta sobe com outra operação, senão o `initialize` nunca sai.
@@ -1745,6 +1763,13 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                         (cano_lost,cano_check_at,stall_due) = (false,None,None);
                         tracing::info!(key=%target.key,session=%target.name,"Claude sem terminal religado ao mesmo cano");
                         effects.extend(engine.reattach(snapshot)?);
+                        if std::mem::take(&mut boot_pending) {
+                            let id = format!("bootstrap:{}:{}:{}",target.key,target.generation,unique());
+                            match queue.exec(target.generation,&format!("prepare:{id}"),clock(start),Action::Prepare { id:id.clone(),payload:json!({"kind":"bootstrap"}),entry_id:None }).await {
+                                Ok(_)=>effects.extend(engine.initialize(id)?),
+                                Err(failure)=>enter_error(&mut error,&target,io_failure(failure)),
+                            }
+                        }
                         if std::mem::take(&mut stall_shown) { effects.extend(engine.clear_problem(DELIVERY_STALLED)); }
                         // O que pode ter saído antes da queda se acerta com o transcript antes da entrega nova.
                         if !confirming {
