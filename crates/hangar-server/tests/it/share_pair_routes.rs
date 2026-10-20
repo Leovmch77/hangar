@@ -806,6 +806,20 @@ async fn two_pairs_on_one_token_each_speak_and_leave_for_themselves() {
     assert_eq!(e.last_input()["text"], "[de fora: pc-ana::Y] só eu");
 }
 
+/// O mesmo aviso de grupo vindo por duas máquinas do outro dono (dois pares, endereços diferentes)
+/// entra uma vez: a chave é o `notice` e o destino, nunca quem mandou.
+#[tokio::test(flavor = "multi_thread")]
+async fn outside_notice_deduped_across_own_machines() {
+    let e = env().await;
+    let (_, casa) = e.seed_pair("s0", "pc-ana-casa", "Y", ADDR);
+    let (_, lab) = e.seed_pair("s0", "pc-ana-lab", "Y", "https://b.tail.ts.net:8443");
+    for token in [&casa, &lab] {
+        let (status, body) = e.message(token, json!({"text": "oi", "group": true, "session": "s0", "notice": "n-1"})).await;
+        assert_eq!(status, 200, "{body}");
+    }
+    assert_eq!(e.inputs("s0"), 1);
+}
+
 // --- envio do dono ----------------------------------------------------------------------------
 
 async fn send(e: &Env, over: Value) -> (u16, Value) {

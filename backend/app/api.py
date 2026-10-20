@@ -606,7 +606,7 @@ async def _jev_aux_pelo_rust(request: Request, call_next):
 
 # Grupo entre máquinas: rotas só do Rust. Pelas portas do Python (Connect) só repasse, nunca o 404 sem
 # código que a outra máquina leria como versão antiga.
-_GRUPOS_RUST = re.compile(r"^/api/groups/[^/]+(/ops)?$")
+_GRUPOS_RUST = re.compile(r"^/api/groups/[^/]+(/ops|/deliver|/contract)?$")
 _GRUPO_DA_SESSAO = re.compile(r"^/api/sessions/[^/]+/group$")
 
 

@@ -151,6 +151,7 @@ mod groups_convert;
 mod groups_deliver;
 mod groups_federation;
 mod groups_fed_exit;
+mod groups_fed_notice;
 mod groups_legacy;
 mod groups_local;
 mod groups_outbox;

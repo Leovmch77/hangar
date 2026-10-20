@@ -44,12 +44,14 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/sessions/{name}/pair", post(pair).delete(unpair).fallback(pass_any))
         .route("/api/sessions/{name}/group-message", post(group_message).fallback(pass_any))
-        .route("/api/sessions/{name}/pair/contract", get(contract).fallback(pass_any))
+        .route("/api/sessions/{name}/pair/contract", get(contract).put(super::fed_notice::session_contract_put).fallback(pass_any))
         .route("/api/sessions/{name}/pair-remote", post(super::legacy::pair_remote).fallback(pass_any))
         .route("/api/sessions/{name}/unpair-remote", post(super::legacy::unpair_remote).fallback(pass_any))
         .route("/api/sessions/{name}/group", get(super::federation::session_group).fallback(pass_any))
         .route("/api/groups/{gid}", get(super::federation::get_record).put(super::federation::put_record))
         .route("/api/groups/{gid}/ops", post(super::federation::ops))
+        .route("/api/groups/{gid}/deliver", post(super::fed_notice::deliver))
+        .route("/api/groups/{gid}/contract", get(super::fed_notice::owner_contract).put(super::fed_notice::owner_contract))
 }
 
 /// Pedido do dono que o Rust atende, com o corpo já lido.
@@ -360,6 +362,8 @@ pub(super) async fn group_message(State(st): State<Arc<AppState>>, ConnectInfo(p
     let Some(link) = link.filter(|l| !l.peers.is_empty()) else {
         return asked.refuse(StatusCode::NOT_FOUND, "erro_sessao_sem_grupo", "sessão não está num grupo", json!({}));
     };
+    // Grupo entre máquinas: limite e espalhamento são da dona.
+    if link.fed.is_some() { return super::fed_notice::group_message(&asked, &link, body.text).await; }
     if storm(&link.gid) {
         return asked.refuse(StatusCode::TOO_MANY_REQUESTS, "erro_group_message_tempestade",
             &format!("mais de {STORM_MAX} avisos de grupo em {}s — parece loop; espere ou responda 1:1", STORM_WINDOW.as_secs()),
@@ -396,6 +400,7 @@ pub(super) async fn contract(State(st): State<Arc<AppState>>, ConnectInfo(peer):
     let Some(link) = link else {
         return asked.refuse(StatusCode::NOT_FOUND, "erro_sessao_nao_pareada", "sessão não está pareada", json!({}));
     };
+    if link.fed.is_some() { return super::fed_notice::session_contract(&asked, &link).await; }
     let path = asked.groups.contract_path(&link.gid);
     let shown = path.to_string_lossy().into_owned();
     // Ausente = contrato ainda vazio, como no Python; ilegível é falha, nunca "vazio".

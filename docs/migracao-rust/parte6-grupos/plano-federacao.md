@@ -688,16 +688,16 @@ outra máquina ficam de fora da sugestão — registrar como limite na `docs/dec
 **Fecha:** I-4A, I-6A, I-7A, BRG-31, BRG-32 (sem mudança, motivo registrado), BRG-33 (limite),
 Review Focus 6.
 
-- [ ] **Step 1: Testes**: `notice_reaches_every_machine`; `notice_reaches_outside_once`;
+- [x] **Step 1: Testes**: `notice_reaches_every_machine`; `notice_reaches_outside_once`;
   `storm_counts_only_at_the_owner`; `outside_notice_never_leaves_to_third_parties`;
   `contract_put_conflict_is_409`; `owner_down_contract_is_503`;
   `owner_down_same_machine_still_delivers` (membros da mesma máquina recebem, as outras vêm em
   `pulados`); `outside_notice_deduped_across_own_machines`; e em Python
   `test_bastao_cites_remote_owner_contract`.
-- [ ] **Step 2: Rodar e ver falhar.**
-- [ ] **Step 3: Implementar.**
-- [ ] **Step 4: Rodar.** Esperado: PASS.
-- [ ] **Step 5: Commit** — `feat(groups): group notices and the shared contract through the owner machine`.
+- [x] **Step 2: Rodar e ver falhar.**
+- [x] **Step 3: Implementar.**
+- [x] **Step 4: Rodar.** Esperado: PASS.
+- [x] **Step 5: Commit** — `feat(groups): group notices and the shared contract through the owner machine`.
 
 ---
 

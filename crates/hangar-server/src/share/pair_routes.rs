@@ -810,6 +810,19 @@ fn seen_notices() -> std::sync::MutexGuard<'static, std::collections::HashMap<St
     SEEN.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Chave do aviso entregue: o destino (máquina `me` e sessão) e o `notice`, nunca quem mandou. O
+/// mesmo aviso vindo por duas máquinas do outro dono, ou pelo par e pela dona do grupo, entra uma vez.
+pub(crate) fn notice_key(me: &str, notice: &str, session: &str) -> String { format!("{me}\n{notice}\n{session}") }
+
+/// Já entregue dentro da janela da tempestade (o mapa é podado aqui).
+pub(crate) fn notice_seen(key: &str) -> bool {
+    let mut seen = seen_notices();
+    seen.retain(|_, t| t.elapsed() < STORM_WINDOW);
+    seen.contains_key(key)
+}
+
+pub(crate) fn notice_mark(key: String) { seen_notices().insert(key, std::time::Instant::now()); }
+
 async fn pair_message(State(st): St, caller: Option<Extension<Caller>>, bytes: Bytes) -> Response {
     let (v, map) = match fields(&bytes, &[("text", true, Some(MAX_MESSAGE))], false) { Ok(v) => v, Err(r) => return r };
     // `from` é só o nome da sessão de lá; a máquina sai do registro.
@@ -840,29 +853,32 @@ async fn pair_message(State(st): St, caller: Option<Extension<Caller>>, bytes: B
         }
     };
     // Máquina pelo registro (carimbado pelo token), sessão pelo `from` validado; nunca do texto.
-    let text = format!("[de fora: {}::{}] {}", rec.alias, from.as_deref().unwrap_or(&rec.peer_session), pairs::sanitize_message(&v[0]));
+    let who = format!("{}::{}", rec.alias, from.as_deref().unwrap_or(&rec.peer_session));
+    let clean = pairs::sanitize_message(&v[0]);
+    let text = format!("[de fora: {who}] {clean}");
     if map.get("group").and_then(Value::as_bool) == Some(true) {
-        // Um salto: só os locais do grupo do par recebem; nada volta a sair desta máquina.
+        // Um salto: só os locais do grupo do par recebem; nada volta a sair a outro par de fora.
         let mut last = (StatusCode::OK, json!({"ok": true}));
         let mut delivered = false;
         let notice = map.get("notice").and_then(Value::as_str).filter(|n| !n.is_empty() && n.len() <= 64);
-        if notice.is_some() { seen_notices().retain(|_, t| t.elapsed() < STORM_WINDOW); }
+        let me = server_id(&st.app);
         for session in &locals {
-            let key = notice.map(|n| format!("{}\n{n}\n{session}", rec.peer_address));
-            // A entrega de antes pode vencer enquanto as outras sessões recebem: a hora vale aqui.
-            if key.as_deref().is_some_and(|k| seen_notices().get(k).is_some_and(|t| t.elapsed() < STORM_WINDOW)) {
+            let key = notice.map(|n| notice_key(&me, n, session));
+            if key.as_deref().is_some_and(notice_seen) {
                 delivered = true;
                 continue;
             }
             let (status, reply) = write_input(&st.app, session, &text, true).await;
             if status.is_success() {
                 delivered = true;
-                if let Some(k) = key { seen_notices().insert(k, std::time::Instant::now()); }
+                if let Some(k) = key { notice_mark(k); }
             } else {
                 tracing::warn!(code = "external_pair_group_notice_failed", session = %session, status = status.as_u16(), "par externo: aviso de grupo de fora não entregue");
                 last = (status, reply);
             }
         }
+        // Grupo entre máquinas: a dona leva às outras máquinas do dono, nunca a outro par de fora.
+        crate::groups::fed_notice::relay_outside(st.app.clone(), pair.session.clone(), who, clean, notice.unwrap_or_default().to_owned());
         return if delivered { json_response(StatusCode::OK, json!({"ok": true})) } else { json_response(last.0, last.1) };
     }
     // `to` = a sessão daqui que a resposta 1:1 nomeia; sem ele, a de `session` se for do grupo.

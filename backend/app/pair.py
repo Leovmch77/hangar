@@ -54,7 +54,7 @@ class PairLink:
         return {"peers": peers, "task": data.get("task", ""),
                 "gid": data.get("gid") or _gid_legado(self.name, peers),
                 "harness": harness if isinstance(harness, dict) else {},
-                "orq": data.get("orq") is True}
+                "orq": data.get("orq") is True, "dona": fed.get("owner") if isinstance(fed := data.get("fed"), dict) and fed.get("local") is False else None}
 
 
 def _arquivo_dir() -> Path:

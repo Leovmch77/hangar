@@ -5,6 +5,7 @@ pub mod convert;
 pub mod deliver;
 pub mod exit;
 pub mod fed_exit;
+pub mod fed_notice;
 pub mod federation;
 pub mod legacy;
 pub mod link_return;

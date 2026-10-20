@@ -297,6 +297,18 @@ def test_com_contrato_o_dossie_diz_quem_ganha_na_divergencia(tmp_path):
     assert "vale o contrato" in bloco
 
 
+def test_bastao_cites_remote_owner_contract(tmp_path):
+    """Grupo entre máquinas com a dona em outra máquina: o arquivo não existe aqui; o dossiê aponta a
+    máquina dona e o comando que lê por ela."""
+    from app import pair
+    (pair._pair_dir() / "origem.json").write_text(json.dumps(
+        {"peers": ["casa::parceira"], "task": "", "gid": "g1", "fed": {"owner": "casa", "local": False, "version": 1}}))
+    md = bastao.montar(str(FIX / "jsonl_samples.jsonl"), None, "claude", "origem")
+    bloco = md.split("## Grupo e par", 1)[1].split("## ", 1)[0]
+    assert "na máquina `casa`" in bloco and "hangar-send --contrato" in bloco
+    assert "grupo-g1.md" not in bloco
+
+
 def test_as_secoes_de_citacao_dizem_no_titulo_que_sao_citacao(tmp_path):
     """O rótulo vai no TÍTULO, não só no aviso da abertura: num dossiê de 200 linhas ninguém lê as
     duas últimas seções perto do cabeçalho, e são justamente elas as mais acionáveis."""

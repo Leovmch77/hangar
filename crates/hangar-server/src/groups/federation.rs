@@ -309,6 +309,7 @@ enum OpsBody {
     Outside { protocol: u32, #[serde(rename = "origin")] _origin: String, link: bool, outside: OutsideRef },
     Leave { protocol: u32, origin: String, member: String },
     Rename { protocol: u32, origin: String, from: String, to: String },
+    Message { protocol: u32, origin: String, sender: String, text: String, #[serde(default)] notice: String, #[serde(default)] from_outside: bool },
 }
 
 /// `POST /api/groups/{gid}/ops`: pedido de outra máquina à dona. `leave`/`rename`/`message` são
@@ -327,6 +328,8 @@ pub(super) async fn ops(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conn
         }
         OpsBody::Leave { protocol, origin, member } if protocol == PROTOCOL => super::fed_exit::leave_op(&m.st, &m.groups, &m.gid, &origin, &member).await,
         OpsBody::Rename { protocol, origin, from, to } if protocol == PROTOCOL => super::fed_exit::rename_op(&m.st, &m.groups, &m.gid, &origin, &from, &to).await,
+        OpsBody::Message { protocol, origin, sender, text, notice, from_outside } if protocol == PROTOCOL && notice.len() <= 64 =>
+            super::fed_notice::owner_message(&m.st, &m.groups, &m.gid, super::fed_notice::Notice { origin, sender, text, notice, from_outside }).await,
         _ => return crate::session_write::invalid_body(&m.parts.headers),
     };
     m.answer(result)
@@ -1164,7 +1167,7 @@ pub fn spawn(st: Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
 pub fn forwarded_route(method: &axum::http::Method, path: &str) -> bool {
     let groups = path.strip_prefix("/api/groups/").is_some_and(|rest| match rest.split_once('/') {
         None => !rest.is_empty(),
-        Some((gid, tail)) => !gid.is_empty() && tail == "ops",
+        Some((gid, tail)) => !gid.is_empty() && (tail == "ops" || super::fed_notice::owns_tail(tail)),
     });
     let session = *method == axum::http::Method::GET && path.strip_prefix("/api/sessions/").and_then(|r| r.strip_suffix("/group")).is_some_and(|n| !n.is_empty() && !n.contains('/'));
     groups || session
@@ -1178,6 +1181,9 @@ pub async fn serve_forwarded(st: Arc<AppState>, peer: SocketAddr, mut req: Reque
     let state = State(st);
     let info = ConnectInfo(peer);
     if path.starts_with("/api/sessions/") { return session_group(state, info, req).await; }
+    if path.rsplit_once('/').is_some_and(|(_, tail)| super::fed_notice::owns_tail(tail)) {
+        return super::fed_notice::serve_forwarded(state.0, peer, req).await;
+    }
     match (method, path.ends_with("/ops")) {
         (axum::http::Method::POST, true) => ops(state, info, req).await,
         (axum::http::Method::GET, false) => get_record(state, info, req).await,
