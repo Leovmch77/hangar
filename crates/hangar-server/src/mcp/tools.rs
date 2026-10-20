@@ -1,4 +1,4 @@
-//! As 15 tools. Cada uma chama a rota pública que o `hangar-send`/`hangar-preview` chama, pelo
+//! As 16 tools. Cada uma chama a rota pública que o `hangar-send`/`hangar-preview` chama, pelo
 //! roteador deste processo e como o dono; o `html_render` publica direto na loja de páginas e os
 //! verbos do navegador vão ao app desktop, como no CLI.
 use std::collections::HashMap;
@@ -103,6 +103,10 @@ struct Pair { #[serde(default)] alvo: String, #[serde(default)] tarefa: String, 
 #[derive(Deserialize)]
 struct OnlySession { #[serde(default)] sessao: String }
 
+/// Sem `conteudo` lê; com ele grava, e `mtime` é o da leitura (nulo = o contrato ainda não existe).
+#[derive(Deserialize)]
+struct Contract { conteudo: Option<String>, #[serde(default)] mtime: Option<String>, #[serde(default)] sessao: String }
+
 #[derive(Deserialize)]
 struct Close { alvo: String }
 
@@ -193,6 +197,7 @@ impl Tools {
             "group" => match args(name, raw) { Ok(a) => self.group(headers, a).await, Err(e) => Err(e) },
             "pair" => match args(name, raw) { Ok(a) => self.pair(headers, a).await, Err(e) => Err(e) },
             "unpair" => match args::<OnlySession>(name, raw) { Ok(a) => self.unpair(headers, &a.sessao).await, Err(e) => Err(e) },
+            "contract" => match args(name, raw) { Ok(a) => self.contract(headers, a).await, Err(e) => Err(e) },
             "new_session" => match args(name, raw) { Ok(a) => self.new_session(headers, a).await, Err(e) => Err(e) },
             "close_session" => match args::<Close>(name, raw) { Ok(a) => self.close_session(headers, &a.alvo).await, Err(e) => Err(e) },
             "interrupt" => match args::<Close>(name, raw) { Ok(a) => self.interrupt(headers, &a.alvo).await, Err(e) => Err(e) },
@@ -266,7 +271,9 @@ impl Tools {
         let rows = self.ok(Method::GET, "/api/sessions", None).await?;
         let rows: Vec<Value> = rows.as_array().into_iter().flatten().map(|s| json!({"name": s["name"], "state": s["state"],
             "cwd": s["cwd"], "provider": s["provider"], "headless": s["headless"],
-            "voce": s["name"].as_str().is_some_and(|n| Some(n) == me.as_deref()), "grupo": s["pair_gid"]})).collect();
+            "voce": s["name"].as_str().is_some_and(|n| Some(n) == me.as_deref()), "grupo": s["pair_gid"],
+            // Membro de outra máquina vem como `servidor::sessao`; `dona` só em grupo entre máquinas.
+            "membros": s["pair_peers"], "dona": s["pair_owner"]})).collect();
         let content = rows.iter().map(|r| ContentBlock::text(serde_json::to_string_pretty(r).unwrap_or_default())).collect();
         let mut result = CallToolResult::success(content);
         result.structured_content = Some(json!({"result": rows}));
@@ -328,6 +335,21 @@ impl Tools {
     async fn unpair(&self, headers: &HeaderMap, sessao: &str) -> Outcome {
         let me = self.me(headers, sessao).await?;
         self.ok(Method::DELETE, &format!("/api/sessions/{}/pair", segment(&me)), None).await.map(dict)
+    }
+
+    async fn contract(&self, headers: &HeaderMap, a: Contract) -> Outcome {
+        let me = self.me(headers, &a.sessao).await?;
+        let path = format!("/api/sessions/{}/pair/contract", segment(&me));
+        let (status, value) = match a.conteudo {
+            None => self.route(Method::GET, &path, None).await,
+            Some(content) => self.route(Method::PUT, &path, Some(json!({"content": content, "mtime": a.mtime}))).await,
+        };
+        if (200..300).contains(&status) { return Ok(dict(value)); }
+        // O código vai na frente: `erro_contrato_mudou` é o sinal de ler de novo antes de gravar.
+        Err(match value["detail"]["code"].as_str() {
+            Some(code) => format!("{code}: {}", detail(status, &value)),
+            None => detail(status, &value),
+        })
     }
 
     async fn new_session(&self, headers: &HeaderMap, a: NewSession) -> Outcome {

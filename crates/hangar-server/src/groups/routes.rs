@@ -1,5 +1,6 @@
 //! Rotas de grupo com as respostas do Python (`api.py`: `pair_session`, `unpair_session`,
-//! `group_message`, `pair_contract`; o par 1:1 entre máquinas mora em `legacy.rs`). O convidado
+//! `group_message`, `pair_contract`; o grupo entre máquinas mora em `federation.rs` e o par 1:1
+//! antigo em `legacy.rs`). O convidado
 //! segue ao Python; corpo que o Rust não aceita é 422 `erro_corpo_invalido` daqui, sem repasse.
 //! Texto do protocolo, avisos e chamadas a outra máquina saem depois de soltar o lock do grupo.
 //!
@@ -200,7 +201,7 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
     let mut others: Vec<String> = Vec::new();
     for p in raw.into_iter().filter(|p| !p.is_empty()) {
         // Membro de fora não tem sidecar aqui: entrar com ele é entrar no grupo da ponta daqui.
-        // Assim ele nunca chega ao `pair_cross`, que é só de máquina própria.
+        // Assim ele nunca chega à federação, que é só de máquina própria.
         let p = asked.st.share.as_ref().and_then(|s| s.pairs.by_address(&p)).map_or(p, |r| r.local_session);
         if !others.contains(&p) { others.push(p); }
     }

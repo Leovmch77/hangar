@@ -857,7 +857,7 @@ async fn pair_message(State(st): St, caller: Option<Extension<Caller>>, bytes: B
     let clean = pairs::sanitize_message(&v[0]);
     let text = format!("[de fora: {who}] {clean}");
     if map.get("group").and_then(Value::as_bool) == Some(true) {
-        // Um salto: só os locais do grupo do par recebem; nada volta a sair a outro par de fora.
+        // Um salto na fronteira: aqui recebem os locais do grupo do par; nada volta a sair a outro par de fora.
         let mut last = (StatusCode::OK, json!({"ok": true}));
         let mut delivered = false;
         let notice = map.get("notice").and_then(Value::as_str).filter(|n| !n.is_empty() && n.len() <= 64);

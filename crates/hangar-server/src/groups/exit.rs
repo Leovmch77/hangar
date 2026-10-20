@@ -39,8 +39,8 @@ pub async fn leave_and_notify(st: &AppState, groups: &GroupService, name: &str) 
     Ok((ex, warnings))
 }
 
-/// Par externo: avisa o outro lado e apaga registro e convite aqui mesmo. Máquina própria: o
-/// `/unpair-remote` dela. Locais não são avisados (recado para quem saiu volta "sessão não encontrada").
+/// Par externo: avisa o outro lado e apaga registro e convite aqui mesmo. Par 1:1 antigo com
+/// máquina própria: o `/unpair-remote` dela. Locais não são avisados (recado para quem saiu volta "sessão não encontrada").
 pub async fn notify_exit(st: &AppState, groups: &GroupService, name: &str, ex: &[String]) -> Vec<Value> {
     let mut errs = Vec::new();
     for p in ex.iter().filter(|p| is_remote(p)) {

@@ -76,8 +76,9 @@ pub fn plan_join(read: &dyn Fn(&str) -> Option<Sidecar>, input: &JoinInput, fres
     let infos: Vec<_> = names.iter().map(|n| members_of(read, n)).collect();
     let members = dedup(infos.iter().flat_map(|(ms, _, _)| ms.iter().cloned()));
 
-    // Par entre máquinas próprias é 1:1 (uma sessão local + um remoto): a união nunca arrasta um
-    // remoto que não passou pelo handshake para dentro de um grupo. Membro de fora é membro comum.
+    // Remoto de máquina própria aqui só é o par 1:1 antigo (uma sessão local + um remoto): a união
+    // nunca o arrasta para dentro de um grupo; grupo entre máquinas passa pela federação. Membro de
+    // fora é membro comum.
     let outsiders = members.iter().filter(|m| is_remote(m) && (input.outside)(m)).count();
     let own = members.iter().filter(|m| is_remote(m)).count() - outsiders;
     let locals = members.len() - own - outsiders;
