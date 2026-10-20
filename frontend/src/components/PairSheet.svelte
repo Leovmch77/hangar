@@ -263,6 +263,9 @@
       ?? (x.server === sid ? sessions.find((s) => s.name === x.name)?.state : null) ?? null;
   }
 
+  // A própria sessão entra na lista, marcada: o grupo mostra os N membros.
+  const meuEstado = $derived(stateOf({ key: '', name: sessionName, server: sid, machine: null, note: null }));
+
   // "Ver em grade": abre o GRUPO inteiro (eu + membros) na grade de comparação existente —
   // cards ao vivo (transcript/preview/estado), 1 clique entra na sessão, cada uma na máquina dela.
   function openGrid() {
@@ -300,6 +303,14 @@
       <div class="list">
         {#if lendoIdentidades}<p class="empty">{m.comum_carregando()}</p>
         {:else if entreMaquinas}{#each semIdentificador as nota (nota)}<p class="empty">{nota}</p>{/each}{/if}
+        <div class="row row--member">
+          {#if meuEstado}<span class="dot" style="background: {stateColors[meuEstado as keyof typeof stateColors]};" aria-hidden="true"></span>{/if}
+          <span class="row-main">
+            <span class="row-name">{sessionName}</span>
+            <span class="row-cwd">{m.grupo_esta_sessao()}</span>
+          </span>
+          {#if meuEstado}<span class="row-paired">{rotuloEstado(meuEstado as State)}</span>{/if}
+        </div>
         {#each membros as x (x.key)}
           {@const st = stateOf(x)}
           {@const p = x.name}

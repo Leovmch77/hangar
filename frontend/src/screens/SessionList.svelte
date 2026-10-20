@@ -33,7 +33,7 @@ import * as m from '../paraglide/messages';
   import type { RemovalSnapshot } from '../lib/auth';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { createSessionListModel, pairCodigo, pairResto } from '../lib/sessionListModel.svelte';
-  import { countAwaiting, fmtWhen, initials, clusterByPair } from '@hangar/core';
+  import { countAwaiting, fmtWhen, initials } from '@hangar/core';
   import ConversationList from '../components/ConversationList.svelte';
   import { sessionOrganization } from '../lib/sessionOrganization.svelte';
   import { updateBadge } from '../lib/badge';
@@ -94,7 +94,8 @@ import * as m from '../paraglide/messages';
     if (alvo && !loading && !sessions.some((x) => x.serverId === alvo.serverId && x.name === alvo.name)) grupoAlvo = null;
   });
   function selo(s: AggSession) {
-    const label = model.groupBadge(s);
+    // O cabeçalho do bloco já diz o ticket e as máquinas; a linha diz de qual máquina ela é.
+    const label = model.memberMachine(s) ?? model.groupBadge(s);
     return label ? { label, onOpen: () => (grupoAlvo = { name: s.name, serverId: s.serverId }) } : null;
   }
   // Sessões locais do mesmo grupo: o convite de par com acesso completo abre todas.
@@ -613,7 +614,7 @@ import * as m from '../paraglide/messages';
               </div>
               {/if}
               {#if !model.collapsed.has(g.id)}
-                {#each clusterByPair(g.sessions) as item (item.kind === 'header' ? `ph:${item.gid}` : `${item.session.serverId}:${item.session.name}`)}
+                {#each model.cluster(g.sessions) as item (item.kind === 'header' ? `ph:${item.gid}` : `${item.session.serverId}:${item.session.name}`)}
                   {#if item.kind === 'header'}
                     {@const rep = groupRep(item.gid)}
                     {@const rotulo = model.pairLabel(item.gid, item.label)}
@@ -634,6 +635,7 @@ import * as m from '../paraglide/messages';
                 {#if pairAwaiting(item.gid) > 0}
                   <span class="pair-await" title={`${pairAwaiting(item.gid)} ${m.estado_aguardando()}`}>{pairAwaiting(item.gid)}</span>
                 {/if}
+                      {#if model.pairSeal(item.gid)}<span class="pair-seal">{model.pairSeal(item.gid)}</span>{/if}
                       <span class="pair-count">{item.count}</span>
                     </button>
                   {:else if !item.gid || !model.collapsed.has(`pair:${item.gid}`)}
@@ -677,7 +679,7 @@ import * as m from '../paraglide/messages';
                "Agrupar por" so aparece com 2+ servidores — entao quem usa um servidor so perdia o
                agrupamento de pareamento inteiro, que e justamente a feature de quem pareia sessoes
                no mesmo repo. Sobrava so o chip dentro do card. -->
-          {#each clusterByPair(model.flatRows) as item (item.kind === 'header' ? `ph:${item.gid}` : `${item.session.serverId}:${item.session.name}`)}
+          {#each model.cluster(model.flatRows) as item (item.kind === 'header' ? `ph:${item.gid}` : `${item.session.serverId}:${item.session.name}`)}
             {#if item.kind === 'header'}
               {@const rep = groupRep(item.gid)}
                     {@const rotulo = model.pairLabel(item.gid, item.label)}
@@ -695,6 +697,7 @@ import * as m from '../paraglide/messages';
                 {#if pairAwaiting(item.gid) > 0}
                   <span class="pair-await" title={`${pairAwaiting(item.gid)} ${m.estado_aguardando()}`}>{pairAwaiting(item.gid)}</span>
                 {/if}
+                {#if model.pairSeal(item.gid)}<span class="pair-seal">{model.pairSeal(item.gid)}</span>{/if}
                 <span class="pair-count">{item.count}</span>
               </button>
             {:else if !item.gid || !model.collapsed.has(`pair:${item.gid}`)}
@@ -997,6 +1000,9 @@ import * as m from '../paraglide/messages';
     color: var(--warning); background: rgba(255, 159, 10, 0.14);
     border-radius: var(--radius-full); padding: 1px 8px;
     font-variant-numeric: tabular-nums;
+  }
+  .pair-seal {
+    flex-shrink: 0; font-size: var(--text-xs); color: var(--text-muted); white-space: nowrap;
   }
   .pair-count {
     flex-shrink: 0; font-size: var(--text-xs); color: var(--accent);

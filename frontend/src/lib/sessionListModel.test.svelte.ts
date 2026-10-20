@@ -136,7 +136,7 @@ describe('grupo entre máquinas fica na máquina de cada membro, com selo (I-9A)
   const grupoDe = (model: ReturnType<typeof createSessionListModel>, name: string) =>
     model.allGroups.find(g => g.sessions.some(s => s.name === name))!;
 
-  it.each((['desktop', 'mobile'] as const).flatMap(variant =>
+  it.each((['desktop'] as const).flatMap(variant =>
     ['server', 'project'].map(mode => ({ variant, mode }))))('$variant/$mode: sem bloco no topo, cada membro no grupo da sua máquina ou projeto', ({ variant, mode }) => {
     localStorage.setItem('cp_group_by', mode);
     const model = createSessionListModel(opts(variant));
@@ -170,6 +170,16 @@ describe('grupo entre máquinas fica na máquina de cada membro, com selo (I-9A)
     expect(createSessionListModel(opts('mobile')).groupBadge(store.rows[0])).toBeNull();
   });
 
+  it.each(['server', 'project'])('celular/%s: o par antigo entre máquinas é um bloco só, na posição do primeiro membro', (mode) => {
+    localStorage.setItem('cp_group_by', mode);
+    const model = createSessionListModel(opts('mobile'));
+    const comPar = model.allGroups.filter(g => g.sessions.some(s => s.pair_gid));
+    expect(comPar).toHaveLength(1);
+    const headers = model.cluster(comPar[0].sessions).filter(i => i.kind === 'header');
+    expect(headers).toEqual([expect.objectContaining({ count: 2, label: 'TASK-123 Configurar VM' })]);
+    expect(model.pairMembers('3881e52a').map(s => s.name).sort()).toEqual(['jefferson-2', 'setup-vm']);
+  });
+
   it('sem identidade confirmada o par antigo não vira selo e fica no cluster da máquina', () => {
     store.identities = undefined;
     const model = createSessionListModel(opts('desktop'));
@@ -177,6 +187,72 @@ describe('grupo entre máquinas fica na máquina de cada membro, com selo (I-9A)
     const local = model.allGroups.find(g => g.id === 'srv-a')!;
     expect(clusterByPair(local.sessions).find(item => item.kind === 'header')).toMatchObject({ gid: 'b745f21b', count: 1 });
     expect(model.pairMembers('b745f21b').map(s => s.name)).toEqual(['jefferson-2']);
+  });
+});
+
+describe('celular: grupo entre máquinas é um bloco só, onde o primeiro membro apareceria', () => {
+  const peers = ['work::ABC-1-coord', 'work::ABC-1-proxy',
+    'vm::ABC-1-app', 'vm::abc2-app'];
+  const membro = (name: string, serverId: string, cwd: string) => sess(name, serverId, {
+    pair_gid: 'g1', pair_owner: 'work', pair_task: 'ABC-1 Bulas', cwd,
+    pair_peers: peers.filter(p => !p.endsWith(`::${name}`)),
+  });
+  const MEMBROS = ['ABC-1-coord', 'ABC-1-proxy', 'ABC-1-app', 'abc2-app'];
+  beforeEach(() => {
+    store.identities = new Map([['srv-n', 'work'], ['srv-d', 'vm']]);
+    comServidores([
+      { id: 'srv-n', label: 'work', sessions: [
+        sess('aa-solo-n', 'srv-n', { cwd: '/w/aa' }),
+        membro('ABC-1-coord', 'srv-n', '/w/hangar'), membro('ABC-1-proxy', 'srv-n', '/w/proxy'),
+      ] },
+      { id: 'srv-d', label: 'vm', sessions: [
+        sess('aa-solo-d', 'srv-d', { cwd: '/w/aa' }), sess('zz-solo-d', 'srv-d', { cwd: '/w/zz' }),
+        membro('ABC-1-app', 'srv-d', '/w/web-app'), membro('abc2-app', 'srv-d', '/w/web-app'),
+      ] },
+    ]);
+  });
+
+  it.each([
+    // Máquina: "vm" vem antes; o primeiro membro é o 1º da vm depois de "aa-solo-d".
+    { mode: 'server', grupo: 'srv-d', antes: ['aa-solo-d'] },
+    // Projeto: "aa" vem antes de "hangar"; o primeiro membro é o do projeto "hangar".
+    { mode: 'project', grupo: '/w/hangar', antes: [] as string[] },
+  ])('$mode: 4 membros de 2 máquinas num bloco só', ({ mode, grupo, antes }) => {
+    localStorage.setItem('cp_group_by', mode);
+    const model = createSessionListModel(opts('mobile'));
+    const comMembro = model.allGroups.filter(g => g.sessions.some(s => s.pair_gid));
+    expect(comMembro.map(g => g.id)).toEqual([grupo]);
+    const nomes = comMembro[0].sessions.map(s => s.name);
+    expect(nomes.slice(0, antes.length)).toEqual(antes);
+    expect(nomes.slice(antes.length, antes.length + 4).sort()).toEqual([...MEMBROS].sort());
+    const itens = model.cluster(comMembro[0].sessions);
+    expect(itens.filter(i => i.kind === 'header')).toEqual([expect.objectContaining({ count: 4, label: 'ABC-1 Bulas' })]);
+    expect(itens.findIndex(i => i.kind === 'header')).toBe(antes.length);
+    // Nenhuma seção fica vazia, e nenhum membro aparece fora do bloco.
+    expect(model.allGroups.every(g => g.sessions.length > 0)).toBe(true);
+    expect(model.allSessions).toHaveLength(7);
+    expect(model.pairSeal('g1')).toBe(m.grupo_selo_maquinas({ n: 2 }));
+    expect(model.memberMachine(store.rows.find(s => s.name === 'ABC-1-app'))).toBe('vm');
+    expect(model.memberMachine(store.rows.find(s => s.name === 'aa-solo-d'))).toBeNull();
+  });
+
+  it('busca que acha um membro mostra o bloco inteiro', () => {
+    localStorage.setItem('cp_group_by', 'server');
+    const model = createSessionListModel(opts('mobile'));
+    model.filterText = 'abc2';
+    expect(model.groups).toHaveLength(1);
+    expect(model.groups[0].sessions.map(s => s.name).sort()).toEqual([...MEMBROS].sort());
+    expect(model.cluster(model.groups[0].sessions).find(i => i.kind === 'header')).toMatchObject({ count: 4 });
+  });
+
+  it('seção com erro de servidor fica, mesmo esvaziada pelo bloco', () => {
+    localStorage.setItem('cp_group_by', 'server');
+    const n = store.byServer.find((b: any) => b.server.id === 'srv-n');
+    n.sessions = n.sessions.filter((s: any) => s.pair_gid);
+    n.error = 'offline';
+    store.rows = store.byServer.flatMap((b: any) => b.sessions);
+    const secao = createSessionListModel(opts('mobile')).allGroups.find(g => g.id === 'srv-n');
+    expect(secao).toMatchObject({ error: 'offline', sessions: [] });
   });
 });
 

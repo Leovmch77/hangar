@@ -2608,6 +2608,7 @@
   "grupo_recusa_outra_dona": "Both are already in groups owned by different machines. Undo one to join them.",
   "grupo_recusa_convite": "An invited session can't be grouped: grouping belongs to the owner's server",
   "grupo_selo_maquinas": "{n} machines",
+  "grupo_esta_sessao": "this session",
   "grupo_membro_maquina_desconectada": "{maquina} isn't connected on this device.",
   "arquivo_sem_permissao": "No permission to read this folder.",
   "arquivo_ilegivel": "Couldn't read this folder.",

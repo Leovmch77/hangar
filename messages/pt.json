@@ -2608,6 +2608,7 @@
   "grupo_recusa_outra_dona": "As duas já estão em grupos de máquinas diferentes. Desfaça um para juntar.",
   "grupo_recusa_convite": "Sessão de convite não agrupa: agrupar é do servidor do dono",
   "grupo_selo_maquinas": "{n} máquinas",
+  "grupo_esta_sessao": "esta sessão",
   "grupo_membro_maquina_desconectada": "{maquina} não está conectada neste aparelho.",
   "arquivo_sem_permissao": "Sem permissão para ler esta pasta.",
   "arquivo_ilegivel": "Não foi possível ler esta pasta.",
