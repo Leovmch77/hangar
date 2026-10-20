@@ -17,7 +17,10 @@ const mocks = vi.hoisted(() => {
     return { promise, resolve, reject };
   };
   const params = { server: 'server-1', name: 'fixture-a' };
-  const servers = { ready: true, servers: [{ id: 'server-1' }] };
+  const servers = { ready: true, servers: [{ id: 'server-1', label: 'casa' }, { id: 'server-2', label: 'lab' }] };
+  // A outra máquina chega pela lista já aberta no app; o identificador, pela leitura de cada máquina.
+  const byServer = [{ server: { id: 'server-2', label: 'lab' }, sessions: [{ serverId: 'server-2', serverLabel: 'lab', name: 'fixture-z', state: 'idle' }] }];
+  const identities = { identities: new Map([['server-1', 'casa'], ['server-2', 'lab']]), loading: new Set<string>() };
   let rows = [{ serverId: 'server-1', name: 'fixture-a', pair_peers: [] as string[] }];
   const listeners = new Set<() => void>();
   const subscribe = (listener: () => void) => {
@@ -28,9 +31,9 @@ const mocks = vi.hoisted(() => {
     rows = rows.map((row) => (row.name === 'fixture-a' ? { ...row, pair_peers: peers } : row));
     for (const listener of listeners) listener();
   };
-  const useSessions = (selector: (value: { rows: typeof rows }) => unknown) => {
+  const useSessions = (selector: (value: { rows: typeof rows; byServer: typeof byServer }) => unknown) => {
     const current = React.useSyncExternalStore(subscribe, () => rows, () => rows);
-    return selector({ rows: current });
+    return selector({ rows: current, byServer });
   };
   const useServers = (selector: (value: typeof servers) => unknown) => selector(servers);
   const back = vi.fn();
@@ -64,7 +67,7 @@ const mocks = vi.hoisted(() => {
   const undo = vi.fn();
   const markLeavingPair = vi.fn(() => undo);
   const anchoredPairs = vi.fn((_server: string, _name: string): unknown[] => []);
-  return { deferred, params, setPeers, useSessions, useServers, back, alert, core, reset, undo, markLeavingPair, anchoredPairs };
+  return { deferred, params, setPeers, useSessions, useServers, identities, back, alert, core, reset, undo, markLeavingPair, anchoredPairs };
 });
 
 vi.mock('react-native', async (importOriginal) => ({
@@ -80,7 +83,8 @@ vi.mock('expo-router', () => ({
   useLocalSearchParams: () => ({ ...mocks.params }),
   useRouter: () => ({ back: mocks.back, push: vi.fn() }),
 }));
-vi.mock('@hangar/core', () => mocks.core);
+vi.mock('@hangar/core', async (importOriginal) => ({ ...(await importOriginal<Record<string, unknown>>()), ...mocks.core }));
+vi.mock('./identities', () => ({ useIdentities: () => mocks.identities }));
 vi.mock('../../stores/servers', () => ({ useServers: mocks.useServers }));
 vi.mock('../../stores/sessions', () => ({ useSessions: mocks.useSessions, markLeavingPair: mocks.markLeavingPair, anchoredPairs: mocks.anchoredPairs }));
 vi.mock('../../chat/AssistantBubble', () => ({ mkMarkdownStyle: () => ({}) }));
@@ -88,7 +92,8 @@ vi.mock('./PairFeed', () => ({ PairFeed: () => null }));
 vi.mock('./PairPicker', () => ({
   PairPicker: (props: { busy: boolean; loading: boolean; error: string; onToggle: (peer: string) => void; onPair: () => void }) =>
     React.createElement('div', { 'data-testid': 'picker', 'data-busy': String(props.busy), 'data-loading': String(props.loading) },
-      React.createElement('button', { 'data-testid': 'pick', onClick: () => props.onToggle('fixture-b') }),
+      React.createElement('button', { 'data-testid': 'pick', onClick: () => props.onToggle('server-1::fixture-b') }),
+      React.createElement('button', { 'data-testid': 'pick-remote', onClick: () => props.onToggle('server-2::fixture-z') }),
       React.createElement('button', { 'data-testid': 'pair', onClick: props.onPair })),
 }));
 vi.mock('./PairMembers', () => ({
@@ -140,6 +145,30 @@ async function startPair<T>() {
   expect(byTestId('picker')!.dataset.busy).toBe('true');
   return pending;
 }
+
+describe('PairSheet — sessão de outra máquina', () => {
+  beforeEach(() => {
+    mocks.reset([]);
+    document.body.innerHTML = '';
+  });
+
+  afterEach(() => {
+    act(() => root?.unmount());
+    document.body.innerHTML = '';
+  });
+
+  it('pede ao servidor da âncora com a origem qualificada pelo identificador da máquina dela', async () => {
+    mocks.core.pairSession.mockResolvedValue({});
+    await mount();
+    click('pick');
+    click('pick-remote');
+    click('pair');
+    await flush();
+
+    expect(mocks.core.pairSession).toHaveBeenCalledWith('fixture-a', ['fixture-b', 'lab::fixture-z'], '', false, mocks.useServers((s) => s.servers[0]));
+    expect(mocks.back).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('PairSheet — ação em voo sobrevive à atualização de pair_peers', () => {
   beforeEach(() => {

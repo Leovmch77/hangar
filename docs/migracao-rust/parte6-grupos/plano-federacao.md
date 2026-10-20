@@ -915,11 +915,11 @@ Status: ready-for-agent
 **Invariante:** visual copia o nativo (Task 15); regras de iOS do CLAUDE.md; sem `npm install`
 fora de `--prefix`.
 
-- [ ] **Step 1: Testes.**
-- [ ] **Step 2: Rodar e ver falhar.**
-- [ ] **Step 3: Implementar.**
+- [x] **Step 1: Testes.**
+- [x] **Step 2: Rodar e ver falhar.**
+- [x] **Step 3: Implementar.**
 - [ ] **Step 4: Rodar.** Esperado: testes tocados verdes; `npm run check` na raiz verde.
-- [ ] **Step 5: Commit** — `feat(mobile): pick and show group members from every machine`.
+- [x] **Step 5: Commit** — `feat(mobile): pick and show group members from every machine`.
 
 ---
 

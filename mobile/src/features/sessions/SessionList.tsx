@@ -203,7 +203,9 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
     const server = own(s.outside?.localServerId ?? s.serverId);
     if (!server) { toast.erro(m.servidor_nao_existe()); return; }
     const sair = (alias: string, session: string) => leaveExternal(alias, session, server);
-    if (a.kind === 'invite') {
+    if (a.kind === 'group') {
+      router.push(`/s/${s.serverId}/${s.name}/pair` as never);
+    } else if (a.kind === 'invite') {
       setConvite({ server, name: s.name, members: (s.pair_peers ?? []).filter((p) => !p.includes('::')) });
     } else if (a.kind === 'accept') {
       setAceite({ server, name: s.name, sessions: useSessions.getState().rows.filter((r) => r.serverId === server.id) });
@@ -228,7 +230,7 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
         } },
       ]);
     }
-  }, []);
+  }, [router]);
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);

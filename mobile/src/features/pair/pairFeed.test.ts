@@ -131,10 +131,12 @@ it('mantém GET e pareamento no servidor da rota quando outro está ativo', asyn
   const { container } = await renderPair();
   await act(async () => container.querySelector<HTMLButtonElement>('[role="checkbox"]')!.click());
   await act(async () => button(container, 'par_parear_nomes').click());
-  expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+  // O identificador de cada máquina é lido para as candidatas de outras máquinas.
+  const calls = fetchMock.mock.calls.filter(([url]) => !String(url).endsWith('/api/peers/identificador'));
+  expect(calls.map(([url]) => String(url))).toEqual([
     'http://a.local/api/sessions', 'http://a.local/api/sessions/a/pair',
   ]);
-  expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'POST', headers: { Authorization: 'Bearer token-a' }, body: '{"peers":["b"],"task":"","replace_task":false}' });
+  expect(calls[1][1]).toMatchObject({ method: 'POST', headers: { Authorization: 'Bearer token-a' }, body: '{"peers":["b"],"task":"","replace_task":false}' });
   expect(navigation.back).toHaveBeenCalledOnce();
 });
 
