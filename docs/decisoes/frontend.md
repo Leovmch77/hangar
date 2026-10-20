@@ -153,6 +153,34 @@ A folga do `hold_tail` só era gasta por um crescimento seguinte; sem ele, ficav
 comando que some), parecendo um bloco que faltou desenhar. Agora a folga parada por 500 ms desliza
 até zero. Durante o streaming ela segue segurando o histórico, porque cada mudança reinicia a espera.
 
+## Padrões de criação compartilhados com o APK (19/10/2026)
+
+O desktop guardava o padrão do harness em `harness-defaults.json` no aparelho. O APK não lia esse
+arquivo e enviava modelo, esforço e permissão vazios; o servidor então escolhia a permissão da
+conta Claude. O padrão marcado no Hangar não chegava à abertura do celular.
+
+`GET` e `PUT /api/session-defaults` leem e guardam o padrão no servidor Rust, separado por provedor,
+motor e conta do motor. O arquivo `session-defaults.json` fica na pasta de dados do Hangar, com
+escrita atômica sob trava. Remover grava uma entrada nula: o arquivo antigo de outro desktop não
+pode ressuscitar uma escolha removida. Ao conectar, o desktop importa seus padrões locais daquele
+servidor apenas onde ainda não há registro; a leitura do seletor também faz essa importação. O
+Claude sem motor continua espelhando a escolha marcada no `settings.json` principal. O APK lê o
+registro antes de habilitar a criação; opções alteradas à mão valem só para aquela abertura. Uma
+falha de leitura é exibida e pode ser repetida, sem abrir com outra permissão. O Connect só
+transporta a requisição autenticada ao mesmo Rust; convidados não acessam o registro.
+
+O seletor de pastas do APK, completo ou compacto, busca nos filhos de todas as raízes autorizadas
+do servidor escolhido. Digitar refiltra os resultados da tentativa, sem novo scan por letra;
+selecionar ou abrir um resultado leva sua própria raiz. Homônimos mostram a origem, caminhos
+duplicados aparecem uma vez e falhas de uma raiz não ocultam os resultados das outras.
+
+Provas de regressão: a criação do mobile enviava `permission_mode: null` e passou a enviar
+`bypassPermissions`, modelo e esforço publicados no servidor; a busca passou a selecionar uma
+pasta da outra raiz nas duas apresentações. A API real foi exercitada por HTTP, incluindo
+remoção, importação antiga, separação de motor/conta, arquivo ilegível e recusa sem credencial.
+Os testes de componente usam a interface de React Native adaptada para DOM: não comprovam a
+execução do APK no Android.
+
 ## Nova sessão: busca entre raízes e seleção de conta (05/10/2026)
 
 Com texto e “Pesquisar em todas as pastas” marcado, o modal nativo procura nos filhos das

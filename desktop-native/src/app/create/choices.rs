@@ -317,6 +317,7 @@ impl NewSession {
     pub(super) fn load_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sync_customizations(window, cx);
         let seq = self.models.start();
+        self.defaults_ready = false;
         if self.proxy_accounts().is_none() { self.model.clear(); self.effort.clear(); }
         self.subagent.clear();
         self.service_tier = None;
@@ -335,12 +336,17 @@ impl NewSession {
         if let Some(config) = self.config.clone() { query.push(("config_dir".into(), config)); }
         if self.provider == "codex" { query.push(("codex_account".into(), self.codex_account.clone())); }
         let (key, default_key) = (self.memory_key(), self.default_key());
+        let scope = self.default_scope();
         self.request(cx, move |api, send| Box::pin(async move {
             // O padrão marcado do harness vence a última escolha lembrada.
-            let (remembered, saved) = tokio::task::spawn_blocking(move || {
+            let (remembered, legacy) = tokio::task::spawn_blocking(move || {
                 let saved = crate::appearance::harness_default(&default_key);
-                (saved.clone().map(|(m, e, _)| (m, e)).unwrap_or_else(|| crate::appearance::last_model(&key)), saved)
+                (crate::appearance::last_model(&key), saved)
             }).await.unwrap_or_default();
+            let scope: Vec<_> = scope.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            let saved = api.read_session_default(&scope, legacy).await;
+            let remembered = saved.as_ref().ok().and_then(|saved| saved.as_ref())
+                .map(|(m, e, _)| (m.clone(), e.clone())).unwrap_or(remembered);
             let query: Vec<(&str, &str)> = query.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
             send(CreateReply::Models(seq, api.server_read(&["model-options"], &query, 30).await, remembered, saved)).await
         }));
@@ -350,6 +356,15 @@ impl NewSession {
     fn default_key(&self) -> String {
         let key = format!("{}:{}:{}", self.link.api.identity(), self.provider, if self.provider == "claude" { self.engine.as_str() } else { "" });
         if self.proxy_accounts().is_some() { format!("{key}:account:{}", self.engine_account) } else { key }
+    }
+
+    fn default_scope(&self) -> Vec<(&'static str, String)> {
+        let mut query = vec![("provider", self.provider.to_owned())];
+        if self.provider == "claude" && !self.engine.is_empty() {
+            query.push(("engine", self.engine.clone()));
+            if self.proxy_accounts().is_some() { query.push(("engine_account", self.engine_account.clone())); }
+        }
+        query
     }
 
     fn current_choice(&self) -> (String, String, String) {
@@ -364,29 +379,35 @@ impl NewSession {
         if self.proxy_accounts().is_some() && !self.engine_ready() { return None; }
         let checked = self.saved_default.as_ref() == Some(&self.current_choice());
         let label = tr("create_default_for_harness").replace("{harness}", provider_name(self.provider));
-        Some(div().px(px(4.)).child(Checkbox::new("create-default-harness").label(label).checked(checked).disabled(self.creating)
+        Some(div().px(px(4.)).child(Checkbox::new("create-default-harness").label(label).checked(checked).disabled(self.creating || self.default_saving || !self.defaults_ready)
             .on_change(cx.listener(|this, on: &bool, _, cx| {
+                if this.default_saving { return; }
                 let value = on.then(|| this.current_choice());
-                // Na hora, num arquivo pequeno: o check só fica marcado se gravou, e duas gravações seguidas não se cruzam.
-                if let Err(error) = crate::appearance::set_harness_default(&this.default_key(), value.clone()) {
-                    this.error = Some(tr("create_default_failed").replace("{erro}", &error));
-                    cx.notify();
-                    return;
-                }
-                this.saved_default = value.clone();
-                // Claude da conta (sem motor): o padrão também é o do settings.json da máquina, para o `claude` fora do Hangar.
-                if let Some((model, effort, permission)) = value.filter(|_| this.provider == "claude" && this.engine.is_empty() && this.proxy_accounts().is_none()) {
-                    this.request(cx, move |api, send| Box::pin(async move {
+                this.default_saving = true;
+                this.default_save_seq += 1;
+                let (save_seq, scope_seq, scope) = (this.default_save_seq, this.models.seq, this.default_scope());
+                let mirror = this.provider == "claude" && this.engine.is_empty() && this.proxy_accounts().is_none();
+                this.request(cx, move |api, send| Box::pin(async move {
+                    let scope: Vec<_> = scope.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                    let result = api.save_session_default(&scope, value.clone(), false).await;
+                    let saved = result.is_ok();
+                    send(CreateReply::HarnessDefaultSaved(save_seq, scope_seq, result)).await;
+                    if let Some((model, effort, permission)) = value.filter(|_| saved && mirror) {
                         send(CreateReply::ClaudeDefaultSaved(api.server_send(reqwest::Method::POST, &["claude", "defaults"],
                             Some(serde_json::json!({"model": model, "effort": effort, "permission": permission})), 10).await)).await;
-                    }));
-                }
+                    }
+                }));
                 cx.notify();
             }))))
     }
 
     pub(super) fn receive_models(&mut self, seq: u64, result: Result<Value, Failure>, remembered: (String, String),
-        saved: Option<(String, String, String)>, window: &mut Window, cx: &mut Context<Self>) {
+        saved: Result<Option<(String, String, String)>, Failure>, window: &mut Window, cx: &mut Context<Self>) {
+        if seq != self.models.seq { return; }
+        self.defaults_ready = saved.is_ok();
+        if let Err(error) = &saved { self.error = Some(tr("create_default_failed").replace("{erro}", &Hangar::fetch_failure(error))); }
+        let result = saved.as_ref().map_err(Clone::clone).and(result);
+        let saved = saved.ok().flatten();
         let catalog = result.map_err(|e| Hangar::fetch_failure(&e)).and_then(|v| {
             let mut models: Vec<ModelOption> = serde_json::from_value(v.get("models").cloned().unwrap_or_default()).map_err(|_| tr("invalid_response"))?;
             // O picker do Claude dá o mesmo id (`opus`) às versões antigas: escolher "Opus 4.6" abriria o Opus atual.

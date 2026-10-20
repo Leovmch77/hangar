@@ -97,6 +97,7 @@ pub fn area_of(path: &str) -> usize {
 /// O Rust atende este pedido do dono sem repassar? Mesma decisão do `routes::router`: as rotas
 /// GET registradas lá, mais os `matches` de Git/arquivos e de worktrees que o `pass_any` consulta.
 pub fn rust_route(method: &Method, path: &str) -> bool {
+    if matches!(*method, Method::GET | Method::PUT) && path == "/api/session-defaults" { return true; }
     if crate::orq_conductor::matches(method, path) { return true; }
     if crate::session_media::is_media(method, path) { return true; }
     if crate::accounts::http::matches(method, path) { return true; }
