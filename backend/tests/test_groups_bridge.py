@@ -195,7 +195,8 @@ def test_pair_route_forwards_status_and_body(monkeypatch, client):
     r = client.post("/api/sessions/a/pair", json={"peer": "b", "task": "y"}, headers=H)
     assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_pareamento_tarefa_existente"
     assert calls == [("group.route", {"method": "POST", "name": "a", "route": "pair", "body": {
-        "peer": "b", "peers": [], "task": "y", "replace_task": False, "notify_members": True, "orq": False}})]
+        "peer": "b", "peers": [], "task": "y", "replace_task": False, "notify_members": True, "orq": False},
+        "facts": {"orchestrators": [], "phases": {}}})]
 
 
 GROUP_ROUTES = [

@@ -604,6 +604,22 @@ async def _jev_aux_pelo_rust(request: Request, call_next):
                                   "/__hangar_server/forwarded" if delivery else "/__hangar_server/jev/aux")
 
 
+# Grupo entre máquinas: rotas só do Rust. Pelas portas do Python (Connect) só repasse, nunca o 404 sem
+# código que a outra máquina leria como versão antiga.
+_GRUPOS_RUST = re.compile(r"^/api/groups/[^/]+(/ops)?$")
+_GRUPO_DA_SESSAO = re.compile(r"^/api/sessions/[^/]+/group$")
+
+
+@app.middleware("http")
+async def _grupos_pelo_rust(request: Request, call_next):
+    path = request.url.path
+    if not (_GRUPOS_RUST.match(path) or (request.method == "GET" and _GRUPO_DA_SESSAO.match(path))):
+        return await call_next(request)
+    if guest_of(request) is not None or guest_users.current.get() is not None:
+        return JSONResponse({"detail": erro("erro_fora_do_convite", "fora da sessao compartilhada")}, status_code=403)
+    return await _repasse_ao_rust(request, _groups_need_rust(), "/__hangar_server/forwarded")
+
+
 # Rotas de plano e o catálogo de plugins e skills: o dono é o Rust (`plans::routes`, `claude_customizations`).
 _PLANOS_LEITURA = re.compile(r"^/api/sessions/[^/]+/(plan|plans|plan-preview)$")
 _PLANOS_ESCRITA = re.compile(r"^/api/sessions/[^/]+/plan-(pin|step|archive)$")
@@ -4133,15 +4149,72 @@ def _require_rust_groups() -> None:
         raise HTTPException(503, detail=_groups_need_rust())
 
 
+def _route_facts(name: str, body: dict | None) -> dict:
+    """Fatos do `orq` que a rota de grupo usaria, lidos antes da ponte (I-5A): dentro dela o Rust não
+    pergunta ao Python. Orquestradores = todas as execuções ativas; fase = gid `orq` dos nomes citados."""
+    from app.adapters.orq import runs
+    body = body or {}
+    names = [name, *(body.get("peers") or []), *([body["peer"]] if body.get("peer") else [])]
+    phases = {}
+    for n in names:
+        link = PairLink(n).get() or {} if "::" not in n else {}
+        if link.get("orq") and link.get("gid"):
+            phases[link["gid"]] = runs.group_phase(link["gid"])
+    return {"orchestrators": [r["name"] for r in runs.active()], "phases": phases}
+
+
+async def _route_after(out: dict) -> None:
+    """O que o Rust devolveu para o Python fazer depois da ponte, num sentido: entregar o recado a
+    sessão que só ele atende e promover o time do `orq`. Promoção que falha desfaz o grupo novo."""
+    failed = []
+    for d in out.get("deliveries") or []:
+        res = await _enviar(d["name"], d["text"])
+        if not res.get("ok"):
+            failed.append({"sessao": d["name"], "erro": res.get("error") or erro("erro_envio_falhou_desconhecida", "falha desconhecida no envio")})
+    for post in out.get("post") or []:
+        if post.get("op") == "promote" and (refused := await asyncio.to_thread(_promote_or_undo, post["name"], post["gid"])):
+            out["status"], out["body"] = 409, {"detail": refused}
+            return
+    body = out.get("body")
+    if failed and isinstance(body, dict):
+        diag.registrar("grupos.entrega_pela_ponte", "aviso", falhas=len(failed))
+        if body.get("warning") is None:
+            body["warning"] = erro("erro_pareamento_aviso_parcial", "aviso falhou em: " + "; ".join(f["sessao"] for f in failed), avisos=failed)
+        elif isinstance(body["warning"], dict):
+            body["warning"].setdefault("params", {}).setdefault("avisos", []).extend(failed)
+
+
+def _promote_or_undo(name: str, gid: str) -> dict | None:
+    """`orq_context.promote` (os arquivos do `orq` são do Python). Conflito = o grupo recém-criado sai,
+    membro a membro, pela ponte; todos estavam soltos (grupo novo), então sair volta ao que era."""
+    from app import orq_context, orq_md
+    try:
+        orq_context.promote(name, gid)
+    except orq_context.IdentityUnavailable:
+        _log.warning("pair: sem identidade para promover o grupo %s", gid)
+    except (orq_context.PromotionConflict, orq_md.Conflito) as e:
+        link = PairLink(name).get() or {}
+        for member in [name, *(p for p in link.get("peers", []) if "::" not in p)]:
+            try:
+                groups_bridge.call("group.leave", name=member, phases={gid: "ended"})
+            except groups_bridge.GroupsBridgeError as undo:
+                _log.warning("pair: o grupo %s não foi desfeito em %s: %s", gid, member, undo.code)
+        return erro("erro_orq_arquivo_mudou", str(e))
+    return None
+
+
 async def _group_route(method: str, name: str, route: str, body: BaseModel | None = None):
     """Grupos são do Rust; aqui chega só o que entrou pela 8768 e segue num sentido. Sem o Rust não
     há reserva Python."""
     _require_rust_groups()
+    data = body.model_dump() if body is not None else None
+    facts = await asyncio.to_thread(_route_facts, name, data)
     try:
         out = await asyncio.to_thread(groups_bridge.call, "group.route", method=method, name=name, route=route,
-                                      body=body.model_dump() if body is not None else None)
+                                      body=data, facts=facts)
     except groups_bridge.GroupsBridgeError as e:
         raise _group_unavailable(e.code) from None
+    await _route_after(out)
     return _bridge_reply(out)
 
 

@@ -24,8 +24,9 @@ const MAX_REPLY: usize = 4 << 20;
 #[derive(Deserialize)]
 #[serde(tag = "op", content = "args")]
 enum Operation {
+    /// `facts`: o que o Python sabe da orquestração, lido antes de chamar (I-5A).
     #[serde(rename = "group.route")]
-    Route { method: String, name: String, route: String, #[serde(default)] body: Value },
+    Route { method: String, name: String, route: String, #[serde(default)] body: Value, facts: RouteFacts },
     /// Fechamento que não passou pelo `delete` do Rust (Connect, convidado): a fase do `orq` de cada
     /// gid vem no pedido, lida pelo Python antes de chamar.
     #[serde(rename = "group.leave")]
@@ -34,6 +35,42 @@ enum Operation {
     Rename { old: String, new: String },
     #[serde(rename = "group.orq_associate")]
     OrqAssociate { name: String, gid: String, mtime: f64, facts: TeamFacts },
+}
+
+/// Fatos do `orq` que o Python manda com a rota: os nomes que são linha de orquestrador (todas as
+/// execuções ativas) e a fase de cada gid envolvido.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RouteFacts { orchestrators: Vec<String>, #[serde(default)] phases: std::collections::HashMap<String, Value> }
+
+/// Pedido que chegou pela ponte do Python. Dentro dele o Rust não chama o Python: os fatos do `orq`
+/// vieram no corpo, e o que só o Python faz (entregar a sessão que ele atende, promover o time) volta
+/// na resposta para ele fazer depois, num sentido.
+pub(crate) struct BridgeCtx {
+    orchestrators: std::collections::HashSet<String>,
+    phases: std::collections::HashMap<String, Value>,
+    deliveries: std::sync::Mutex<Vec<Value>>,
+    post: std::sync::Mutex<Vec<Value>>,
+}
+
+tokio::task_local! { static CTX: Arc<BridgeCtx>; }
+
+/// O pedido da ponte em curso nesta tarefa, se há um.
+pub(crate) fn current() -> Option<Arc<BridgeCtx>> { CTX.try_with(Arc::clone).ok() }
+
+impl BridgeCtx {
+    pub(crate) fn orchestrators(&self, names: &[String]) -> Vec<String> {
+        names.iter().filter(|n| self.orchestrators.contains(*n)).cloned().collect()
+    }
+    pub(crate) fn phase(&self, gid: &str) -> OrqPhase { super::orq::phase_of(self.phases.get(gid)) }
+    /// Recado a sessão que só o Python atende: ele entrega depois que a ponte responder.
+    pub(crate) fn defer_delivery(&self, name: &str, text: &str, steer: bool) {
+        self.deliveries.lock().unwrap_or_else(|e| e.into_inner()).push(json!({"name": name, "text": text, "steer": steer}));
+    }
+    /// A promoção do time grava arquivos do `orq`, que só o Python escreve.
+    pub(crate) fn defer_promote(&self, name: &str, gid: &str) {
+        self.post.lock().unwrap_or_else(|e| e.into_inner()).push(json!({"op": "promote", "name": name, "gid": gid}));
+    }
 }
 
 /// Fases que o Python mandou; gid sem fase = `Unknown`, que mantém o grupo vivo.
@@ -94,7 +131,14 @@ pub(crate) async fn route(st: Arc<AppState>, method: &str, name: &str, route: &s
 
 async fn execute(st: Arc<AppState>, groups: Arc<GroupService>, op: Operation) -> Result<Value, Failed> {
     match op {
-        Operation::Route { method, name, route: path, body } => route(st, &method, &name, &path, body).await,
+        Operation::Route { method, name, route: path, body, facts } => {
+            let ctx = Arc::new(BridgeCtx { orchestrators: facts.orchestrators.into_iter().collect(), phases: facts.phases,
+                deliveries: Default::default(), post: Default::default() });
+            let mut out = CTX.scope(ctx.clone(), route(st, &method, &name, &path, body)).await?;
+            out["deliveries"] = Value::Array(std::mem::take(&mut *ctx.deliveries.lock().unwrap_or_else(|e| e.into_inner())));
+            out["post"] = Value::Array(std::mem::take(&mut *ctx.post.lock().unwrap_or_else(|e| e.into_inner())));
+            Ok(out)
+        }
         Operation::Leave { name, phases } => {
             let ex = groups.leave_with(&name, &KnownPhases(phases)).await.map_err(group_failed)?;
             let warnings = notify_exit(&st, &groups, &name, &ex).await;

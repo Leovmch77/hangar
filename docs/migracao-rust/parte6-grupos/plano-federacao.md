@@ -602,7 +602,7 @@ dona sai "não confirmado".
 - [x] **Step 2: Rodar e ver falhar.**
 - [x] **Step 3: Implementar.**
 - [x] **Step 4: Rodar.** Esperado: PASS.
-- [ ] **Step 5: Portas de fora**: conferir que a 8768 repassa `/api/groups/*` e `GET …/group` (ou
+- [x] **Step 5: Portas de fora**: conferir que a 8768 repassa `/api/groups/*` e `GET …/group` (ou
   recusa com código) e que a 8766 recusa com código; teste Python
   `test_connect_forwards_groups_routes` e teste Rust `guest_groups_routes_refused_with_code`.
 - [x] **Step 6: Commit** — `feat(groups): groups across the owner's machines with an owner machine`.

@@ -373,7 +373,11 @@ pub async fn write_input(st: &AppState, name: &str, text: &str, steer: bool) -> 
             result
         }
         Write::Busy => (StatusCode::CONFLICT, busy_body()),
-        Write::Python => relay_as_owner(st, name, body).await,
+        // Pela ponte do Python: ele mesmo entrega, depois de a ponte responder (sem ida e volta).
+        Write::Python => match crate::groups::bridge::current() {
+            Some(ctx) => { ctx.defer_delivery(name, text, steer); (StatusCode::OK, json!({"ok": true, "deferred": true})) }
+            None => relay_as_owner(st, name, body).await,
+        },
         Write::Failed(error) => (StatusCode::SERVICE_UNAVAILABLE, detail_body(&error.code, &error.message, json!({}))),
     }
 }

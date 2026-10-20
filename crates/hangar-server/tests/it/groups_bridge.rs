@@ -50,7 +50,9 @@ async fn server(root: &Path, n: usize) -> Server {
     Server { public, private, python, groups, pair }
 }
 
-async fn bridge(addr: SocketAddr, op: &str, args: Value, secret: Option<&str>) -> (u16, Value) {
+/// Sem fatos dados, a rota leva os fatos vazios que o Python mandaria sem orquestração ativa.
+async fn bridge(addr: SocketAddr, op: &str, mut args: Value, secret: Option<&str>) -> (u16, Value) {
+    if op == "group.route" && args.get("facts").is_none() { args["facts"] = json!({"orchestrators": [], "phases": {}}); }
     let mut req = client().post(format!("http://{addr}/__hangar_server/groups")).header("content-type", "application/json")
         .body(json!({"op": op, "args": args}).to_string());
     if let Some(secret) = secret { req = req.header("x-hangar-internal", secret); }
@@ -64,6 +66,12 @@ async fn result(srv: &Server, op: &str, args: Value) -> Value {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["ok"], true, "{op}: {body}");
     body["result"].clone()
+}
+
+/// `{status, body}` da rota, sem o que a ponte devolve ao Python para ele fazer depois.
+fn answered(mut out: Value) -> Value {
+    if let Some(map) = out.as_object_mut() { map.remove("deliveries"); map.remove("post"); }
+    out
 }
 
 async fn public(srv: &Server, method: &str, path: &str, body: Option<&Value>) -> Value {
@@ -100,14 +108,14 @@ async fn route_answers_like_the_public_route() {
     let srv = server(dir.path(), 3).await;
     let refused = json!({"peer": "s0"});
     let via_bridge = result(&srv, "group.route", json!({"method": "POST", "name": "s0", "route": "pair", "body": refused})).await;
-    assert_eq!(via_bridge, public(&srv, "POST", "s0/pair", Some(&refused)).await);
+    assert_eq!(answered(via_bridge.clone()), public(&srv, "POST", "s0/pair", Some(&refused)).await);
     assert_eq!(via_bridge["status"], 400);
     let paired = result(&srv, "group.route", json!({"method": "POST", "name": "s0", "route": "pair",
         "body": {"peer": "s1", "peers": [], "task": "t", "replace_task": false, "notify_members": true, "orq": false}})).await;
     assert_eq!(paired["status"], 200, "{paired}");
     assert_eq!(paired["body"]["members"], json!(["s0", "s1"]));
     let contract = result(&srv, "group.route", json!({"method": "GET", "name": "s1", "route": "contract", "body": null})).await;
-    assert_eq!(contract, public(&srv, "GET", "s1/pair/contract", None).await);
+    assert_eq!(answered(contract), public(&srv, "GET", "s1/pair/contract", None).await);
     let left = result(&srv, "group.route", json!({"method": "DELETE", "name": "s1", "route": "pair", "body": null})).await;
     assert_eq!(left["status"], 200, "{left}");
     assert!(!srv.pair.join("s0.json").exists());
@@ -202,4 +210,39 @@ async fn orq_associate_never_calls_python() {
     assert_eq!(std::fs::read_to_string(&draft).unwrap(), "<!-- hangar-orq-group: real -->\n");
     assert!(srv.python.internal_bodies("orq/associate").is_empty() && srv.python.internal_bodies("orq/group-phase").is_empty(),
         "nenhuma pergunta de volta ao Python");
+}
+
+/// Rota que chega pela ponte do Python (8768): os fatos do `orq` vêm no pedido, e o que só o Python
+/// faz (entregar a sessão que ele atende, promover o time) volta na resposta. Nenhuma chamada ao
+/// Python durante a rota.
+#[tokio::test(flavor = "multi_thread")]
+async fn bridged_route_never_calls_python() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 4).await;
+    let calls = |p: &fake::Fake| ["orq/is-orchestrator", "orq/group-phase", "orq/promote"].iter().map(|r| p.internal_bodies(r).len()).sum::<usize>()
+        + p.list_facts_calls.load(std::sync::atomic::Ordering::SeqCst) + p.input_calls();
+    let before = calls(&srv.python);
+    let facts = json!({"orchestrators": ["s3"], "phases": {}});
+    let refused = result(&srv, "group.route", json!({"method": "POST", "name": "s3", "route": "pair", "body": {"peers": ["s0"]}, "facts": facts})).await;
+    assert_eq!((refused["status"].clone(), refused["body"]["detail"]["code"].clone()), (json!(409), json!("erro_sessao_orq")), "o fato do Python decide");
+    let paired = result(&srv, "group.route", json!({"method": "POST", "name": "s0", "route": "pair", "body": {"peers": ["s1"]}, "facts": facts})).await;
+    assert_eq!(paired["status"], 200, "{paired}");
+    let mut told: Vec<&str> = paired["deliveries"].as_array().unwrap().iter().map(|d| d["name"].as_str().unwrap()).collect();
+    told.sort();
+    assert_eq!(told, ["s0", "s1"], "o protocolo volta ao Python para entregar");
+    let gid = paired["body"]["gid"].as_str().unwrap().to_owned();
+    let left = result(&srv, "group.route", json!({"method": "DELETE", "name": "s1", "route": "pair", "body": null,
+        "facts": {"orchestrators": [], "phases": {gid: "ended"}}})).await;
+    assert_eq!(left["status"], 200, "{left}");
+    assert_eq!(left["deliveries"][0]["name"], "s1", "o aviso de saída também");
+    let orq = result(&srv, "group.route", json!({"method": "POST", "name": "s2", "route": "pair", "body": {"orq": true}, "facts": facts})).await;
+    assert_eq!(orq["status"], 200, "{orq}");
+    assert_eq!((orq["post"][0]["op"].clone(), orq["post"][0]["name"].clone()), (json!("promote"), json!("s2")), "a promoção fica com o Python");
+    // A saída de um grupo `orq` usa a fase que o Python mandou.
+    let orq_gid = orq["body"]["gid"].as_str().unwrap().to_owned();
+    let gone = result(&srv, "group.route", json!({"method": "DELETE", "name": "s2", "route": "pair", "body": null,
+        "facts": {"orchestrators": [], "phases": {orq_gid: "ended"}}})).await;
+    assert_eq!(gone["status"], 200, "{gone}");
+    assert!(!srv.pair.join("s2.json").exists(), "execução acabada: o grupo orq sozinho sai");
+    assert_eq!(calls(&srv.python), before, "nenhuma chamada ao Python dentro da rota da ponte");
 }

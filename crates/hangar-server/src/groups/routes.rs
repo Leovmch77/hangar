@@ -140,8 +140,11 @@ impl Asked {
 /// `wanted`, uma descoberta nova (como o `_cached_info_sync`).
 pub(crate) async fn providers(st: &AppState, wanted: &[String]) -> Result<BTreeMap<String, String>, Value> {
     let failed = |e: crate::list::bridge::ListError| list_unavailable(e.code);
-    let rows = st.list.snapshot().await.map_err(failed)?.rows;
-    let mut found: BTreeMap<String, String> = rows.iter().map(|r| (r.name.clone(), r.provider.clone())).collect();
+    // Pela ponte do Python, a descoberta local basta: o retrato pediria os fatos a ele.
+    let pick = |r: &hangar_api::session::SessionRow| (r.name.clone(), r.provider.clone());
+    let mut found: BTreeMap<String, String> = if super::bridge::current().is_some() {
+        st.list.discover(None).await.map_err(failed)?.iter().map(pick).collect()
+    } else { st.list.snapshot().await.map_err(failed)?.rows.iter().map(pick).collect() };
     if wanted.iter().any(|n| !found.contains_key(n)) {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
         found.extend(st.list.discover(Some(now)).await.map_err(failed)?.iter().map(|r| (r.name.clone(), r.provider.clone())));
