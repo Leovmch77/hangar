@@ -770,24 +770,16 @@ enum Applied { Ignored(u64), Done { version: u64, names: Vec<String>, newcomers:
 
 /// `PUT` da dona aplicado aqui: só sidecar de quem está em `joining` nasce; só sidecar da mesma
 /// (dona, gid) muda ou sai; renomear e sair pendentes nesta máquina vencem o envio.
-pub async fn local_apply(st: &AppState, groups: &GroupService, gid: &str, body: PushBody) -> Result<Value, Refusal> {
+pub async fn local_apply(st: &Arc<AppState>, groups: &Arc<GroupService>, gid: &str, body: PushBody) -> Result<Value, Refusal> {
     let me = groups.server_id().to_owned();
     if me.is_empty() { return Err(no(StatusCode::BAD_REQUEST, "erro_pareamento_server_id_ausente", NO_SERVER_ID, json!({}))); }
     // Sem a dona no peers.json daqui, saída, renomear e aviso dela não teriam para onde ir.
     if st.peers.base_url(&body.owner).is_none() { return Err(unregistered(&body.owner)); }
     if body.owner == me { return Err(no(StatusCode::CONFLICT, "erro_grupo_identificador_igual", "a dona do grupo tem o mesmo id desta máquina", json!({}))); }
     let fed = of(st, groups).await?;
-    let pending = fed.outbox.pending();
-    let renamed: HashMap<String, String> = pending.iter().filter_map(|i| match i {
-        OutboxItem::Rename { owner, gid: g, from, to, .. } if *owner == body.owner && g == gid => Some((from.clone(), to.clone())),
-        _ => None,
-    }).collect();
-    let leaving: HashSet<String> = pending.iter().filter_map(|i| match i {
-        OutboxItem::Leave { owner, gid: g, member, .. } if *owner == body.owner && g == gid => Some(member.clone()),
-        _ => None,
-    }).collect();
-    let rename = |n: &str| renamed.get(n).cloned().unwrap_or_else(|| n.to_owned());
-    let joining: Vec<String> = body.joining.iter().map(|n| rename(n)).filter(|n| !leaving.contains(n)).collect();
+    // Leitura antecipada só para conferir as sessões na lista; quem vale é a da fila sob o lock.
+    let (renamed, leaving) = pending_moves(&fed.outbox.pending(), &body.owner, gid);
+    let joining = moved(&body.joining, &renamed, &leaving);
     let harness = if joining.is_empty() || body.dissolved { BTreeMap::new() } else {
         providers(st, &joining).await.map_err(|failed| Refusal(StatusCode::SERVICE_UNAVAILABLE, json!({"detail": failed})))?
     };
@@ -797,32 +789,55 @@ pub async fn local_apply(st: &AppState, groups: &GroupService, gid: &str, body: 
     let outside = outside_addresses(st);
     let dir = Arc::new(pair_dir(groups));
     let applied = {
-        let (dir, me, gid) = (dir.clone(), me.clone(), gid.to_owned());
-        let renamed = renamed.clone();
-        groups.locked(blocking(move || apply_push(&dir, &me, &gid, &body, &renamed, &leaving, &joining, &harness, &outside))).await??
+        let (dir, me, gid, outbox) = (dir.clone(), me.clone(), gid.to_owned(), fed.outbox.clone());
+        groups.locked(blocking(move || {
+            // Renomear e sair que entraram na fila até agora vencem o envio.
+            let (renamed, leaving) = pending_moves(&outbox.pending(), &body.owner, &gid);
+            let joining = moved(&body.joining, &renamed, &leaving);
+            apply_push(&dir, &me, &gid, &body, &renamed, &leaving, &joining, &harness, &outside)
+        })).await??
     };
     let (version, names, newcomers, dropped) = match applied {
         Applied::Done { version, names, newcomers, dropped } => (version, names, newcomers, dropped),
         Applied::Ignored(version) => return Ok(json!({"protocol": PROTOCOL, "version": version, "members": [], "ignored": true})),
     };
     groups.changed();
-    if !newcomers.is_empty() {
-        let record = record_view(&dir, &me, gid, &names);
-        if let Some(record) = &record {
-            tell_newcomers(st, groups, &me, record, &newcomers).await;
-            // A dona não lê a resposta do PUT: a falha daqui fica no diário desta máquina.
-            for failed in grant_locals(st, groups, &me, record).await {
+    // Avisos depois da resposta: a dona espera a confirmação por pouco tempo, e uma sessão ocupada
+    // a faria tirar do grupo quem já entrou. Falha vai ao diário daqui.
+    let (st, groups, gid, reply) = (st.clone(), groups.clone(), gid.to_owned(), json!({"protocol": PROTOCOL, "version": version, "members": names}));
+    tokio::spawn(async move {
+        if !newcomers.is_empty() && let Some(record) = record_view(&dir, &me, &gid, &names) {
+            tell_newcomers(&st, &groups, &me, &record, &newcomers).await;
+            for failed in grant_locals(&st, &groups, &me, &record).await {
                 tracing::warn!(code = super::routes::ACCESS_FAILED, error = %failed, "groups: acesso de fora ao membro novo não gravado");
             }
         }
-    }
-    for n in &dropped {
-        let text = format!("{PREFIX} Você saiu do grupo de trabalho entre máquinas. Volte a operar independente; use hangar-send só quando o usuário pedir.");
-        if let Err(error) = deliver_text(st, n, &text).await {
-            tracing::warn!(code = "groups_exit_notice_failed", session = %n, error = %error["code"], "groups: o aviso de saída não chegou");
+        for n in &dropped {
+            let text = format!("{PREFIX} Você saiu do grupo de trabalho entre máquinas. Volte a operar independente; use hangar-send só quando o usuário pedir.");
+            if let Err(error) = deliver_text(&st, n, &text).await {
+                tracing::warn!(code = "groups_exit_notice_failed", session = %n, error = %error["code"], "groups: o aviso de saída não chegou");
+            }
+        }
+    });
+    Ok(reply)
+}
+
+/// (renomeados `de → para`, quem está saindo) da fila desta máquina para o grupo (`owner`, `gid`).
+fn pending_moves(pending: &[OutboxItem], owner: &str, gid: &str) -> (HashMap<String, String>, HashSet<String>) {
+    let mut renamed = HashMap::new();
+    let mut leaving = HashSet::new();
+    for item in pending {
+        match item {
+            OutboxItem::Rename { owner: o, gid: g, from, to, .. } if o == owner && g == gid => { renamed.insert(from.clone(), to.clone()); }
+            OutboxItem::Leave { owner: o, gid: g, member, .. } if o == owner && g == gid => { leaving.insert(member.clone()); }
+            _ => {}
         }
     }
-    Ok(json!({"protocol": PROTOCOL, "version": version, "members": names}))
+    (renamed, leaving)
+}
+
+fn moved(names: &[String], renamed: &HashMap<String, String>, leaving: &HashSet<String>) -> Vec<String> {
+    names.iter().map(|n| renamed.get(n).cloned().unwrap_or_else(|| n.clone())).filter(|n| !leaving.contains(n)).collect()
 }
 
 /// O grupo como os sidecars daqui o veem, para o texto do protocolo.

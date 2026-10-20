@@ -158,7 +158,9 @@ async fn three_locals_plus_one_remote() {
     assert_eq!(peers_of(&remote), ["casa::s0", "casa::s1", "casa::s2"]);
     assert_eq!(remote["fed"], json!({"owner": "casa", "local": false, "version": 1}));
     assert_eq!(remote["task"], "t");
-    assert_eq!(inputs(&n.lab, "s3"), 1);
+    // A participante avisa depois de responder ao PUT.
+    let python = n.lab.python.clone();
+    fake::wait_until(move || python.hits_to("/api/sessions/s3/input") == 1).await;
     assert!(record(&n.lab, gid).is_none(), "só a dona tem registro");
     assert!(n.lab.changes.load(Ordering::SeqCst) > 0, "o PUT avisa a lista");
     // O grupo como cada máquina o vê.
@@ -380,7 +382,9 @@ async fn join_from_participant_does_not_deadlock() {
     assert_eq!(got, ["lab::s1", "lab::s2", "s0"]);
     let s0 = sidecar(&n.casa, "s0").unwrap();
     assert_eq!(s0["fed"], json!({"owner": "lab", "local": false, "version": 1}));
-    assert_eq!(inputs(&n.casa, "s0"), 1, "o protocolo chega pela máquina dela");
+    // O protocolo chega pela máquina dela, depois de ela responder ao PUT.
+    let python = n.casa.python.clone();
+    fake::wait_until(move || python.hits_to("/api/sessions/s0/input") == 1).await;
     assert!(record(&n.lab, body["gid"].as_str().unwrap()).is_some());
 }
 
@@ -609,4 +613,44 @@ async fn owner_id_change_does_not_dissolve_participants() {
     federation::spawn(n.lab.state.clone()).expect("participante com id").await.unwrap();
     let s1 = sidecar(&n.lab, "s1").expect("o grupo continua em lab");
     assert_eq!(s1["fed"]["owner"], "casa");
+}
+
+/// A participante responde ao `PUT` antes de avisar as sessões: um aviso lento não faz a dona tirar
+/// do grupo quem já entrou.
+#[tokio::test(flavor = "multi_thread")]
+async fn participant_answers_before_notices() {
+    let n = net().await;
+    n.lab.python.hold_input(true);
+    let (status, body) = pair(&n.casa, "s0", json!({"peers": ["lab::s1"]})).await;
+    n.lab.python.hold_input(false);
+    n.lab.python.release.notify_waiters();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["warning"], Value::Null, "confirmado sem esperar o aviso: {body}");
+    let python = n.lab.python.clone();
+    fake::wait_until(move || python.hits_to("/api/sessions/s1/input") == 1).await;
+}
+
+/// Um `Leave` que entra na fila enquanto o `PUT` espera o lock do grupo vale para ele.
+#[tokio::test(flavor = "multi_thread")]
+async fn leave_enqueued_while_waiting_for_the_lock_is_honoured() {
+    let n = net().await;
+    peers(&n.lab, &[("casa", closed_port().await)]);
+    let all = json!([member("casa", "s0"), member("lab", "s1"), member("lab", "s2")]);
+    assert_eq!(push(&n.lab, "g1", json!({"protocol": 1, "owner": "casa", "version": 1, "members": all, "joining": ["s1"]})).await.0, 200);
+    let groups = n.lab.state.groups.clone().unwrap();
+    let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+    let (free_tx, free_rx) = tokio::sync::oneshot::channel::<()>();
+    let lock = tokio::spawn(async move { groups.locked(async move { let _ = held_tx.send(()); let _ = free_rx.await; }).await });
+    held_rx.await.unwrap();
+    let addr = n.lab.addr;
+    let body = json!({"protocol": 1, "owner": "casa", "version": 2, "members": all, "joining": ["s2"]});
+    let asked = tokio::spawn(async move { call(addr, "PUT", "/api/groups/g1", Some(&body)).await });
+    // Dá tempo de o PUT passar das leituras de fora do lock; mais curto só deixa de exercitar a corrida.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    federation::existing(&n.lab.pair).unwrap().outbox().enqueue(vec![OutboxItem::Leave { owner: "casa".into(), gid: "g1".into(),
+        member: "s2".into(), origin: "lab".into() }]).unwrap();
+    free_tx.send(()).unwrap();
+    lock.await.unwrap();
+    assert_eq!(asked.await.unwrap().0, 200);
+    assert!(sidecar(&n.lab, "s2").is_none(), "a saída pendente vale");
 }
