@@ -183,12 +183,12 @@ impl AccountService {
                 }
             }
         }
-        // Registrada antes da guarda: a sessão que pedir a conta no meio do caminho já é ouvida.
-        let renewal = Renewal::start(&key);
         let guard = self
             .locks
             .try_acquire(&key, GuardMode::Exclusive)
             .map_err(|_| "sessao-viva")?;
+        // Só quem segura a conta se registra: a perdedora de uma disputa apagaria o registro da vencedora.
+        let renewal = Renewal::start(&key);
         let window = Arc::new(std::sync::Mutex::new(None::<String>));
         let work = self.renew_locked(account, key.clone(), guard, client.clone(), quick, runtime, window.clone());
         tokio::select! { biased;
@@ -204,17 +204,16 @@ impl AccountService {
         }
     }
 
-    /// Fecha a janela de uma renovação interrompida sem segurar a conta; falhando, a próxima
-    /// renovação fecha antes de começar.
+    /// Fecha a janela de uma renovação interrompida sem segurar a conta; falhando, segue tentando
+    /// como a limpeza estacionada, ainda sem a trava.
     fn close_yielded(&self, client: WindowClient, key: AccountKey, operation: String) {
         let service = self.clone();
         tokio::spawn(async move {
+            let Ok(record) = service.login_record(&key) else { return };
             if client.call(&key, &operation, "close", None).await.is_ok() {
-                if let Ok(record) = service.login_record(&key) {
-                    let _ = fs::remove_file(record);
-                }
+                let _ = fs::remove_file(record);
             } else {
-                service.refresh_cleanup.0.lock().await.insert(key, (operation, None));
+                service.park_cleanup(client, key, operation, None, record).await;
             }
         });
     }
@@ -273,7 +272,7 @@ impl AccountService {
             .is_err()
         {
             if client.call(&key, &operation, "close", None).await.is_err() {
-                self.park_cleanup(client, key, operation, _guard, record)
+                self.park_cleanup(client, key, operation, Some(_guard), record)
                     .await;
             } else {
                 let _ = fs::remove_file(record);
@@ -292,7 +291,7 @@ impl AccountService {
             timer.tick().await;
         };
         if client.call(&key, &operation, "close", None).await.is_err() {
-            self.park_cleanup(client, key, operation, _guard, record)
+            self.park_cleanup(client, key, operation, Some(_guard), record)
                 .await;
             return Err("renovacao-falhou");
         }
@@ -311,18 +310,19 @@ impl AccountService {
         client: WindowClient,
         key: AccountKey,
         operation: String,
-        guard: super::AccountGuard,
+        guard: Option<super::AccountGuard>,
         record: std::path::PathBuf,
     ) {
         tracing::warn!(
             code = "refresh_cleanup_pending",
-            "janela da renovação não fechou; conta segue travada até o fechamento"
+            locked = guard.is_some(),
+            "janela da renovação não fechou; o fechamento segue sendo tentado"
         );
         let pending = self.refresh_cleanup.0.clone();
         pending
             .lock()
             .await
-            .insert(key.clone(), (operation.clone(), Some(guard)));
+            .insert(key.clone(), (operation.clone(), guard));
         let service = self.clone();
         tokio::spawn(async move {
             let renewal = Renewal::start(&key);
@@ -513,7 +513,7 @@ mod tests {
             let service = service.clone();
             tokio::spawn(async move { service.refresh_claude(&account, bridge, Some(runtime), true).await })
         };
-        while locks.try_acquire(&key, GuardMode::Shared).is_ok() {
+        while !RENEWALS.lock().unwrap().contains_key(&key) {
             assert!(!renewing.is_finished(), "a renovação acabou sem segurar a conta");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
