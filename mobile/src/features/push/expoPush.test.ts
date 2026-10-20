@@ -115,12 +115,12 @@ describe('permissão liberada nos ajustes', () => {
 });
 
 describe('installNotificationHandler', () => {
-  it('instala uma vez só, com banner e lista e sem som', async () => {
+  it('instala uma vez só, com banner, lista e som', async () => {
     installNotificationHandler();
     installNotificationHandler();
     expect(h.handler).toHaveBeenCalledTimes(1);
     const behavior = await h.handler.mock.calls[0][0].handleNotification();
-    expect(behavior).toMatchObject({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: false });
+    expect(behavior).toMatchObject({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true });
   });
 });
 

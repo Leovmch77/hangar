@@ -25,12 +25,12 @@ export async function retryExpoPushIfDenied(servers: Server[]): Promise<PushResu
 }
 
 let handlerInstalled = false;
-// Sem o handler, o push que chega com o app aberto é descartado.
+// Sem o handler, o push que chega com o app aberto é descartado; sem som, o Android não mostra o banner.
 export function installNotificationHandler(): void {
   if (handlerInstalled) return;
   handlerInstalled = true;
   Notifications.setNotificationHandler({
-    handleNotification: async () => ({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: false, shouldSetBadge: false }),
+    handleNotification: async () => ({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: true, shouldSetBadge: false }),
   });
 }
 
