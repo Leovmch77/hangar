@@ -73,23 +73,44 @@ def test_connect_forwards_groups_routes(rust):
     assert _Rust.seen[-1]["original"] == "/api/groups/x/y"
 
 
-def test_connect_forward_delivers_what_the_rust_deferred(rust, monkeypatch):
+def test_connect_forward_delivers_what_the_rust_deferred_before_answering(rust, monkeypatch):
     """Recado a sessão que só o Python atende volta no corpo do Rust: o Python o tira da resposta e
-    entrega depois, sem o Rust chamá-lo dentro do pedido."""
+    entrega ANTES de responder, num prazo, sem o Rust chamá-lo dentro do pedido; quem não recebeu
+    (falha ou prazo) vai em `failed`, como as sessões que o Rust entregou."""
+    import asyncio
     sent = []
 
     async def enviar(name, text):
+        if name == "lenta":
+            await asyncio.sleep(5)
         sent.append((name, text))
-        return {"ok": False, "error": {"code": "erro_x", "params": {}, "msg": "x"}}
+        return {"ok": name == "pi2", "error": {"code": "erro_x", "params": {}, "msg": "x"}}
     monkeypatch.setattr(api, "_enviar", enviar)
+    monkeypatch.setattr(api, "_DEFERRED_WAIT", 0.2)
+    monkeypatch.setattr(settings, "server_id", "casa")
     registered = []
     monkeypatch.setattr(api.diag, "registrar", lambda evento, nivel, **kw: registered.append((evento, kw)))
-    monkeypatch.setattr(_Rust, "extra", {"hangar_deliveries": [{"name": "pi1", "text": "[grupo: casa::s0] oi", "steer": False}]})
+    line = "[grupo: casa::s0] oi"
+    monkeypatch.setattr(_Rust, "extra", {"protocol": 1, "failed": ["casa::s9"], "hangar_deliveries": [
+        {"name": n, "text": line, "steer": False} for n in ("pi1", "pi2", "lenta")]})
     body = {"protocol": 1, "origin": "casa", "sender": "s0", "text": "oi", "notice": "n1"}
     r = TestClient(api.app).post("/api/groups/g1/deliver", json=body, headers=AUTH)
-    assert r.status_code == 200 and r.json() == {"server_id": "casa", "de": "rust"}
-    assert sent == [("pi1", "[grupo: casa::s0] oi")]
-    assert [e for e, _ in registered if e.startswith("grupos.")] == ["grupos.entrega_adiada_falhou"]
+    assert r.status_code == 200 and "hangar_deliveries" not in r.json()
+    assert sorted(r.json()["failed"]) == ["casa::lenta", "casa::pi1", "casa::s9"]
+    assert sorted(sent) == [("pi1", line), ("pi2", line)]
+    assert "grupos.entrega_adiada_falhou" in [e for e, _ in registered]
+
+
+def test_connect_forward_without_failed_list_answers_with_warning(rust, monkeypatch):
+    """Rota sem lista `failed` (o `op` da dona): a falha da entrega vai no `warning` da resposta."""
+    async def enviar(name, text):
+        return {"ok": False, "error": {"code": "erro_x", "params": {}, "msg": "x"}}
+    monkeypatch.setattr(api, "_enviar", enviar)
+    monkeypatch.setattr(_Rust, "extra", {"hangar_deliveries": [{"name": "pi1", "text": "oi", "steer": False}]})
+    r = TestClient(api.app).post("/api/groups/g1/ops", json={"op": "join"}, headers=AUTH)
+    assert r.status_code == 200
+    warning = r.json()["warning"]
+    assert warning["code"] == "erro_pareamento_aviso_parcial" and warning["params"]["avisos"][0]["sessao"] == "pi1"
 
 
 def test_groups_routes_refuse_guest_and_python_mode_with_code(rust, monkeypatch):
@@ -192,3 +213,42 @@ def test_promote_os_error_undoes_and_names_who_did_not_leave(bridge, monkeypatch
     assert r.json()["detail"]["params"]["nao_sairam"] == ["b"]
     assert [e for e, _ in registered if e.startswith("grupos.")] == ["grupos.promocao_desfeita_falhou"]
     assert ("pi", "saiu") in bridge.sent
+
+
+def test_promote_without_identity_keeps_the_group_and_warns(bridge, monkeypatch):
+    """Sem identidade o time não é promovido: o pareamento fica, mas a resposta diz isso com código."""
+    def no_identity(name, gid):
+        raise orq_context.IdentityUnavailable("sessão sem identidade")
+    monkeypatch.setattr(orq_context, "promote", no_identity)
+    bridge.reply = {"status": 200, "body": {"ok": True, "warning": None}, "deliveries": [], "post": [{"op": "promote", "name": "arb", "gid": "g9"}]}
+    r = TestClient(api.app).post("/api/sessions/arb/pair", json={"orq": True}, headers=AUTH)
+    assert r.status_code == 200
+    assert r.json()["warning"]["code"] == "erro_orq_promocao_sem_identidade"
+    assert not any(op == "group.leave" for op, _ in bridge.calls)
+
+
+def test_promote_undo_reports_the_undo_notices_that_failed(bridge, monkeypatch):
+    """O aviso da saída que desfaz o grupo e não chegou entra na resposta do 409."""
+    def conflict(name, gid):
+        raise orq_context.PromotionConflict("o grupo já possui outro contrato")
+    monkeypatch.setattr(orq_context, "promote", conflict)
+
+    def call(op, **args):
+        bridge.calls.append((op, args))
+        if op == "group.route":
+            return bridge.reply
+        return {"ex_peers": [], "warnings": [], "deliveries": [{"name": "falha", "text": "saiu", "steer": False}]}
+    monkeypatch.setattr(groups_bridge, "call", call)
+    bridge.reply = {"status": 200, "body": {"ok": True}, "deliveries": [], "post": [{"op": "promote", "name": "arb", "gid": "g9"}]}
+    r = TestClient(api.app).post("/api/sessions/arb/pair", json={"orq": True}, headers=AUTH)
+    assert (r.status_code, r.json()["detail"]["code"]) == (409, "erro_orq_arquivo_mudou")
+    assert r.json()["warning"]["params"]["avisos"][0]["sessao"] == "falha"
+
+
+def test_bridged_failure_without_dict_body_goes_to_the_journal(bridge, monkeypatch):
+    registered = []
+    monkeypatch.setattr(api.diag, "registrar", lambda evento, nivel, **kw: registered.append((evento, kw)))
+    bridge.reply = {"status": 200, "body": "texto", "deliveries": [{"name": "falha", "text": "oi", "steer": False}], "post": []}
+    r = TestClient(api.app).post("/api/sessions/a/pair", json={"peer": "b"}, headers=AUTH)
+    assert r.status_code == 200
+    assert "grupos.falha_sem_corpo" in [e for e, _ in registered]

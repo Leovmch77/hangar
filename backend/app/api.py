@@ -23,7 +23,6 @@ from fastapi import FastAPI, Depends, HTTPException, Query, Request, WebSocket, 
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from starlette.background import BackgroundTask
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.requests import ClientDisconnect
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -616,16 +615,14 @@ async def _grupos_pelo_rust(request: Request, call_next):
     if guest_of(request) is not None or guest_users.current.get() is not None:
         return JSONResponse({"detail": erro("erro_fora_do_convite", "fora da sessao compartilhada")}, status_code=403)
     resp = await _repasse_ao_rust(request, _groups_need_rust(), "/__hangar_server/forwarded")
-    # Recado a sessão que só o Python atende volta no corpo: sai da resposta e é entregue depois dela.
+    # Recado a sessão que só o Python atende volta no corpo: sai dele e é entregue antes da resposta,
+    # num prazo, para quem não recebeu entrar na resposta como as falhas do Rust.
     if b'"hangar_deliveries"' not in resp.body:
         return resp
     body = json.loads(resp.body)
-    deliveries = body.pop("hangar_deliveries")
-
-    async def deliver():
-        for failed in await _deliver_deferred(deliveries):
-            diag.registrar("grupos.entrega_adiada_falhou", "aviso", sessao=failed["sessao"], codigo=failed["erro"].get("code"))
-    return JSONResponse(body, status_code=resp.status_code, background=BackgroundTask(deliver))
+    failed = await _deliver_deferred(body.pop("hangar_deliveries"), _DEFERRED_WAIT)
+    _report_failed(body, failed, "grupos.entrega_adiada_falhou", ("failed", "pulados"))
+    return JSONResponse(body, status_code=resp.status_code)
 
 
 # Rotas de plano e o catálogo de plugins e skills: o dono é o Rust (`plans::routes`, `claude_customizations`).
@@ -2186,8 +2183,13 @@ def _jsonl_of_session(name: str) -> str | None:
         return None
 
 
-async def _deliver_deferred(deliveries) -> list[dict]:
-    """Recados que o Rust devolveu por serem a sessões que só o Python atende; falhas como avisos."""
+# Teto da entrega adiada pela 8768: abaixo do prazo da dona (`DELIVER_WAIT`, 5 s), como o das sessões do Rust.
+_DEFERRED_WAIT = 3.0
+
+
+async def _deliver_deferred(deliveries, wait: float | None = None) -> list[dict]:
+    """Recados que o Rust devolveu por serem a sessões que só o Python atende; falhas como avisos.
+    Com `wait`, a sessão que não termina no prazo é abandonada e conta como falha."""
     by_session: dict[str, list[str]] = {}
     for d in deliveries or []:
         by_session.setdefault(d["name"], []).append(d["text"])
@@ -2197,7 +2199,32 @@ async def _deliver_deferred(deliveries) -> list[dict]:
         results = [await _enviar(name, text) for text in texts]
         return [{"sessao": name, "erro": res.get("error") or erro("erro_envio_falhou_desconhecida", "falha desconhecida no envio")}
                 for res in results if not res.get("ok")]
-    return [f for failed in await asyncio.gather(*(one(n, t) for n, t in by_session.items())) for f in failed]
+
+    async def bounded(name: str, texts: list[str]) -> list[dict]:
+        try:
+            return await asyncio.wait_for(one(name, texts), wait)
+        except TimeoutError:
+            return [{"sessao": name, "erro": erro("erro_envio_falhou", "não deu pra enviar: groups_notice_timeout", erro="groups_notice_timeout")}]
+    return [f for failed in await asyncio.gather(*(bounded(n, t) for n, t in by_session.items())) for f in failed]
+
+
+def _report_failed(body, failed: list[dict], event: str, lists: tuple[str, ...] = ()) -> None:
+    """Põe na resposta quem não recebeu o recado entregue pelo Python: na primeira lista de `lists`
+    que o corpo tiver (as das rotas entre máquinas, qualificadas como as do Rust) ou no `warning`.
+    Sem corpo onde caber, o diário."""
+    if not failed:
+        return
+    names = [f["sessao"] for f in failed]
+    diag.registrar(event, "aviso", falhas=len(failed), sessoes=",".join(names))
+    key = next((k for k in lists if isinstance(body, dict) and isinstance(body.get(k), list)), None)
+    if key:
+        body[key].extend(f"{settings.server_id}::{n}" for n in names)
+    elif isinstance(body, dict) and body.get("warning") is None:
+        body["warning"] = erro("erro_pareamento_aviso_parcial", "aviso falhou em: " + "; ".join(names), avisos=failed)
+    elif isinstance(body, dict) and isinstance(body["warning"], dict):
+        body["warning"].setdefault("params", {}).setdefault("avisos", []).extend(failed)
+    else:
+        diag.registrar("grupos.falha_sem_corpo", "erro", falhas=len(failed), sessoes=",".join(names))
 
 
 async def _rust_leave(name: str, phases: dict) -> list[dict]:
@@ -4195,31 +4222,36 @@ async def _route_after(out: dict) -> None:
     """O que o Rust devolveu para o Python fazer depois da ponte, num sentido: entregar o recado a
     sessão que só ele atende e promover o time do `orq`. Promoção que falha desfaz o grupo novo."""
     failed = await _deliver_deferred(out.get("deliveries"))
+    notes: list[dict] = []
     for post in out.get("post") or []:
         undone: list = []
-        refused = post.get("op") == "promote" and await asyncio.to_thread(_promote_or_undo, post["name"], post["gid"], undone)
-        await _deliver_deferred(undone)
+        refused = post.get("op") == "promote" and await asyncio.to_thread(_promote_or_undo, post["name"], post["gid"], undone, notes)
+        failed += await _deliver_deferred(undone)
         if refused:
             out["status"], out["body"] = 409, {"detail": refused}
-            return
+            break
     body = out.get("body")
-    if failed and isinstance(body, dict):
-        diag.registrar("grupos.entrega_pela_ponte", "aviso", falhas=len(failed))
-        if body.get("warning") is None:
-            body["warning"] = erro("erro_pareamento_aviso_parcial", "aviso falhou em: " + "; ".join(f["sessao"] for f in failed), avisos=failed)
-        elif isinstance(body["warning"], dict):
-            body["warning"].setdefault("params", {}).setdefault("avisos", []).extend(failed)
+    for note in notes:
+        if isinstance(body, dict) and body.get("warning") is None:
+            body["warning"] = note
+        else:
+            failed.append({"sessao": note["params"]["sessao"], "erro": note})
+    _report_failed(body, failed, "grupos.entrega_pela_ponte")
 
 
-def _promote_or_undo(name: str, gid: str, deliveries: list) -> dict | None:
+def _promote_or_undo(name: str, gid: str, deliveries: list, notes: list) -> dict | None:
     """`orq_context.promote` (os arquivos do `orq` são do Python). Conflito ou falha de disco = o grupo
     recém-criado sai, membro a membro, pela ponte; todos estavam soltos (grupo novo), então sair volta
-    ao que era. Os recados que a saída devolve vão para `deliveries`, entregues por quem chamou."""
+    ao que era. Os recados que a saída devolve vão para `deliveries`, entregues por quem chamou. Sem
+    identidade o grupo fica e o aviso vai para `notes`."""
     from app import orq_context, orq_md
     try:
         orq_context.promote(name, gid)
-    except orq_context.IdentityUnavailable:
+    except orq_context.IdentityUnavailable as e:
         _log.warning("pair: sem identidade para promover o grupo %s", gid)
+        diag.registrar("grupos.promocao_sem_identidade", "aviso", sessao=name, detalhe=gid)
+        notes.append(erro("erro_orq_promocao_sem_identidade", f"o grupo ficou, mas o time não foi promovido: {e}",
+                          sessao=name, grupo=gid, detalhe=str(e)))
     except (orq_context.PromotionConflict, orq_md.Conflito, OSError) as e:
         link = PairLink(name).get() or {}
         stayed = []

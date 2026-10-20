@@ -4057,6 +4057,7 @@
   "erro_orq_modelo_desconhecido": "model outside the account catalog: {modelos}",
   "erro_orq_celula_invalida": "a value with '|' or a line break cannot go into the contract",
   "erro_orq_arquivo_mudou": "the file changed since it was read — reload",
+  "erro_orq_promocao_sem_identidade": "the group was created, but the orchestration team was not moved to it: {detalhe}",
   "erro_orq_conta_nao_liberada": "the policy does not allow that account",
   "erro_orq_modelo_nao_liberado": "the policy does not allow that model on that account",
   "erro_orq_conta_travada": "that account is locked to a single model",

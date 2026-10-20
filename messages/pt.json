@@ -4057,6 +4057,7 @@
   "erro_orq_modelo_desconhecido": "modelo fora do catálogo da conta: {modelos}",
   "erro_orq_celula_invalida": "valor com '|' ou quebra de linha não pode ir pro contrato",
   "erro_orq_arquivo_mudou": "o arquivo mudou desde a leitura — recarregue",
+  "erro_orq_promocao_sem_identidade": "o grupo foi criado, mas o time da orquestração não foi levado para ele: {detalhe}",
   "erro_orq_conta_nao_liberada": "a política não libera essa conta",
   "erro_orq_modelo_nao_liberado": "a política não libera esse modelo nessa conta",
   "erro_orq_conta_travada": "essa conta é travada num modelo só",
