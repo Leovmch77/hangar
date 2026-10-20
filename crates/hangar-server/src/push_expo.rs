@@ -43,7 +43,8 @@ fn read(path: &Path) -> io::Result<Registry> {
     }
 }
 
-/// Ler, mudar e gravar sob a trava: inscrição e envio concorrentes não se apagam.
+/// Relê, muda e grava sob a trava: o envio só aplica podas e tickets novos sobre o que estiver gravado,
+/// e uma inscrição feita durante o envio fica.
 fn update(path: &Path, change: impl FnOnce(&mut Registry)) -> io::Result<()> {
     std::fs::create_dir_all(path.parent().ok_or_else(|| io::Error::other("pasta ausente"))?)?;
     let lock = std::fs::OpenOptions::new().read(true).append(true).create(true).open(path.with_extension("lock"))?;
@@ -67,9 +68,10 @@ pub async fn subscribe(State(state): State<Arc<AppState>>, ConnectInfo(peer): Co
 pub(crate) async fn serve(state: &Arc<AppState>, request: Request) -> Response {
     let parsed = to_bytes(request.into_body(), BODY_LIMIT).await.ok()
         .and_then(|raw| serde_json::from_slice::<Subscribe>(&raw).ok())
-        .filter(|s| s.token.starts_with("ExponentPushToken[") && ["pt", "en"].contains(&s.locale.as_str()));
+        .filter(|s| s.token.starts_with("ExponentPushToken[") && ["pt", "en"].contains(&s.locale.as_str())
+            && !s.server_id.trim().is_empty() && !s.label.trim().is_empty());
     let Some(new) = parsed else {
-        return failure(StatusCode::BAD_REQUEST, "push_expo_invalid", "token do Expo ou idioma inválidos");
+        return failure(StatusCode::BAD_REQUEST, "push_expo_invalid", "token do Expo, servidor, nome ou idioma inválidos");
     };
     let entry = Entry { token: new.token, server_id: new.server_id, label: new.label, locale: new.locale, at: chrono::Utc::now().to_rfc3339() };
     let path = path(&state.accounts.env.home);
@@ -137,13 +139,19 @@ async fn deliver(path: PathBuf, base: String, diag: DiagClient, notify: Notify) 
         }).collect();
         match post(&client, format!("{base}/--/api/v2/push/send"), Value::Array(messages)).await {
             // O Expo devolve os tickets na ordem das mensagens.
-            Ok(reply) => for (ticket, entry) in reply["data"].as_array().into_iter().flatten().zip(&targets) {
-                match ticket["id"].as_str() {
-                    Some(id) if ticket["status"] == "ok" => tickets.push(Pending { ticket_id: id.into(), token: entry.token.clone() }),
-                    _ if unregistered(ticket) => { dead.insert(entry.token.clone()); }
-                    _ => report("push_expo_ticket_error"),
+            Ok(reply) => {
+                let answered = reply["data"].as_array().map_or(&[][..], Vec::as_slice);
+                if answered.len() != targets.len() { report("push_expo_ticket_count"); }
+                let mut failed = 0;
+                for (ticket, entry) in answered.iter().zip(&targets) {
+                    match ticket["id"].as_str() {
+                        Some(id) if ticket["status"] == "ok" => tickets.push(Pending { ticket_id: id.into(), token: entry.token.clone() }),
+                        _ if unregistered(ticket) => { dead.insert(entry.token.clone()); }
+                        _ => failed += 1,
+                    }
                 }
-            },
+                if failed > 0 { report(&format!("push_expo_ticket_error:{failed}")); }
+            }
             Err(code) => report(code),
         }
     }

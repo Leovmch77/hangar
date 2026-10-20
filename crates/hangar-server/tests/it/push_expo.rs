@@ -7,13 +7,26 @@ use std::time::Duration;
 
 /// O que o servidor Expo falso recebeu, e o recibo que ele devolve.
 #[derive(Default)]
-struct Expo { calls: Mutex<Vec<(String, Value)>>, receipts: Mutex<Value> }
+struct Expo {
+    calls: Mutex<Vec<(String, Value)>>,
+    receipts: Mutex<Value>,
+    // Ticket `DeviceNotRegistered` no `/send`, em vez de ok.
+    unregistered: std::sync::atomic::AtomicBool,
+    // O `/send` só responde depois deste sinal: o teste age entre a leitura e a gravação do envio.
+    hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
 
 async fn expo_send(State(expo): State<Arc<Expo>>, raw: Bytes) -> String {
     let body: Value = serde_json::from_slice(&raw).unwrap();
-    let tickets: Vec<Value> = body.as_array().unwrap().iter()
-        .map(|m| json!({"status": "ok", "id": format!("ticket-{}", m["to"].as_str().unwrap())})).collect();
+    let dead = expo.unregistered.load(std::sync::atomic::Ordering::SeqCst);
+    let tickets: Vec<Value> = body.as_array().unwrap().iter().map(|m| if dead {
+        json!({"status": "error", "details": {"error": "DeviceNotRegistered"}})
+    } else {
+        json!({"status": "ok", "id": format!("ticket-{}", m["to"].as_str().unwrap())})
+    }).collect();
     expo.calls.lock().unwrap().push(("send".into(), body));
+    let hold = expo.hold.lock().unwrap().take();
+    if let Some(hold) = hold { let _ = hold.await; }
     json!({"data": tickets}).to_string()
 }
 
@@ -206,4 +219,64 @@ async fn two_tokens_go_in_one_send() {
     assert_eq!(calls[0].1.as_array().unwrap().len(), 2);
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(fixture.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn subscribe_during_a_send_survives_its_write() {
+    let fixture = Fixture::start().await;
+    fixture.subscribe(TOKEN, "Casa", "pt", true).await;
+    let (release, hold) = tokio::sync::oneshot::channel();
+    *fixture.expo.hold.lock().unwrap() = Some(hold);
+    fixture.notify(false).await;
+    fixture.wait_calls(1).await;
+    assert_eq!(fixture.subscribe("ExponentPushToken[novo]", "Casa", "pt", true).await.status(), 200);
+    release.send(()).unwrap();
+    let registry = fixture.wait_registry(|r| r["pending"].as_array().is_some_and(|p| !p.is_empty())).await;
+    let tokens: Vec<&str> = registry["tokens"].as_array().unwrap().iter().map(|e| e["token"].as_str().unwrap()).collect();
+    assert_eq!(tokens, [TOKEN, "ExponentPushToken[novo]"]);
+}
+
+#[tokio::test]
+async fn unregistered_ticket_prunes_right_away() {
+    let fixture = Fixture::start().await;
+    fixture.subscribe(TOKEN, "Casa", "pt", true).await;
+    fixture.expo.unregistered.store(true, std::sync::atomic::Ordering::SeqCst);
+    fixture.notify(false).await;
+    let registry = fixture.wait_registry(|r| r["tokens"].as_array().is_some_and(Vec::is_empty)).await;
+    assert_eq!(registry["pending"], json!([]));
+    assert_eq!(fixture.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn private_route_needs_the_internal_secret() {
+    let fixture = Fixture::start().await;
+    let response = reqwest::Client::new().post(format!("{}/__hangar_server/push/expo", fixture.private))
+        .header("content-type", "application/json")
+        .body(json!({"session": "s1", "title": {"pt": "a", "en": "a"}, "body": {"pt": "b", "en": "b"}}).to_string())
+        .send().await.unwrap();
+    assert_eq!(response.status(), 404);
+}
+
+#[tokio::test]
+async fn empty_server_or_label_is_refused() {
+    let fixture = Fixture::start().await;
+    assert_eq!(fixture.subscribe(TOKEN, " ", "pt", true).await.status(), 400);
+    let response = reqwest::Client::new().post(format!("{}/api/push/expo/subscribe", fixture.public)).bearer_auth("fixture-owner")
+        .header("content-type", "application/json")
+        .body(json!({"token": TOKEN, "server_id": "", "label": "Casa", "locale": "pt"}).to_string())
+        .send().await.unwrap();
+    assert_eq!(response.status(), 400);
+    assert_eq!(body(response).await["detail"]["code"], "push_expo_invalid");
+}
+
+#[tokio::test]
+async fn connect_owner_subscribes_through_the_forwarder() {
+    let fixture = Fixture::start().await;
+    let response = reqwest::Client::new().post(format!("{}/__hangar_server/forwarded", fixture.private))
+        .header("x-hangar-internal", "fixture-internal").header("x-hangar-path", "/api/push/expo/subscribe")
+        .header("content-type", "application/json")
+        .body(json!({"token": TOKEN, "server_id": "casa", "label": "Casa", "locale": "pt"}).to_string())
+        .send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(fixture.registry()["tokens"][0]["token"], TOKEN);
 }
