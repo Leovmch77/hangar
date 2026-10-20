@@ -29,7 +29,7 @@ vi.mock('@hangar/core', () => ({ subscribeExpoPushForServer: h.subscribe }));
 vi.mock('../../paraglide/runtime', () => ({ getLocale: () => 'pt' }));
 vi.mock('../../stores/servers', () => ({ useServers: vi.fn() }));
 
-import { handleNotificationResponse, installNotificationHandler, openFromNotification, registerExpoPush, retryExpoPushIfDenied } from './expoPush';
+import { handleNotificationResponse, installNotificationHandler, openFromNotification, pushRegistrationKey, registerExpoPush, retryExpoPushIfDenied } from './expoPush';
 
 const casa = { id: 'casa', label: 'Casa', baseUrl: 'https://casa.test', token: 't1' };
 const work = { id: 'work', label: 'Trabalho', baseUrl: 'https://work.test', token: 't2' };
@@ -106,6 +106,15 @@ describe('permissão liberada nos ajustes', () => {
     expect(h.subscribe).toHaveBeenCalledWith(casa, expect.objectContaining({ server_id: 'casa' }));
   });
 
+  it('permissão ainda negada na volta não pergunta de novo', async () => {
+    h.permission = 'denied';
+    await registerExpoPush([casa]);
+    h.request.mockClear();
+    expect(await retryExpoPushIfDenied([casa])).toBe('denied');
+    expect(h.request).not.toHaveBeenCalled();
+    expect(h.getToken).not.toHaveBeenCalled();
+  });
+
   it('não registra de novo quando a última tentativa deu certo', async () => {
     await registerExpoPush([casa]);
     h.subscribe.mockClear();
@@ -139,5 +148,20 @@ describe('handleNotificationResponse', () => {
     handleNotificationResponse(response('default-action') as never, [casa]);
     expect(h.push).toHaveBeenCalledTimes(1);
     expect(h.clear).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('pushRegistrationKey', () => {
+  it('muda com idioma, nome e conjunto de servidores', () => {
+    const base = pushRegistrationKey([casa, work], 'pt');
+    expect(pushRegistrationKey([casa, work], 'pt')).toBe(base);
+    expect(pushRegistrationKey([casa, work], 'en')).not.toBe(base);
+    expect(pushRegistrationKey([{ ...casa, label: 'Casa nova' }, work], 'pt')).not.toBe(base);
+    expect(pushRegistrationKey([casa], 'pt')).not.toBe(base);
+  });
+
+  it('sem servidor para registrar, chave vazia', () => {
+    expect(pushRegistrationKey([], 'pt')).toBe('');
+    expect(pushRegistrationKey([{ ...casa, invite: true }], 'pt')).toBe('');
   });
 });

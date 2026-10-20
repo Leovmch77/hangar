@@ -18,7 +18,8 @@ import { Toaster, toast } from '../src/ui/Toast';
 import { LiveVoiceRoot } from '../src/features/voice/LiveVoiceRoot';
 import { setFatalErrorRoute, takeFatalErrorNotice } from '../src/net/fatalErrors';
 import * as m from '../src/paraglide/messages';
-import { installNotificationHandler, registerExpoPush, retryExpoPushIfDenied, useNotificationNavigation } from '../src/features/push/expoPush';
+import { installNotificationHandler, pushRegistrationKey, registerExpoPush, retryExpoPushIfDenied, useNotificationNavigation } from '../src/features/push/expoPush';
+import { getLocale } from '../src/paraglide/runtime';
 import { registrarDiag } from '@hangar/core';
 
 configureCore();
@@ -67,12 +68,13 @@ export default function Layout() {
   }, []);
 
   useNotificationNavigation();
-  // Só quando o conjunto de servidores muda: a lista se regrava por outros motivos (rede local aprendida).
-  const pushKey = servers.map((s) => s.id).join('\n');
+  // A lista se regrava por outros motivos (rede local aprendida); só servidor, nome ou idioma refazem o registro.
+  const idioma = useAparencia((s) => s.idioma);
+  const pushKey = pushRegistrationKey(servers, getLocale());
   useEffect(() => {
     if (!ready || !pushKey) return;
     registerExpoPush(useServers.getState().servers).catch(reportPushError);
-  }, [ready, pushKey]);
+  }, [ready, pushKey, idioma]);
 
   useEffect(() => {
     if (!ready) return;

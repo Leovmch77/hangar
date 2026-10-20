@@ -15,13 +15,16 @@ let lastResult: PushResult | null = null;
 
 // ponytail: só Android; o iOS do SideStore não assina o entitlement de push.
 export async function registerExpoPush(servers: Server[]): Promise<PushResult> {
-  lastResult = await register(servers);
+  lastResult = await register(servers, true);
   return lastResult;
 }
 
 /** Volta dos ajustes do sistema: quem negou e depois liberou precisa mandar o token agora. */
 export async function retryExpoPushIfDenied(servers: Server[]): Promise<PushResult | null> {
-  return lastResult === 'denied' ? registerExpoPush(servers) : null;
+  if (lastResult !== 'denied') return null;
+  // Só lê: perguntar a cada volta ao app insistiria com quem já negou.
+  lastResult = await register(servers, false);
+  return lastResult;
 }
 
 let handlerInstalled = false;
@@ -34,7 +37,7 @@ export function installNotificationHandler(): void {
   });
 }
 
-async function register(servers: Server[]): Promise<PushResult> {
+async function register(servers: Server[], ask: boolean): Promise<PushResult> {
   if (Platform.OS !== 'android') return 'unsupported';
   // O canal precisa existir antes do pedido: no Android 13+ é ele que dispara a pergunta do sistema.
   await Notifications.setNotificationChannelAsync('default', {
@@ -42,7 +45,7 @@ async function register(servers: Server[]): Promise<PushResult> {
     importance: Notifications.AndroidImportance.HIGH,
   });
   let { status } = await Notifications.getPermissionsAsync();
-  if (status !== 'granted') ({ status } = await Notifications.requestPermissionsAsync());
+  if (status !== 'granted' && ask) ({ status } = await Notifications.requestPermissionsAsync());
   if (status !== 'granted') return 'denied';
   const projectId = Constants.expoConfig?.extra?.eas?.projectId as string | undefined;
   const { data: token } = await Notifications.getExpoPushTokenAsync({ projectId });
@@ -51,6 +54,12 @@ async function register(servers: Server[]): Promise<PushResult> {
   await Promise.allSettled(servers.filter(pushable).map((s) =>
     subscribeExpoPushForServer(s, { token, server_id: s.id, label: s.label, locale })));
   return 'registered';
+}
+
+/** Muda quando o registro precisa ser refeito: servidor entrou ou saiu, foi renomeado, ou o idioma mudou. */
+export function pushRegistrationKey(servers: Server[], locale: string): string {
+  const parts = servers.filter(pushable).map((s) => `${s.id}\t${s.label}`);
+  return parts.length ? [locale, ...parts].join('\n') : '';
 }
 
 export function openFromNotification(data: unknown, servers: Server[]): void {
