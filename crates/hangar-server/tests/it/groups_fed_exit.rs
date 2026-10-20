@@ -172,6 +172,9 @@ async fn partial_join_on_owner_without_members_dissolves() {
     let gid = pair(&n.casa, "s0", &["lab::s1", "vm::s2"]).await;
     sidecar_becomes(&n.vm, "s2", |s| s.is_some()).await;
     unpair(&n.casa, "s0").await;
+    // O envio lê o registro na hora: reescrevê-lo antes da entrega dissolveria o grupo antes da hora.
+    sidecar_becomes(&n.lab, "s1", has_peers(&["vm::s2"])).await;
+    sidecar_becomes(&n.vm, "s2", has_peers(&["lab::s1"])).await;
     // Registro com uma máquina só: o que fica de uma dissolução interrompida no meio.
     let path = n.casa.pair.join("groups").join(format!("{gid}.json"));
     let mut rec = record(&n.casa, &gid).unwrap();
