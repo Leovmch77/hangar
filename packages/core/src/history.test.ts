@@ -186,11 +186,19 @@ describe('mergeHistoryWithLiveRetiring: real que chega pelo /history', () => {
     expect(r.retired).toEqual([]);
   });
   it.each([{ current: [] }, { current: [{ id: 'live', kind: 'assistant_msg', text: 'Ao vivo' } as ChatEvent] }])(
-    'conserva filas quando o chamador faz a própria reconciliação: $current', ({ current }) => {
+    'conserva filas que só vieram no REST: $current', ({ current }) => {
       const history = [user('real', 'Vamos fazer hoje agora'), user('queued-specific', 'Vamos fazer hoje')];
-      const r = mergeHistoryWithLiveRetiring(history, current, { cachedEvents: new Set(), retireQueued: false });
+      const r = mergeHistoryWithLiveRetiring(history, current, { cachedEvents: new Set(), retireQueuedFromCurrent: true });
       expect(r.events).toEqual([...history, ...current]);
       expect(r.retired).toEqual([]);
     },
   );
+  it('reconcilia só as filas atuais sem consumir uma fila nova do REST', () => {
+    const common = user('common', 'comum');
+    const current = [common, user('queued-x', 'ok'), user('queued-y', 'ok')];
+    const r = mergeHistoryWithLiveRetiring([common, user('real', 'ok'), user('queued-new', 'ok')], current,
+      { retireQueuedFromCurrent: true });
+    expect(r.events.map((e) => e.id)).toEqual(['common', 'real', 'queued-new', 'queued-y']);
+    expect(r.retired).toEqual(['queued-x']);
+  });
 });

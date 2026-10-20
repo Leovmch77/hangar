@@ -62,7 +62,7 @@ export function appendTail(tail: ChatEvent[], current: ChatEvent[]): ChatEvent[]
 /** Mensagem real que chegou pelo REST aposenta a bolha da fila dona da linha, como o caminho do SSE
  *  (Chat.svelte). Só reais que não estavam na tela, e só bolhas enfileiradas antes dela; a real cuja
  *  bolha o Chat já aposentou (`retiredBefore`) não leva outra junto. */
-function retireQueuedCoveredBy(events: ChatEvent[], fresh: ReadonlySet<string>, retiredBefore: ChatEvent[]):
+function retireQueuedCoveredBy(events: ChatEvent[], fresh: ReadonlySet<string>, retiredBefore: ChatEvent[], eligibleQueued?: ReadonlySet<string>):
   { events: ChatEvent[]; retired: string[] } {
   let out = events;
   const retired: string[] = [];
@@ -72,6 +72,7 @@ function retireQueuedCoveredBy(events: ChatEvent[], fresh: ReadonlySet<string>, 
     const consumed = donoDaLinha(real.text, pending.map((e) => e.text!));
     if (consumed >= 0) { pending = pending.filter((_, i) => i !== consumed); continue; }
     const filas = out.flatMap((e, i) => (e.kind === 'user_msg' && e.id.startsWith('queued-') && e.text
+      && (!eligibleQueued || eligibleQueued.has(e.id))
       && (real.ts == null || e.queued_ts == null || real.ts >= e.queued_ts) ? [{ i, text: e.text }] : []));
     const dono = donoDaLinha(real.text, filas.map((f) => f.text));
     if (dono < 0) continue;
@@ -89,7 +90,7 @@ export function mergeHistoryWithLive(
     preserveNoSeam?: boolean;
     removedIds?: ReadonlySet<string>;
     cachedEvents?: ReadonlySet<ChatEvent>;
-    retireQueued?: boolean;
+    retireQueuedFromCurrent?: boolean;
   } = {},
 ): ChatEvent[] {
   return mergeHistoryWithLiveRetiring(history, current, options).events;
@@ -104,7 +105,7 @@ export function mergeHistoryWithLiveRetiring(
     preserveNoSeam?: boolean;
     removedIds?: ReadonlySet<string>;
     cachedEvents?: ReadonlySet<ChatEvent>;
-    retireQueued?: boolean;
+    retireQueuedFromCurrent?: boolean;
   } = {},
 ): { events: ChatEvent[]; retired: string[] } {
   const removed = options.removedIds ?? new Set<string>();
@@ -144,6 +145,6 @@ export function mergeHistoryWithLiveRetiring(
     merged.push(...current.slice(cursor).filter(e => !historyIds.has(e.id)));
   }
   const events = merged.filter(e => !removed.has(e.id));
-  // O mobile reconcilia as filas no ingest; reais antigos do REST não podem consumi-las de novo.
-  return options.retireQueued === false ? { events, retired: [] } : retireQueuedCoveredBy(events, fresh, retiredBefore);
+  // Filas que vieram no próprio REST podem ser posteriores às mensagens reais dele.
+  return retireQueuedCoveredBy(events, fresh, retiredBefore, options.retireQueuedFromCurrent ? onScreen : undefined);
 }

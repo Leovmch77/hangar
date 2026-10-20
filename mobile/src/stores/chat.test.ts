@@ -449,6 +449,53 @@ test.each([
   chat.release();
 });
 
+test('histórico após reset confirma só a fila correspondente entre os eventos ao vivo', async () => {
+  historyResponses = [[]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const requests = fetchManual();
+  created[0].trigger('reset', '{}');
+  const common = ev({ id: 'common', kind: 'assistant_msg', text: 'Evento comum' });
+  for (const message of [common, ev({ id: 'queued-x', text: 'Primeira mensagem' }), ev({ id: 'queued-y', text: 'Outra mensagem' })]) {
+    created[0].trigger('message', JSON.stringify(message));
+  }
+  requests[0].responder([common, ev({ id: 'real', text: 'Primeira mensagem' })]);
+  await tick();
+  expect(chat.use.getState().events.map((e) => e.id)).toEqual(['common', 'real', 'queued-y']);
+  chat.release();
+});
+
+test.each(['real', 'confirmed', 'removed'])('histórico atrasado e replay não devolvem fila retirada por %s', async (reason) => {
+  historyResponses = [[]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const requests = fetchManual();
+  const source = created[0];
+  source.trigger('reset', '{}');
+  const common = ev({ id: 'common', kind: 'assistant_msg' });
+  const queued = ev({ id: 'queued-x', text: 'Primeira mensagem' });
+  for (const message of [common, queued, ev({ id: 'queued-y', text: 'Outra mensagem' })]) {
+    source.trigger('message', JSON.stringify(message));
+  }
+  if (reason === 'real') source.trigger('message', JSON.stringify(ev({ id: 'real', text: queued.text })));
+  else if (reason === 'confirmed') source.trigger('queue_confirmed', JSON.stringify({ ...queued, queued_confirmed: true }));
+  else source.trigger('queue', JSON.stringify({ entries: [], removed: ['x'], actions: true }));
+  requests[0].responder([common, queued]);
+  await tick();
+  const ids = reason === 'real' ? ['common', 'queued-y', 'real'] : ['common', 'queued-y'];
+  expect(chat.use.getState().events.map((e) => e.id)).toEqual(ids);
+  source.trigger('message', JSON.stringify(queued));
+  expect(chat.use.getState().events.map((e) => e.id)).toEqual(ids);
+  source.trigger('reset', '{}');
+  source.trigger('message', JSON.stringify(queued));
+  requests[1].responder([]);
+  await tick();
+  expect(chat.use.getState().events.map((e) => e.id)).toEqual(['queued-x']);
+  chat.release();
+});
+
 test('/clear aceito só retira seu eco quando o servidor confirma a troca de conversa', async () => {
   historyResponses = [[ev({ id: 'old:1', kind: 'assistant_msg', text: 'Conversa anterior' })]];
   const chat = chatStore('srv1', 'sess');
