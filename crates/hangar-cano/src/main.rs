@@ -602,7 +602,9 @@ async fn run(args: Args) -> i32 {
         let status = tokio::select! {
             status = child.wait() => status,
             Ok(()) = &mut kill_rx => {
-                let _ = child.start_kill();
+                if let Err(e) = child.start_kill() {
+                    log(&format!("derrubar o claude falhou: {e}"));
+                }
                 child.wait().await
             }
         };
