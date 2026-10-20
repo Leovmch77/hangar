@@ -821,10 +821,10 @@ mod tests {
         assert_eq!((row.state.as_str(), row.question.as_deref()), ("awaiting_input", Some("Permitir Bash?")));
         assert_eq!(row.options, Some(vec!["Permitir".into(), "Negar".into()]));
         assert_eq!(row.status_line.as_deref(), Some("🤖 Haiku 4.5"));
-        // Processo parado: o marcador responde. Pane nunca é raspado.
+        // Processo parado: sessão parada, mesmo com o marcador em "working". Pane nunca é raspado.
         row.question = None;
         run(&mut row, &dirs, &io, Some(&snap(false))).await;
-        assert_eq!(row.state, "working");
+        assert_eq!(row.state, "idle");
         assert_eq!(*io.calls.lock().unwrap(), 0);
         // Runtime com erro não passa por sessão parada calada.
         let broken = BTreeMap::from([("s".to_owned(), serde_json::json!({"error": "cano_exited", "view": {"alive": true}}))]);
