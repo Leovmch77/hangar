@@ -18,7 +18,8 @@ vi.mock('./auth', () => ({
   getActiveId: vi.fn(() => 'srv-a'), selectServer: vi.fn(), serverColor: (id: string) => `c-${id}`,
 }));
 
-import { createSessionListModel, groupItems } from './sessionListModel.svelte';
+import { clusterByPair } from '@hangar/core';
+import { createSessionListModel } from './sessionListModel.svelte';
 
 const sess = (name: string, serverId: string, over: Record<string, unknown> = {}) => ({
   name, serverId, serverLabel: serverId.toUpperCase(), serverColor: `c-${serverId}`,
@@ -174,7 +175,7 @@ describe('grupo entre máquinas fica na máquina de cada membro, com selo (I-9A)
     const model = createSessionListModel(opts('desktop'));
     expect(model.groupBadge(store.rows[0])).toBeNull();
     const local = model.allGroups.find(g => g.id === 'srv-a')!;
-    expect(groupItems(local).find(item => item.kind === 'header')).toMatchObject({ gid: 'b745f21b', count: 1 });
+    expect(clusterByPair(local.sessions).find(item => item.kind === 'header')).toMatchObject({ gid: 'b745f21b', count: 1 });
     expect(model.pairMembers('b745f21b').map(s => s.name)).toEqual(['jefferson-2']);
   });
 });

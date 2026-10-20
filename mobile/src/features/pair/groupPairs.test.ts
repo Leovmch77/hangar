@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { AggSession } from '@hangar/core';
-import { groupBadge, groupBadges, groupMembers, outsideRow, pairCandidates, pickKey, pairTargets, ticketCode } from './groupPairs';
+import { groupBadges, type AggSession } from '@hangar/core';
+import { groupBadge, groupMembers, outsideRow, pairCandidates, pickKey } from './groupPairs';
 
 const row = (name: string, extra: Partial<AggSession> = {}) => ({ name, state: 'idle', serverId: 's1', serverLabel: 'casa', serverColor: '#000', ...extra }) as AggSession;
 const ids = new Map([['s1', 'casa'], ['s2', 'lab']]);
@@ -14,13 +14,6 @@ describe('outsideRow', () => {
 });
 
 describe('selo do grupo', () => {
-  it('código do ticket como o split_code do nativo', () => {
-    expect(ticketCode('ABC-1234 tela X')).toBe('ABC-1234');
-    expect(ticketCode('PM-12')).toBe('PM-12');
-    expect(ticketCode('PM-12x')).toBeNull();
-    expect(ticketCode('tela nova')).toBeNull();
-  });
-
   const badgeOf = (s: AggSession, rows: AggSession[], identities = ids) => groupBadge(s, groupBadges(rows, identities).get(pickKey(s.serverId, s.name)));
 
   it('grupo de uma máquina mantém o rótulo antigo', () => {
@@ -67,15 +60,6 @@ describe('candidatas de todas as máquinas', () => {
     const fed = { ...lab, rows: [row('z', { serverId: 's2', pair_gid: 'g2', pair_owner: 'lab', pair_peers: ['w'] })] };
     const mine = row('a', { pair_gid: 'g1', pair_owner: 'casa', pair_peers: ['b'] });
     expect(pairCandidates(mine, [fed], ids, new Set())[0].candidates[0].refusal).toBe('other_owner');
-  });
-
-  it('o pedido qualifica só quem é de outra máquina', () => {
-    expect(pairTargets(['s1::b', 's2::z'], 's1', ids)).toEqual({ names: ['b', 'lab::z'], unresolved: [] });
-  });
-
-  it('máquina sem identificador válido não vai como undefined::nome: a escolha sai do pedido', () => {
-    expect(pairTargets(['s1::b', 's3::w'], 's1', ids)).toEqual({ names: ['b'], unresolved: ['s3::w'] });
-    expect(pairTargets(['s2::z'], 's1', new Map([['s1', 'casa'], ['s2', 'casa']]))).toEqual({ names: [], unresolved: ['s2::z'] });
   });
 });
 

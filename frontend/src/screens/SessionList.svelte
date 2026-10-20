@@ -32,7 +32,7 @@ import * as m from '../paraglide/messages';
   import type { AggSession, Provider, SessionOpeningExtras, WorktreeChoice } from '@hangar/core';
   import type { RemovalSnapshot } from '../lib/auth';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
-  import { createSessionListModel, groupItems, pairCodigo, pairResto } from '../lib/sessionListModel.svelte';
+  import { createSessionListModel, pairCodigo, pairResto } from '../lib/sessionListModel.svelte';
   import { countAwaiting, fmtWhen, initials, clusterByPair } from '@hangar/core';
   import ConversationList from '../components/ConversationList.svelte';
   import { sessionOrganization } from '../lib/sessionOrganization.svelte';
@@ -608,7 +608,7 @@ import * as m from '../paraglide/messages';
               </div>
               {/if}
               {#if !model.collapsed.has(g.id)}
-                {#each groupItems(g) as item (item.kind === 'header' ? `ph:${item.gid}` : `${item.session.serverId}:${item.session.name}`)}
+                {#each clusterByPair(g.sessions) as item (item.kind === 'header' ? `ph:${item.gid}` : `${item.session.serverId}:${item.session.name}`)}
                   {#if item.kind === 'header'}
                     {@const rep = groupRep(item.gid)}
                     {@const rotulo = model.pairLabel(item.gid, item.label)}

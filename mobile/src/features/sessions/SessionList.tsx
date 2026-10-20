@@ -9,6 +9,7 @@ import {
   deleteSession,
   effectiveGroupBy,
   formataErro,
+  groupBadges,
   renameSession,
   setPairAccess,
   resumeSession,
@@ -29,7 +30,7 @@ import { SessionSectionCard, SessionSectionHeader } from './SessionSection';
 import { PairInviteSheet, type PairTarget } from '../pair/PairInviteSheet';
 import { PairAcceptSheet, type PairAcceptTarget } from '../pair/PairAcceptSheet';
 import { leaveExternal } from '../pair/leaveExternal';
-import { groupBadges, pickKey } from '../pair/groupPairs';
+import { pickKey } from '../pair/groupPairs';
 import { useIdentities } from '../pair/identities';
 import { ConversationList } from './ConversationList';
 import { RenameSheet } from './RenameSheet';
@@ -482,7 +483,8 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
               onResume={retomar}
               onWorktree={proprios.has(item.serverId) ? abrirWorktree : undefined}
               onPair={proprios.has(item.serverId) || item.outside ? fazerPar : undefined}
-              crossBadge={crossBadges.get(pickKey(item.serverId, item.name))}
+              crossBadgeText={crossBadges.get(pickKey(item.serverId, item.name))?.text}
+              crossBadgeMachines={crossBadges.get(pickKey(item.serverId, item.name))?.machines}
             />
           </SessionSectionCard>
         )}

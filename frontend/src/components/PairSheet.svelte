@@ -3,7 +3,7 @@
   import { desktop } from '../lib/desktop.svelte';
   import { renderMarkdown } from '../lib/markdown';
   import { getSessions, pairSession, unpairSession, getHistory, getPairContract } from '@hangar/core';
-  import { fullPairsByAlias, grantFull, pairExternals, pairHeaderLabel, groupGlobal, canPair, identityOf } from '@hangar/core';
+  import { fullPairsByAlias, grantFull, pairExternals, pairHeaderLabel, groupGlobal, canPair, pairTargets } from '@hangar/core';
   import { sessionServerFor, useSessionServer } from '../lib/sessionServer';
   import { mensagemRecusa } from '../lib/arrastarGrupo.svelte';
   import { formataErro } from '@hangar/core';
@@ -195,12 +195,18 @@
 
   async function doPair() {
     if (!picked.length || busy) return;
+    // De outra máquina, o nome vai qualificado; o servidor desta sessão leva o pedido até a dona.
+    const { names: nomes, unresolved } = pairTargets(picked.map((k) => `${serverOf(k)}::${nameOf(k)}`), sid, identities);
+    // Escolhida numa máquina sem identificador válido não vai ao servidor: sai da seleção, com o motivo.
+    if (unresolved.length) {
+      picked = picked.filter((k) => !unresolved.includes(`${serverOf(k)}::${nameOf(k)}`));
+      error = m.grupo_recusa_sem_identificador();
+      return;
+    }
     busy = true;
     error = null;
     try {
       // Mesmo endpoint pra criar grupo e pra ADICIONAR membro (o backend une os grupos).
-      // De outra máquina, o nome vai qualificado; o servidor desta sessão leva o pedido até a dona.
-      const nomes = picked.map((k) => serverOf(k) === sid ? nameOf(k) : `${identityOf(serverOf(k), identities)}::${nameOf(k)}`);
       const daqui = picked.filter((k) => serverOf(k) === sid).map(nameOf);
       const res = await pairSession(sessionName, nomes, task.trim(), false, sessionServer());
       const falhas = await grantFull(liberar.flatMap((alias) => daqui.map((name) => ({ name, alias }))), sessionServer());

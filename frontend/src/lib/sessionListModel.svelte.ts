@@ -7,8 +7,8 @@ import { getActiveId, selectServer, serverColor } from './auth';
 import { formataErro } from '@hangar/core';
 import { sessionsStore } from './sessionsStore.svelte';
 import {
-  clusterByPair, countAwaiting, effectiveGroupBy, groupGlobal, groupSelectedByServer, projectKey, projectLabel, providerName,
-  isOrq, sortSessions, type GroupBy, type PairRow, placeExternalRows, pairExternals, pairHeaderLabel,
+  countAwaiting, effectiveGroupBy, groupBadges, groupSelectedByServer, projectKey, projectLabel, providerName,
+  isOrq, sortSessions, type GroupBy, placeExternalRows, pairExternals, pairHeaderLabel,
 } from '@hangar/core';
 import type { AggSession, ResumeCandidate, State } from '@hangar/core';
 import * as m from '../paraglide/messages';
@@ -36,10 +36,6 @@ export interface Group {
   color: string | null;
   error: string | null;
   sessions: AggSession[];
-}
-
-export function groupItems(group: Group): PairRow<AggSession>[] {
-  return clusterByPair(group.sessions);
 }
 
 export interface SessionListModelOptions {
@@ -175,23 +171,10 @@ export function createSessionListModel(opts: SessionListModelOptions) {
 
   // Selo do grupo que atravessa máquinas (I-9A): o membro fica na máquina dele, e o selo diz o
   // código do ticket ou quantas máquinas o grupo tem. Grupo de uma máquina só já tem o cabeçalho.
-  const badges = $derived.by(() => {
-    const out = new Map<string, string>();
-    for (const g of groupGlobal(rows, sessionsStore.identities ?? new Map())) {
-      const machines = new Set<string>();
-      for (const mb of g.members) {
-        if (mb.kind === 'here') machines.add(`here:${mb.server}`);
-        else if (mb.kind === 'missing') machines.add(`id:${mb.server_id}`);
-      }
-      if (machines.size < 2) continue;
-      const code = PAIR_COD.exec(g.label)?.[1];
-      const label = code ?? m.grupo_selo_maquinas({ n: machines.size });
-      for (const mb of g.members) if (mb.kind === 'here') out.set(selectionKey({ serverId: mb.server, name: mb.name }), label);
-    }
-    return out;
-  });
+  const badges = $derived(groupBadges(rows, sessionsStore.identities ?? new Map()));
   function groupBadge(s: AggSession): string | null {
-    return badges.get(selectionKey(s)) ?? null;
+    const badge = badges.get(`${s.serverId}::${s.name}`);
+    return badge ? badge.text ?? m.grupo_selo_maquinas({ n: badge.machines }) : null;
   }
 
   // Cabeçalho do grupo com sessão de fora: "hangar ↔ casa::api (Ana)", só com os membros locais.

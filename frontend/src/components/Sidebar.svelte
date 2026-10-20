@@ -23,7 +23,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   import GroupGlyph from './icons/GroupGlyph.svelte';
   import SessionSignals from './SessionSignals.svelte';
   import type { SessionInfo, AggSession, Provider, SessionOpeningExtras, WorktreeChoice } from '@hangar/core';
-  import { cwdParts, rotuloEstado, stateColors, countAwaiting, railLabel, fmtWhen, relativeTime, latestAssistantEvent, untrackedReason, providerTag, isOrq } from '@hangar/core';
+  import { cwdParts, rotuloEstado, stateColors, countAwaiting, railLabel, fmtWhen, relativeTime, latestAssistantEvent, untrackedReason, providerTag, isOrq, clusterByPair } from '@hangar/core';
   import { arrastarGrupo, mensagemRecusa } from '../lib/arrastarGrupo.svelte';
   import { createDragToGroup, dragChave } from '../lib/dragToGroup';
   import { updateBadge } from '../lib/badge';
@@ -36,7 +36,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   import { navMode } from '../lib/navMode.svelte';
   import { ctxPanel } from '../lib/ctxPanel.svelte';
   import { navegadorPanel } from '../lib/navegadorPanel.svelte';
-  import { createSessionListModel, groupItems, pairCodigo, pairResto, type Group } from '../lib/sessionListModel.svelte';
+  import { createSessionListModel, pairCodigo, pairResto, type Group } from '../lib/sessionListModel.svelte';
 
   const DEFAULT_BRANCHES = new Set(['main', 'master']);
 
@@ -756,7 +756,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
         </div>
       {/if}
       {#if !expanded || !model.collapsed.has(g.id)}
-      {#each groupItems(g) as item (item.kind === 'header' ? `ph:${item.gid}` : `${item.session.serverId}::${item.session.name}`)}
+      {#each clusterByPair(g.sessions) as item (item.kind === 'header' ? `ph:${item.gid}` : `${item.session.serverId}::${item.session.name}`)}
         {#if item.kind === 'header'}
           {#if expanded}
           <!-- Cluster de pareamento (Opção C): sub-header colapsável do grupo, dentro do servidor.

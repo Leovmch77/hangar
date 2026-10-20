@@ -81,7 +81,9 @@ export function groupGlobal(rows: AggSession[], identities: ReadonlyMap<string, 
   const byKey = new Map<string, AggSession[]>();
   for (const row of rows) {
     const key = keys.get(row);
-    if (key) byKey.set(key, [...(byKey.get(key) ?? []), row]);
+    if (!key) continue;
+    const list = byKey.get(key);
+    if (list) list.push(row); else byKey.set(key, [row]);
   }
   return [...byKey].map(([key, members]) => {
     const outside = new Map<string, GroupMember>();
@@ -104,4 +106,41 @@ export function groupGlobal(rows: AggSession[], identities: ReadonlyMap<string, 
       members: [...members.map((s): GroupMember => ({ kind: 'here', server: s.serverId, name: s.name })), ...missing.values(), ...outside.values()],
     };
   });
+}
+
+// Cópia do `split_code` do nativo (desktop-native/src/app/grouping.rs): "ABC-12 tela" → "ABC-12".
+export function ticketCode(task: string | null | undefined): string | null {
+  return task?.match(/^[A-Za-z][A-Za-z0-9_.]*-\d+(?![A-Za-z0-9_])/)?.[0] ?? null;
+}
+
+export type GroupBadge = { text: string | null; machines: number };
+
+/** Selo dos membros de grupo que atravessa máquinas: o código do ticket (`text`) ou o número de máquinas, só com
+ * duas ou mais. Chave: `<servidor>::<nome>`. */
+export function groupBadges(rows: AggSession[], identities: ReadonlyMap<string, string>): Map<string, GroupBadge> {
+  const out = new Map<string, GroupBadge>();
+  for (const g of groupGlobal(rows, identities)) {
+    const machines = new Set(g.members.flatMap((mb) => mb.kind === 'here' ? [`here:${mb.server}`] : mb.kind === 'missing' ? [`id:${mb.server_id}`] : []));
+    if (machines.size < 2) continue;
+    const badge = { text: ticketCode(g.label), machines: machines.size };
+    for (const mb of g.members) if (mb.kind === 'here') out.set(`${mb.server}::${mb.name}`, badge);
+  }
+  return out;
+}
+
+/** Nomes do pedido ao servidor da âncora (`picked` em `<servidor>::<nome>`): outra máquina vai como
+ * `<identificador>::<nome>`. Máquina sem identificador válido não entra no pedido: a escolha volta em `unresolved`. */
+export function pairTargets(picked: string[], serverId: string, identities: ReadonlyMap<string, string>): { names: string[]; unresolved: string[] } {
+  const names: string[] = [];
+  const unresolved: string[] = [];
+  for (const key of picked) {
+    const at = key.indexOf('::');
+    const server = key.slice(0, at);
+    const name = key.slice(at + 2);
+    const id = server === serverId ? null : identityOf(server, identities);
+    if (server === serverId) names.push(name);
+    else if (id) names.push(`${id}::${name}`);
+    else unresolved.push(key);
+  }
+  return { names, unresolved };
 }

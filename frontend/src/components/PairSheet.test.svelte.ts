@@ -7,10 +7,13 @@ const core = vi.hoisted(() => ({
   getSessions: vi.fn(async () => [{ name: 'eu', state: 'idle', pair_gid: 'g', pair_owner: 'casa', pair_peers: ['lab::x', 'vizinha'] }]),
   getHistory: vi.fn(async () => []),
   getPairContract: vi.fn(async () => ({ path: '/c.md', content: '' })),
+  pairSession: vi.fn(async () => ({})),
 }));
 const store = vi.hoisted(() => ({
   rows: [] as unknown[],
-  identities: new Map<string, string>(),
+  // Reativo: o caso do identificador que some depois da escolha depende disso.
+  get identities(): ReadonlyMap<string, string> { return ids.v; },
+  set identities(v: ReadonlyMap<string, string>) { ids.v = v; },
   identityStatus: new Map<string, 'reading' | 'failed'>(),
   servers: [{ id: 'srv-a', label: 'Casa' }, { id: 'srv-b', label: 'Lab' }, { id: 'srv-off', label: 'Desligada' }],
   requestIdentities: vi.fn(),
@@ -24,6 +27,7 @@ vi.mock('../lib/auth', () => ({
   listServers: () => store.servers,
 }));
 
+const ids = $state({ v: new Map<string, string>() as ReadonlyMap<string, string> });
 const PairSheet = (await import('./PairSheet.svelte')).default;
 
 async function settle() { for (let i = 0; i < 6; i++) { await Promise.resolve(); await tick(); } }
@@ -63,6 +67,27 @@ describe('PairSheet — grupo entre máquinas', () => {
     await settle();
     expect(document.body.textContent).toContain(m.comum_carregando());
     expect(conversaDe('lab::x')).toBeNull();
+    unmount(c);
+  });
+
+  it('identificador que some depois da escolha: não pede `undefined::nome`, tira a escolha e diz o motivo', async () => {
+    store.rows = [...store.rows, row({ serverId: 'srv-b', serverLabel: 'Lab', name: 'z' })];
+    store.identities = new Map([['srv-a', 'casa'], ['srv-b', 'lab']]);
+    const c = montar();
+    await settle();
+    (document.querySelector('.ghost-add') as HTMLButtonElement).click();
+    await settle();
+    const z = [...document.querySelectorAll<HTMLButtonElement>('button.row')].find((b) => b.querySelector('.row-name')?.textContent === 'z')!;
+    expect(z.disabled).toBe(false);
+    z.click();
+    await settle();
+    store.identities = new Map([['srv-a', 'casa']]);
+    await settle();
+    (document.querySelector('.primary-btn') as HTMLButtonElement).click();
+    await settle();
+    expect(core.pairSession).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(m.grupo_recusa_sem_identificador());
+    expect((document.querySelector('.primary-btn') as HTMLButtonElement).disabled).toBe(true);
     unmount(c);
   });
 });

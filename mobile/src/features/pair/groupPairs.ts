@@ -1,31 +1,11 @@
-import { canPair, groupGlobal, identityOf, type AggSession, type State } from '@hangar/core';
+import { canPair, groupGlobal, type AggSession, type GroupBadge, type State } from '@hangar/core';
 
 /** Membro de fora (`alias::sessao`) é aberto pela entrada do par, não pelo servidor do grupo. */
 export function outsideRow(rows: AggSession[], peer: string): AggSession | null {
   return rows.find((r) => r.outside && `${r.outside.alias}::${r.name}` === peer) ?? null;
 }
 
-// Cópia do `split_code` do nativo (desktop-native/src/app/grouping.rs): "ABC-12 tela" → "ABC-12".
-export function ticketCode(task: string | null | undefined): string | null {
-  return task?.match(/^[A-Za-z][A-Za-z0-9_.]*-\d+(?![A-Za-z0-9_])/)?.[0] ?? null;
-}
-
-export type GroupBadge = { text: string | null; machines: number };
-
-/** Selo dos membros de grupo que atravessa máquinas, pelo modelo global (como o nativo e a PWA): o ticket ou o número de
- * máquinas, só com duas ou mais. Chave: `pickKey`. */
-export function groupBadges(rows: AggSession[], identities: ReadonlyMap<string, string>): Map<string, GroupBadge> {
-  const out = new Map<string, GroupBadge>();
-  for (const g of groupGlobal(rows, identities)) {
-    const machines = new Set(g.members.flatMap((mb) => mb.kind === 'here' ? [`here:${mb.server}`] : mb.kind === 'missing' ? [`id:${mb.server_id}`] : []));
-    if (machines.size < 2) continue;
-    const badge = { text: ticketCode(g.label), machines: machines.size };
-    for (const mb of g.members) if (mb.kind === 'here') out.set(pickKey(mb.server, mb.name), badge);
-  }
-  return out;
-}
-
-/** Selo do grupo na linha: o de `groupBadges` quando atravessa máquinas; senão o rótulo de uma máquina só. */
+/** Selo do grupo na linha: o de `groupBadges` (core) quando atravessa máquinas; senão o rótulo de uma máquina só. */
 export function groupBadge(s: AggSession, crossMachines?: GroupBadge): GroupBadge | null {
   if (crossMachines) return crossMachines;
   const peers = s.pair_peers ?? [];
@@ -69,23 +49,6 @@ export function pairCandidates(
   return out;
 }
 
-/** Nomes do pedido ao servidor da âncora: outra máquina vai como `<identificador>::<nome>`. Máquina sem identificador
- * válido não entra no pedido: a escolha volta em `unresolved`. */
-export function pairTargets(picked: string[], serverId: string, identities: ReadonlyMap<string, string>): { names: string[]; unresolved: string[] } {
-  const names: string[] = [];
-  const unresolved: string[] = [];
-  for (const key of picked) {
-    const at = key.indexOf('::');
-    const server = key.slice(0, at);
-    const name = key.slice(at + 2);
-    const id = server === serverId ? null : identityOf(server, identities);
-    if (server === serverId) names.push(name);
-    else if (id) names.push(`${id}::${name}`);
-    else unresolved.push(key);
-  }
-  return { names, unresolved };
-}
-
 export type MemberView = {
   key: string;
   name: string;
@@ -98,7 +61,9 @@ export type MemberView = {
 
 /** Membros do grupo da sessão aberta, de todas as máquinas, sem ela. Fora do modelo global (par sem gid), `pair_peers`. */
 export function groupMembers(serverId: string, name: string, rows: AggSession[], identities: ReadonlyMap<string, string>): MemberView[] {
-  const rowOf = (server: string, n: string) => rows.find((r) => !r.outside && r.serverId === server && r.name === n);
+  const byKey = new Map<string, AggSession>();
+  for (const r of rows) if (!r.outside && !byKey.has(pickKey(r.serverId, r.name))) byKey.set(pickKey(r.serverId, r.name), r);
+  const rowOf = (server: string, n: string) => byKey.get(pickKey(server, n));
   const self = (m: { kind: string; server?: string; name?: string }) => m.kind === 'here' && m.server === serverId && m.name === name;
   const group = groupGlobal(rows, identities).find((g) => g.members.some(self));
   if (!group) {
