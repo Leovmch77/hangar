@@ -144,7 +144,8 @@ def _hangar_skill_names(roots: Roots) -> set[str]:
 
 
 def _hangar_hook_names(roots: Roots) -> set[str]:
-    return {p.name for p in (Path(roots.hangar) / "backend" / "hooks").glob("*.py")}
+    # `pair-context` é subcomando do binário `hangar-server`, não arquivo em backend/hooks.
+    return {p.name for p in (Path(roots.hangar) / "backend" / "hooks").glob("*.py")} | {"pair-context"}
 
 
 def _is_hangar_hook(command, own: set[str]) -> bool:
