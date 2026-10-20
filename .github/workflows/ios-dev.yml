@@ -92,3 +92,55 @@ jobs:
           path: mobile/ios/${{ env.IPA_NAME }}.ipa
           retention-days: 30
           if-no-files-found: error
+
+  # SideStore instala e atualiza o Hangar pela fonte fixa da release mobile-latest.
+  publish:
+    if: ${{ inputs.configuration == 'Release' }}
+    needs: ipa
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    concurrency:
+      group: mobile-latest
+      cancel-in-progress: false
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - uses: actions/download-artifact@v4
+        with:
+          name: hangar-release-ipa
+          path: out
+      - name: APK do mesmo runtime
+        working-directory: mobile
+        run: |
+          if [ -z "$EXPO_TOKEN" ]; then
+            echo "::warning::Segredo EXPO_TOKEN ausente; mobile-latest sai sem hangar.apk."
+            exit 0
+          fi
+          runtime=$(node -p 'require("./app.json").expo.runtimeVersion')
+          npx eas-cli@latest build:list --platform android --status finished --build-profile preview \
+            --runtime-version "$runtime" --limit 1 --json --non-interactive > ../out/builds.json
+          url=$(node -p 'require("../out/builds.json")[0]?.artifacts?.buildUrl ?? ""')
+          if [ -z "$url" ]; then
+            echo "::warning::Nenhum build Android preview pronto com runtime $runtime; mobile-latest sai sem hangar.apk."
+            exit 0
+          fi
+          curl -fsSL "$url" -o ../out/hangar.apk
+      - name: Publica na mobile-latest
+        run: |
+          mv out/hangar-release.ipa out/hangar.ipa
+          node mobile/scripts/sidestore-source.mjs out/hangar.ipa "$GITHUB_RUN_NUMBER" > out/sidestore-source.json
+          files=(out/hangar.ipa out/sidestore-source.json)
+          test -f out/hangar.apk && files+=(out/hangar.apk)
+          # Pré-release fora do "Latest": quem lê a release mais nova continua achando a native-latest.
+          gh release view mobile-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create mobile-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+                 --prerelease --latest=false --title "Hangar mobile" \
+                 --notes "App do celular para SideStore (iOS) e instalação direta (Android). Reescrita a cada build Release do iOS."
+          gh release upload mobile-latest "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
