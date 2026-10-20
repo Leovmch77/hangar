@@ -225,3 +225,24 @@ interna do Claude Code, fora do alcance do app. Para furar essa fila, o chip
 "N na fila · mandar agora" (o mesmo do Kimi) era oferecido também ao Claude com terminal no
 nativo, no PWA e no app, e apertava `ctrl+x ctrl+s`, levando a fila interna inteira. Hoje a
 mensagem espera no Hangar, no painel "Na fila", e o chip ficou só para o Kimi.
+
+## Par entre máquinas só 1:1
+
+(Até 20/10/2026 → [grupo entre máquinas](plataforma.md#grupo-entre-máquinas-do-dono-uma-dona-um-gid-e-fila-em-disco-20102026).)
+`--pair servidor::sessao` criava um par de duas sessões: o backend local chamava o
+`/pair-remote` da outra máquina (`legacy::pair_cross` no Rust, antes o Python) e cada lado gravava
+o outro como `servidor::sessao` no próprio sidecar, sem `gid` comum nem contrato compartilhado.
+Juntar um terceiro ou um grupo local ao par era recusado, `--group` só alcançava sessões desta
+máquina e o `hangar-send --help`
+dizia "--group cross-server ainda não existe". O receptor `/pair-remote`/`/unpair-remote` ficou só
+para máquina ainda na versão antiga, e o par antigo vivo vira grupo sozinho.
+
+## Escritas de grupo no Python ao lado do Rust
+
+(08/10/2026 até 20/10/2026 → [grupos: o Rust grava](plataforma.md#grupos-o-rust-grava).)
+O `pair.py` ainda tinha as escritas (`PairLink.set/clear`, `_merge_contract`,
+`_arquivar_contratos`), que recusavam com `GroupsOwnedByRust` no modo `rust`/`pending` e voltavam
+a valer no modo `python`; o texto do protocolo morava em `pair_texto.py` e o hook do
+`SessionStart` era o `hooks/pair_hook.py`, que lia o sidecar e montava o texto em Python. Saíram
+quando o texto passou a `groups/text.rs` e o hook ao `hangar-server pair-context`; no modo
+`python` operação de grupo responde 503 `groups_need_rust_server`.

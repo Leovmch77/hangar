@@ -798,11 +798,11 @@ Status: ready-for-agent
 
 **Fecha:** desenho-federacao §8, D-TXT-5 (registrado como limite: só Claude reinjeta).
 
-- [ ] **Step 1: Atualizar** os textos; conferir que a tool `contract` e a flag `--contrato` são
+- [x] **Step 1: Atualizar** os textos; conferir que a tool `contract` e a flag `--contrato` são
   exatamente as citadas nas Tasks 2 e 10.
-- [ ] **Step 2: Prova**: `scripts/hangar-send --help | grep -n "group"` mostra o texto novo;
+- [x] **Step 2: Prova**: `scripts/hangar-send --help | grep -n "group"` mostra o texto novo;
   `cd crates && … cargo test -p hangar-server --lib mcp::` verde.
-- [ ] **Step 3: Commit** — `docs(groups): tell agents and docs that groups cross machines`.
+- [x] **Step 3: Commit** — `docs(groups): tell agents and docs that groups cross machines`.
 
 ---
 

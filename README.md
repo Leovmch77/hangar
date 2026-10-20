@@ -81,7 +81,8 @@ Tailscale. The phone uses the installable web app (PWA).
 - **A browser per session.** The agent opens the page it just changed, clicks, fills the form and
   takes the screenshot while you watch next to the conversation.
 - **Across machines.** Link your desktop, laptop and server over LAN or Tailscale: every session
-  in one list, and an agent on one machine messages, pairs with or creates a session on another.
+  in one list, and an agent on one machine messages or creates a session on another, and working
+  groups span machines, with one shared contract.
 - **Pass the baton.** Out of quota mid-task? One button opens a new session on another account,
   model or CLI, already knowing what the current one was doing. Each account's quota stays in
   the top bar.

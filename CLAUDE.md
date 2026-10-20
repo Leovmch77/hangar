@@ -134,12 +134,13 @@ subcommands/advanced flags remain raw; `command codex` is the explicit bypass.
 ## Sessões-irmãs (hangar-send) + pareamento
 
 Sessões usam `scripts/hangar-send` para recados, pareamento e criação; consulte `--help` antes
-dessas operações. Recados e pareamento 1:1 alcançam outros servidores por `servidor::sessao`;
-`--group` é local. A sessão nasce no modelo/esforço/permissão pedidos, validados por
-`app/model_args.py`. Pareamento = vínculo simétrico (`app/pair.py`, sidecars em
-`<config>/.hangar-pair/`) + prompt de protocolo injetado nas duas sessões; a UI
-mostra chip 🤝 (Composer), badges nas listas, PairSheet (conversa do par + contrato compartilhado
-`<a>__<b>.md` + split view desktop).
+dessas operações. Recados e pareamento alcançam outros servidores por `servidor::sessao`; o
+pareamento forma um grupo entre as máquinas, e `--group` chega a todas. A sessão nasce no
+modelo/esforço/permissão pedidos, validados por `app/model_args.py`. Pareamento = grupo gravado
+pelo Rust (`crates/hangar-server/src/groups/`, sidecars em `<config>/.hangar-pair/`) + prompt de
+protocolo injetado em quem estava sem grupo; a UI mostra chip 🤝 (Composer), badges nas listas,
+PairSheet (conversa do par + contrato compartilhado `grupo-<gid>.md` + split view desktop). O
+contrato fica na máquina dona; de outra máquina, `hangar-send --contrato` ou a tool MCP `contract`.
 
 **Par noutro modelo:** `--engine <motor>` faz a sessão nova nascer num motor de
 `~/.claude/engines.json` (ver "Model engines" nas convenções). Vale pra parear uma sessão Claude com
@@ -177,13 +178,14 @@ npm --prefix frontend run build                          # só se o front for se
 ```
 
 Sessões Claude já abertas não releem o CLAUDE.md global — só as novas conhecem o hangar-send.
-Escopo: `--group` é local; recados, pareamento 1:1 e `--list` alcançam OUTROS servidores via
+Escopo: recados, pareamento, `--group` e `--list` alcançam OUTROS servidores via
 endereço `servidor::sessao`: `backend/peers.json` (id → base_url+token, gitignored;
 ver `peers.json.example`) + `CP_SERVER_ID` no `backend/.env`. Peer com `"enabled": false` sai da
 VARREDURA (painel e `--list`) mas segue endereçável por `servidor::sessao` — é pra máquina que
 você sabe que está desligada, senão cada poll paga o timeout de 4s esperando ela (id desta máquina, endereço de
 resposta do `[de: id::sessao]`). Recados usam o script; o pareamento remoto passa pelo backend
-local e por `/pair-remote` no destino.
+local e pela máquina dona do grupo (`/api/groups/{gid}/*`); `/pair-remote` só atende máquina
+ainda na versão antiga.
 
 ## SSE event model
 
@@ -395,7 +397,9 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
 - **Grupo: protocolo reinjetado no `SessionStart`, saída por UMA esteira, anti-loop no backend.**
   Só quem estava sem grupo recebe o protocolo, sem lista de membros; entrada, saída e troca de
   tarefa não acordam ninguém, e o grupo se consulta (`sessions`, `--list`). Grupo `orq` não recebe
-  nem o protocolo: o kick-off traz canal e contrato.
+  nem o protocolo: o kick-off traz canal e contrato. O texto é do Rust (`groups/text.rs`) e o hook
+  é o `hangar-server pair-context`, sem rede, que responde com o servidor parado; só o Claude
+  reinjeta.
   Varredura de sessão morta confirma ausência por TEMPO, nunca por número de polls. Aviso do app
   sai como `[painel: <rótulo com espaço>]`, nunca `[de: …]`: o modelo responde a quem assina.
 - **Grupo de 1 só existe no grupo `orq` com execução `auto` viva.** Viva = `orq.json` com `auto`
@@ -614,8 +618,8 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   num sentido, corpo, método e query intactos: `input`/`answer`/`select`/`select/submit` e as rotas
   `queue/*` do Claude a `/__hangar_server/claude/<nome>/<rota>`, tudo do Codex do Rust (`queue/*`
   incluídas) a
-  `/__hangar_server/codex/<nome>/<rota>` (a mesma ponte recebe o texto de broadcast, grupo, par e
-  MCP para Codex com terminal); 421 = o Rust não atende e o Python segue, transporte que falha =
+  `/__hangar_server/codex/<nome>/<rota>` (a mesma ponte recebe o texto de broadcast para Codex
+  com terminal); 421 = o Rust não atende e o Python segue, transporte que falha =
   5xx `<provedor>_bridge_failed`. Texto que nasce no Python para o Claude segue em `_send_one`, coberto
   só pelo `freeze`. Contrato e motivo em
   [plataforma.md](docs/decisoes/plataforma.md#escritas-do-claude-no-hangar-server) e
@@ -641,7 +645,7 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   comando no `new-session`, nunca digitado no shell); o tmux-resurrect pula as sessões do Hangar.
   Sessão que bate o limite de uso troca de conta sozinha pela reabertura (só Claude). No modo
   `python`, abrir e reabrir respondem 503 com código, sem lançador Python. Exceções que ainda passam
-  pelo Python: texto que nasce nele (grupo, par, broadcast) acorda Claude/Codex sem terminal pedindo
+  pelo Python: texto que nasce nele (broadcast) acorda Claude/Codex sem terminal pedindo
   ao Rust, e a transferência Claude→Codex. Decisões e medições em
   [plataforma.md](docs/decisoes/plataforma.md#abertura-de-sessão-única-no-rust).
 - **Perguntas, permissões e ciclo de vida da sessão aberta são do Rust.** Rust: plugin do Claude (`/api/plugin/*`, `plugin::Store`), fatos e entrega, modos de
@@ -667,13 +671,21 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   nunca vira lista vazia nem a do Python: 503 com código no `GET`, `list_error` com código no SSE,
   `problema` na linha quando só os fatos caíram. Convidado e outros métodos seguem ao Python.
   Medidas em [plataforma.md](docs/decisoes/plataforma.md#lista-do-dono-no-hangar-server).
-- **Os grupos são do Rust: no modo `rust`/`pending` só ele grava `.hangar-pair`.** Sidecars,
-  fusão e arquivo de contrato e a varredura de membro morto (ausência por tempo, lista sem fatos
-  não varre) moram em `groups/`. Quem chama no Python (rotas das portas dele, registry, par
-  externo, MCP) pede pela ponte `groups_bridge` (`/__hangar_server/groups`); as escritas do
-  `pair.py` recusam nesses modos (`GroupsOwnedByRust`) e o modo `python` segue com o código antigo.
-  Pedido que chegou pela ponte nunca volta ao Python. Motivo em
+- **Os grupos são só do Rust; o Python não tem lógica de grupo.** Sidecars, fusão, contrato,
+  texto do protocolo e a varredura de membro morto (ausência por tempo, lista sem fatos não varre)
+  moram em `groups/`. O Python só lê o arquivo de grupo e, nas portas dele (8768, fechar e
+  renomear pelo Connect, `orq`), repassa num sentido pela ponte `groups_bridge`
+  (`/__hangar_server/groups`). No modo `python` toda operação de grupo responde 503
+  `groups_need_rust_server`; fechar sessão em grupo ainda fecha, com esse aviso. Motivo em
   [plataforma.md](docs/decisoes/plataforma.md#grupos-o-rust-grava).
+- **Grupo entre máquinas do dono: uma dona, um `gid`, fila em disco.** Parear com
+  `servidor::sessao` junta as máquinas do `peers.json` num grupo só; a máquina dona guarda o
+  registro (`.hangar-pair/groups/<gid>.json`) e o contrato, e entrada, saída, troca de nome, aviso
+  e contrato passam por ela. Saída e troca de nome vão por `groups/outbox.json` e esperam a
+  máquina voltar; aviso de grupo não espera (`pulados`). Rede, 503 `groups_need_rust_server`,
+  409 `busy`, 429, 401 e 408 tentam de novo; outro 4xx com código é recusa. Membro de fora só
+  alcança a máquina do par; par 1:1 antigo vira grupo sozinho. Sem rede sob o lock de grupo.
+  Evidência em [plataforma.md](docs/decisoes/plataforma.md#grupo-entre-máquinas-do-dono-uma-dona-um-gid-e-fila-em-disco-20102026).
 - **Sessão filha ligada: `link` na abertura, vínculo no arquivo de grupo da filha.** Só o dono liga
   (`erro_link_convidado`), só local (`erro_link_remoto`), nunca em grupo `orq`. O vínculo é
   `linked_by` no sidecar da filha e vale só com o pai entre os `peers`; o pai sair o apaga. Ligar

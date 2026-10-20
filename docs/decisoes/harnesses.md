@@ -867,6 +867,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   provados pelo golden do contrato. Ver
   [entradas juntadas pela CLI](#entradas-juntadas-pela-cli-numa-mensagem-só-14102026).
 
+- **O protocolo de grupo volta depois de `/clear` e compactação pelo `hangar-server pair-context`.**
+  É o comando do `SessionStart` (`startup|resume|clear|compact`) que o `hook_installer.py` grava em
+  cada conta, com a pasta `.hangar-pair` no argv e `|| exit 0`: lê o sidecar e os pares externos do
+  disco, sem rede nem token, e responde com o servidor parado. Grupo com par de fora traz as duas
+  partes. Só o Claude tem esse gancho: Codex, Pi, omp e Kimi perdem o protocolo ao compactar
+  (limite registrado). Ver [grupos: o Rust grava](plataforma.md#grupos-o-rust-grava).
+
 ## Entradas juntadas pela CLI numa mensagem só (14/10/2026)
 
 Na prova de ponta a ponta da fila, duas entradas orientadas no mesmo turno ("fila A editada" e
