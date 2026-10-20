@@ -12,7 +12,7 @@ use std::{cell::RefCell, rc::Rc};
 
 /// Por que soltar a origem sobre o alvo não agrupa (`DropReason` do web).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Refusal { Same, OtherServer, Dead, SameGroup, CrossServer, Orq, Invite }
+pub(super) enum Refusal { Same, Orq, Dead, Invite, SameGroup, NoIdentity, OtherOwner }
 
 impl Refusal {
     pub(super) fn text(self) -> String {
@@ -20,19 +20,118 @@ impl Refusal {
             // O web nem deixa arrastar a linha do convite, então não tem frase para isto.
             Refusal::Invite => return tr("group_refusal_invite"),
             Refusal::Same => "grupo_recusa_same",
-            Refusal::OtherServer => "grupo_recusa_other_server",
+            Refusal::Orq => "grupo_recusa_orq",
             Refusal::Dead => "grupo_recusa_dead",
             Refusal::SameGroup => "grupo_recusa_same_group",
-            Refusal::CrossServer => "grupo_recusa_cross_server",
-            Refusal::Orq => "grupo_recusa_orq",
+            Refusal::NoIdentity => "grupo_recusa_sem_identificador",
+            Refusal::OtherOwner => "grupo_recusa_outra_dona",
         })
     }
 }
 
-/// Par de outro servidor próprio; o membro de fora (par externo) também vem como `alias::sessao`, mas grupo misto vale.
-fn remote_peer(s: &SessionInfo) -> bool {
-    let outside: Vec<String> = s.outside_pairs().iter().map(|p| format!("{}::{}", p.alias, p.session)).collect();
-    s.peers().iter().any(|p| p.contains("::") && !outside.contains(p))
+// Modelo global de grupos: cópia de `packages/core/src/pairGroups.ts` e do `canPair`, com os casos das duas em
+// `packages/core/src/pairGroups.fixtures.json`.
+
+/// Uma linha da lista com a chave da máquina dela no app; `invite` = máquina de convite.
+#[derive(Clone, Copy)]
+pub(super) struct Row<'a> { pub server: &'a str, pub session: &'a SessionInfo, pub invite: bool }
+
+/// Membro de um grupo: sessão numa máquina conectada aqui, citada numa máquina sem conexão aqui (só texto), ou de fora.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Serialize), serde(tag = "kind", rename_all = "lowercase"))]
+pub(super) enum Member { Here { server: String, name: String }, Missing { server_id: String, name: String }, Outside { alias: String, session: String } }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Serialize))]
+pub(super) struct GlobalGroup { pub key: String, pub label: String, pub members: Vec<Member> }
+
+/// Identificador da máquina do app. Ausente, vazio ou igual ao de outra máquina não vale: não se adivinha.
+pub(super) fn identity_of<'a>(server: &str, ids: &'a HashMap<String, String>) -> Option<&'a str> {
+    let id = ids.get(server).filter(|id| !id.is_empty())?;
+    (!ids.iter().any(|(other, value)| other != server && value == id)).then_some(id.as_str())
+}
+
+fn owned(s: &SessionInfo) -> Option<&str> { s.pair_owner.as_deref().filter(|o| !o.is_empty()) }
+
+/// Chave do grupo, fora o par antigo: dona + gid entre máquinas, máquina + gid no grupo de uma só.
+pub(super) fn group_key(row: Row) -> Option<String> {
+    let gid = row.session.pair_gid.as_deref().filter(|g| !g.is_empty())?;
+    Some(match owned(row.session) { Some(owner) => format!("fed:{owner}/{gid}"), None => format!("local:{}/{gid}", row.server) })
+}
+
+/// Par 1:1 antigo entre máquinas (sem dona): cada uma é o único par da outra, pelo identificador.
+pub(super) fn legacy_pair(a: Row, b: Row, ids: &HashMap<String, String>) -> bool {
+    let points = |from: Row, to: Row| {
+        let peers = from.session.peers();
+        owned(from.session).is_none() && peers.len() == 1 && from.server != to.server
+            && identity_of(to.server, ids).is_some_and(|id| peers[0] == format!("{id}::{}", to.session.name))
+    };
+    points(a, b) && points(b, a)
+}
+
+/// Grupos de todas as máquinas do app. Membro citado numa máquina sem conexão aqui vira `Missing`; com alguma máquina do
+/// app sem identificador válido, quem não aparece fica de fora em vez de virar `Missing` por palpite.
+// ponytail: buscas quadráticas no número de linhas; a lista de sessões é curta.
+pub(super) fn global_groups(rows: &[Row], ids: &HashMap<String, String>) -> Vec<GlobalGroup> {
+    let servers: HashSet<&str> = ids.keys().map(String::as_str).chain(rows.iter().map(|r| r.server)).collect();
+    let mut known: HashMap<&str, &str> = HashMap::new();
+    let mut unresolved = false;
+    for server in servers {
+        match identity_of(server, ids) { Some(id) => { known.insert(id, server); } None => unresolved = true }
+    }
+    // Posição da única linha com esta máquina e nome; repetida não vale.
+    let unique = |server: &str, name: &str| {
+        let mut hits = rows.iter().enumerate().filter(|(_, r)| r.server == server && r.session.name == name).map(|(i, _)| i);
+        let first = hits.next()?;
+        hits.next().is_none().then_some(first)
+    };
+
+    let mut keys: Vec<Option<String>> = vec![None; rows.len()];
+    for (i, row) in rows.iter().enumerate() {
+        if keys[i].is_some() { continue; }
+        let peers = row.session.peers();
+        let peer = (peers.len() == 1).then(|| peers[0].split_once("::")).flatten()
+            .and_then(|(id, name)| unique(known.get(id)?, name));
+        if let Some(j) = peer.filter(|&j| unique(row.server, &row.session.name) == Some(i) && legacy_pair(*row, rows[j], ids)) {
+            let mut pair = [format!("{}::{}", row.server, row.session.name), format!("{}::{}", rows[j].server, rows[j].session.name)];
+            pair.sort();
+            let key = format!("remote:{}", serde_json::to_string(&pair).unwrap_or_default());
+            keys[j] = Some(key.clone());
+            keys[i] = Some(key);
+            continue;
+        }
+        keys[i] = group_key(*row);
+    }
+
+    let mut groups: Vec<(String, Vec<Row>)> = Vec::new();
+    for (row, key) in rows.iter().zip(keys) {
+        let Some(key) = key else { continue };
+        match groups.iter_mut().find(|(k, _)| *k == key) { Some((_, members)) => members.push(*row), None => groups.push((key, vec![*row])) }
+    }
+    groups.into_iter().map(|(key, members)| {
+        let mut outside: Vec<(String, Member)> = Vec::new();
+        for m in &members {
+            for p in m.session.outside_pairs().iter() {
+                let address = format!("{}::{}", p.alias, p.session);
+                if !outside.iter().any(|(a, _)| *a == address) {
+                    outside.push((address, Member::Outside { alias: p.alias.clone(), session: p.session.clone() }));
+                }
+            }
+        }
+        let mut missing: Vec<(&str, Member)> = Vec::new();
+        for m in members.iter().filter(|_| !unresolved) {
+            for address in m.session.peers() {
+                let Some((id, name)) = address.split_once("::") else { continue };
+                if id.is_empty() || name.is_empty() || known.contains_key(id) || outside.iter().any(|(a, _)| a == address)
+                    || missing.iter().any(|(a, _)| a == address) { continue; }
+                missing.push((address, Member::Missing { server_id: id.to_owned(), name: name.to_owned() }));
+            }
+        }
+        let label = members.iter().filter_map(|m| m.session.pair_task.as_deref().map(str::trim)).find(|t| !t.is_empty()).map(str::to_owned)
+            .unwrap_or_else(|| members.iter().map(|m| m.session.name.as_str()).collect::<Vec<_>>().join(", "));
+        let here = members.iter().map(|m| Member::Here { server: m.server.to_owned(), name: m.session.name.clone() });
+        GlobalGroup { key, label, members: here.chain(missing.into_iter().map(|(_, m)| m)).chain(outside.into_iter().map(|(_, m)| m)).collect() }
+    }).collect()
 }
 
 /// Sessão local que passa a ter o par `alias` com acesso completo ao entrar no grupo.
@@ -75,17 +174,34 @@ pub(super) async fn pair_and_grant(api: Api, target: String, peers: Vec<String>,
     Ok(result)
 }
 
-/// `canPair` do web. `same_server`: as duas são da mesma máquina (o grupo é resolvido pelo backend de uma só).
-pub(super) fn can_pair(origin: &SessionInfo, target: &SessionInfo, same_server: bool) -> Result<(), Refusal> {
-    if !same_server { return Err(Refusal::OtherServer); }
-    if origin.name == target.name { return Err(Refusal::Same); }
+/// `canPair` do web, na mesma ordem. Membro de fora não impede.
+pub(super) fn can_pair(origin: Row, target: Row, ids: &HashMap<String, String>) -> Result<(), Refusal> {
+    let (o, t) = (origin.session, target.session);
+    let same_server = origin.server == target.server;
+    if same_server && o.name == t.name { return Err(Refusal::Same); }
     // O grupo da orquestração é montado pelo orq; agrupar a linha dele à mão desfaz a execução.
-    if origin.orq() || target.orq() { return Err(Refusal::Orq); }
-    if origin.state == "dead" || target.state == "dead" { return Err(Refusal::Dead); }
-    if origin.pair_gid.is_some() && origin.pair_gid == target.pair_gid { return Err(Refusal::SameGroup); }
-    if remote_peer(origin) || remote_peer(target) { return Err(Refusal::CrossServer); }
+    if o.orq() || t.orq() { return Err(Refusal::Orq); }
+    if o.state == "dead" || t.state == "dead" { return Err(Refusal::Dead); }
+    // Parear é rota do servidor inteiro do dono.
+    if origin.invite || target.invite { return Err(Refusal::Invite); }
+    if group_key(origin).is_some_and(|k| Some(k) == group_key(target)) || legacy_pair(origin, target, ids) { return Err(Refusal::SameGroup); }
+    // O pedido leva `<identificador>::<nome>` da outra máquina.
+    if !same_server && (identity_of(origin.server, ids).is_none() || identity_of(target.server, ids).is_none()) {
+        return Err(Refusal::NoIdentity);
+    }
+    // Só grupos da mesma dona se fundem; o grupo de uma máquina só tem ela como dona.
+    let grouped = |s: &SessionInfo| s.pair_gid.as_deref().is_some_and(|g| !g.is_empty());
+    if grouped(o) && grouped(t) && !(same_server && owned(o).is_none() && owned(t).is_none()) {
+        match (owner(origin, ids), owner(target, ids)) {
+            (Some(a), Some(b)) if a != b => return Err(Refusal::OtherOwner),
+            (Some(_), Some(_)) => {}
+            _ => return Err(Refusal::NoIdentity),
+        }
+    }
     Ok(())
 }
+
+fn owner<'a>(row: Row<'a>, ids: &'a HashMap<String, String>) -> Option<&'a str> { owned(row.session).or_else(|| identity_of(row.server, ids)) }
 
 /// `canLeave` do web: os pares também contam, para o par de outro servidor que venha sem `pair_gid` (o externo tem um).
 pub(super) fn can_leave(s: &SessionInfo) -> bool { !s.orq() && (s.pair_gid.is_some() || !s.peers().is_empty()) }
@@ -232,12 +348,23 @@ impl Hangar {
         s.pair_gid.as_deref().is_some_and(|gid| self.sidebar.is_collapsed(&pair_key(gid, remote)))
     }
 
+    /// Identificador de cada máquina do app (`/api/peers/identificador`).
+    // shortcut: ainda não lido no nativo; sem ele, agrupar entre máquinas recusa por falta de identificador, e o
+    // pedido (que ainda vai só à máquina da origem) nunca sai para outra.
+    pub(super) fn identities(&self) -> HashMap<String, String> { HashMap::new() }
+
+    /// A linha da sessão para o modelo de grupos.
+    fn pair_row<'a>(&'a self, target: &'a Target) -> Option<Row<'a>> {
+        Some(Row { server: &target.server, session: self.target_session(target)?, invite: self.invite_target(target) })
+    }
+
     /// Candidatas do "Agrupar com…": as outras da mesma máquina que o arrastar aceitaria, na ordem da barra.
     pub(super) fn group_candidates(&self, origin: &Target) -> Vec<String> {
-        let Some(session) = self.target_session(origin) else { return Vec::new() };
+        let Some(row) = self.pair_row(origin) else { return Vec::new() };
+        let ids = self.identities();
         let mut list: Vec<&SessionInfo> = self.sessions_of(&origin.server).iter().filter(|s| !self.sidebar.is_hidden(&origin.server, &s.name)).collect();
         list.sort_by_cached_key(|s| s.name.to_lowercase());
-        list.into_iter().filter(|s| can_pair(session, s, true).is_ok()).map(|s| s.name.clone()).collect()
+        list.into_iter().filter(|s| can_pair(row, Row { session: s, ..row }, &ids).is_ok()).map(|s| s.name.clone()).collect()
     }
 
     // ── Arrastar ──
@@ -252,14 +379,13 @@ impl Hangar {
 
     /// O que soltar ali faria, pela sessão viva: `None` é nada (fundo sem grupo, sessão sumida).
     fn verdict(&self, origin: &Target, spot: Option<&DropSpot>) -> Option<Result<DropAction, Refusal>> {
-        // Convidado não agrupa nem desagrupa: parear é rota do servidor inteiro do dono.
-        if self.invite_target(origin) { return Some(Err(Refusal::Invite)); }
-        let session = self.target_session(origin)?;
+        let row = self.pair_row(origin)?;
         match spot {
-            None => can_leave(session).then_some(Ok(DropAction::Leave)),
+            // Convidado não desagrupa: parear é rota do servidor inteiro do dono.
+            None if row.invite => Some(Err(Refusal::Invite)),
+            None => can_leave(row.session).then_some(Ok(DropAction::Leave)),
             Some(DropSpot::Row(target) | DropSpot::Pair { rep: target, .. }) => {
-                let other = self.target_session(target)?;
-                Some(can_pair(session, other, target.server == origin.server).map(|_| DropAction::Join(target.clone())))
+                Some(can_pair(row, self.pair_row(target)?, &self.identities()).map(|_| DropAction::Join(target.clone())))
             }
         }
     }
@@ -506,7 +632,13 @@ impl Hangar {
                 v.affected = names;
                 // Com a chamada em voo fica o que se via no clique.
                 if !v.busy { v.inherited = existing_group(o, t).map(|g| g.pair_task.clone().unwrap_or_default()); }
-                v.block = match (o, t) { (Some(o), Some(t)) => can_pair(o, t, true).err().map(Refusal::text), _ => Some(Refusal::Dead.text()) };
+                v.block = match (o, t) {
+                    (Some(o), Some(t)) => {
+                        let row = Row { server: &origin.server, session: o, invite: self.invite_target(origin) };
+                        can_pair(row, Row { session: t, ..row }, &self.identities()).err().map(Refusal::text)
+                    }
+                    _ => Some(Refusal::Dead.text()),
+                };
                 if !v.busy {
                     v.grants = match (o, t) { (Some(o), Some(t)) => [full_grants(t, o), full_grants(o, t)].concat(), _ => Vec::new() };
                 }
@@ -629,27 +761,58 @@ pub(super) fn fill_group(menu: PopupMenu, hangar: &WeakEntity<Hangar>, origin: &
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` do gpui_kit, que o `super::*` traz, esconderia o `#[test]` da linguagem.
-    use super::{Grant, ListRow, Refusal, SessionInfo, can_leave, can_pair, cluster, existing_group, full_grants, pair_header_label, split_code};
+    use super::{Grant, ListRow, Refusal, Row, SessionInfo, can_leave, can_pair, cluster, existing_group, full_grants, global_groups,
+        pair_header_label, split_code};
     use crate::api::dto::{PairExternal, PairExternalEntry, PairResult};
+    use serde_json::Value;
+    use std::collections::HashMap;
 
     fn s(name: &str, gid: Option<&str>, peers: &[&str]) -> SessionInfo {
         SessionInfo { name: name.into(), state: "idle".into(), pair_gid: gid.map(str::to_owned),
             pair_peers: (!peers.is_empty()).then(|| peers.iter().map(|p| (*p).to_owned()).collect()), ..Default::default() }
     }
 
+    fn fixtures() -> Value { serde_json::from_str(include_str!("../../../packages/core/src/pairGroups.fixtures.json")).unwrap() }
+
+    fn identities(case: &Value, all: &Value) -> HashMap<String, String> {
+        serde_json::from_value(case.get("identities").unwrap_or(&all["defaultIdentities"]).clone()).unwrap()
+    }
+
+    fn row<'a>(v: &'a Value, session: &'a SessionInfo) -> Row<'a> {
+        Row { server: v["server"].as_str().unwrap(), session, invite: v["invite"].as_bool().unwrap_or(false) }
+    }
+
     #[test]
-    fn can_pair_refuses_like_the_web() {
-        let (a, b) = (s("a", None, &[]), s("b", None, &[]));
-        assert_eq!(can_pair(&a, &b, true), Ok(()));
-        assert_eq!(can_pair(&a, &a, true), Err(Refusal::Same));
-        assert_eq!(can_pair(&a, &b, false), Err(Refusal::OtherServer));
-        assert_eq!(can_pair(&a, &SessionInfo { state: "dead".into(), ..b.clone() }, true), Err(Refusal::Dead));
-        assert_eq!(can_pair(&s("a", Some("g"), &["b"]), &s("b", Some("g"), &["a"]), true), Err(Refusal::SameGroup));
-        assert_eq!(can_pair(&s("a", Some("g"), &["b"]), &s("c", Some("h"), &["d"]), true), Ok(()), "grupos diferentes se fundem");
-        assert_eq!(can_pair(&a, &s("b", None, &["srv::x"]), true), Err(Refusal::CrossServer));
-        let orq = SessionInfo { provider: "orq".into(), ..s("o", None, &[]) };
-        assert_eq!(can_pair(&orq, &b, true), Err(Refusal::Orq));
-        assert_eq!(can_pair(&a, &orq, true), Err(Refusal::Orq));
+    fn global_groups_follow_the_shared_fixture() {
+        let all = fixtures();
+        for case in all["groups"].as_array().unwrap() {
+            let raw = case["rows"].as_array().unwrap();
+            let sessions: Vec<SessionInfo> = raw.iter().map(|v| serde_json::from_value(v.clone()).unwrap()).collect();
+            let rows: Vec<Row> = raw.iter().zip(&sessions).map(|(v, s)| row(v, s)).collect();
+            assert_eq!(serde_json::to_value(global_groups(&rows, &identities(case, &all))).unwrap(), case["groups"], "{}", case["name"]);
+        }
+    }
+
+    #[test]
+    fn can_pair_follows_the_shared_fixture() {
+        let all = fixtures();
+        for case in all["canPair"].as_array().unwrap() {
+            let origin: SessionInfo = serde_json::from_value(case["origin"].clone()).unwrap();
+            let target: SessionInfo = serde_json::from_value(case["target"].clone()).unwrap();
+            let want = match case["result"].as_str().unwrap() {
+                "ok" => Ok(()),
+                "same" => Err(Refusal::Same),
+                "orq" => Err(Refusal::Orq),
+                "dead" => Err(Refusal::Dead),
+                "invite" => Err(Refusal::Invite),
+                "same_group" => Err(Refusal::SameGroup),
+                "no_identity" => Err(Refusal::NoIdentity),
+                "other_owner" => Err(Refusal::OtherOwner),
+                other => panic!("motivo desconhecido na fixture: {other}"),
+            };
+            let got = can_pair(row(&case["origin"], &origin), row(&case["target"], &target), &identities(case, &all));
+            assert_eq!(got, want, "{}", case["name"]);
+        }
     }
 
     #[test]
@@ -700,14 +863,6 @@ mod tests {
         let ListRow::Header { label, .. } = &rows[0] else { panic!("cabeçalho primeiro") };
         assert!(label.starts_with("ABC-1 ") && label.contains("ana::Y (Ana)") && label.contains("bia::Z (Bia)"), "{label}");
         assert_eq!(pair_header_label("t", &[]), "t", "sem par, o rótulo de sempre");
-    }
-
-    #[test]
-    fn outside_member_does_not_make_the_group_cross_server() {
-        let x = SessionInfo { pair_externals: Some(vec![ext("ana", "Ana", "Y", "view", false)]), ..s("X", Some("g"), &["ana::Y"]) };
-        assert_eq!(can_pair(&s("a", None, &[]), &x, true), Ok(()), "grupo misto aceita sessão local");
-        let both = SessionInfo { pair_peers: Some(vec!["ana::Y".into(), "srv::q".into()]), ..x };
-        assert_eq!(can_pair(&s("a", None, &[]), &both, true), Err(Refusal::CrossServer));
     }
 
     #[test]

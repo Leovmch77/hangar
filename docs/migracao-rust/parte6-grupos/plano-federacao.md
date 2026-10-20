@@ -834,14 +834,14 @@ duas.
 Identificador de cada máquina lido sob demanda por `GET /api/peers/identificador` (como
 `frontend/src/lib/sessionsStore.svelte.ts:198-217`).
 
-- [ ] **Step 1: Fixture** com os casos: dois servidores mesma dona, donas diferentes, identidade
+- [x] **Step 1: Fixture** com os casos: dois servidores mesma dona, donas diferentes, identidade
   ausente, identidade repetida, par antigo, membro de fora, `same_name_two_servers`, `orq`, morto.
-- [ ] **Step 2: Testes** das duas cópias lendo a fixture.
-- [ ] **Step 3: Rodar e ver falhar.**
-- [ ] **Step 4: Implementar** as duas cópias.
-- [ ] **Step 5: Rodar.** Esperado: `cd packages/core && npx vitest run src/pairGroups.test.ts src/pairDrop.test.ts`
+- [x] **Step 2: Testes** das duas cópias lendo a fixture.
+- [x] **Step 3: Rodar e ver falhar.**
+- [x] **Step 4: Implementar** as duas cópias.
+- [x] **Step 5: Rodar.** Esperado: `cd packages/core && npx vitest run src/pairGroups.test.ts src/pairDrop.test.ts`
   e `cd desktop-native && cargo test grouping::` verdes.
-- [ ] **Step 6: Commit** — `feat(clients): one group model across machines for core and native`.
+- [x] **Step 6: Commit** — `feat(clients): one group model across machines for core and native`.
 
 ---
 

@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { canPair, canLeave, pairAnchor } from './pairDrop';
 import type { AggSession } from './types';
+import fixtures from './pairGroups.fixtures.json';
+
+type FixtureRow = { server: string; invite?: boolean; [field: string]: unknown };
+const fixtureRow = ({ server, invite, ...rest }: FixtureRow) =>
+  ({ serverId: server, serverLabel: server, serverColor: '#123', state: 'idle', serverInvite: invite, ...rest }) as unknown as AggSession;
+const fixtureIdentities = (c: object) =>
+  new Map(Object.entries('identities' in c ? (c.identities as Record<string, string>) : fixtures.defaultIdentities));
 
 const s = (over: Partial<AggSession> = {}): AggSession =>
   ({
@@ -14,12 +21,6 @@ describe('canPair', () => {
     expect(canPair(s({ name: 'a' }), s({ name: 'a' }))).toEqual({ ok: false, reason: 'same' });
   });
 
-  it('recusa servidor diferente', () => {
-    const origem = s({ name: 'a', serverId: 'srv1' });
-    const alvo = s({ name: 'b', serverId: 'srv2' });
-    expect(canPair(origem, alvo)).toEqual({ ok: false, reason: 'other_server' });
-  });
-
   it('recusa sessão morta, tanto na origem quanto no alvo', () => {
     const viva = s({ name: 'a' });
     const morta = s({ name: 'b', state: 'dead' });
@@ -31,13 +32,6 @@ describe('canPair', () => {
     const origem = s({ name: 'a', pair_gid: 'g1' });
     const alvo = s({ name: 'b', pair_gid: 'g1' });
     expect(canPair(origem, alvo)).toEqual({ ok: false, reason: 'same_group' });
-  });
-
-  it('recusa cross-server, tanto na origem quanto no alvo', () => {
-    const local = s({ name: 'a' });
-    const comPeerRemoto = s({ name: 'b', pair_peers: ['srv2::outra'] });
-    expect(canPair(comPeerRemoto, local)).toEqual({ ok: false, reason: 'cross_server' });
-    expect(canPair(local, comPeerRemoto)).toEqual({ ok: false, reason: 'cross_server' });
   });
 
   it('membro de fora (par externo) não conta como par de outro servidor', () => {
@@ -64,6 +58,13 @@ describe('canPair', () => {
 
   it('aceita o caso feliz', () => {
     expect(canPair(s({ name: 'a' }), s({ name: 'b' }))).toEqual({ ok: true });
+  });
+});
+
+describe('canPair (fixture compartilhada com o nativo)', () => {
+  it.each(fixtures.canPair.map((c) => [c.name, c] as const))('%s', (_name, c) => {
+    const got = canPair(fixtureRow(c.origin), fixtureRow(c.target), fixtureIdentities(c));
+    expect(got).toEqual(c.result === 'ok' ? { ok: true } : { ok: false, reason: c.result });
   });
 });
 
