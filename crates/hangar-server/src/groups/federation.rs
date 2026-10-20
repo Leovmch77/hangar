@@ -869,8 +869,14 @@ fn apply_push(dir: &PairDir, me: &str, gid: &str, body: &PushBody, renamed: &Has
     let ours: Vec<(String, Sidecar)> = all.iter().filter(|(_, s)| s.gid == gid && s.fed.as_ref().is_some_and(|f| f.owner == body.owner)).cloned().collect();
     let seen_key = format!("{}::{gid}", body.owner);
     let mut applied = read_applied(dir);
-    let stored = ours.iter().filter_map(|(_, s)| s.fed.as_ref().map(|f| f.version)).chain(applied.get(&seen_key).copied()).max().unwrap_or(0);
-    if body.version < stored || (body.version == stored && stored > 0) { return Ok(Applied::Ignored(stored)); }
+    // A menor versão entre os sidecars do grupo: queda no meio da gravação deixa versões misturadas, e
+    // o reenvio da mesma versão conserta. Sem sidecar, vale a última aplicada.
+    let stored = ours.iter().filter_map(|(_, s)| s.fed.as_ref().map(|f| f.version)).min()
+        .unwrap_or_else(|| applied.get(&seen_key).copied().unwrap_or(0));
+    // Dois joins à mesma máquina saem com a versão atual do registro: a mesma versão com alguém do
+    // `joining` ainda sem sidecar nela é aplicada de novo (reaplicar não muda o que já está certo).
+    let joins_left = joining.iter().any(|j| !ours.iter().any(|(n, s)| n == j && s.fed.as_ref().is_some_and(|f| f.version == body.version)));
+    if body.version < stored || (body.version == stored && stored > 0 && !joins_left) { return Ok(Applied::Ignored(stored)); }
     let mut writes: Vec<(String, Sidecar)> = Vec::new();
     let mut clears: Vec<String> = Vec::new();
     let mut names = Vec::new();

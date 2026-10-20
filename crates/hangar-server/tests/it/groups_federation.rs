@@ -563,3 +563,32 @@ async fn outside_grant_failure_reaches_the_caller() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["warning"]["code"], "erro_grupo_acesso_externo_falhou", "{body}");
 }
+
+/// Dois joins à mesma máquina saem com a versão atual do registro: o segundo `PUT` tem a mesma
+/// versão do primeiro e um `joining` novo, que não pode ser ignorado.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_joins_to_same_machine_both_get_sidecars() {
+    let n = net().await;
+    let all = json!([member("casa", "s0"), member("lab", "s1"), member("lab", "s2")]);
+    assert_eq!(push(&n.lab, "g1", json!({"protocol": 1, "owner": "casa", "version": 2, "members": all, "joining": ["s1"]})).await.0, 200);
+    let (status, answer) = push(&n.lab, "g1", json!({"protocol": 1, "owner": "casa", "version": 2, "members": all, "joining": ["s2"]})).await;
+    assert_eq!(status, 200, "{answer}");
+    assert!(sidecar(&n.lab, "s2").is_some(), "o segundo membro também entra: {answer}");
+    assert_eq!(peers_of(&sidecar(&n.lab, "s1").unwrap()), ["casa::s0", "s2"]);
+}
+
+/// Queda no meio da gravação deixa versões misturadas: o reenvio da mesma versão conserta.
+#[tokio::test(flavor = "multi_thread")]
+async fn mixed_versions_after_crash_are_repaired() {
+    let n = net().await;
+    let all = json!([member("casa", "s0"), member("lab", "s1"), member("lab", "s2")]);
+    assert_eq!(push(&n.lab, "g1", json!({"protocol": 1, "owner": "casa", "version": 3, "task": "nova", "members": all, "joining": ["s1", "s2"]})).await.0, 200);
+    let mut s2 = sidecar(&n.lab, "s2").unwrap();
+    s2["fed"]["version"] = json!(2);
+    s2["task"] = json!("velha");
+    std::fs::write(n.lab.pair.join("s2.json"), s2.to_string()).unwrap();
+    let (status, answer) = push(&n.lab, "g1", json!({"protocol": 1, "owner": "casa", "version": 3, "task": "nova", "members": all, "joining": []})).await;
+    assert_eq!(status, 200, "{answer}");
+    let s2 = sidecar(&n.lab, "s2").unwrap();
+    assert_eq!((s2["task"].clone(), s2["fed"]["version"].clone()), (json!("nova"), json!(3)));
+}
