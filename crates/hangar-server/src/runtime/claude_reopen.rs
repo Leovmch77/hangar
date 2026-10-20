@@ -609,13 +609,14 @@ impl RuntimeRegistry {
                 Some((generation,view))=>(generation,Some(view)),
                 None=>(self.queue_generation(&spec.key).await?,None),
             };
-            // Reabrir com a entrega parada (aviso do próprio ator) é a saída da mensagem presa: o turno e a
-            // subida congelados na queda e a fila vão para a vida nova, que entrega o que estiver esperando.
+            // Reabrir com a entrega parada (aviso do próprio ator) é a saída da mensagem presa: o turno, a
+            // subida e o cartão congelados na queda (inalcançáveis com o cano surdo) saem com a vida velha, e a
+            // fila vai para a nova, que entrega o que estiver esperando.
             let stalled=reload && view.as_ref().is_some_and(|view|view["public_state"]["problema"]==super::actor::DELIVERY_STALLED);
             let checks_busy=checks && !stalled;
             if let Some(view)=&view {
                 if checks_busy && view["alive"]==true && view["initialized"]!=true {return Err(busy("erro_sessao_iniciando"));}
-                if checks && (!view["question"].is_null() || view["pending"].as_array().is_some_and(|p|!p.is_empty())) {return Err(busy("erro_sessao_esperando_resposta"));}
+                if checks_busy && (!view["question"].is_null() || view["pending"].as_array().is_some_and(|p|!p.is_empty())) {return Err(busy("erro_sessao_esperando_resposta"));}
                 if checks_busy && view["in_progress"]==true {return Err(busy("erro_sessao_trabalhando"));}
                 // O modo e as escolhas que a CLI mudou sozinha valem; com motor, o do sidecar.
                 if let Some(mode)=view["permission_mode"].as_str().and_then(PermissionMode::claude) {spec.permission_mode=Some(mode);}

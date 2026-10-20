@@ -955,6 +955,17 @@ impl Engine {
                 Err(failure) => tracing::warn!(session=%self.state.session,code=%failure.code,"escrita não enviada sem desfecho na queda"),
             }
         }
+        // Sem terminal, resposta a pedido do app-server ainda sem confirmação termina na queda, como no Claude:
+        // a que nunca saiu volta não escrita e a entregue ao socket que caiu fica incerta.
+        let answers:Vec<(String,bool)> = if self.headless { self.wires.iter().filter(|(_,wire)|wire.server_request.is_some() && !wire.final_result)
+            .map(|(id,_)|(id.clone(),handed.contains(id))).collect() } else { Vec::new() };
+        for (operation_id,sent) in answers {
+            let outcome = if sent { WriteOutcome::Unknown } else { WriteOutcome::NotWritten };
+            match self.apply_input(EngineInput::WriteAck { operation_id,outcome },self.clock) {
+                Ok(next) => effects.extend(next),
+                Err(failure) => tracing::warn!(session=%self.state.session,code=%failure.code,"resposta sem desfecho na queda"),
+            }
+        }
         self.ready = false;
         if !self.headless {
             self.connected = false; self.subscribed = false; self.subscribe_due = None; self.turn_known = false;

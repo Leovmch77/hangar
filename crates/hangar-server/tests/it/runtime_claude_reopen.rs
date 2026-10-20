@@ -821,8 +821,8 @@ async fn until<F:std::future::Future<Output=bool>>(what:&str,mut check:impl FnMu
 /// controle e anota cada `user` em `users.log`), aberto no Rust, com o socket tomado por outro cliente e o
 /// arquivo da escuta apagado: o cano segue vivo e surdo para o ator, e a mensagem enviada fica na fila.
 /// `stall`: o prazo do aviso; `turn_open`: antes da queda a primeira vida recebeu uma mensagem e o turno dela
-/// ficou aberto (o `claude` falso nunca responde); `never_initialized`: o `claude` da primeira vida não
-/// responde ao `initialize`, e a sessão cai ainda subindo.
+/// ficou aberto (o `claude` falso nunca responde), com um pedido de permissão aberto nele; `never_initialized`:
+/// o `claude` da primeira vida não responde ao `initialize`, e a sessão cai ainda subindo.
 struct Deaf { fx:Fixture, key:String, registry:Arc<RuntimeRegistry>, first:u32, _thief:hangar_server::runtime::cano::CanoConnection }
 async fn deaf_headless_with_a_waiting_message(stall:Duration,turn_open:bool,never_initialized:bool) -> Deaf {
     use hangar_server::runtime::protocol::{CanoBinding,Disposition,OperationKind,RuntimeCommand};
@@ -832,9 +832,10 @@ async fn deaf_headless_with_a_waiting_message(stall:Duration,turn_open:bool,neve
     fx.transcript();
     let bin = fx.home.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
-    let (fake,log,mute) = (fx.home.join("fake-claude.sh"),fx.home.join("users.log"),fx.home.join("mute-init"));
+    let (fake,log,mute,ask) = (fx.home.join("fake-claude.sh"),fx.home.join("users.log"),fx.home.join("mute-init"),fx.home.join("ask-once"));
     if never_initialized { std::fs::write(&mute,"").unwrap(); }
-    // Sai sozinho depois de 120 s parado: nenhum processo do teste sobra. `mute-init` vale para uma subida só.
+    if turn_open { std::fs::write(&ask,"").unwrap(); }
+    // Sai sozinho depois de 120 s parado: nenhum processo do teste sobra. `mute-init` e `ask-once` valem uma vez só.
     crate::write_executable(&fake,format!(r#"#!/bin/bash
 mute=0; [ -f '{mute}' ] && rm -f '{mute}' && mute=1
 while IFS= read -r -t 120 line; do
@@ -843,10 +844,12 @@ while IFS= read -r -t 120 line; do
       [ $mute = 1 ] && grep -q '"subtype":"initialize"' <<<"$line" && continue
       rid=$(sed -E 's/^.*"request_id":"([^"]*)".*$/\1/' <<<"$line")
       printf '{{"type":"control_response","response":{{"subtype":"success","request_id":"%s","response":{{"commands":[]}}}}}}\n' "$rid";;
-    *'"type":"user"'*) echo "$line" >> '{log}';;
+    *'"type":"user"'*)
+      echo "$line" >> '{log}'
+      [ -f '{ask}' ] && rm -f '{ask}' && printf '%s\n' '{{"type":"control_request","request_id":"perm-1","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{{"command":"ls"}}}}}}';;
   esac
 done
-"#,mute=mute.display(),log=log.display()));
+"#,mute=mute.display(),log=log.display(),ask=ask.display()));
     // O `argv[0]` é `claude`: é por ele que a abertura reconhece o filho do cano.
     crate::write_executable(&bin.join("claude"),format!("#!/bin/bash\nexec -a claude /bin/bash '{}' \"$@\"\n",fake.display()));
     fx.put_sidecar(json!({"name":"s1","provider":"claude","headless":true,"key":key,"cwd":fx.cwd,"session_id":SID,
@@ -864,7 +867,9 @@ done
     }
     if turn_open {
         handle.command(RuntimeCommand { operation_id:"em-curso".into(),kind:OperationKind::Input,payload:json!({"text":"em-curso","entry_id":"em-curso"}) }).await.unwrap();
-        until("o turno da primeira vida abre",||{let handle=handle.clone();async move {handle.view().await.unwrap()["in_progress"]==true}}).await;
+        until("o turno da primeira vida abre com a permissão pedida",||{let handle=handle.clone();async move {
+            let view=handle.view().await.unwrap();
+            view["in_progress"]==true && view["pending"].as_array().is_some_and(|p|!p.is_empty())}}).await;
     }
     let cano:Value = serde_json::from_slice::<Value>(&std::fs::read(fx.sidecar_path("s1")).unwrap()).unwrap()["cano"].clone();
     let first = cano["pid"].as_u64().unwrap() as u32;
@@ -900,7 +905,8 @@ async fn reload_stalled_and_check_delivery(turn_open:bool,never_initialized:bool
     let handle = registry.handle(key,1).await.unwrap();
     until("o aviso de entrega parada aparece",||{let handle=handle.clone();async move {
         let view=handle.view().await.unwrap();
-        view["public_state"]["problema"]=="headless_delivery_stalled" && view["in_progress"]==turn_open && view["initialized"]!=never_initialized}}).await;
+        view["public_state"]["problema"]=="headless_delivery_stalled" && view["in_progress"]==turn_open && view["initialized"]!=never_initialized
+            && view["pending"].as_array().is_some_and(|p|p.is_empty()!=turn_open)}}).await;
     let (_python,server) = crate::runtime_codex_watch::serve_owner(registry.clone()).await;
     let (status,body) = post(server,"recarregar",json!({})).await;
     assert_eq!((status,&body),(200,&json!({"ok":true})),"{body}");

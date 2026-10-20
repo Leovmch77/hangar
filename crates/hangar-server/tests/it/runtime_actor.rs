@@ -2517,9 +2517,9 @@ mod cano_reconnect {
     /// Cano falso que aceita várias conexões, como o de verdade: a n-ésima (1 = abertura) recebe o retrato
     /// (`Serve`), fecha sem ele (`Refuse`) ou fica muda até o ator largar o socket (`Hang`). `cut` derruba a
     /// conexão atual sem `cano_saiu`; `garble` manda um envelope que o leitor não conhece, com o socket de pé;
-    /// `aberto` vai nos retratos seguintes.
+    /// `aberto` vai nos retratos seguintes; com `unacked`, o quadro chega e a escrita fica sem confirmação.
     struct LiveCano { escuta:String, accepts:Arc<Mutex<Vec<Instant>>>, frames:Arc<Mutex<Vec<Value>>>, cut:Arc<tokio::sync::Notify>,
-        garble:Arc<tokio::sync::Notify>, aberto:Arc<AtomicBool>, busy:Arc<AtomicBool>, hung_closed:Arc<tokio::sync::Notify>, server:tokio::task::JoinHandle<()> }
+        garble:Arc<tokio::sync::Notify>, aberto:Arc<AtomicBool>, busy:Arc<AtomicBool>, unacked:Arc<AtomicBool>, hung_closed:Arc<tokio::sync::Notify>, server:tokio::task::JoinHandle<()> }
     impl Drop for LiveCano { fn drop(&mut self) { self.server.abort(); } }
     impl LiveCano {
         fn accepts(&self) -> usize { self.accepts.lock().unwrap().len() }
@@ -2536,8 +2536,8 @@ mod cano_reconnect {
         let escuta = format!("tcp:{}",listener.local_addr().unwrap());
         let (accepts,frames,cut,aberto,hung_closed) = (Arc::new(Mutex::new(Vec::new())),Arc::new(Mutex::new(Vec::new())),
             Arc::new(tokio::sync::Notify::new()),Arc::new(AtomicBool::new(false)),Arc::new(tokio::sync::Notify::new()));
-        let (garble,busy) = (Arc::new(tokio::sync::Notify::new()),Arc::new(AtomicBool::new(false)));
-        let (seen,written,cutting,open,hung,garbling,working) = (accepts.clone(),frames.clone(),cut.clone(),aberto.clone(),hung_closed.clone(),garble.clone(),busy.clone());
+        let (garble,busy,unacked) = (Arc::new(tokio::sync::Notify::new()),Arc::new(AtomicBool::new(false)),Arc::new(AtomicBool::new(false)));
+        let (seen,written,cutting,open,hung,garbling,working,silent) = (accepts.clone(),frames.clone(),cut.clone(),aberto.clone(),hung_closed.clone(),garble.clone(),busy.clone(),unacked.clone());
         let pendentes:Vec<String> = pendentes.iter().map(Value::to_string).collect();
         let server = tokio::spawn(async move {
             while let Ok((stream,_)) = listener.accept().await {
@@ -2563,6 +2563,7 @@ mod cano_reconnect {
                             let envelope:Value = serde_json::from_str(&raw).unwrap();
                             let frame:Value = serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap();
                             written.lock().unwrap().push(frame.clone());
+                            if silent.load(Ordering::Acquire) { continue; }
                             let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
                             if reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.is_err() { break; }
                             // Codex: o app-server falso responde a todo pedido JSON-RPC (o Claude não manda `id` com `method`).
@@ -2586,7 +2587,7 @@ mod cano_reconnect {
                 }
             }
         });
-        LiveCano { escuta,accepts,frames,cut,garble,aberto,busy,hung_closed,server }
+        LiveCano { escuta,accepts,frames,cut,garble,aberto,busy,unacked,hung_closed,server }
     }
 
     struct Waits { normal:Vec<Duration>, pending:Vec<Duration>, stall:Duration }
@@ -2949,6 +2950,27 @@ mod cano_reconnect {
             payload:json!({"option":1,"interaction_id":before}) }).await.unwrap();
         assert!(reply.disposition == Disposition::Accepted,"{reply:?}");
         assert!(cano.frames.lock().unwrap().iter().any(|frame|frame["id"] == 7 && frame["result"]["decision"] == "accept"),"a resposta sai no socket novo");
+        handle.stop().await.unwrap();
+    }
+
+    /// Resposta ao cartão entregue ao socket que cai antes de confirmar: a queda a encerra na hora, como no
+    /// Claude (pode ter saído, então incerta), em vez de esperar o prazo da operação.
+    #[tokio::test]
+    async fn codex_answer_open_when_the_socket_drops_ends_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let proc = sleeper(dir.path());
+        let request = json!({"id":7,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-1","command":"ls"}});
+        let cano = live_cano_with(|n|if n == 1 { Answer::Serve } else { Answer::Refuse },vec![request]).await;
+        let handle = codex_actor_with(dir.path(),&cano,proc.0.id(),waits(&[0,3_600_000],&[0,3_600_000],60_000),true,None).await;
+        let card = state_until(&handle,"cartão da aprovação",|state|state["interaction_id"].is_string()).await["interaction_id"].clone();
+        cano.unacked.store(true,Ordering::Release);
+        let sender = handle.clone();
+        let answer = tokio::spawn(async move { sender.command(RuntimeCommand { operation_id:"answer".into(),kind:OperationKind::Select,
+            payload:json!({"option":1,"interaction_id":card}) }).await });
+        wait_for("a resposta chega ao socket",||cano.frames.lock().unwrap().iter().any(|frame|frame["id"] == 7)).await;
+        cano.cut.notify_one();
+        let reply = tokio::time::timeout(Duration::from_secs(3),answer).await.expect("a queda encerra a resposta na hora").unwrap().unwrap();
+        assert_eq!(reply.disposition,Disposition::Unknown,"entregue ao socket que caiu: pode ter saído, nunca reenviada: {reply:?}");
         handle.stop().await.unwrap();
     }
 
