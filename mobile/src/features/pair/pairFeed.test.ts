@@ -29,7 +29,7 @@ vi.mock('react-native-enriched-markdown', () => ({
 vi.mock('../../chat/AssistantBubble', () => ({ mkMarkdownStyle: () => ({}) }));
 vi.mock('../../paraglide/messages', () => Object.fromEntries(
   ('par_conversa_titulo par_sem_historico comum_carregando par_vazio_trocas par_parear_titulo par_passam_hint forward_nenhuma_viva par_parear_aria par_tarefa_placeholder par_pareando par_parear_nomes par_escolha_varias '
-    + 'par_grupo_titulo par_membros_hint par_abrir_conversa_de par_adicionar_sessao par_vazio_fora_grupo par_adicionar_aria par_adicionando par_adicionar_nomes par_escolha_sessoes par_saindo par_sair_grupo '
+    + 'par_grupo_titulo par_membros_hint par_abrir_conversa_de par_adicionar_sessao par_vazio_fora_grupo par_adicionar_aria par_adicionando par_adicionar_nomes par_escolha_sessoes par_saindo par_sair_grupo worktree_esta_sessao '
     + 'forward_nao_listou par_contrato_falhou par_contrato_titulo par_falhou_pareamento par_falhou_saida comandos_confirmar comum_cancelar comum_confirmar compare_servidor_nao_encontrado comum_voltar')
     .split(' ').map((key) => [key, () => key]),
 ));

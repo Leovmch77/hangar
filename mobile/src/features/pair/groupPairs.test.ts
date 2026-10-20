@@ -70,6 +70,7 @@ describe('membros do grupo entre máquinas', () => {
       row('z', { serverId: 's2', serverLabel: 'lab', state: 'working', pair_gid: 'g', pair_owner: 'casa', pair_peers: ['casa::a', 'vm::y'] }),
     ];
     expect(groupMembers('s1', 'a', rows, ids)).toEqual([
+      { key: 's1::a', name: 'a', machine: null, state: 'idle', target: null, missing: false, self: true },
       { key: 's2::z', name: 'z', machine: 'lab', state: 'working', target: { server: 's2', name: 'z' }, missing: false },
       { key: 'missing:vm::y', name: 'y', machine: 'vm', state: null, target: null, missing: true },
     ]);
@@ -78,7 +79,15 @@ describe('membros do grupo entre máquinas', () => {
   it('par sem gid continua pelos nomes de pair_peers', () => {
     const rows = [row('a', { pair_peers: ['b'] }), row('b', { pair_peers: ['a'], state: 'working' })];
     expect(groupMembers('s1', 'a', rows, ids)).toEqual([
+      { key: 's1::a', name: 'a', machine: null, state: 'idle', target: null, missing: false, self: true },
       { key: 'b', name: 'b', machine: null, state: 'working', target: { server: 's1', name: 'b' }, missing: false },
     ]);
+  });
+
+  it('os 4 do grupo de 2 máquinas, vistos de um membro da outra máquina', () => {
+    const fed = (name: string, serverId: string) => row(name, { serverId, serverLabel: serverId === 's1' ? 'casa' : 'lab', pair_gid: 'g', pair_owner: 'casa', pair_peers: ['x'] });
+    const rows = [fed('a', 's1'), fed('b', 's1'), fed('c', 's2'), fed('d', 's2')];
+    const members = groupMembers('s2', 'c', rows, ids);
+    expect(members.map((mb) => [mb.name, mb.machine, !!mb.self])).toEqual([['a', 'casa', false], ['b', 'casa', false], ['c', null, true], ['d', null, false]]);
   });
 });

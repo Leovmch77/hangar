@@ -57,23 +57,27 @@ export type MemberView = {
   // ausente = só texto (máquina sem conexão aqui, ou membro de fora sem entrada)
   target: { server: string; name: string } | null;
   missing: boolean;
+  // a sessão aberta: listada como "esta sessão", sem conversa para abrir
+  self?: true;
 };
 
-/** Membros do grupo da sessão aberta, de todas as máquinas, sem ela. Fora do modelo global (par sem gid), `pair_peers`. */
+/** Membros do grupo da sessão aberta, de todas as máquinas, ela marcada. Fora do modelo global (par sem gid), `pair_peers`. */
 export function groupMembers(serverId: string, name: string, rows: AggSession[], identities: ReadonlyMap<string, string>): MemberView[] {
   const byKey = new Map<string, AggSession>();
   for (const r of rows) if (!r.outside && !byKey.has(pickKey(r.serverId, r.name))) byKey.set(pickKey(r.serverId, r.name), r);
   const rowOf = (server: string, n: string) => byKey.get(pickKey(server, n));
   const self = (m: { kind: string; server?: string; name?: string }) => m.kind === 'here' && m.server === serverId && m.name === name;
+  const me: MemberView = { key: pickKey(serverId, name), name, machine: null, state: rowOf(serverId, name)?.state ?? null, target: null, missing: false, self: true };
   const group = groupGlobal(rows, identities).find((g) => g.members.some(self));
   if (!group) {
-    return (rowOf(serverId, name)?.pair_peers ?? []).map((peer) => {
+    return [me, ...(rowOf(serverId, name)?.pair_peers ?? []).map((peer) => {
       const fora = outsideRow(rows, peer);
       const target = fora ? { server: fora.serverId, name: fora.name } : { server: serverId, name: peer };
       return { key: peer, name: peer, machine: null, state: (fora ?? rowOf(serverId, peer))?.state ?? null, target, missing: false };
-    });
+    })];
   }
-  return group.members.filter((m) => !self(m)).map((m): MemberView => {
+  return group.members.map((m): MemberView => {
+    if (self(m)) return me;
     if (m.kind === 'here') {
       const row = rowOf(m.server, m.name);
       return { key: pickKey(m.server, m.name), name: m.name, machine: m.server === serverId ? null : row?.serverLabel ?? m.server, state: row?.state ?? null, target: { server: m.server, name: m.name }, missing: false };

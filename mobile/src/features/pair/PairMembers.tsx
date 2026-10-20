@@ -32,14 +32,14 @@ export function PairMembers({ members, machines, picked, pickedNames, adding, bu
 
   return (
     <View style={styles.content}>
-      <Text style={[styles.title, { color: theme.tokens.text.primary }]}>{m.par_grupo_titulo({ n: members.length + 1 })}</Text>
+      <Text style={[styles.title, { color: theme.tokens.text.primary }]}>{m.par_grupo_titulo({ n: members.length })}</Text>
       <Text style={[styles.hint, { color: theme.tokens.text.secondary }]}>{m.par_membros_hint()}</Text>
 
       <View style={styles.list}>
         {members.map((member) => {
           const { state, machine } = member;
           const detail = member.missing && machine ? m.grupo_membro_maquina_desconectada({ maquina: machine })
-            : [machine, state ? rotuloEstado(state) : null].filter(Boolean).join(' · ');
+            : [member.self ? m.worktree_esta_sessao() : null, machine, state ? rotuloEstado(state) : null].filter(Boolean).join(' · ');
           const content = <>
             <View style={[styles.dot, { backgroundColor: state ? stateDot(state) : theme.tokens.text.muted }]} />
             <View style={styles.main}>

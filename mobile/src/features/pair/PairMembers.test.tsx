@@ -20,6 +20,7 @@ const noop = () => {};
 describe('PairMembers', () => {
   it('membro de máquina desconectada é texto com rótulo, não botão desligado', async () => {
     const members: MemberView[] = [
+      { key: 'casa::eu', name: 'eu', machine: null, state: 'idle', target: null, missing: false, self: true },
       { key: 'casa:a', name: 'a', machine: null, state: 'idle', target: { server: 'casa', name: 'a' }, missing: false },
       { key: 'lab::x', name: 'x', machine: 'lab', state: null, target: null, missing: true },
     ];
@@ -32,6 +33,10 @@ describe('PairMembers', () => {
       expect(buttons.some((l) => l.startsWith('x'))).toBe(false);
       expect(container.querySelector('[aria-label^="x, "]')).not.toBeNull();
       expect(buttons.some((l) => l.includes('a'))).toBe(true);
+      // a própria sessão entra na lista e na contagem, marcada e sem botão
+      expect(container.textContent).toContain('(3)');
+      expect(buttons.some((l) => l.includes('eu'))).toBe(false);
+      expect(container.querySelector('[aria-label^="eu, "]')).not.toBeNull();
     } finally {
       act(() => root.unmount());
     }

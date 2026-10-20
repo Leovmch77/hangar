@@ -10,6 +10,7 @@ import {
   effectiveGroupBy,
   formataErro,
   groupBadges,
+  groupGlobal,
   renameSession,
   setPairAccess,
   resumeSession,
@@ -26,7 +27,7 @@ import { Icon } from '../../ui/Icon';
 import { toast } from '../../ui/Toast';
 import { SessionRow, type PairAction } from './SessionRow';
 import { buildSessionSections, sessionGroupKey, type SessionSection } from './sessionSections';
-import { SessionSectionCard, SessionSectionHeader } from './SessionSection';
+import { GroupBlockHeader, SessionSectionCard, SessionSectionHeader } from './SessionSection';
 import { PairInviteSheet, type PairTarget } from '../pair/PairInviteSheet';
 import { PairAcceptSheet, type PairAcceptTarget } from '../pair/PairAcceptSheet';
 import { leaveExternal } from '../pair/leaveExternal';
@@ -84,6 +85,7 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
   const crossMachine = useMemo(() => rows.some((r) => r.pair_owner || r.pair_peers?.some((p) => p.includes('::'))), [rows]);
   const { identities } = useIdentities(crossMachine ? servers : NO_SERVERS);
   const crossBadges = useMemo(() => groupBadges(rows, identities), [rows, identities]);
+  const pairGroups = useMemo(() => groupGlobal(rows, identities), [rows, identities]);
   const [filtro, setFiltro] = useState('');
   const insets = useSafeAreaInsets();
   // chave `modo:id`: trocar o Agrupar por não herda o recolhido de um grupo de outro tipo
@@ -252,7 +254,7 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
   const busca = filtro.trim().toLowerCase();
   // Filtrar + ordenar + agrupar a lista inteira a cada render é caro, e arrastar um slider de
   // material re-renderiza todo mundo que lê o tema — inclusive esta tela.
-  const sections = useMemo(() => buildSessionSections(rows, modo, busca, recolhidos), [rows, busca, modo, recolhidos]);
+  const sections = useMemo(() => buildSessionSections(rows, modo, busca, recolhidos, undefined, pairGroups), [rows, busca, modo, recolhidos, pairGroups]);
   const variosServidores = servers.length > 1;
 
   // Sessão que entra ou sai do topo desliza para o lugar novo em vez de pular. A chave ignora a
@@ -471,11 +473,12 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
         renderSectionHeader={({ section }) => <SessionSectionHeader section={section} onToggle={alternarGrupo} />}
         renderItem={({ item, section, index }) => (
           <SessionSectionCard index={index} total={section.data.length}>
+            {section.heads.has(pickKey(item.serverId, item.name)) ? <GroupBlockHeader head={section.heads.get(pickKey(item.serverId, item.name))!} /> : null}
             <SessionRow
               session={item}
               compact={home}
-              // No topo as linhas vêm de máquinas diferentes, então dizem de qual são.
-              mostrarServidor={todos.length > 1 && (modo !== 'server' || section.id.startsWith('state:'))}
+              // No topo as linhas vêm de máquinas diferentes, então dizem de qual são; no bloco do grupo, a de outra máquina também.
+              mostrarServidor={todos.length > 1 && (modo !== 'server' || section.id.startsWith('state:') || item.serverId !== section.id)}
               onPress={abrir}
               onGit={abrirGit}
               onExcluir={excluir}
