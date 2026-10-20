@@ -116,6 +116,10 @@ jobs:
         with:
           name: hangar-release-ipa
           path: out
+      # Daqui até o APK, falha não segura o IPA: a release sai sem APK e o aviso fica no log.
+      - if: ${{ env.EXPO_TOKEN != '' }}
+        continue-on-error: true
+        run: npm ci --workspace=@hangar/core --workspace=mobile
       - name: APK do mesmo runtime
         working-directory: mobile
         run: |
@@ -124,14 +128,18 @@ jobs:
             exit 0
           fi
           runtime=$(node -p 'require("./app.json").expo.runtimeVersion')
-          npx eas-cli@latest build:list --platform android --status finished --build-profile preview \
-            --runtime-version "$runtime" --limit 1 --json --non-interactive > ../out/builds.json
-          url=$(node -p 'require("../out/builds.json")[0]?.artifacts?.buildUrl ?? ""')
+          if ! npx eas-cli@latest build:list --platform android --status finished --build-profile preview \
+              --runtime-version "$runtime" --limit 1 --json --non-interactive > ../out/builds.json; then
+            echo "::warning::eas build:list falhou; mobile-latest sai sem hangar.apk."
+            exit 0
+          fi
+          url=$(node -p 'require("../out/builds.json")[0]?.artifacts?.buildUrl ?? ""') || url=
           if [ -z "$url" ]; then
             echo "::warning::Nenhum build Android preview pronto com runtime $runtime; mobile-latest sai sem hangar.apk."
             exit 0
           fi
-          curl -fsSL "$url" -o ../out/hangar.apk
+          curl -fsSL "$url" -o ../out/hangar.apk \
+            || { rm -f ../out/hangar.apk; echo "::warning::Download do APK falhou; mobile-latest sai sem hangar.apk."; }
       - name: Publica na mobile-latest
         run: |
           mv out/hangar-release.ipa out/hangar.ipa
@@ -144,3 +152,9 @@ jobs:
                  --prerelease --latest=false --title "Hangar mobile" \
                  --notes "App do celular para SideStore (iOS) e instalação direta (Android). Reescrita a cada build Release do iOS."
           gh release upload mobile-latest "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          # APK de outro runtime nativo não roda o JS deste build; melhor a release sem APK.
+          if ! test -f out/hangar.apk; then
+            gh release delete-asset mobile-latest hangar.apk --repo "$GITHUB_REPOSITORY" -y \
+              && echo "::warning::hangar.apk anterior removido da mobile-latest." || true
+          fi
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/mobile-latest" -f sha="$GITHUB_SHA" -F force=true >/dev/null
