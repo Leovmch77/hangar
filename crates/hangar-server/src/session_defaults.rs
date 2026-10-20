@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, io, net::SocketAddr, path::Path, sync::Arc};
 use crate::{routes::{AppState, gate}, session_open::PermissionMode, session_write::{detail_body, json_response}};
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Defaults { pub model: String, pub effort: String, pub permission: String }
 
@@ -46,6 +46,19 @@ struct Save {
 
 #[derive(Serialize)]
 struct Selection { configured: bool, defaults: Option<Defaults> }
+
+fn path(home: &Path) -> std::path::PathBuf { home.join(".hangar").join("session-defaults.json") }
+
+/// A chave gravada para provedor, motor e conta do motor; `None` = combinação que não existe.
+pub(crate) fn scope_key(provider: &str, engine: &str, engine_account: &str) -> Option<String> {
+    Scope { provider: provider.into(), engine: engine.into(), engine_account: engine_account.into() }.key()
+}
+
+/// O padrão marcado para o escopo, que o lançador aplica ao que o pedido não disse.
+pub(crate) fn saved(home: &Path, provider: &str, engine: &str, engine_account: &str) -> io::Result<Option<Defaults>> {
+    let Some(key) = scope_key(provider, engine, engine_account) else { return Ok(None) };
+    Ok(read(&path(home))?.remove(&key).flatten())
+}
 
 fn read(path: &Path) -> io::Result<BTreeMap<String, Option<Defaults>>> {
     match crate::runtime::queue::read_replaced(path) {
@@ -98,7 +111,7 @@ pub(crate) async fn serve(state: &Arc<AppState>, request: Request) -> Response {
         };
         Some(save)
     } else { None };
-    let path = state.accounts.env.home.join(".hangar").join("session-defaults.json");
+    let path = path(&state.accounts.env.home);
     match tokio::task::spawn_blocking(move || selection(&path, &key, save)).await {
         Ok(Ok(selection)) => json_response(StatusCode::OK, json!(selection)),
         _ => failure(StatusCode::SERVICE_UNAVAILABLE, "session_defaults_unavailable", "não foi possível ler ou guardar o padrão da abertura"),

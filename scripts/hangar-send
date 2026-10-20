@@ -29,10 +29,13 @@
 #                                  nunca responda um [grupo:] com --group (evita loop); responda 1:1.
 #                                  O backend entrega a cada membro pelo mesmo caminho do 1:1.
 #   hangar-send --new <nome> [cwd]     cria sessão nova, com terminal gerenciado ou headless.
-#                                  cwd default = home. O que for omitido HERDA desta sessão: a
-#                                  conta (com 95% ou mais de uso, vai para a de mais folga, como
-#                                  --conta auto), o modo de permissão (claude; plan herda o modo
-#                                  de base) e o sem terminal (claude/codex). Flag explícita vence.
+#                                  cwd default = home. Modelo, esforço e permissão omitidos vêm do
+#                                  PADRÃO SALVO no servidor (a caixinha da tela de criar); sem padrão
+#                                  salvo, a permissão vem desta sessão. --inherit: a permissão vem
+#                                  desta sessão mesmo com padrão salvo (plan herda o modo de base).
+#                                  O resto omitido HERDA desta sessão: a conta (com 95% ou mais de
+#                                  uso, vai para a de mais folga, como --conta auto) e o sem terminal
+#                                  (claude/codex). Flag explícita vence.
 #   hangar-send --new <servidor>::<nome> [cwd]  idem, NOUTRO servidor (peers.json), com as mesmas
 #                                  flags. cwd, --conta e --conta auto são resolvidos LÁ (cwd default
 #                                  = home de lá; --conta pelo nome da conta de lá).
@@ -419,7 +422,7 @@ fi
 
 if [[ "$1" == "--new" ]]; then
     shift
-    name="${1:?uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--conta <nome>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--subagente <modelo>] [--service-tier <default|priority>] [--profile <nome>] [--headless|--terminal] [--jev|--sem-jev] [--read-only] [--no-inherit] [--engine-account <id>] [--branch <nome> [--new-branch [--base <ref>]]] [--customizations <json>] [--prompt <texto>] [--remember-provider] [--link] [--resume <id da conversa>]}"
+    name="${1:?uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--conta <nome>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--subagente <modelo>] [--service-tier <default|priority>] [--profile <nome>] [--headless|--terminal] [--jev|--sem-jev] [--read-only] [--inherit|--no-inherit] [--engine-account <id>] [--branch <nome> [--new-branch [--base <ref>]]] [--customizations <json>] [--prompt <texto>] [--remember-provider] [--link] [--resume <id da conversa>]}"
     shift
     # servidor::nome cria a sessão NOUTRA máquina, pela API dela (peers.json), igual ao recado.
     remoto=""
@@ -435,7 +438,7 @@ if [[ "$1" == "--new" ]]; then
     # DESCARTADO calado — na conta Anthropic, parecendo que atendeu o pedido.
     if [[ "$name" == -* ]]; then
         echo "erro: nome de sessão não pode começar com '-' (esqueceu o nome?)" >&2
-        echo "uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--conta <nome>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--subagente <modelo>] [--service-tier <default|priority>] [--profile <nome>] [--headless|--terminal] [--jev|--sem-jev] [--read-only] [--no-inherit] [--engine-account <id>] [--branch <nome> [--new-branch [--base <ref>]]] [--customizations <json>] [--prompt <texto>] [--remember-provider] [--link] [--resume <id da conversa>]" >&2
+        echo "uso: hangar-send --new <nome> [cwd] [--engine <motor>] [--provider <claude|codex|pi|omp|kimi>] [--conta <nome>] [--model <id>] [--effort <nivel>] [--permissao <modo>] [--subagente <modelo>] [--service-tier <default|priority>] [--profile <nome>] [--headless|--terminal] [--jev|--sem-jev] [--read-only] [--inherit|--no-inherit] [--engine-account <id>] [--branch <nome> [--new-branch [--base <ref>]]] [--customizations <json>] [--prompt <texto>] [--remember-provider] [--link] [--resume <id da conversa>]" >&2
         exit 2
     fi
     # --engine: a sessão nova nasce num MOTOR de modelo (~/.claude/engines.json) em vez da conta
@@ -468,7 +471,10 @@ if [[ "$1" == "--new" ]]; then
     while [[ $# -gt 0 ]]; do
         case "$1" in
             # --no-inherit: o omitido cai no padrão da conta em vez de herdar desta sessão (D-001).
-            --no-inherit) once no_inherit "$1" true; shift ;;
+            --no-inherit|--inherit)
+                [[ -n "$no_inherit" ]] && { echo "erro: use só um entre --inherit e --no-inherit" >&2; exit 2; }
+                # --inherit: a permissão desta sessão vence o padrão salvo no servidor.
+                if [[ "$1" == --inherit ]]; then no_inherit=mode; else no_inherit=true; fi; shift ;;
             --engine-account) once engine_account "$1" "${2:?uso: --engine-account <id>}"; shift 2 ;;
             --branch) once branch "$1" "${2:?uso: --branch <nome>}"; shift 2 ;;
             --new-branch) once new_branch "$1" true; shift ;;
@@ -648,7 +654,7 @@ s = json.load(sys.stdin); print(s["path"] + "\t" + s["label"])' <<<"$sugestao")
     if [[ -n "$resume" ]]; then
         [[ "$resume" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "erro: id de conversa inválido: $resume" >&2; exit 2; }
         for pair in "--effort:$effort" "--permissao:$permissao" "--profile:$perfil" "--read-only:$read_only" "--jev/--sem-jev:$jev" \
-                    "--subagente:$subagente" "--service-tier:$service_tier" "--no-inherit:$no_inherit" "--branch:$branch" \
+                    "--subagente:$subagente" "--service-tier:$service_tier" "--inherit/--no-inherit:$no_inherit" "--branch:$branch" \
                     "--new-branch:$new_branch" "--base:$base" "--customizations:$customizations" "--prompt:$prompt" \
                     "--remember-provider:${remember_provider#false}" "--link:$link_child"; do
             [[ -n "${pair#*:}" ]] && { echo "erro: ${pair%%:*} não combina com --resume" >&2; exit 2; }
@@ -703,8 +709,10 @@ if sys.argv[16]:
     d["creator"] = sys.argv[16]
 if sys.argv[17]:
     d["service_tier"] = sys.argv[17]
-if sys.argv[18]:
+if sys.argv[18] == "true":
     d["inherit"] = False
+elif sys.argv[18] == "mode":
+    d["inherit"] = True
 if sys.argv[19]:
     d["engine_account"] = sys.argv[19]
 if sys.argv[20]:

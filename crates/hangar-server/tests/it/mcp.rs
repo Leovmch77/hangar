@@ -141,7 +141,10 @@ async fn catalog_is_the_python_one_with_the_whole_open_request() {
             assert_eq!(rust, python, "{} igual ao Python", python["name"]);
             continue;
         }
-        assert!(rust["description"].as_str().unwrap().starts_with(python["description"].as_str().unwrap()));
+        // A herança do modo mudou depois do Python (o padrão salvo vem antes): só a abertura do texto segue igual.
+        let (rust_text, python_text) = (rust["description"].as_str().unwrap(), python["description"].as_str().unwrap());
+        assert!(rust_text.starts_with(python_text.split(" O que for omitido").next().unwrap()), "{rust_text}");
+        assert!(rust_text.contains("padrão salvo no servidor"), "{rust_text}");
         assert_eq!(rust["outputSchema"], python["outputSchema"]);
         assert_eq!(rust["inputSchema"]["required"], python["inputSchema"]["required"]);
         for (key, schema) in python["inputSchema"]["properties"].as_object().unwrap() {
