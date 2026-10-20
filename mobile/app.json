@@ -108,6 +108,7 @@
           "enableBackgroundRecording": true
         }
       ],
+      "./plugins/withoutApsEnvironment",
       "expo-notifications",
       [
         "expo-media-library",

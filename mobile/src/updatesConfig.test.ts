@@ -68,8 +68,9 @@ async function generatedNative() {
     platforms: ['ios', 'android'],
     assertMissingModProviders: false,
   });
+  // Campo interno do Expo, o mesmo que o `expo config --type introspect` lê.
   const results = (out as any)._internal.modResults;
-  return { plist: results.ios.infoPlist, manifest: results.android.manifest };
+  return { plist: results.ios.infoPlist, entitlements: results.ios.entitlements, manifest: results.android.manifest };
 }
 
 const pluginOptions = (name: string) => {
@@ -108,6 +109,12 @@ describe('native-3: tablet, ditado em segundo plano e push', () => {
   it('traz o plugin do expo-notifications', () => {
     expect(config.plugins?.some((p) => (Array.isArray(p) ? p[0] : p) === 'expo-notifications')).toBe(true);
   });
+
+  it('iOS sai sem o entitlement de push, que o SideStore com Apple ID gratuito não assina', async () => {
+    const { entitlements } = await generatedNative();
+    expect(entitlements).toBeDefined();
+    expect(entitlements).not.toHaveProperty('aps-environment');
+  }, 60_000);
 
   it('lê o google-services.json do ambiente do EAS', () => {
     process.env.GOOGLE_SERVICES_JSON = '/tmp/x.json';
