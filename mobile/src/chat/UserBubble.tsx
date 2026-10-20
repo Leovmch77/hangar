@@ -67,12 +67,14 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, serverId
 
   // O texto não é `selectable`: no Android a seleção come o toque longo que abre as ações, e copiar
   // já está lá.
-  const bolha = (conteudo: ReactNode, textoAcoes: string, voz = false) => (
-    <View style={[styles.col, voz && styles.colVoz]}>
+  // `largo`: o card de arquivo tem width 100%; numa bolha que encolhe ao conteúdo, ele a esticava
+  // além da coluna e ela vazava pela esquerda. Com card, a bolha ocupa a coluna inteira.
+  const bolha = (conteudo: ReactNode, textoAcoes: string, voz = false, largo = false) => (
+    <View style={[styles.col, voz && styles.colVoz, largo && styles.colLarga]}>
       <Pressable
         onLongPress={alternar}
         delayLongPress={350}
-        style={[styles.bubble, voz && styles.voice, peer && { borderWidth: 1, borderColor: peerColor }]}
+        style={[styles.bubble, voz && styles.voice, largo && styles.bubbleLarga, peer && { borderWidth: 1, borderColor: peerColor }]}
         accessibilityActions={[{ name: 'longpress', label: m.navbar_mais_acoes() }]}
         onAccessibilityAction={(e) => { if (e.nativeEvent.actionName === 'longpress') alternar(); }}
       >
@@ -125,6 +127,8 @@ export const UserBubble = memo(function UserBubble({ text, sessionName, serverId
         {cards}
       </>,
       caption || body,
+      false,
+      cards.length > 0,
     );
   }
 
@@ -139,6 +143,8 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.base.space[1],
   },
   colVoz: { alignSelf: 'flex-start', alignItems: 'flex-start' },
+  colLarga: { width: '82%' },
+  bubbleLarga: { alignSelf: 'stretch' },
   bubble: {
     backgroundColor: superficie(theme, 0.8),
     borderRadius: theme.base.radius.md,
