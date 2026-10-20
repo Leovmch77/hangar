@@ -151,6 +151,32 @@ def test_delete_answers_the_rust_code_when_the_close_fails(monkeypatch):
     assert failed.value.status_code == 500 and failed.value.detail["code"] == "codex_bridge_failed"
 
 
+def test_delete_entering_the_connect_port_is_closed_by_the_rust(monkeypatch):
+    killed, recorded, cleaned, bridged = [], [], [], []
+    monkeypatch.setattr(api_mod.registry, "kill", lambda name, closed_by_rust=False: killed.append(closed_by_rust) or [])
+    monkeypatch.setattr(api_mod, "_recusa_orq", lambda name: None)
+    monkeypatch.setattr(api_mod, "_jsonl_of_session", lambda name: None)
+    monkeypatch.setattr(api_mod, "_invalidate_lists", lambda: cleaned.append("invalidate"))
+    monkeypatch.setattr(api_mod.share_bridge, "revoke_session", lambda name: cleaned.append("revoke"))
+    monkeypatch.setattr(api_mod.closed_names, "record", lambda jsonl, name: recorded.append((jsonl, name)))
+    replies = iter([(200, b'{"closed": true, "killed": true, "transcript": "/t/a.jsonl"}'), None,
+                    (409, b'{"detail": {"code": "session_transfer_busy", "params": {}}}')])
+    monkeypatch.setattr(runtime_coordinator, "rust_claude", lambda *args: bridged.append(args) or next(replies))
+
+    def delete(port):
+        return asyncio.run(api_mod.kill_session("ct", request=_request(port, "/api/sessions/ct", body=b"", method="DELETE")))
+    assert delete(api_mod.CONNECT_PORT)["ok"] is True
+    assert (killed, recorded, cleaned) == ([True], [("/t/a.jsonl", "ct")], []), "fechada pelo Rust: aqui só as lojas daqui"
+    delete(api_mod.CONNECT_PORT)
+    assert killed[1:] == [False] and cleaned == ["invalidate", "revoke"], "421: o Python fecha pelo nome, como antes"
+    with pytest.raises(api_mod._RustReply) as refused:
+        delete(api_mod.CONNECT_PORT)
+    assert refused.value.args[0] == 409 and len(killed) == 2, "recusa do Rust volta como veio, sem fechar aqui"
+    assert bridged == [("ct", "close", "POST", b"")] * 3
+    delete(GUEST_PORT)
+    assert len(bridged) == 3, "só o que entrou pelo Connect vai à ponte"
+
+
 def test_sends_from_python_paths_go_to_the_rust_and_return_its_code(monkeypatch):
     calls = []
     monkeypatch.setattr(runtime_coordinator, "rust_owns_codex_terminal", lambda: True)

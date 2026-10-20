@@ -249,3 +249,28 @@ async fn claude_bridge_serves_input_answers_and_queue_of_a_rust_claude() {
         assert_eq!(python.hits_to(&format!("/api/sessions/s/{route}")), 0, "{route}: nunca volta ao Python");
     }
 }
+
+/// O `DELETE` do Claude que entrou pelo Connect chega à ponte (`POST close`) e é encerrado pelo mesmo
+/// `kill_claude` da 8765: a entrada sai do Rust. O processo daqui não se comprova desta vida, então nada é
+/// morto e a resposta é 421, para o Python fechar pelo nome; sessão que o Rust não tem também é 421.
+#[tokio::test]
+async fn connect_delete_of_a_rust_claude_closes_through_the_bridge() {
+    let (dir, store) = (tempfile::tempdir().unwrap(), Arc::new(InteractionStore::default()));
+    let (registry, _plugin) = registry_with_plugin(&store).await;
+    open_headless(&registry, dir.path(), "s").await;
+    let (python, upstream) = fake::spawn_fake().await;
+    let state = hangar_server::routes::AppState::new(fake::config(upstream, "127.0.0.1"));
+    assert!(state.state.runtime.set(registry.clone()).is_ok());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let private = listener.local_addr().unwrap();
+    let router = hangar_server::routes::terminal_router(Arc::new(state));
+    tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap() });
+    let close = |name: &'static str| async move {
+        fake::client().post(format!("http://{private}/__hangar_server/claude/{name}/close"))
+            .header("x-hangar-internal", SECRET).send().await.unwrap().status().as_u16()
+    };
+    assert_eq!(close("nada").await, 421);
+    assert_eq!(close("s").await, 421);
+    assert!(!registry.has_entry(None, "s").await, "o encerramento passou pelo Rust: a entrada desta vida saiu");
+    assert_eq!(python.hits_to("/api/sessions/s"), 0, "a ponte nunca devolve ao Python");
+}

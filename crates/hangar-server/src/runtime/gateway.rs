@@ -173,6 +173,8 @@ fn healthy(terminal:bool,view:&Value)->bool {
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível para esta chave ou geração") }
 
 /// Encerrar recusado porque a vida guardada não se comprova; ocupação e transferência não estão aqui.
+/// Código interno da religação automática que achou a sessão fechada pelo nome; nunca sai do Rust.
+const SESSION_CLOSED:&str="lifecycle_session_closed";
 const LIFE_UNPROVEN:[&str;6]=["lifecycle_binding","lifecycle_binding_unavailable","lifecycle_process_birth_missing","lifecycle_process_changed","lifecycle_process_read","lifecycle_target_unavailable"];
 
 /// `list-sessions` (`nome\tcriação`) ainda tem a sessão `name` desta vida. Outra criação no mesmo nome é
@@ -910,6 +912,15 @@ impl RuntimeRegistry {
             if let Ok(operation)=barrier.operation.lock() && let Some((owner,cancel))=operation.as_ref() && owner==name {cancel.store(true,std::sync::atomic::Ordering::Release);}
         }
     }
+    /// Sem o sidecar a sessão foi fechada pelo nome: a entrada sai sem matar nada, em vez de religar e pôr
+    /// erro numa sessão que não existe mais. Chamar com a barreira da chave.
+    async fn release_closed_by_name(&self,key:&str,generation:u64,name:&str) -> bool {
+        if !super::lifecycle::claude_sidecar_absent(name) {return false;}
+        if let Err(error)=self.close_locked(key,generation,false).await {
+            tracing::warn!(key,session=name,code=%error.code,"entrada da sessão fechada pelo nome não saiu do Rust");
+        }
+        true
+    }
     async fn schedule_claude_respawn(self:&Arc<Self>,key:&str,generation:u64) {
         let handle=self.entries.lock().await.get(key).filter(|entry|entry.generation==generation && entry.provider=="claude").map(|entry|entry.handle.clone());
         let Some(handle)=handle else {return};
@@ -932,21 +943,32 @@ impl RuntimeRegistry {
         let (registry,key)=(self.clone(),key.to_owned());
         tokio::spawn(async move {
             let id=format!("auto-restart:{key}:{generation}");
-            let mut gave_up=false;
+            let (mut gave_up,mut released)=(false,false);
             for attempt in 0..3 {
-                tokio::time::sleep(base * (1u32<<attempt)).await;
+                // Já fechada pelo nome: a primeira volta a solta sem esperar.
+                if attempt>0 || !super::lifecycle::claude_sidecar_absent(&name) {tokio::time::sleep(base * (1u32<<attempt)).await;}
                 if context.cancelled.load(std::sync::atomic::Ordering::Acquire) {break;}
                 let result=async {
                     let _ingress=super::lifecycle::ClosedIngress::acquire(&registry.ingress,&name).await?;
                     let _guard=barrier.lock().await;
-                    registry.reopen_headless_locked(&name,&key,generation,&id,None,true,Some(context.clone()),attempt).await
+                    // Sem a entrada desta vida, só segue quem a tirou numa volta anterior: outro a fechou depois
+                    // de a religação ser aceita (o cancelamento do `close` pode ter vindo antes dela).
+                    if !released && !registry.entries.lock().await.get(&key).is_some_and(|entry|entry.generation==generation) {return Err(failure("lifecycle_cancelled"));}
+                    if registry.release_closed_by_name(&key,generation,&name).await {return Err(failure(SESSION_CLOSED));}
+                    let result=registry.reopen_headless_locked(&name,&key,generation,&id,None,true,Some(context.clone()),attempt).await;
+                    released=!registry.entries.lock().await.contains_key(&key);
+                    result
                 }.await;
                 match result {
                     Ok(_)=>break,
+                    Err(error) if matches!(error.code.as_str(),"lifecycle_cancelled"|SESSION_CLOSED)=> {
+                        tracing::info!(key,session=name,code=%error.code,"sessão fechada; reabertura automática cancelada");
+                        break;
+                    },
                     Err(error)=> {
                         super::actor::mark_live_error(&registry.live_sender(&name),&error.code,&error.message);
                         tracing::warn!(key,session=name,attempt,code=%error.code,"reabertura automática não confirmada");
-                        if matches!(error.code.as_str(),"lifecycle_cancelled"|"runtime_generation"|"runtime_binding"|"lifecycle_conversation") {break;}
+                        if matches!(error.code.as_str(),"runtime_generation"|"runtime_binding"|"lifecycle_conversation") {break;}
                         gave_up=attempt==2 || super::claude_launch::permanent(&error.code);
                         if gave_up {break;}
                     },
@@ -3781,6 +3803,169 @@ mod tests {
         assert_eq!(refused.code,"lifecycle_agent_still_alive");
         assert!(!registry.has_entry(None,"cl").await,"nenhuma vida nova");
         drop(agent);
+        server.abort();
+    }
+
+    /// Registro de teste sobre os processos falsos do cano, com a espera da reabertura automática curta.
+    #[cfg(target_os="linux")]
+    fn park_registry(home:&std::path::Path,processes:Arc<ParkProcesses>,configure:impl FnOnce(RuntimeRegistry)->RuntimeRegistry) -> (Arc<RuntimeRegistry>,crate::side::Hubs) {
+        let env=crate::accounts::environment::AccountEnvironment::from_map([("HOME".to_owned(),home.to_string_lossy().into_owned())].into());
+        let registry=Arc::new(configure(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"fixture".into(),"instance".into()).with_processes(processes).with_codex_environment(env)));
+        registry.bind_lifecycle();
+        let hubs=crate::side::Hubs::default();registry.bind_hubs(hubs.downgrade());
+        (registry,hubs)
+    }
+
+    /// O dono fecha pelo nome a sessão sem terminal aberta no Rust (o `DELETE` que o Python atende: o sidecar
+    /// sai, depois o cano morre). A queda que o ator vê não religa: nenhum erro no canal do nome e a entrada sai.
+    #[cfg(target_os="linux")]
+    #[tokio::test]
+    async fn owner_close_does_not_schedule_respawn() {
+        let home=tempfile::tempdir().unwrap();
+        let (key,name)=("a1".repeat(16),"cl-owner-close");
+        let (mut cano,escuta,_,server)=park_cano(home.path(),&key).await;
+        let sidecar=json!({"name":name,"key":key,"cwd":home.path(),"session_id":"a","headless":true,"initialized":true,"permission_mode":"manual",
+            "cano":{"pid":cano.0.id(),"escuta":escuta,"token":"fixture","versao":2}});
+        // A reabertura lê o sidecar na pasta do ciclo de vida (a temporária, nos testes).
+        let files=[home.path().join(".hangar/claude-headless"),super::super::lifecycle::claude_sidecar_dir().unwrap()].map(|dir|{
+            std::fs::create_dir_all(&dir).unwrap();let file=dir.join(format!("{name}.json"));std::fs::write(&file,sidecar.to_string()).unwrap();file
+        });
+        let processes=Arc::new(ParkProcesses {canos:std::sync::Mutex::new(vec![i64::from(cano.0.id())]),dir:home.path().into(),agent:Default::default()});
+        let (registry,_hubs)=park_registry(home.path(),processes,|registry|registry.with_respawn_base(Duration::from_millis(20)));
+        registry.open_claude_headless(name,false).await.unwrap().unwrap();
+
+        for file in &files { std::fs::remove_file(file).unwrap(); }
+        cano.0.kill().unwrap();cano.0.wait().unwrap();
+        server.abort();
+        let deadline=std::time::Instant::now()+Duration::from_secs(20);
+        while registry.has_entry(None,name).await {
+            let error=registry.live_sender(name).borrow().as_ref().and_then(|state|state.error.clone());
+            assert!(error.is_none(),"o fechamento pelo nome virou religação com erro no canal da sessão: {error:?}");
+            assert!(std::time::Instant::now()<deadline,"a entrada da sessão fechada pelo nome não saiu do Rust");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let error=registry.live_sender(name).borrow().as_ref().and_then(|state|state.error.clone());
+        assert!(error.is_none(),"a sessão fechada ficou com erro no canal: {error:?}");
+    }
+
+    /// `close()` sem matar (troca de nome ou de conta pelo Python, parada do servidor) com um `claude_exit` que
+    /// chega junto: a religação aceita depois do cancelamento do `close` não religa a sessão recém-fechada.
+    #[cfg(target_os="linux")]
+    #[tokio::test]
+    async fn a_respawn_admitted_after_the_close_cancelled_does_not_reopen_the_closed_session() {
+        let home=tempfile::tempdir().unwrap();
+        let (key,name)=("c3".repeat(16),"cl-close-race");
+        let (cano,escuta,accepts,_cut,server)=serving_cano(home.path(),&key,|_|false).await;
+        let sidecar=json!({"name":name,"key":key,"cwd":home.path(),"session_id":"a","headless":true,"initialized":true,"permission_mode":"manual",
+            "cano":{"pid":cano.0.id(),"escuta":escuta,"token":"fixture","versao":2}});
+        // O `close` sem matar deixa o sidecar: só a vaga da religação pode impedir a volta.
+        let files=[home.path().join(".hangar/claude-headless"),super::super::lifecycle::claude_sidecar_dir().unwrap()].map(|dir|{
+            std::fs::create_dir_all(&dir).unwrap();let file=dir.join(format!("{name}.json"));std::fs::write(&file,sidecar.to_string()).unwrap();file
+        });
+        let processes=Arc::new(ParkProcesses {canos:std::sync::Mutex::new(vec![i64::from(cano.0.id())]),dir:home.path().into(),agent:Default::default()});
+        let (registry,_hubs)=park_registry(home.path(),processes,|registry|registry.with_respawn_base(Duration::from_millis(20)));
+        registry.open_claude_headless(name,false).await.unwrap().unwrap();
+        let deadline=std::time::Instant::now()+Duration::from_secs(20);
+        while registry.live_sender(name).borrow().as_ref().and_then(|state|state.binding.clone()).is_none() {
+            assert!(std::time::Instant::now()<deadline,"o ator não publicou o vínculo");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let barrier=registry.barrier(&key).await;
+        let guard=barrier.lock().await;
+        // Operação de mentira: o `close` a cancela antes de esperar a barreira, e isso diz que ele já passou dali.
+        let probe=Arc::new(std::sync::atomic::AtomicBool::new(false));
+        *barrier.operation.lock().unwrap()=Some((name.into(),probe.clone()));
+        let close={let registry=registry.clone();let key=key.clone();tokio::spawn(async move {registry.close(&key,1).await})};
+        while !probe.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(std::time::Instant::now()<deadline,"o close não cancelou");
+            tokio::task::yield_now().await;
+        }
+        registry.schedule_claude_respawn(&key,1).await;
+        assert!(barrier.operation.lock().unwrap().as_ref().is_some_and(|(_,flag)|!Arc::ptr_eq(flag,&probe)),"a religação foi aceita depois do cancelamento");
+        drop(guard);
+        close.await.unwrap().unwrap();
+        while barrier.operation.lock().unwrap().is_some() {
+            assert!(std::time::Instant::now()<deadline,"a religação não terminou");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let error=registry.live_sender(name).borrow().as_ref().and_then(|state|state.error.clone());
+        let reopened=registry.has_entry(None,name).await;
+        if reopened {registry.close(&key,1).await.unwrap();}
+        assert!(!reopened && error.is_none(),"a sessão fechada voltou ({reopened}) ou ficou com erro ({error:?}); conexões ao cano: {}",accepts.load(std::sync::atomic::Ordering::SeqCst));
+        for file in &files {let _=std::fs::remove_file(file);}
+        server.abort();
+    }
+
+    /// Cano de verdade da chave e um servidor que atende várias conexões: `refuse(n)` fecha a n-ésima (a
+    /// primeira é 1) logo depois do pedido; `cut` derruba a conexão servida.
+    #[cfg(target_os="linux")]
+    #[allow(clippy::type_complexity)]
+    async fn serving_cano(dir:&std::path::Path,key:&str,refuse:fn(usize)->bool)
+        -> (Reaped,String,Arc<std::sync::atomic::AtomicUsize>,Arc<tokio::sync::Notify>,tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncBufReadExt,AsyncWriteExt,BufReader};
+        let (child,_,_,unused)=park_cano(dir,key).await;
+        unused.abort();
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+        let (accepts,cut)=(Arc::new(std::sync::atomic::AtomicUsize::new(0)),Arc::new(tokio::sync::Notify::new()));
+        let (counted,cutting)=(accepts.clone(),cut.clone());
+        let server=tokio::spawn(async move {
+            let mut connections=tokio::task::JoinSet::new();
+            while let Ok((socket,_))=listener.accept().await {
+                let n=counted.fetch_add(1,std::sync::atomic::Ordering::SeqCst)+1;
+                let cutting=cutting.clone();
+                connections.spawn(async move {
+                    let mut socket=BufReader::new(socket);let mut line=String::new();
+                    if socket.read_line(&mut line).await.unwrap_or(0)==0 || refuse(n) {return;}
+                    let snapshot=json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,"pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+                    if socket.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.is_err() {return;}
+                    loop {
+                        line.clear();
+                        tokio::select! { _=cutting.notified()=>break, read=socket.read_line(&mut line)=>if read.unwrap_or(0)==0 {break} }
+                    }
+                });
+            }
+        });
+        (child,format!("tcp:{address}"),accepts,cut,server)
+    }
+
+    /// Conversa aberta (`request_reopen`) numa sessão sem terminal saudável com religação marcada para
+    /// daqui a uma hora: a tentativa marcada sai na hora, sem reabrir a sessão nem abrir outra tentativa.
+    #[cfg(target_os="linux")]
+    #[tokio::test]
+    async fn request_reopen_wakes_the_scheduled_reconnect_of_a_healthy_headless_claude() {
+        let home=tempfile::tempdir().unwrap();
+        let (key,name)=("b2".repeat(16),"cl-reopen-wake");
+        let (cano,escuta,accepts,cut,server)=serving_cano(home.path(),&key,|n|n==2).await;
+        let dir=home.path().join(".hangar/claude-headless");std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{name}.json")),json!({"name":name,"key":key,"cwd":home.path(),"session_id":"a","headless":true,"initialized":true,
+            "permission_mode":"manual","cano":{"pid":cano.0.id(),"escuta":escuta,"token":"fixture","versao":2}}).to_string()).unwrap();
+        let processes=Arc::new(ParkProcesses {canos:std::sync::Mutex::new(vec![i64::from(cano.0.id())]),dir:home.path().into(),agent:Default::default()});
+        let hour=Duration::from_secs(3600);
+        let (registry,_hubs)=park_registry(home.path(),processes,|registry|registry.with_reconnect_waits(vec![Duration::ZERO,hour],vec![Duration::ZERO,hour],hour));
+        registry.open_claude_headless(name,false).await.unwrap().unwrap();
+        let accepted=||accepts.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(accepted(),1);
+
+        cut.notify_one();
+        let deadline=std::time::Instant::now()+Duration::from_secs(20);
+        while accepted()<2 {
+            assert!(std::time::Instant::now()<deadline,"a primeira tentativa (espera zero) não saiu");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // A recusa marca a próxima para daqui a uma hora; o pedido só antecipa a marcada, então repeti-lo é inofensivo.
+        while accepted()<3 {
+            assert!(std::time::Instant::now()<deadline,"a conversa aberta não antecipou a religação marcada");
+            registry.request_reopen(name);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(accepted(),3,"uma tentativa só, sem outra aberta pelo pedido");
+        let (generation,handle)=registry.entries.lock().await.get(&key).map(|entry|(entry.generation,entry.handle.clone())).expect("a sessão segue aberta");
+        assert_eq!(generation,1,"religar não é reabrir");
+        let snapshot=handle.snapshot().await.unwrap();
+        assert!(snapshot["error"].is_null(),"religada sem erro: {snapshot}");
+        registry.close(&key,1).await.unwrap();
         server.abort();
     }
 }

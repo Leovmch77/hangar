@@ -1168,7 +1168,11 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:RuntimeConnect
                                 mode_commit=Some(ModeCommit {proof:ModeProof {binding:crate::interactions::InteractionBinding {key:target.key.clone(),conversation:previous,generation:target.generation},operation_id:id,mode:mode.into()},digest});
                             }
                         },
-                        Err(failed)=>{if let Some(id)=operation_id {mode_failures.insert(id,failed.clone());}enter_error(&mut error,&target,failed);},
+                        Err(failed)=>{
+                            if let Some(id)=operation_id {mode_failures.insert(id,failed.clone());}
+                            // Sidecar apagado: a sessão foi fechada pelo nome e não há onde gravar; a religação a solta.
+                            if failed.code!="lifecycle_sidecar_read" || !super::lifecycle::claude_sidecar_absent(&target.name) {enter_error(&mut error,&target,failed);}
+                        },
                     }
                 },
                 Effect::WakeQueue => { drain_requested = true; },

@@ -223,6 +223,12 @@ pub(crate) fn claude_sidecar_dir()->Result<std::path::PathBuf,RuntimeError> {
     home.map(|home|home.join(".hangar/claude-headless")).ok_or_else(||failure("lifecycle_sidecar_path"))
 }
 
+/// O sidecar da sessão não existe (só a ausência; ilegível não conta): o fechamento pelo nome o apaga
+/// antes de matar o cano.
+pub(super) fn claude_sidecar_absent(name:&str)->bool {
+    claude_sidecar_dir().is_ok_and(|dir|std::fs::symlink_metadata(super::codex_sidecar::path(&dir,name)).is_err_and(|error|error.kind()==std::io::ErrorKind::NotFound))
+}
+
 /// O arquivo já existe: esta operação nunca cadastra nem prepara uma conta.
 /// O chamador segura a lease do Store e o portão de revisão do ator.
 pub fn delete_sidecar(target:&super::protocol::RuntimeTarget,conversation:&str)->Result<(),RuntimeError> {

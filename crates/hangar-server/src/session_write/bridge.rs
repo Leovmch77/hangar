@@ -40,7 +40,8 @@ fn as_owner(req: &mut Request, name: &str, rest: &str) -> bool {
 /// `/__hangar_server/claude/<nome>/<rota>`: `POST` em `input`, `answer`, `select`, `select/submit`,
 /// `permission-mode` e `model-effort`, `GET` em `permission-modes`, e as rotas do painel da fila (`DELETE`/`PATCH
 /// queue/<id>`, `POST queue/reorder` e `queue/<id>/steer`), de sessão Claude com entrada no Rust, pela
-/// mesma rota do dono; `POST`/`GET btw` de qualquer sessão (a rota decide). Outra rota, método ou sessão: 421.
+/// mesma rota do dono; `POST`/`GET btw` de qualquer sessão (a rota decide); `POST close`, o `DELETE` do Claude
+/// aberto aqui que entrou pelo Connect. Outra rota, método ou sessão: 421.
 pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, mut req: Request) -> Response {
     use super::{answer, control, input, permissions};
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
@@ -49,6 +50,7 @@ pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     if rest == "open" && req.method() == Method::POST {
         return crate::session_open::server::bridge(State(st), ConnectInfo(peer), req).await;
     }
+    if rest == "close" && req.method() == Method::POST { return close_bridged(st, peer, &name, req.headers()).await; }
     // Pergunta lateral (`POST`/`GET btw`): a própria rota decide sessão, provedor e modo, inclusive o
     // Claude sem terminal parado, que ainda não tem entrada.
     if rest == "btw" && matches!(*req.method(), Method::POST | Method::GET) {
@@ -152,10 +154,7 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     match closed {
         None => return crate::routes::pass(&st, req, &fwd).await,
         Some(Err(error)) => {
-            let mut response = match super::busy_refusal(&error) {
-                Some((status, body)) => super::json_response(status, body),
-                None => super::detail(StatusCode::INTERNAL_SERVER_ERROR, &error.code, &error.message, json!({})),
-            };
+            let mut response = close_refusal(&error);
             crate::routes::cors(req.headers(), response.headers_mut());
             return response;
         }
@@ -167,23 +166,7 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
             }
         }
     }
-    if let Some(groups) = st.groups.clone() {
-        match crate::groups::exit::leave_and_notify(&st, &groups, &name).await {
-            Ok((_, warnings)) if !warnings.is_empty() => tracing::warn!(session = %name, avisos = warnings.len(), "aviso de saída do grupo falhou ao encerrar"),
-            Err(error) => tracing::warn!(session = %name, error = %error, "saída do grupo falhou ao encerrar a sessão"),
-            _ => {}
-        }
-    }
-    // Convites e par da sessão são do Rust: o Python marcado não volta a pedir a revogação.
-    if let Some(share) = st.share.clone() {
-        match share.store.revoke_session(&name, None) {
-            Ok(0) => {}
-            Ok(_) => crate::share::owner_routes::sync_tunnel(&share).await,
-            Err(error) => tracing::error!(session = %name, code = "share_store_failed", "convites da sessão encerrada não revogados: {error}"),
-        }
-    }
-    st.list.forget(&name);
-    st.list.invalidate();
+    after_close(&st, &name).await;
     match axum::http::HeaderValue::from_str(&st.cfg.internal_secret) {
         Ok(mark) => { req.headers_mut().insert(RUST_CLOSED, mark); }
         // Sem a marca o Python tentaria encerrar de novo pela ponte: não repassa, e a limpeza dele que
@@ -198,6 +181,50 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         }
     }
     crate::routes::pass(&st, req, &fwd).await
+}
+
+fn close_refusal(error: &crate::runtime::protocol::RuntimeError) -> Response {
+    match super::busy_refusal(error) {
+        Some((status, body)) => super::json_response(status, body),
+        None => super::detail(StatusCode::INTERNAL_SERVER_ERROR, &error.code, &error.message, json!({})),
+    }
+}
+
+/// Depois de o Rust encerrar a sessão: sai do grupo, revoga os convites e some da lista.
+async fn after_close(st: &Arc<AppState>, name: &str) {
+    if let Some(groups) = st.groups.clone() {
+        match crate::groups::exit::leave_and_notify(st, &groups, name).await {
+            Ok((_, warnings)) if !warnings.is_empty() => tracing::warn!(session = %name, avisos = warnings.len(), "aviso de saída do grupo falhou ao encerrar"),
+            Err(error) => tracing::warn!(session = %name, error = %error, "saída do grupo falhou ao encerrar a sessão"),
+            _ => {}
+        }
+    }
+    // Convites e par da sessão são do Rust: o Python marcado não volta a pedir a revogação.
+    if let Some(share) = st.share.clone() {
+        match share.store.revoke_session(name, None) {
+            Ok(0) => {}
+            Ok(_) => crate::share::owner_routes::sync_tunnel(&share).await,
+            Err(error) => tracing::error!(session = %name, code = "share_store_failed", "convites da sessão encerrada não revogados: {error}"),
+        }
+    }
+    st.list.forget(name);
+    st.list.invalidate();
+}
+
+/// O `DELETE` do Claude que entrou pelo Connect (8768): o mesmo encerramento da 8765, sem repasse; o
+/// Python, com a resposta, limpa só as lojas dele. 421 = não é Claude aberto aqui, e o Python segue.
+async fn close_bridged(st: Arc<AppState>, peer: SocketAddr, name: &str, headers: &axum::http::HeaderMap) -> Response {
+    let Some(runtime) = st.state.runtime.get().cloned() else { return not_ours() };
+    if let Some(dirs) = st.list.env().dirs.as_ref() { crate::session_open::restore::forget(&dirs.home, name); }
+    crate::diag::record(crate::diag::diary_dir(), vec![close_line(name, headers, peer)], "sessão fechada");
+    match runtime.kill_claude(name).await {
+        None => not_ours(),
+        Some(Err(error)) => close_refusal(&error),
+        Some(Ok(closed)) => {
+            after_close(&st, name).await;
+            super::json_response(StatusCode::OK, closed)
+        }
+    }
 }
 
 /// As rotas que o Rust atende para o Codex dele; outra cai no Python (421).

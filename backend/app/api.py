@@ -2214,11 +2214,21 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
     await asyncio.to_thread(_recusa_orq, name)
     # Marca do Rust: ele já encerrou o Codex com terminal dele (e o grupo); aqui só as lojas daqui.
     closed = bool(request and internal_api._secret) and secrets.compare_digest(request.headers.get("x-hangar-rust-closed", "").encode(), internal_api._secret.encode())
+    bridged = None
+    # Entrou pelo Connect: o Claude aberto no Rust fecha lá, como o da 8765; 421 (`None`) segue aqui.
+    port = (request.scope.get("server") or (None, None))[1] if request is not None else None
+    if not closed and port == CONNECT_PORT and port != settings.port:
+        from app import runtime_coordinator
+        reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, "close", "POST", b"")
+        if reply is not None:
+            if reply[0] >= 300:
+                raise _RustReply(*reply)
+            closed, bridged = True, json.loads(reply[1]).get("transcript")
     # No modo Rust a saída do grupo (dentro do kill) já avisa as outras máquinas e o par externo.
     link = None if closed or groups_bridge.rust_owns_groups() else await asyncio.to_thread(lambda: PairLink(name).get())
-    # Fechada pelo Rust a sessão já saiu da lista: o transcript vem no cabeçalho dele.
+    # Fechada pelo Rust a sessão já saiu da lista: o transcript vem no cabeçalho ou na resposta dele.
     if closed:
-        jsonl = urllib.parse.unquote(request.headers.get("x-hangar-closed-transcript", "")) or None
+        jsonl = bridged or urllib.parse.unquote(request.headers.get("x-hangar-closed-transcript", "")) or None
     else:
         jsonl = await asyncio.to_thread(_jsonl_of_session, name)
     try:
