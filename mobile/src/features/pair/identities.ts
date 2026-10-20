@@ -1,12 +1,10 @@
 import { useEffect, useMemo, useReducer } from 'react';
-import type { Server } from '@hangar/core';
-import { readIdentifier } from '../machines/api';
+import { GROUP_IDENTITY_RETRY_MS, readGroupIdentity, type Server } from '@hangar/core';
 
 // Identificador de cada máquina, lido sob demanda e guardado por endereço, como a PWA (sessionsStore).
 const known = new Map<string, string>();
 const failedUntil = new Map<string, number>();
 const cacheKey = (s: Server) => `${s.id}\n${s.baseUrl}`;
-const RETRY_MS = 30_000;
 
 /** Máquina do app → identificador; `loading` são as que ainda não responderam. Falha repete em 30 s. */
 export function useIdentities(servers: Server[]) {
@@ -21,8 +19,8 @@ export function useIdentities(servers: Server[]) {
       if (timer === undefined) timer = setTimeout(() => { timer = undefined; read(); }, ms);
     };
     const failed = (key: string) => {
-      failedUntil.set(key, Date.now() + RETRY_MS);
-      retryIn(RETRY_MS);
+      failedUntil.set(key, Date.now() + GROUP_IDENTITY_RETRY_MS);
+      retryIn(GROUP_IDENTITY_RETRY_MS);
     };
     const read = () => {
       for (const server of own) {
@@ -31,9 +29,8 @@ export function useIdentities(servers: Server[]) {
         const wait = (failedUntil.get(key) ?? 0) - Date.now();
         if (wait > 0) { retryIn(wait); continue; }
         failedUntil.delete(key);
-        readIdentifier(server, controller.signal).then(
-          // Vazio é máquina sem CP_SERVER_ID: falha relida no mesmo intervalo, para o conserto aparecer sem reabrir.
-          (value) => { if (value.identificador) known.set(key, value.identificador); else if (!controller.signal.aborted) failed(key); },
+        readGroupIdentity(server, controller.signal).then(
+          (id) => { known.set(key, id); },
           () => { if (!controller.signal.aborted) failed(key); },
         ).finally(() => { if (!controller.signal.aborted) bump(); });
       }

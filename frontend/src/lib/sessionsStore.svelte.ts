@@ -6,13 +6,12 @@
 // fica montada o tempo todo segurando 1 retain — não há fecha-e-reabre de streams. Se um dia nenhum
 // consumidor ficar permanentemente montado, considerar um keep-alive com delay no release.
 import * as m from '../paraglide/messages';
-import type { EventSourceLike } from '@hangar/core';
-import { openSessionsStream, registrarDiag, novoReqDiag, checkInviteForServer, decidirRota, esquecerRota, rotaDecidida } from '@hangar/core';
+import type { EventSourceLike, SessionInfo } from '@hangar/core';
+import { GROUP_IDENTITY_RETRY_MS, readGroupIdentity, openSessionsStream, registrarDiag, novoReqDiag, checkInviteForServer, decidirRota, esquecerRota, rotaDecidida } from '@hangar/core';
 import { getActiveId, listServers, onServersChanged, setEphemeralServers, type Server } from './auth';
 import { attachGuest, createExternalPairSync, listExternalPairs, reconcilePairEntries, type ExternalPair } from '@hangar/core';
 import { navPelaLista } from './navPelaLista';
 import { forgetServer, setLiveTerminals } from './hangarTerminals.svelte';
-import { getIdentificador } from './peers';
 import { ouvirFechamentoNav, podarNavMortos } from './navegadorPanel.svelte';
 import { aggregateSessions, epocasDeRecriacao, jsonlDaSessao, sweepHidden, type Slot, type Aggregate, type Epocas } from '@hangar/core';
 import { hasOpenChat } from './sessionServer';
@@ -32,7 +31,8 @@ function createSessionsStore() {
   // Agrupar entre máquinas precisa do identificador de cada uma antes de haver par `srv::`.
   let identitiesWanted = false;
   // Basta uma linha de qualquer máquina com grupo entre máquinas para todas precisarem do identificador.
-  let identitiesNeeded = false;
+  // Por máquina, recalculado só no quadro dela.
+  const slotsNeedingIdentity = new Set<string>();
   const identityLoaders = new Map<string, () => void>();
   // $state.raw: agg é SUBSTITUÍDO inteiro a cada recompute e nunca mutado — o proxy profundo do
   // $state só custava, e embrulhar as rows em proxy quebrava a identidade que o memo do
@@ -174,7 +174,7 @@ function createSessionsStore() {
     for (const id of identityStatus.keys()) if (!list.some(s => s.id === id)) setIdentityStatus(id, null);
     for (const [id, es] of streams) {
       if (!list.some((s) => s.id === id)) {
-        es.close(); streams.delete(id); slots.delete(id); ultimoSinal.delete(id); forgetServer(id);
+        es.close(); streams.delete(id); slots.delete(id); slotsNeedingIdentity.delete(id); ultimoSinal.delete(id); forgetServer(id);
         clearTimeout(watchdogs.get(id)); watchdogs.delete(id);
         clearTimeout(primeiros.get(id)); primeiros.delete(id);
         clearTimeout(retryTimers.get(id)); retryTimers.delete(id);
@@ -190,6 +190,7 @@ function createSessionsStore() {
         clearTimeout(watchdogs.get(s.id)); watchdogs.delete(s.id);
         clearTimeout(primeiros.get(s.id)); primeiros.delete(s.id);
         slots.set(s.id, { sessions: [], error: m.convite_encerrado() });
+        slotsNeedingIdentity.delete(s.id);
         forgetServer(s.id);
         continue;
       }
@@ -214,26 +215,22 @@ function createSessionsStore() {
       let identityRetryAt = 0;
       const loadIdentity = () => {
         if (s.invite) return;   // servidor de convite não responde /api/peers/identificador
-        if (!isCurrent() || !(identitiesNeeded || identitiesWanted) || identityRequested || Date.now() < identityRetryAt) return;
+        if (!isCurrent() || !(slotsNeedingIdentity.size || identitiesWanted) || identityRequested || Date.now() < identityRetryAt) return;
         identityRequested = true;
         setIdentityStatus(s.id, 'reading');
-        const failed = (codigo: string) => {
-          identityRequested = false;
-          identityRetryAt = Date.now() + 30_000;
-          setIdentityStatus(s.id, 'failed');
-          registrarDiag({ evento: 'lista.identificador_falhou', nivel: 'aviso', codigo }, s.baseUrl);
-        };
         // Resposta de conexão já fechada só limpa a leitura se nenhuma conexão nova assumiu a máquina.
         const stale = () => { if (!streams.has(s.id)) setIdentityStatus(s.id, null); };
-        void getIdentificador(s).then(({ identificador }) => {
+        void readGroupIdentity(s).then((identificador) => {
           if (!isCurrent()) return stale();
-          // Vazio é máquina sem CP_SERVER_ID: relê no mesmo intervalo, para o conserto aparecer sem reconectar.
-          if (!identificador) return failed('vazio');
           setIdentityStatus(s.id, null);
           identities = new Map(identities).set(s.id, identificador);
         }).catch((error: unknown) => {
           if (!isCurrent()) return stale();
-          failed(error instanceof Error ? error.name : 'erro');
+          identityRequested = false;
+          identityRetryAt = Date.now() + GROUP_IDENTITY_RETRY_MS;
+          setIdentityStatus(s.id, 'failed');
+          registrarDiag({ evento: 'lista.identificador_falhou', nivel: 'aviso',
+            codigo: error instanceof Error ? error.name : 'erro' }, s.baseUrl);
         });
       };
       identityLoaders.set(s.id, loadIdentity);
@@ -353,9 +350,12 @@ function createSessionsStore() {
           if (!Array.isArray(sessions)) throw new Error('sessions frame must be an array');
           slots.set(s.id, { sessions, error: null });
           if (!s.invite) notePairs();
-          identitiesNeeded = [...slots.values()].some((slot) => slot.sessions?.some((session) =>
-            session.pair_owner || session.pair_peers?.some((peer) => peer.includes('::'))));
-          if (identitiesNeeded) for (const load of identityLoaders.values()) load();
+          if ((sessions as SessionInfo[]).some((session) => session.pair_owner || session.pair_peers?.some((peer) => peer.includes('::')))) {
+            slotsNeedingIdentity.add(s.id);
+          } else {
+            slotsNeedingIdentity.delete(s.id);
+          }
+          if (slotsNeedingIdentity.size) for (const load of identityLoaders.values()) load();
           const caiuEm = quedas.get(s.id);
           if (primeiroValido || caiuEm !== undefined) {
             registrarDiag({ evento: caiuEm === undefined ? 'lista.conectou' : 'lista.voltou',
@@ -519,6 +519,7 @@ function createSessionsStore() {
     pairSync.reset();
     pairLeft = null;
     slots.clear();
+    slotsNeedingIdentity.clear();
     quedas.clear(); tentativas.clear();
     // Parar não é sumiço: sem isto, o próximo retain() (o próprio DesktopShell, ao remontar)
     // veria todo nome "voltar" e subiria a época de todas as sessões — remontando chats vivos.
