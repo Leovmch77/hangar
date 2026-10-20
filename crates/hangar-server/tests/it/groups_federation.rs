@@ -698,3 +698,17 @@ async fn session_group_with_unreadable_record_is_a_store_failure() {
     let (status, answer) = call(n.casa.addr, "GET", "/api/sessions/s0/group", None).await;
     assert_eq!(status, 500, "{answer}");
 }
+
+/// Registro da dona ilegível no aviso de grupo: a recusa com código volta, e a causa vai ao diário.
+#[tokio::test(flavor = "multi_thread")]
+async fn group_notice_with_unreadable_record_reaches_the_journal() {
+    let n = net().await;
+    let (status, body) = pair(&n.casa, "s0", json!({"peers": ["lab::s1"]})).await;
+    assert_eq!(status, 200, "{body}");
+    let gid = body["gid"].as_str().unwrap().to_owned();
+    std::fs::write(n.casa.pair.join("groups").join(format!("{gid}.json")), "{torto").unwrap();
+    let (status, answer) = call(n.casa.addr, "POST", "/api/sessions/s0/group-message", Some(&json!({"text": "oi"}))).await;
+    assert_eq!((status, answer["detail"]["params"]["detalhe"].clone()), (503, json!("groups_store_failed")), "{answer}");
+    let python = n.casa.python.clone();
+    fake::wait_until(move || python.diag().iter().any(|d| d["evento"] == "rust.groups_store_failed")).await;
+}
