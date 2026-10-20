@@ -1284,8 +1284,9 @@ impl ClaudeEngine {
     }
 
     /// Segundos parada desde o último evento da CLI ou comando nosso, se nada está em aberto; `None` = não estaciona.
+    /// Sem o socket a vista não sabe do turno nem das perguntas do processo: conta como aberta.
     pub fn park_idle(&self,now:f64) -> Option<f64> {
-        let open = !self.alive || self.initializing || self.in_progress || !self.pending.is_empty() || self.question.is_some()
+        let open = !self.alive || !self.transport_up || self.initializing || self.in_progress || !self.pending.is_empty() || self.question.is_some()
             || self.effort_intent.as_ref().is_some_and(|intent|intent["status"] == "prepared" || intent["status"] == "dispatching")
             || !self.background.is_empty();
         (!open).then(||now - self.active_at)

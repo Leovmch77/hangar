@@ -1339,9 +1339,11 @@ impl RuntimeRegistry {
     async fn open_attempt(&self,target:RuntimeTarget,managed:Option<std::path::PathBuf>,spawn:bool) -> Result<Value,RuntimeError> {
         self.cancel_lifecycle_name(&target.name).await;
         let barrier=self.barrier(&target.key).await;barrier.cancel();let _guard=barrier.lock().await;
-        self.open_headless_locked(target,managed,spawn).await
+        self.open_headless_locked(target,managed,spawn,true).await
     }
-    async fn open_headless_locked(&self,mut target:RuntimeTarget,managed:Option<std::path::PathBuf>,spawn:bool)->Result<Value,RuntimeError> {
+    /// `adopt_unreachable`: o cano gravado é um vivo de antes, e se ele não atender o ator nasce religando. Quem
+    /// acabou de subir o cano passa `false`: a falha volta para ele desfazer a subida.
+    async fn open_headless_locked(&self,mut target:RuntimeTarget,managed:Option<std::path::PathBuf>,spawn:bool,adopt_unreachable:bool)->Result<Value,RuntimeError> {
         let launch=managed.as_ref().filter(|_|spawn);
         let existing = self.entries.lock().await.get(&target.key).map(|entry|(entry.generation,entry.handle.clone()));
         let handle = if let Some((generation,handle)) = existing {
@@ -1369,7 +1371,7 @@ impl RuntimeRegistry {
             Ok(_)=>cano::connect(&target.binding).await,
         };
         // Cano vivo da chave (não o subido aqui) que não atendeu: o ator nasce religando a ele, nunca sem ator.
-        let adopted_live = connection.is_err() && target.provider == "claude" && matches!(launched,Ok(None)) && {
+        let adopted_live = adopt_unreachable && connection.is_err() && target.provider == "claude" && matches!(launched,Ok(None)) && {
             let (pid,key) = (target.binding.pid,target.key.clone());
             tokio::task::spawn_blocking(move||process::liveness(pid,&key)==process::Liveness::Ours).await.unwrap_or(false)
         };
@@ -2163,7 +2165,7 @@ impl RuntimeRegistry {
             // Caiu a conexão, não a CLI: religa ao mesmo cano em vez de matar o turno vivo.
             self.close_locked(key,generation,false).await?;
             target.metadata["session_id"]=json!(binding.conversation);
-            self.open_headless_locked(target.clone(),None,false).await?;
+            self.open_headless_locked(target.clone(),None,false,true).await?;
             if let Some(entry)=self.entries.lock().await.get_mut(key) {
                 entry.auto_respawn=auto_respawn;
                 entry.settings_owner=context.as_ref().map(|ctx|ctx.recipe.clone());
@@ -2262,7 +2264,7 @@ impl RuntimeRegistry {
         if super::lifecycle::patch_sidecar(&original_target,&json!({"cano":serde_json::to_value(&cano).unwrap()}))?["updated"]!=true {return Err(failure("lifecycle_sidecar_changed"));}
         drop(store);drop(lease);
         let result=async {
-            self.open_headless_locked(target.clone(),None,false).await?;
+            self.open_headless_locked(target.clone(),None,false,false).await?;
             if let Some(entry)=self.entries.lock().await.get_mut(key) {
                 let fresh=entry.relaunch.as_ref().ok_or_else(||failure("relaunch_recipe_missing"))?;
                 let (pid,birth)=fresh.agent_identity();recipe.pin_settings(pid,birth)?;
@@ -3068,7 +3070,7 @@ mod tests {
         let held_lease=acquire_lease(&target.lease_path).unwrap();let mut initial=QueueState::new("key",1,&name,vec![json!({"id":"a-row","text":"only-a","ts":1.0,"delivered":false})]);initial.runtime_state["view"]=json!({"conversation":"a","initialized":true});Store::open(&target.state_path,&target.projection_dir,initial).unwrap();drop(held_lease);
         let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"fixture".into(),"instance".into()).with_processes(Arc::new(SidRecipeProcesses {dir:dir.path().into()})).with_interactions(Arc::default()));let hubs=crate::side::Hubs::default();registry.bind_lifecycle();registry.bind_hubs(hubs.downgrade());
         let barrier=registry.barrier("key").await;let open_guard=barrier.lock().await;
-        let opened=registry.open_headless_locked(target.clone(),None,false).await.unwrap();assert_eq!(opened["opened"],true);
+        let opened=registry.open_headless_locked(target.clone(),None,false,true).await.unwrap();assert_eq!(opened["opened"],true);
         tokio::time::sleep(Duration::from_millis(100)).await;let pending=registry.handle("key",1).await.unwrap().snapshot().await.unwrap();assert!(pending["error"].is_null());assert_eq!(pending["view"]["lifecycle_pending"],true);assert_eq!(users.load(std::sync::atomic::Ordering::Relaxed),0);
         drop(open_guard);
         tokio::time::timeout(Duration::from_secs(2),async {loop {if registry.interaction_binding_readonly(&name).await.is_ok_and(|binding|binding.generation==2 && binding.conversation=="b") {break;}tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
@@ -4128,6 +4130,46 @@ mod tests {
         assert_eq!(initializes(),1,"uma vez");
         assert_eq!(accepts.load(std::sync::atomic::Ordering::SeqCst),2);
         registry.close(&key,1).await.unwrap();
+        server.abort();
+    }
+
+    /// Ator sem conexão não leu o retrato (turno, perguntas): parado há qualquer tempo, mesmo além do
+    /// `PARK_AFTER`, não é estacionado, senão o vigia mataria um turno vivo.
+    #[cfg(target_os="linux")]
+    #[tokio::test]
+    async fn boot_unconnected_actor_idle_past_park_after_is_not_parked() {
+        let home=tempfile::tempdir().unwrap();
+        let (key,name)=("a7".repeat(16),"cl-boot-park");
+        let (cano,accepts,_lines,server,registry,_hubs)=boot_over_live_cano(home.path(),&key,name,true,|_|true,|registry|registry).await;
+        assert!(registry.has_entry(Some(&key),name).await,"nasce com ator");
+        // `ZERO` = qualquer tempo parado conta como acima do prazo.
+        registry.park_idle_claude(Duration::ZERO).await;
+        assert!(registry.has_entry(Some(&key),name).await,"sem conexão a sessão não é estacionada");
+        assert!(process::probe_alive(cano.0.id()),"o cano segue vivo (conexões: {})",accepts.load(std::sync::atomic::Ordering::SeqCst));
+        registry.close(&key,1).await.unwrap();
+        server.abort();
+    }
+
+    /// Abertura sem adoção do cano que não atende (a reabertura que acabou de subir um cano novo): falha na
+    /// hora e não deixa ator, para quem subiu o cano desfazer.
+    #[cfg(target_os="linux")]
+    #[tokio::test]
+    async fn open_of_a_just_launched_cano_that_refuses_fails_at_once() {
+        let home=tempfile::tempdir().unwrap();
+        let (key,name)=("b8".repeat(16),"cl-open-fresh");
+        let (cano,escuta,_accepts,_cut,_lines,server)=serving_cano(home.path(),&key,|_|true).await;
+        let processes=Arc::new(ParkProcesses {canos:std::sync::Mutex::new(vec![i64::from(cano.0.id())]),dir:home.path().into(),agent:Default::default()});
+        let (registry,_hubs)=park_registry(home.path(),processes,|registry|registry);
+        let queue=home.path().join("queue");
+        let meta=json!({"name":name,"key":key,"cwd":home.path(),"session_id":"a","headless":true,"initialized":true,"permission_mode":"manual",
+            "cano":{"pid":cano.0.id(),"escuta":escuta,"token":"fixture","versao":2}});
+        let target=RuntimeTarget {key:key.clone(),generation:1,name:name.into(),provider:"claude".into(),metadata:meta,
+            binding:CanoBinding {pid:cano.0.id(),escuta,token:"fixture".into(),versao:2},lease_path:queue.join("lease"),state_path:queue.join("state.json"),
+            projection_dir:queue.clone(),transcript:home.path().join("a.jsonl"),created:0.0};
+        std::fs::create_dir_all(&queue).unwrap();
+        let opened=tokio::time::timeout(Duration::from_secs(30),registry.open_headless_locked(target,None,false,false)).await.expect("a abertura não espera");
+        assert!(opened.is_err(),"cano novo que não atende é falha da abertura: {opened:?}");
+        assert!(!registry.has_entry(Some(&key),name).await,"sem ator para o cano recém-subido");
         server.abort();
     }
 }
