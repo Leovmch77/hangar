@@ -296,13 +296,31 @@ def test_hangar_terminal_is_outside_the_session(client, monkeypatch, tmp_path, h
 def test_hangar_restart_reruns_the_same_multiline_command(client, monkeypatch, tmp_path, home, private_tmux):
     from app import api
     monkeypatch.setenv("SHELL", "/bin/sh")
-    monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0.5)
-    dead = _run_hangar(client, monkeypatch, tmp_path, "echo x >> runs.txt\necho y >> runs.txt").json()["terminal"]
-    assert dead["alive"] is False
+    monkeypatch.setattr(api, "_SHORTCUT_FAIL_WINDOW", 0)
+    # A resposta HTTP pode chegar antes do fim; cada execução só avança quando o teste libera.
+    release = home / "release"
+    command = "while [ ! -e release ]; do sleep 0.05; done\necho x >> runs.txt\necho y >> runs.txt"
+
+    def stopped(ident):
+        return next((row for row in _hangar(client) if row["id"] == ident and not row["alive"]), None)
+
+    first = _run_hangar(client, monkeypatch, tmp_path, command)
+    assert first.status_code == 202
+    started = first.json()["terminal"]
+    assert started["alive"] is True
+    release.touch()
+    dead = _wait_for(lambda: stopped(started["id"]))
+    assert dead and dead["exit_code"] == 0
+    assert (home / "runs.txt").read_text().split() == ["x", "y"]
     assert [t["id"] for t in _hangar(client)] == [dead["id"]]          # comando multilinha continua listado
+    release.unlink()
     r = client.post(f"/api/hangar-terminals/{dead['id']}/restart", headers=_auth())
     assert r.status_code == 202 and r.json()["terminal"]["id"] != dead["id"]
-    assert _wait_for(lambda: (home / "runs.txt").read_text().split() == ["x", "y", "x", "y"])
+    assert r.json()["terminal"]["alive"] is True
+    release.touch()
+    restarted = _wait_for(lambda: stopped(r.json()["terminal"]["id"]))
+    assert restarted and restarted["exit_code"] == 0
+    assert (home / "runs.txt").read_text().split() == ["x", "y", "x", "y"]
     fresh = _run_hangar(client, monkeypatch, tmp_path, "sleep 30").json()
     assert fresh["reused"] is False
     assert [t["alive"] for t in _hangar(client)] == [True]
