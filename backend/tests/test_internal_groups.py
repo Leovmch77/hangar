@@ -33,7 +33,8 @@ def test_routes_need_the_secret():
 
 
 def test_protocol_text_route_is_gone():
-    assert _post("pair/text", {"kind": "orq"}).status_code == 404
+    # O status depende do `frontend/dist` montado na raiz (405 com ele, 404 sem); a rota é que não pode existir.
+    assert not any(getattr(r, "path", "") == "/internal/pair/text" for r in api_mod.app.routes)
 
 
 def test_group_phase(monkeypatch):
