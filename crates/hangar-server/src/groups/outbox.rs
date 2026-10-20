@@ -48,7 +48,13 @@ impl OutboxItem {
 pub enum OutsideOp { Link(OutsideRef), Unlink(OutsideRef) }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Delivery { Confirmed, Refused { code: String }, Pending }
+pub enum Delivery {
+    Confirmed,
+    Refused { code: String },
+    Pending,
+    /// O grupo foi dissolvido antes de o `Push` esperado sair: não há mais o que confirmar.
+    Dissolved,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict { Retry, Refused(String) }
@@ -65,9 +71,9 @@ pub const LADDER: [Duration; 9] = [
     Duration::from_secs(1800),
 ];
 
-/// Só tenta de novo o que passa sozinho (rede, outra máquina em modo `python`, sessão ocupada,
-/// limite, token recusado por enquanto, prazo, máquina que ainda não está no `peers.json`); o
-/// resto é recusa definitiva com o código de quem recusou.
+/// Só tenta de novo o que passa sozinho (rede, qualquer 5xx, sessão ocupada, limite, token
+/// recusado por enquanto, prazo, máquina que ainda não está no `peers.json`); o resto é recusa
+/// definitiva com o código de quem recusou.
 pub fn verdict(err: &PeerError) -> Verdict {
     match err {
         PeerError::Transport(_) | PeerError::Unknown => Verdict::Retry,
@@ -79,7 +85,8 @@ pub fn verdict(err: &PeerError) -> Verdict {
             match status {
                 401 | 408 | 429 => Verdict::Retry,
                 409 if busy => Verdict::Retry,
-                503 if code == Some("groups_need_rust_server") => Verdict::Retry,
+                // Modo `python` (503 `groups_need_rust_server`) e backend reiniciando passam sozinhos.
+                500.. => Verdict::Retry,
                 _ => Verdict::Refused(code.map_or_else(|| format!("http_{status}"), str::to_owned)),
             }
         }
@@ -106,7 +113,7 @@ struct OutboxFile { next: u64, items: Vec<Entry> }
 
 /// Resultado do último `Push` entregue ou recusado por (máquina, gid), para o `wait`.
 #[derive(Default)]
-struct Outcome { confirmed: Option<u64>, refused: Option<(u64, String)> }
+struct Outcome { confirmed: Option<u64>, refused: Option<(u64, String)>, dissolved: Option<u64> }
 
 /// O trabalhador de um destino: `wake` interrompe a espera, `reset` zera a escada.
 #[derive(Default)]
@@ -162,6 +169,7 @@ impl Outbox {
         let mut state = self.inner.lock();
         let (mut queue, mut next) = (state.items.clone(), state.next);
         let mut touched = BTreeSet::new();
+        let mut dissolved = Vec::new();
         for item in items {
             touched.insert(item.destination().to_owned());
             match item {
@@ -173,7 +181,10 @@ impl Outbox {
                         continue;
                     }
                 }
-                OutboxItem::Dissolved { ref server, ref gid, .. } => queue.retain(|e| !e.item.is_push_to(server, gid)),
+                OutboxItem::Dissolved { ref server, ref gid, version, .. } => {
+                    queue.retain(|e| !e.item.is_push_to(server, gid));
+                    dissolved.push(((server.clone(), gid.clone()), version));
+                }
                 _ => {}
             }
             queue.push(Entry { id: next, item });
@@ -181,7 +192,14 @@ impl Outbox {
         }
         self.inner.persist(&queue, next)?;
         (state.items, state.next) = (queue, next);
+        for (key, version) in &dissolved {
+            let outcome = state.outcomes.entry(key.clone()).or_default();
+            outcome.dissolved = Some(outcome.dissolved.unwrap_or(0).max(*version));
+        }
         for dest in touched { self.inner.start(&mut state, &dest); }
+        drop(state);
+        // Quem espera um `Push` que o `Dissolved` tirou da fila sai já, sem esperar o prazo.
+        if !dissolved.is_empty() { self.inner.settled.notify_waiters(); }
         Ok(())
     }
 
@@ -199,14 +217,15 @@ impl Outbox {
         Ok(())
     }
 
-    /// Espera o `Push` de (`server`, `gid`) com versão `version` ou maior ser entregue ou recusado;
-    /// no prazo, `Pending` (continua na fila).
+    /// Espera o `Push` de (`server`, `gid`) com versão `version` ou maior ser entregue, recusado
+    /// ou trocado por `Dissolved`; no prazo, `Pending` (continua na fila).
     pub async fn wait(&self, server: &str, gid: &str, version: u64, deadline: Duration) -> Delivery {
         let key = (server.to_owned(), gid.to_owned());
         let check = || {
             let state = self.inner.lock();
             let outcome = state.outcomes.get(&key)?;
             if outcome.confirmed.is_some_and(|v| v >= version) { return Some(Delivery::Confirmed); }
+            if outcome.dissolved.is_some_and(|v| v >= version) { return Some(Delivery::Dissolved); }
             outcome.refused.as_ref().filter(|(v, _)| *v >= version).map(|(_, code)| Delivery::Refused { code: code.clone() })
         };
         let wait = async {
@@ -320,7 +339,7 @@ impl Inner {
             match delivery {
                 Delivery::Confirmed => outcome.confirmed = Some(outcome.confirmed.unwrap_or(0).max(version)),
                 Delivery::Refused { code } => outcome.refused = Some((version, code)),
-                Delivery::Pending => {}
+                Delivery::Pending | Delivery::Dissolved => {}
             }
         }
         drop(state);

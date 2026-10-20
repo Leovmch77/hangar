@@ -225,3 +225,30 @@ mod disk_proptest {
         }
     }
 }
+
+#[tokio::test]
+async fn server_error_is_retried() {
+    for err in [refused(503, Some("groups_need_rust_server")), refused(502, None), refused(500, Some("erro_x"))] {
+        assert_eq!(verdict(&err), Verdict::Retry, "{err:?}");
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let sender = Fake::new(vec![Err(refused(503, Some("groups_need_rust_server"))), Err(refused(502, None))], || Ok(()));
+    let outbox = open(&tmp, sender.clone(), &SHORT);
+    outbox.enqueue(vec![push("lab", "g", 1, &[])]).unwrap();
+    assert_eq!(outbox.wait("lab", "g", 1, DEADLINE).await, Delivery::Confirmed);
+    assert_eq!(sender.sent().len(), 3, "as duas falhas de servidor ficaram na fila e foram tentadas de novo");
+}
+
+#[tokio::test]
+async fn wait_on_dissolved_push_returns_now() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outbox = open(&tmp, Fake::down(), &LONG);
+    outbox.enqueue(vec![push("lab", "g", 1, &["a"])]).unwrap();
+    let waiting = outbox.wait("lab", "g", 1, DEADLINE);
+    let dissolve = async {
+        tokio::task::yield_now().await;
+        outbox.enqueue(vec![OutboxItem::Dissolved { server: "lab".into(), gid: "g".into(), version: 2, origin: "casa".into() }]).unwrap();
+    };
+    let (got, ()) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(waiting, dissolve) }).await.expect("o wait esperou o prazo inteiro");
+    assert_eq!(got, Delivery::Dissolved);
+}

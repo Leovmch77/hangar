@@ -512,7 +512,7 @@ existe com item; subida reenvia (dona) ou pede (participante).
 - [x] **Step 2: Rodar e ver falhar.**
 - [x] **Step 3: Implementar.**
 - [x] **Step 4: Rodar.** Esperado: PASS.
-- [ ] **Step 5: Commit** — `feat(groups): group record, outbox and machine identity checks`.
+- [x] **Step 5: Commit** — `feat(groups): group record, outbox and machine identity checks`.
 
 ---
 
