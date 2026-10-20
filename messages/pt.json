@@ -7826,6 +7826,7 @@
   "erro_grupo_membro_nao_confirmado": "A outra máquina não confirmou a entrada de {membros}; essas sessões ficaram fora do grupo.",
   "erro_grupo_dono_indisponivel": "A máquina dona do grupo ({servidor}) não respondeu. Tente de novo quando ela voltar.",
   "erro_grupo_acesso_externo_falhou": "A sessão entrou no grupo, mas o acesso de quem é de fora não foi liberado para: {acesso}.",
+  "erro_grupo_contrato_nao_herdado": "Os grupos se juntaram, mas o contrato destes grupos não passou para o grupo novo: {grupos}.",
   "erro_grupo_fila_cheia": "Há envios demais esperando a outra máquina. Tente de novo quando ela voltar a responder.",
   "erro_grupo_fusao_entre_donos": "Esses grupos são de máquinas donas diferentes e não se juntam. Tire a sessão de um deles antes.",
   "erro_grupo_orq_entre_maquinas": "Grupo de orquestração não aceita sessão de outra máquina.",

@@ -38,6 +38,8 @@ pub use super::outbox::Outbox;
 /// de quem chamou a dona de outra máquina: a resposta chega antes de ele desistir dela.
 pub const JOIN_WAIT: Duration = Duration::from_secs(12);
 
+const CONTRACT_FAILED: &str = "erro_grupo_contrato_nao_herdado";
+
 pub struct Federation {
     outbox: Outbox,
 }
@@ -385,7 +387,9 @@ pub struct JoinAsk {
 pub struct JoinDone { pub gid: String, pub version: u64, #[serde(default)] pub task: String, pub members: Vec<Member>,
     #[serde(default)] pub unconfirmed: Vec<Member>,
     /// Acesso de fora não gravado na dona (`grant_members`).
-    #[serde(default)] pub access_failed: Vec<String> }
+    #[serde(default)] pub access_failed: Vec<String>,
+    /// Grupos absorvidos cujo contrato não foi herdado (`merge_contract`).
+    #[serde(default)] pub contract_failed: Vec<String> }
 
 /// O que a dona grava num join, e como desfazer.
 struct OwnerPlan {
@@ -635,13 +639,14 @@ pub async fn owner_join(st: &Arc<AppState>, groups: &Arc<GroupService>, mut ask:
         return Err(no(StatusCode::BAD_GATEWAY, "erro_grupo_membro_nao_confirmado",
             &format!("nenhuma outra máquina confirmou ({}); o grupo voltou ao que era", names.join(", ")), json!({"membros": names})));
     }
+    let mut contract_failed = Vec::new();
     if !plan.losers.is_empty() {
         let (dir, losers, survivor) = (dir.clone(), plan.losers.iter().map(|r| r.gid.clone()).collect::<Vec<_>>(), gid.clone());
-        groups.locked(blocking(move || for loser in &losers {
-            if !dir.merge_contract(loser, &survivor) {
-                tracing::warn!(code = "groups_contract_merge_failed", loser = %loser, survivor = %survivor, "groups: a fusão não herdou o contrato");
-            }
-        })).await?;
+        contract_failed = groups.locked(blocking(move || losers.into_iter().filter(|loser| !dir.merge_contract(loser, &survivor)).collect::<Vec<_>>())).await?;
+        // Os registros absorvidos já saíram: o contrato que ficou no disco só aparece aqui e na resposta.
+        for loser in &contract_failed {
+            st.diag.report("rust.groups_contract_merge_failed", loser, "groups_contract_merge_failed", "a fusão não herdou o contrato do grupo absorvido");
+        }
     }
     let mut record = plan.record.clone();
     if !unconfirmed.is_empty() {
@@ -661,7 +666,7 @@ pub async fn owner_join(st: &Arc<AppState>, groups: &Arc<GroupService>, mut ask:
         let (st, groups, me, told) = (st.clone(), groups.clone(), me.clone(), record.clone());
         tokio::spawn(async move { tell_newcomers(&st, &groups, &me, &told, &alive).await });
     }
-    Ok(JoinDone { gid, version: record.version, task: record.task.clone(), members: record.members.clone(), unconfirmed, access_failed })
+    Ok(JoinDone { gid, version: record.version, task: record.task.clone(), members: record.members.clone(), unconfirmed, access_failed, contract_failed })
 }
 
 /// Volta o grupo ao de antes do join: sidecars daqui, registros e uma versão nova às máquinas que
@@ -1119,10 +1124,18 @@ pub(super) async fn pair(asked: Asked, held: Option<IngressPass>, others: Vec<St
     };
     let done = match result { Ok(done) => done, Err(r) => return respond(r) };
     let unconfirmed: Vec<String> = done.unconfirmed.iter().map(Member::key).collect();
-    let warning = if unconfirmed.is_empty() { super::routes::access_warning(&done.access_failed) } else {
+    let mut warning = if unconfirmed.is_empty() { super::routes::access_warning(&done.access_failed) } else {
         json!({"code": "erro_grupo_membro_nao_confirmado", "params": {"membros": unconfirmed, "acesso": done.access_failed},
             "msg": format!("não confirmado: {}", unconfirmed.join(", "))})
     };
+    if !done.contract_failed.is_empty() {
+        if warning.is_null() {
+            warning = super::routes::envelope(CONTRACT_FAILED, format!("o grupo ficou, mas o contrato destes grupos não foi herdado: {}", done.contract_failed.join(", ")),
+                json!({"grupos": done.contract_failed}));
+        } else {
+            warning["params"]["grupos"] = json!(done.contract_failed);
+        }
+    }
     let members: Vec<String> = done.members.iter().map(|m| m.view(&me)).collect();
     asked.reply(StatusCode::OK, json!({"ok": true, "members": members, "gid": done.gid, "owner": owner, "warning": warning}))
 }

@@ -7826,6 +7826,7 @@
   "erro_grupo_membro_nao_confirmado": "The other machine did not confirm {membros}; those sessions were left out of the group.",
   "erro_grupo_dono_indisponivel": "The machine that owns the group ({servidor}) did not answer. Try again when it is back.",
   "erro_grupo_acesso_externo_falhou": "The session joined the group, but outside access was not granted for: {acesso}.",
+  "erro_grupo_contrato_nao_herdado": "The groups were merged, but the contract of these groups did not move to the new group: {grupos}.",
   "erro_grupo_fila_cheia": "Too many sends are waiting for the other machine. Try again once it answers.",
   "erro_grupo_fusao_entre_donos": "These groups belong to different owner machines and cannot be merged. Take the session out of one first.",
   "erro_grupo_orq_entre_maquinas": "An orchestration group does not take sessions from another machine.",

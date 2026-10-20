@@ -666,3 +666,22 @@ async fn connect_forwarded_deliver_defers_python_sessions() {
     assert_eq!(got["failed"], json!([]));
     assert_eq!(inputs(&n.lab, "s1"), 1, "o Rust não chamou o Python");
 }
+
+/// Fusão entre máquinas cujo contrato do grupo absorvido não pôde ser herdado: o grupo fica, mas a
+/// resposta avisa com código e o diário recebe a falha.
+#[tokio::test(flavor = "multi_thread")]
+async fn fusion_contract_failure_is_a_coded_warning() {
+    let n = net().await;
+    let (status, body) = pair(&n.casa, "s0", json!({"peers": ["lab::s1"]})).await;
+    assert_eq!(status, 200, "{body}");
+    let a = body["gid"].as_str().unwrap().to_owned();
+    assert_eq!(pair(&n.casa, "s2", json!({"peers": ["s3"]})).await.0, 200);
+    let b = sidecar(&n.casa, "s2").unwrap()["gid"].as_str().unwrap().to_owned();
+    for gid in [&a, &b] { std::fs::write(n.casa.pair.join(format!("grupo-{gid}.md")), [0xff, 0xfe, b'x']).unwrap(); }
+    let (status, body) = pair(&n.casa, "s0", json!({"peers": ["s2"]})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["warning"]["code"], "erro_grupo_contrato_nao_herdado", "{body}");
+    assert_eq!(body["warning"]["params"]["grupos"].as_array().map(Vec::len), Some(1), "{body}");
+    let python = n.casa.python.clone();
+    fake::wait_until(move || python.diag().iter().any(|d| d["evento"] == "rust.groups_contract_merge_failed")).await;
+}
