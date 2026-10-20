@@ -298,7 +298,9 @@ impl RuntimeFeed {
             }
         };
         // Como no `Monitor`: sem retrato, a sugestão e a sessão parada podem estar velhas, e a tela diz isso.
-        if let Some(code) = self.facts.as_ref().and_then(|w| w.error.as_ref()) {
+        // Sem ator não há vínculo nem plugin a ler: é a sessão parada, não estado velho. Ator vivo com vínculo
+        // quebrado já sai acima como `state_feed_binding_unavailable`.
+        if let Some(code) = self.facts.as_ref().and_then(|w| w.error.as_ref()).filter(|code| *code != "runtime_binding") {
             if state.problema.is_none() {
                 state.problema = Some(super::facts::UNAVAILABLE.into());
                 state.problema_detalhe = Some(code.clone());
@@ -497,6 +499,25 @@ mod tests {
         assert_eq!(state["headless"],true);
         assert!(of(&got,"ask_question").is_empty());
         assert!(of(&got,"suggest").is_empty());
+    }
+
+    #[tokio::test]
+    async fn parked_claude_without_actor_shows_no_stale_warning() {
+        let f = claude_fixture();
+        let home = tempfile::tempdir().unwrap();
+        write_sidecar(home.path(),json!({"cwd":"/w","session_id":"sid","model":"claude-opus-5","effort":"high"}));
+        let py = fake_python().await;
+        let registry = Arc::new(crate::runtime::gateway::RuntimeRegistry::new(py.addr,"test".into(),"feed-parked-quiet".into()));
+        let external = Arc::new(FactsStore::default());
+        let mut feed = RuntimeFeed::new(&f.lease.hub,Some(registry.live("s")),f.published.clone(),Some(feed_facts(&py,&external)))
+            .with_registry(Some(registry.clone())).with_home(home.path());
+        feed.refresh_facts().await;
+        feed.parked = feed.load_parked().await;
+        let mut rx = f.lease.hub.tx.subscribe();
+        assert!(feed.round().await);
+        let got = collect(&mut rx,Duration::from_millis(20)).await;
+        let state = &of(&got,"state")[0].2;
+        assert_eq!((state["state"].as_str(), &state["problema"]), (Some("idle"), &serde_json::Value::Null), "{got:?}");
     }
 
     #[tokio::test]

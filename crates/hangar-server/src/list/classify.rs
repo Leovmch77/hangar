@@ -146,8 +146,10 @@ fn headless_state(row: &mut SessionRow, retrato: Option<&BTreeMap<String, Value>
         || (s["view"]["alive"] == true && !s["view"]["public_state"]["state"].is_string()));
     if broken { row.problema = Some("list_runtime_unavailable".into()); }
     let live = snapshot.filter(|s| !broken && s["view"]["alive"] == true).map(|s| &s["view"]["public_state"]);
+    // Sem ator vivo não há turno rodando: o marcador do hook fica em "working" quando o turno acaba sem
+    // o hook final (Esc, limite de uso, queda), e o chat (feed estacionado) já diz parada.
     let Some(state) = live else {
-        row.state = marker.map(|m| m.state.as_str()).filter(|s| ["working", "idle"].contains(s)).unwrap_or("idle").into();
+        row.state = "idle".into();
         return;
     };
     let text = |k: &str| state[k].as_str().map(str::to_owned);
@@ -204,7 +206,7 @@ fn apply(row: &mut SessionRow, a: &PaneAnalysis) {
 static ADOPTIONS: std::sync::Mutex<BTreeMap<String, std::time::Instant>> = std::sync::Mutex::new(BTreeMap::new());
 const ADOPTION_EVERY: Duration = Duration::from_secs(30);
 
-fn adoption_due(name: &str, now: std::time::Instant) -> bool {
+pub(crate) fn adoption_due(name: &str, now: std::time::Instant) -> bool {
     let mut tried = ADOPTIONS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if tried.get(name).is_some_and(|at| now.duration_since(*at) < ADOPTION_EVERY) { return false; }
     tried.insert(name.to_owned(), now);
@@ -319,7 +321,8 @@ impl Classifier {
                 continue;
             }
             // Sem feed, o estado sai da vista do ator: o Python perdeu o cliente e o fato dele ficou para trás.
-            if rust_codex_terminal {
+            if rust_codex_terminal || (row.provider == "codex" && row.headless && facts.headless.is_some()) {
+                if row.headless { codex_pending(row, facts.headless); }
                 // A vista do ator nasce sem linha de status até o primeiro turno; a do rollout (fato) cobre.
                 let from_rollout = row.status_line.take();
                 headless_state(row, facts.headless, None);
@@ -881,9 +884,12 @@ mod tests {
         let io = Fixed { frame: Ok(String::new()), wall: 1000.0, calls: Mutex::new(0) };
         let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: Some(&headless),
                             problems: &problems, stall_seconds: 1e12, monitors: &monitors };
+        // Sem chat aberto e sem ator, a sessão está parada: o fato do Python lê o marcador do hook, que
+        // fica em "working" quando o turno acaba sem resposta.
         let mut without = row();
+        without.state = "working".into();
         Classifier::default().classify(std::slice::from_mut(&mut without), &facts, &io).await;
-        assert_eq!(without.state, "idle", "sem chat aberto vale o fato do Python");
+        assert_eq!(without.state, "idle", "sem ator não há turno rodando");
         let question = serde_json::json!({"questions": [{"question": "Qual caminho?"}]});
         monitors.set(1, "cx", Some("rollout-abc".into()), std::sync::Arc::new(hangar_api::state::StateEvent {
             state: "working".into(), status_line: Some("gpt".into()), codex_question: question.as_object().cloned(), ..Default::default() }));
@@ -946,11 +952,15 @@ mod tests {
         // Sem retrato fornecido, o marcador responde, mas a linha diz que o runtime não foi consultado.
         run(&mut row, &dirs, &io, None).await;
         assert_eq!((row.state.as_str(), row.problema.as_deref()), ("working", Some(RUNTIME_ABSENT)));
-        // Retrato fornecido sem a sessão: ela está parada, como o `hl.snapshot() = None` do Python.
+        // Retrato fornecido sem a sessão: ela está parada, e o marcador "working" que o Esc ou o limite
+        // deixaram para trás não a faz parecer trabalhando.
         let other = BTreeMap::from([("outra".to_owned(), serde_json::json!({"error": null, "view": {"alive": true}}))]);
         row.problema = None;
         run(&mut row, &dirs, &io, Some(&other)).await;
-        assert_eq!((row.state.as_str(), row.problema.as_deref()), ("working", None));
+        assert_eq!((row.state.as_str(), row.problema.as_deref()), ("idle", None));
+        let stopped = BTreeMap::from([("s".to_owned(), serde_json::json!({"error": null, "view": {"alive": false}}))]);
+        run(&mut row, &dirs, &io, Some(&stopped)).await;
+        assert_eq!((row.state.as_str(), row.problema.as_deref()), ("idle", None), "ator encerrado é sessão parada");
         assert_eq!(*io.calls.lock().unwrap(), 0);
         // O problema do adaptador não apaga a ausência do retrato.
         let hooks = HookStates::load(&dirs);
