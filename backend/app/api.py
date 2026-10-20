@@ -692,6 +692,15 @@ async def session_defaults_forward(request: Request):
                                   "/__hangar_server/forwarded")
 
 
+@app.post("/api/push/expo/subscribe", dependencies=[Depends(require_auth)])
+async def push_expo_subscribe_forward(request: Request):
+    """O registro é do Rust; pelo Connect o cabeçalho de convidado não chega a ele, então a recusa é aqui."""
+    if guest_of(request) is not None or guest_users.current.get() is not None:
+        raise HTTPException(403, detail=erro("push_expo_owner_only", "só o dono pode registrar o aviso no celular"))
+    return await _repasse_ao_rust(request, erro("push_expo_unavailable", "o aviso no celular precisa do servidor Rust"),
+                                  "/__hangar_server/forwarded")
+
+
 @app.get("/api/client-api")
 async def client_api_pelo_rust(request: Request):
     """O número é do Rust (`hangar_api::CLIENT_API`). Aqui chega o dono pelo Connect, que segue pela

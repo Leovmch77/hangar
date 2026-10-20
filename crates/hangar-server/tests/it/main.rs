@@ -6,6 +6,7 @@
 
 mod common;
 mod session_defaults;
+mod push_expo;
 mod artifacts;
 mod session_media;
 mod commands;
