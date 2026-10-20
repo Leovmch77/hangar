@@ -297,10 +297,20 @@ impl Sources for LiveSources {
         // Sem entrada no Rust (claude aberto à mão, que só entra no primeiro envio pelo app): o estado sai
         // só do pane e dos arquivos, como no Python; não há vínculo de plugin, pergunta nem modo a ler.
         if let Some(registry) = self.env.runtime.get() && registry.hand_opened(&self.name).await { return facts; }
-        let local = match self.env.runtime.get() {
+        let mut local = match self.env.runtime.get() {
             Some(registry) => super::facts::plugin_reading(registry, &self.name).await,
             None => Err("plugin_runtime_absent".into()),
         };
+        // Vida fechada com o processo de pé (sessão reaberta): adota o Claude do pane como a lista, com o mesmo teto.
+        if local.as_ref().is_err_and(|code| code == "runtime_binding") && let Some(registry) = self.env.runtime.get()
+            && crate::list::classify::adoption_due(&self.name, Instant::now()) {
+            match registry.adopt_claude_terminal(&self.name).await {
+                Ok(()) => local = super::facts::plugin_reading(registry, &self.name).await,
+                Err(error) => if crate::warn_limit::allow(Some(&self.name), "state_adopt_failed") {
+                    tracing::warn!(session = %self.name, code = %error.code, "estado: adoção do Claude com terminal falhou");
+                },
+            }
+        }
         match local {
             Ok(reading) => {
                 let binding = reading.binding;
