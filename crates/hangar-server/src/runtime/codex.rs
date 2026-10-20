@@ -929,14 +929,25 @@ impl Engine {
         effects
     }
 
+    /// Apaga só o problema `code`: o de outra origem que entrou depois fica.
+    pub fn clear_problem(&mut self,code:&str) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        if self.state.problema.as_deref() == Some(code) {
+            self.state.problema = None; self.state.problema_detalhe = None;
+            self.changed(&mut effects,false);
+        }
+        effects
+    }
+
     /// Terminal: só o WebSocket de controle caiu; TUI e app-server seguem vivos. A fila fica segura até
     /// reconectar, e o que era desta conexão encerra sem resposta inventada: RPC em voo vira incerto (nunca
     /// reenviado) e pedido que o servidor não reapresentar não ganha token respondível.
     /// `handed`: operações cujo quadro já foi entregue ao socket que caiu. As outras nunca saíram: viram
     /// `NotWritten` (o mesmo desfecho de uma escrita recusada), não incertas.
+    /// Sem terminal (só o socket com o cano caiu, o app-server segue): a entrega para e a vista fica como
+    /// estava; perguntas e prévia voltam no retrato do cano quando o ator religa.
     pub fn transport_lost(&mut self,detail:&str,handed:&BTreeSet<String>) -> Vec<Effect> {
         let mut effects = Vec::new();
-        if self.headless { return effects; }
         let unsent:Vec<String> = self.rpc.values().filter(|rpc|!rpc.timed_out && !handed.contains(&rpc.operation_id)).map(|rpc|rpc.operation_id.clone()).collect();
         for operation_id in unsent {
             match self.apply_input(EngineInput::WriteAck { operation_id,outcome:WriteOutcome::NotWritten },self.clock) {
@@ -944,10 +955,13 @@ impl Engine {
                 Err(failure) => tracing::warn!(session=%self.state.session,code=%failure.code,"escrita não enviada sem desfecho na queda"),
             }
         }
-        self.connected = false; self.subscribed = false; self.ready = false; self.subscribe_due = None; self.turn_known = false;
-        self.clear_preview(&mut effects);
-        self.lost_requests.extend(self.server_requests.iter().map(|(id,_)|id.clone()));
-        self.server_requests.clear(); self.answering.clear(); self.request_epochs.clear();
+        self.ready = false;
+        if !self.headless {
+            self.connected = false; self.subscribed = false; self.subscribe_due = None; self.turn_known = false;
+            self.clear_preview(&mut effects);
+            self.lost_requests.extend(self.server_requests.iter().map(|(id,_)|id.clone()));
+            self.server_requests.clear(); self.answering.clear(); self.request_epochs.clear();
+        }
         self.finish_service_tier(Disposition::Unknown,json!({"error":"O Codex desconectou antes de confirmar Fast"}),&mut effects);
         let mut uncertain = Vec::new();
         for (_,rpc) in std::mem::take(&mut self.rpc) {
@@ -961,8 +975,10 @@ impl Engine {
             }
         }
         for entry in uncertain { self.set_reservation(&entry,ReservationState::Uncertain); }
-        self.state.problema = Some(super::codex_terminal::DISCONNECTED.into());
-        self.state.problema_detalhe = Some(detail.chars().take(300).collect());
+        if !self.headless {
+            self.state.problema = Some(super::codex_terminal::DISCONNECTED.into());
+            self.state.problema_detalhe = Some(detail.chars().take(300).collect());
+        }
         self.changed(&mut effects,false);
         effects
     }

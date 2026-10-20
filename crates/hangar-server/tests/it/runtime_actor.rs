@@ -1924,6 +1924,38 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn cano_dying_while_the_socket_is_out_respawns_up_to_three() {
+        use_cano_bin();
+        let dir = tempfile::tempdir().unwrap();
+        let key = unique_key();
+        let base = std::time::Duration::from_millis(300);
+        let hour = std::time::Duration::from_secs(3600);
+        lifecycle_codex(dir.path());
+        write_sidecar(dir.path(),&key,json!({}));
+        let registry = Arc::new(RuntimeRegistry::new(crate::refused_address(),"secret".into(),"instance".into()).with_respawn_base(base)
+            .with_reconnect_waits(vec![hour],vec![hour],hour).with_codex_environment(codex_env(dir.path())));
+        registry.open_with_launch(target(dir.path(),&key,no_cano()),dir.path().into()).await.unwrap();
+        until_ready(&registry,&key).await;
+        // Outro cliente no cano toma o socket do ator, com o processo vivo: a religação espera (1 h), sem subir outro.
+        let binding:CanoBinding = { let cano = &sidecar(dir.path())["cano"];
+            CanoBinding { pid:cano["pid"].as_u64().unwrap() as u32,escuta:cano["escuta"].as_str().unwrap().into(),token:cano["token"].as_str().unwrap().into(),versao:2 } };
+        let thief = cano::connect(&binding).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let view = handle_view(&registry,&key).await;
+        assert!(view["ready"] == false && view["public_state"]["problema"].is_null(),"socket fora com o cano vivo não é queda: {view}");
+        assert_eq!(starts(dir.path()).len(),1);
+        // O cano morre durante a espera: queda de sempre, com o teto de 3 subidas.
+        std::fs::write(dir.path().join("crash"),"").unwrap();
+        process::kill(&recorded(dir.path())[0],&key,dir.path()).await.unwrap();
+        drop(thief);
+        until("três subidas depois da queda",||starts(dir.path()).len() >= 4).await;
+        tokio::time::sleep(base * 8 + std::time::Duration::from_secs(1)).await;
+        assert_eq!(starts(dir.path()).len(),4,"teto de 3 subidas seguidas");
+        assert_eq!(handle_view(&registry,&key).await["public_state"]["problema"],"codex_headless_nao_subiu");
+        cleanup(&registry,&key,dir.path()).await;
+    }
+
+    #[tokio::test]
     async fn registry_live_follows_open_respawn_and_close() {
         // O canal do hub nasce com a sessão aberta no Rust, passa pela religação e esvazia no `close`.
         let dir = tempfile::tempdir().unwrap();
@@ -2481,9 +2513,21 @@ mod cano_reconnect {
                         read = next_line(&mut reader,&mut raw) => {
                             if !read { break; }
                             let envelope:Value = serde_json::from_str(&raw).unwrap();
-                            written.lock().unwrap().push(serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap());
+                            let frame:Value = serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap();
+                            written.lock().unwrap().push(frame.clone());
                             let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
                             if reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.is_err() { break; }
+                            // Codex: o app-server falso responde a todo pedido JSON-RPC (o Claude não manda `id` com `method`).
+                            if let (Some(id),Some(method)) = (frame.get("id"),frame["method"].as_str()) {
+                                let result = match method {
+                                    "initialize" => json!({"userAgent":format!("hangar/{} (x)",hangar_codex::version::CHECKED)}),
+                                    "thread/resume" | "thread/start" => json!({"thread":{"id":"thread-1","path":"/tmp/rollout-thread-1.jsonl","status":{"type":"idle"}},"model":"gpt-test"}),
+                                    "turn/start" => json!({"turn":{"id":"turn-1","status":"inProgress"}}),
+                                    _ => json!({}),
+                                };
+                                let reply = json!({"type":"cano_output","frame":json!({"id":id,"result":result}).to_string()});
+                                if reader.get_mut().write_all(format!("{reply}\n").as_bytes()).await.is_err() { break; }
+                            }
                         }
                     }
                 }
@@ -2776,6 +2820,89 @@ mod cano_reconnect {
         tokio::time::sleep(ms(200)).await;
         assert_eq!(cano.accepts(),3);
         assert!(healthy(&handle).await);
+        handle.stop().await.unwrap();
+    }
+
+    // --- Codex sem terminal: a mesma religação, sem o teto de 3 subidas enquanto o cano viver ---
+
+    /// Ator do Codex sem terminal que o Rust sobe (com `launch`), no cano falso; o arquivo da sessão existe
+    /// para a abertura da conversa gravar nele. Sem política: subir outro processo recusa.
+    async fn codex_actor(dir:&std::path::Path,cano:&LiveCano,pid:u32,waits:Waits) -> RuntimeHandle {
+        std::fs::write(dir.join("session.json"),json!({"name":"session","key":"key","provider":"codex","headless":true,"cwd":dir,"thread_id":"thread-1"}).to_string()).unwrap();
+        let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"codex".into(),
+            metadata:json!({"name":"session","headless":true,"thread_id":"thread-1","initialized":true,"ready":true,"cwd":dir}),
+            binding:CanoBinding { pid,escuta:cano.escuta.clone(),token:"secret-test".into(),versao:2 },
+            lease_path:dir.join("key.lock"),state_path:dir.join("key.queue-state.json"),projection_dir:dir.join("projection"),
+            transcript:dir.join("rollout.jsonl"),created:0.0 };
+        let lease = acquire_lease(&target.lease_path).unwrap();
+        let store = Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
+        let engine = RuntimeEngine::new("codex",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
+            .with_launch(LaunchConfig { sidecar_dir:dir.into(),backoff:Duration::from_millis(50) })
+            .with_reconnect_waits(waits.normal,waits.pending,waits.stall).with_cano_check(ms(100));
+        let connection = cano::connect(&target.binding).await.unwrap();
+        RuntimeActor::spawn(target,QueueActor::start(store,lease),connection,engine)
+    }
+
+    fn codex_said(cano:&LiveCano,text:&str) -> usize {
+        cano.frames.lock().unwrap().iter().filter(|frame|frame["method"] == "turn/start" && frame.to_string().contains(&format!("\"{text}\""))).count()
+    }
+
+    #[tokio::test]
+    async fn codex_lost_socket_with_live_cano_keeps_reconnecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let proc = sleeper(dir.path());
+        let cano = live_cano(|n|if (2..=5).contains(&n) { Answer::Refuse } else { Answer::Serve }).await;
+        let handle = codex_actor(dir.path(),&cano,proc.0.id(),waits(&[0,50],&[0,50],60_000)).await;
+        wait_for("abertura",||cano.accepts() == 1).await;
+        cano.cut.notify_one();
+        let mut seen = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5),async { loop {
+            let view = handle.view().await.unwrap();
+            let problem = view["public_state"]["problema"].clone();
+            if !seen.contains(&problem) { seen.push(problem); }
+            if cano.accepts() >= 6 && view["ready"] == true { break; }
+            tokio::time::sleep(ms(10)).await;
+        } }).await.unwrap_or_else(|_|panic!("religa quando o cano aceita: {} conexões, problemas vistos {seen:?}",cano.accepts()));
+        assert!(seen.iter().all(Value::is_null),"cano vivo nunca é queda nem `codex_headless_nao_subiu`: {seen:?}");
+        assert!(healthy(&handle).await,"religar não põe a sessão em erro");
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_stalled_delivery_is_visible_and_clears_on_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let proc = sleeper(dir.path());
+        let cano = live_cano(|n|if [2,3].contains(&n) { Answer::Refuse } else { Answer::Serve }).await;
+        let handle = codex_actor(dir.path(),&cano,proc.0.id(),waits(&[0,3_600_000],&[0,2_000],300)).await;
+        wait_for("abertura",||cano.accepts() == 1).await;
+        cano.cut.notify_one();
+        wait_for("primeira tentativa recusada",||cano.accepts() == 2).await;
+        let reply = handle.command(input("in-1","oi")).await.unwrap();
+        assert!(reply.disposition == Disposition::Deferred,"{reply:?}");
+        state_until(&handle,"aviso depois do prazo",|state|state["problema"] == "headless_delivery_stalled").await;
+        assert!(healthy(&handle).await,"o aviso não põe a sessão em erro");
+        assert_eq!(codex_said(&cano,"oi"),0);
+        wait_for("religa e entrega",||codex_said(&cano,"oi") == 1).await;
+        state_until(&handle,"o aviso sai na religação",|state|state["problema"].is_null()).await;
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn codex_input_during_the_outage_waits_in_the_queue_and_is_delivered_once_on_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let proc = sleeper(dir.path());
+        let cano = live_cano(|n|if n == 2 { Answer::Refuse } else { Answer::Serve }).await;
+        let handle = codex_actor(dir.path(),&cano,proc.0.id(),waits(&[0,500],&[0,500],60_000)).await;
+        wait_for("abertura",||cano.accepts() == 1).await;
+        cano.cut.notify_one();
+        wait_for("primeira tentativa recusada",||cano.accepts() == 2).await;
+        let reply = handle.command(input("in-1","oi")).await.unwrap();
+        assert!(reply.disposition == Disposition::Deferred,"{reply:?}");
+        wait_for("a mensagem sai no socket novo",||codex_said(&cano,"oi") == 1).await;
+        tokio::time::sleep(ms(200)).await;
+        assert_eq!(codex_said(&cano,"oi"),1,"uma vez só");
+        let state = queue_state(dir.path());
+        assert!(state.operations.get("in-1").is_none_or(|op|op.status != Status::Unknown),"entregue, não incerta");
         handle.stop().await.unwrap();
     }
 }

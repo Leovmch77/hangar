@@ -237,7 +237,7 @@ impl RuntimeEngine {
         Self::refresh_write_sources(&self.core,&mut sources,&guards);
         result
     }
-    /// Só o WebSocket adotado caiu (Codex com terminal): a fila segura até reconectar.
+    /// Só o socket caiu (Codex com terminal adotado, Claude e Codex sem terminal): a fila segura até reconectar.
     fn transport_lost(&mut self,detail:&str,handed:&BTreeSet<String>) -> Result<Vec<Effect>,RuntimeError> {
         let mut sources = self.write_sources.lock().map_err(|_|crate::interactions::runtime_error(crate::interactions::InteractionError::Unavailable))?;
         let guards = self.async_guards.lock().map_err(|_|crate::interactions::runtime_error(crate::interactions::InteractionError::Unavailable))?;
@@ -254,7 +254,7 @@ impl RuntimeEngine {
         result
     }
     fn clear_problem(&mut self,code:&str) -> Vec<Effect> {
-        match &mut self.core { Core::Claude(core)=>core.clear_problem(code),Core::Codex(_)=>Vec::new() }
+        match &mut self.core { Core::Claude(core)=>core.clear_problem(code),Core::Codex(core)=>core.clear_problem(code) }
     }
     fn interaction_guard(&self,id:&str) -> Result<Option<hangar_codex::client::RawWriteGuard>,RuntimeError> {
         use crate::interactions::{InteractionError,runtime_error};
@@ -869,9 +869,16 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
         if let Some(rc) = cano_gone.take() {
             reconnect.cancel();
             (cano_lost,cano_check_at,stall_due,stall_shown) = (false,None,None,false);
-            tracing::warn!(key=%target.key,session=%target.name,"cano do Claude morreu com o socket fora; é queda");
-            effects.extend(engine.apply(EngineInput::Line(json!({"type":"cano_saiu","rc":rc})),clock(start))?);
-            publish(&events,&target,&mut revision,"claude_exit",json!({"conversation":engine.view()["conversation"]}));
+            tracing::warn!(key=%target.key,session=%target.name,provider=%target.provider,"cano morreu com o socket fora; é queda");
+            // Codex: a queda de sempre, com o teto de 3 subidas (o cano que guardou o código ainda pode estar de pé).
+            if target.provider == "codex" {
+                if rc.is_some() { respawn.kill = true; } else { enter_error(&mut error,&target,failure("cano_closed")); }
+                effects.extend(engine.apply(EngineInput::Line(json!({"type":"cano_saiu","rc":rc})),clock(start))?);
+                effects.extend(after_exit(&mut respawn,&mut engine,&target,clock(start).monotonic_s,closed.load(Ordering::Acquire)));
+            } else {
+                effects.extend(engine.apply(EngineInput::Line(json!({"type":"cano_saiu","rc":rc})),clock(start))?);
+                publish(&events,&target,&mut revision,"claude_exit",json!({"conversation":engine.view()["conversation"]}));
+            }
         }
         if cano_lost && std::mem::take(&mut stall_dirty) {
             match queue.snapshot().await {
@@ -1366,7 +1373,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                 Job::Drained {generation:target.generation,result}
             });
         }
-        let deadline = engine.deadline().into_iter().chain(respawn.next_at).chain(reconnect.next_at).chain(cano_check_at).chain(stall_due.filter(|_|!stall_shown)).chain(sid_retry.as_ref().map(|(_,at)|*at)).chain(roots.values().filter(|root|root.result.is_none() && !root.timed_out).map(|root|root.deadline))
+        let deadline = engine.deadline().into_iter().chain(respawn.next_at).chain(reconnect.next_at.filter(|_|respawn.task.is_none())).chain(cano_check_at.filter(|_|respawn.task.is_none())).chain(stall_due.filter(|_|!stall_shown)).chain(sid_retry.as_ref().map(|(_,at)|*at)).chain(roots.values().filter(|root|root.result.is_none() && !root.timed_out).map(|root|root.deadline))
             .min_by(f64::total_cmp).map(|seconds|start + Duration::from_secs_f64(seconds.max(0.0)))
             .unwrap_or_else(||Instant::now()+Duration::from_secs(3600));
         tokio::select! {
@@ -1557,6 +1564,16 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                     reconnect.schedule(clock(start).monotonic_s,false);
                     continue;
                 }
+                // Codex sem terminal: socket fora com o cano ainda vivo é religação, não queda. O nascimento lido
+                // agora prova, nas tentativas, que o pid segue sendo este processo.
+                let codex_cano_alive = target.provider == "codex" && adoption.is_none() && respawn.task.is_none()
+                    && matches!(event,None | Some(IoEvent::End { code:None })) && engine.view()["alive"] != false && {
+                    let (pid,key) = (target.binding.pid,target.key.clone());
+                    let birth = tokio::task::spawn_blocking(move||(super::process::liveness(pid,&key) == super::process::Liveness::Ours)
+                        .then(||crate::terminal_facts::agent_birth(pid)).flatten()).await.ok().flatten();
+                    if birth.is_some() { engine.cano_birth = birth; }
+                    birth.is_some()
+                };
                 match event {
                     // Erro de UMA mensagem segue (como o leitor Python); só o erro de leitura encerra.
                     Some(IoEvent::Line(line)) => match engine.apply(EngineInput::Line(line),clock(start)) {
@@ -1604,10 +1621,11 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                     // Queda durante uma subida pedida é a do processo que ela encerrou: não agenda outra.
                     Some(IoEvent::End { .. }) if respawn.task.is_some() => respawn.swallowed = true,
                     None if respawn.task.is_some() => { io_open = false; respawn.swallowed = true; },
-                    // Claude sem terminal: o socket caiu ou o leitor parou num envelope que não conhece (versões
-                    // diferentes de cano e servidor), sem `cano_saiu`. O processo segue; religa ao mesmo cano com
-                    // espera crescente, sem erro, sem queda e sem estado novo. Cano morto vira queda pela tentativa.
-                    lost @ (None | Some(IoEvent::End { code:None })) if target.provider == "claude" && engine.view()["alive"] != false => {
+                    // Claude e Codex sem terminal: o socket caiu ou o leitor parou num envelope que não conhece
+                    // (versões diferentes de cano e servidor), sem `cano_saiu`. O processo segue; religa ao mesmo cano
+                    // com espera crescente, sem erro, sem queda, sem contar subida e sem estado novo. Cano morto vira
+                    // queda pela tentativa ou pela conferência.
+                    lost @ (None | Some(IoEvent::End { code:None })) if (target.provider == "claude" || codex_cano_alive) && engine.view()["alive"] != false => {
                         if lost.is_some() {
                             tracing::warn!(key=%target.key,session=%target.name,"o cano mandou um envelope que o servidor não conhece; religando");
                             if let Some(policy) = &engine.policy {
@@ -1621,7 +1639,9 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                         let sample = clock(start);
                         (cano_lost,lost_at,stall_dirty) = (true,sample.epoch_s,true);
                         cano_check_at = Some(sample.monotonic_s + engine.reconnect_waits.check.as_secs_f64());
-                        tracing::info!(key=%target.key,session=%target.name,"socket do cano do Claude caiu; religando ao mesmo processo");
+                        tracing::info!(key=%target.key,session=%target.name,provider=%target.provider,"socket do cano caiu; religando ao mesmo processo");
+                        // Codex: o motor da volta (religado ou subido de novo) parte do turno que rodava.
+                        if respawn.next_at.is_none() && !respawn.kill { respawn.was_working = engine.view()["in_progress"] == true; }
                         effects.extend(engine.transport_lost("",&std::mem::take(&mut handed))?);
                         reconnect.schedule(sample.monotonic_s,false);
                     },
@@ -1649,6 +1669,9 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                         let snapshot = connection.snapshot.clone();
                         io = connection.start(next.generation,128).hold_lease(queue.lease());
                         io_open = true;
+                        // Subida pedida no meio da queda do socket: o processo e o socket agora são estes.
+                        reconnect.cancel();
+                        (cano_lost,cano_check_at,stall_due,stall_shown) = (false,None,None,false);
                         if error.as_ref().is_some_and(|current|current.code == "cano_closed") { error = None; }
                         // A vida nova parte da vista desta (conversa, modelo, modo) e do que a pessoa trocou.
                         let mut metadata = next.metadata.clone();
@@ -1752,6 +1775,18 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                     }
                     // Daqui para baixo, o cano do Claude sem terminal.
                     _ if adoption.is_some() || !current || !cano_lost => {},
+                    // Codex sem terminal: termina como a subida que acha o cano vivo (motor renovado, retrato e
+                    // inicialização de novo), sem contar subida. Subida pedida em curso é dona do processo: espera.
+                    Reconnection::Connected(RuntimeConnection::Cano(connection)) if target.provider == "codex" => {
+                        if let Some(rc) = connection.snapshot.saiu { cano_gone = Some(Some(rc)); continue; }
+                        if respawn.task.is_some() { reconnect.schedule(clock(start).monotonic_s,stall_due.is_some() || stall_shown); continue; }
+                        transport_epoch += 1;
+                        reconnect.connected();
+                        (cano_lost,cano_check_at,stall_due,stall_shown) = (false,None,None,false);
+                        tracing::info!(key=%target.key,session=%target.name,"Codex sem terminal religado ao mesmo cano");
+                        let back = Relaunched { target:target.clone(),spawned:false,connection,patch:Value::Null };
+                        respawn.task = Some(tokio::spawn(async move { Ok(back) }));
+                    }
                     Reconnection::Connected(RuntimeConnection::Cano(connection)) => {
                         let snapshot = connection.snapshot.clone();
                         // Saiu entre a queda e a volta: é queda, com o código que o cano guardou.
@@ -2272,12 +2307,13 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                     let adoption = adoption.clone();
                     reconnect.task = Some(tokio::spawn(async move { super::codex_terminal::reconnect(&adoption).await }));
                 }
-                if cano_lost && reconnect.task.is_none() && reconnect.next_at.is_some_and(|at|sample.monotonic_s >= at) {
+                // Subida pedida em curso (Codex) é dona do processo: tentativa e conferência esperam o desfecho dela.
+                if cano_lost && respawn.task.is_none() && reconnect.task.is_none() && reconnect.next_at.is_some_and(|at|sample.monotonic_s >= at) {
                     reconnect.next_at = None;
                     reconnect.epoch = transport_epoch;
                     reconnect.task = Some(tokio::spawn(super::cano_reconnect::attempt(target.binding.clone(),target.key.clone(),engine.cano_birth)));
                 }
-                if cano_lost && cano_check_at.is_some_and(|at|sample.monotonic_s >= at) {
+                if cano_lost && respawn.task.is_none() && cano_check_at.is_some_and(|at|sample.monotonic_s >= at) {
                     let (pid,key,birth) = (target.binding.pid,target.key.clone(),engine.cano_birth);
                     let life = tokio::task::spawn_blocking(move||super::cano_reconnect::cano_life(pid,&key,birth)).await;
                     if matches!(life,Ok(super::cano_reconnect::CanoLife::Gone)) { cano_gone = Some(None); }
@@ -2286,7 +2322,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                 if cano_lost && !stall_shown && stall_due.is_some_and(|due|sample.monotonic_s >= due) {
                     stall_shown = true;
                     tracing::warn!(key=%target.key,session=%target.name,"mensagem sem entrega com o cano vivo e o socket fora");
-                    effects.extend(engine.show_problem(DELIVERY_STALLED,Some("mensagem esperando: o Claude segue rodando, mas a conexão com ele ainda não voltou".into())));
+                    let agent = if target.provider == "codex" { "Codex" } else { "Claude" };
+                    effects.extend(engine.show_problem(DELIVERY_STALLED,Some(format!("mensagem esperando: o {agent} segue rodando, mas a conexão com ele ainda não voltou"))));
                 }
                 if respawn.task.is_none() && respawn.next_at.is_some_and(|at|sample.monotonic_s >= at) {
                     respawn.next_at = None;
