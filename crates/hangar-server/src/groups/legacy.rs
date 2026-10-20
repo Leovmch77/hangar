@@ -85,8 +85,16 @@ pub(super) async fn unpair_remote(State(st): State<Arc<AppState>>, ConnectInfo(p
     let held = match asked.enter().await { Ok(held) => held, Err(busy) => return busy };
     let name = asked.name.clone();
     let link = match asked.groups.link(&name).await { Ok(link) => link, Err(error) => return asked.store_failed(&error) };
-    if !link.is_some_and(|l| l.peers.contains(&body.peer)) {
+    let Some(link) = link.filter(|l| l.peers.contains(&body.peer)) else {
         return asked.reply(StatusCode::OK, json!({"ok": true, "warning": null, "noop": format!("'{name}' não está pareado com '{}'", body.peer)}));
+    };
+    // Grupo que já é entre máquinas: quem sai é só `peer`, pela dona.
+    if link.fed.is_some() {
+        drop(held);
+        return match super::fed_exit::peer_left(&asked.st, &asked.groups, &link, &body.peer).await {
+            Ok(()) => asked.reply(StatusCode::OK, json!({"ok": true, "warning": null})),
+            Err(super::federation::Refusal(status, detail)) => asked.reply(status, detail),
+        };
     }
     let ex = match asked.groups.leave(&name).await { Ok(ex) => ex, Err(error) => return asked.store_failed(&error) };
     drop(held);

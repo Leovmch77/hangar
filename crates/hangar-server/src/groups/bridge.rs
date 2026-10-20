@@ -140,12 +140,15 @@ async fn execute(st: Arc<AppState>, groups: Arc<GroupService>, op: Operation) ->
             Ok(out)
         }
         Operation::Leave { name, phases } => {
-            let ex = groups.leave_with(&name, &KnownPhases(phases)).await.map_err(group_failed)?;
-            let warnings = notify_exit(&st, &groups, &name, &ex).await;
+            let (ex, tell) = super::exit::leave(&st, &groups, &name, Some(&KnownPhases(phases))).await.map_err(group_failed)?;
+            let warnings = notify_exit(&st, &groups, &name, &tell).await;
             Ok(json!({"ex_peers": ex, "warnings": warnings}))
         }
         Operation::Rename { old, new } => {
-            groups.rename(&old, &new).await.map_err(group_failed)?;
+            match super::fed_exit::rename(&st, &groups, &old, &new).await {
+                Some(done) => done,
+                None => groups.rename(&old, &new).await,
+            }.map_err(group_failed)?;
             super::link_return::renamed(&st, &old, &new).await;
             Ok(json!({}))
         }

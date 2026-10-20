@@ -636,16 +636,16 @@ Revisão: risco — motivo: concorrência (fila × saída) e contrato entre máq
 **Fecha:** desenho-federacao §3 "Sair/Morte/Renomear", PAIR-45 (morte avisa a outra máquina,
 agora pela fila).
 
-- [ ] **Step 1: Testes**: `leave_never_waits_for_the_owner` (dona fora: sai na hora, `Leave` na
+- [x] **Step 1: Testes**: `leave_never_waits_for_the_owner` (dona fora: sai na hora, `Leave` na
   fila); `dead_member_leaves_through_the_queue`; `rename_reaches_the_owner`;
   `dissolve_keeps_a_local_group_with_outside_pairs`; `leave_ends_outside_pairs_as_today`;
   `push_before_rename_keeps_new_name` (o `Push` com o nome velho chega antes do `Rename`: o membro
   novo continua no grupo); `owner_without_own_members_stays_owner`;
   `old_peer_unpair_after_owner_converted` (com a Task 11).
-- [ ] **Step 2: Rodar e ver falhar.**
-- [ ] **Step 3: Implementar.**
-- [ ] **Step 4: Rodar.** Esperado: PASS.
-- [ ] **Step 5: Commit** — `feat(groups): leave, death and rename of members across machines`.
+- [x] **Step 2: Rodar e ver falhar.**
+- [x] **Step 3: Implementar.**
+- [x] **Step 4: Rodar.** Esperado: PASS.
+- [x] **Step 5: Commit** — `feat(groups): leave, death and rename of members across machines`.
 
 ---
 

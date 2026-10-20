@@ -305,6 +305,8 @@ enum OpsBody {
     Join { protocol: u32, #[serde(rename = "origin")] _origin: String, members: Vec<Member>, #[serde(default)] task: String, #[serde(default)] replace_task: bool,
         #[serde(default)] expected: BTreeMap<String, String> },
     Outside { protocol: u32, #[serde(rename = "origin")] _origin: String, link: bool, outside: OutsideRef },
+    Leave { protocol: u32, origin: String, member: String },
+    Rename { protocol: u32, origin: String, from: String, to: String },
 }
 
 /// `POST /api/groups/{gid}/ops`: pedido de outra máquina à dona. `leave`/`rename`/`message` são
@@ -321,6 +323,8 @@ pub(super) async fn ops(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conn
             let op = if link { OutsideOp::Link(outside) } else { OutsideOp::Unlink(outside) };
             owner_outside(&m.st, &m.groups, &m.gid, op).await.map(|version| json!({"protocol": PROTOCOL, "version": version}))
         }
+        OpsBody::Leave { protocol, origin, member } if protocol == PROTOCOL => super::fed_exit::leave_op(&m.st, &m.groups, &m.gid, &origin, &member).await,
+        OpsBody::Rename { protocol, origin, from, to } if protocol == PROTOCOL => super::fed_exit::rename_op(&m.st, &m.groups, &m.gid, &origin, &from, &to).await,
         _ => return crate::session_write::invalid_body(&m.parts.headers),
     };
     m.answer(result)
