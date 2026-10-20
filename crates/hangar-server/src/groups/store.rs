@@ -268,9 +268,16 @@ fn parse_noting_fed(name: &str, data: &serde_json::Map<String, Value>) -> Option
 /// fsync e sem a conferência de conteúdo do `files::write`, que não servem aqui.
 pub(crate) fn replace_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> { replace_with(target, bytes, false) }
 
-/// Como `replace_atomic`, com fsync do temporário antes do rename: registro, identidade e fila
-/// entre máquinas não podem voltar vazios de uma queda, porque os outros lados confiam neles.
-pub(crate) fn replace_durable(target: &Path, bytes: &[u8]) -> std::io::Result<()> { replace_with(target, bytes, true) }
+/// Como `replace_atomic`, com fsync do temporário antes do rename e da pasta depois: registro,
+/// identidade e fila entre máquinas não podem voltar vazios nem antigos de uma queda, porque os
+/// outros lados confiam neles. Não é o `runtime::queue::atomic_write`: o temporário de nome fixo é
+/// o que uma escrita interrompida sobrescreve na próxima, sem sobrar lixo na pasta.
+pub(crate) fn replace_durable(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    replace_with(target, bytes, true)?;
+    #[cfg(unix)]
+    if let Some(dir) = target.parent() { std::fs::File::open(dir)?.sync_all()?; }
+    Ok(())
+}
 
 fn replace_with(target: &Path, bytes: &[u8], durable: bool) -> std::io::Result<()> {
     // Mesmo nome que o `PairLink.set` usa (`<stem>.json.tmp`), que o `clear_sidecar` também apaga.
