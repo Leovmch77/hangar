@@ -265,11 +265,13 @@ fn reply(Refusal(status, body): Refusal) -> Response { json_response(status, bod
 pub(super) async fn get_record(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
     let m = match Machine::take(st, peer, req).await { Ok(m) => m, Err(r) => return r };
     let (dir, gid, me) = (Arc::new(pair_dir(&m.groups)), m.gid.clone(), m.me());
-    let found = blocking(move || dir.record(&gid)).await;
+    // Id trocado: "inexistente" faria a participante achar que o grupo acabou.
+    let found = blocking(move || identity_ok(&dir, &me).map(|()| (dir.record(&gid), me))).await;
     let result = match found {
-        Ok(Ok(Some(record))) if record.owner == me => Ok(serde_json::to_value(&record).unwrap_or_default()),
-        Ok(Ok(_)) => Err(no(StatusCode::NOT_FOUND, "erro_grupo_inexistente", "grupo inexistente nesta máquina", json!({"gid": m.gid}))),
-        Ok(Err(error)) => Err(store_refusal(error)),
+        Ok(Err(refused)) => Err(refused),
+        Ok(Ok((Ok(Some(record)), me))) if record.owner == me => Ok(serde_json::to_value(&record).unwrap_or_default()),
+        Ok(Ok((Ok(_), _))) => Err(no(StatusCode::NOT_FOUND, "erro_grupo_inexistente", "grupo inexistente nesta máquina", json!({"gid": m.gid}))),
+        Ok(Ok((Err(error), _))) => Err(store_refusal(error)),
         Err(refused) => Err(refused),
     };
     m.answer(result)
@@ -1112,10 +1114,8 @@ pub fn spawn(st: Arc<AppState>) -> Option<tokio::task::JoinHandle<()>> {
                     }
                     Err(_) => tracing::warn!(code = "groups_restart_record_invalid", %owner, "groups: a dona respondeu um registro fora do formato"),
                 },
-                Err(PeerError::Refused { status: 404, detail }) if detail["code"] == "erro_grupo_inexistente" => {
-                    let body = PushBody { protocol: PROTOCOL, owner: owner.clone(), version: u64::MAX, task: String::new(), members: Vec::new(), outside: Vec::new(), joining: Vec::new(), dissolved: true };
-                    let _ = local_apply(&st, &groups, &gid, body).await;
-                }
+                // Só o `Dissolved` da dona (fila durável) desfaz o grupo aqui: "inexistente" pode ser
+                // registro perdido ou id trocado, e dissolver por isso seria para sempre.
                 Err(error) => tracing::warn!(code = "groups_restart_ask_failed", %owner, error = %error.text(&owner), "groups: a dona não respondeu na subida"),
             }
         }

@@ -592,3 +592,21 @@ async fn mixed_versions_after_crash_are_repaired() {
     let s2 = sidecar(&n.lab, "s2").unwrap();
     assert_eq!((s2["task"].clone(), s2["fed"]["version"].clone()), (json!("nova"), json!(3)));
 }
+
+/// A dona com o CP_SERVER_ID trocado não responde "grupo inexistente": a participante nunca
+/// dissolve o grupo por uma resposta que não seja a dissolução.
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_id_change_does_not_dissolve_participants() {
+    let n = net().await;
+    let (status, body) = pair(&n.casa, "s0", json!({"peers": ["lab::s1"]})).await;
+    assert_eq!(status, 200, "{body}");
+    let gid = body["gid"].as_str().unwrap().to_owned();
+    // A mesma pasta, agora servida com outro id.
+    let renamed = machine(&n.casa.root, "casa2").await;
+    let (status, answer) = call(renamed.addr, "GET", &format!("/api/groups/{gid}"), None).await;
+    assert_eq!((status, answer["detail"]["code"].clone()), (409, json!("erro_grupo_identificador_trocado")), "{answer}");
+    peers(&n.lab, &[("casa", renamed.addr), ("vm", n.vm.addr)]);
+    federation::spawn(n.lab.state.clone()).expect("participante com id").await.unwrap();
+    let s1 = sidecar(&n.lab, "s1").expect("o grupo continua em lab");
+    assert_eq!(s1["fed"]["owner"], "casa");
+}
