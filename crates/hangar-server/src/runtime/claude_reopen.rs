@@ -35,7 +35,9 @@ const EFFORTS:[&str;5] = ["low","medium","high","xhigh","max"];
 const EXIT_WAIT:Duration = Duration::from_secs(15);
 /// `--resume` de conversa longa demora a mostrar o prompt.
 const TERMINAL_WAIT:Duration = Duration::from_secs(60);
-const HEADLESS_WAIT:Duration = Duration::from_secs(10);
+// O `initialize` do Claude sem terminal passa de 10 s no Windows (hooks, plugins, MCP): prazo curto matava a
+// vida nova e a de volta no meio da subida.
+const HEADLESS_WAIT:Duration = Duration::from_secs(60);
 /// A vida nova que falhou e não saiu: nada volta por cima dela.
 const NEW_ALIVE:&str = "reopen_new_alive";
 

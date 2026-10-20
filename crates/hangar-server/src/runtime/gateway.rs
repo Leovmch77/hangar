@@ -2219,7 +2219,8 @@ impl RuntimeRegistry {
                 entry.settings_owner=Some(recipe.clone());entry.auto_respawn=auto_respawn;
             }
             let handle=self.entry(key,target.generation).await?;
-            let deadline=tokio::time::Instant::now()+Duration::from_secs(10);
+            // Mesmo prazo da reabertura (`HEADLESS_WAIT`): o `initialize` passa de 10 s no Windows.
+            let deadline=tokio::time::Instant::now()+Duration::from_secs(60);
             loop {
                 let snapshot=handle.snapshot().await?;
                 if !snapshot["error"].is_null() || snapshot["view"]["alive"]==false {return Err(failure("relaunch_initialize"));}
