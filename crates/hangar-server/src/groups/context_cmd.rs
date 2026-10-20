@@ -1,7 +1,7 @@
 //! `hangar-server pair-context <pair_dir>`: o hook de SessionStart do Claude Code reinjeta o protocolo
 //! do grupo depois de /clear, compactação e retomada (o prompt do `--pair` some; o sidecar fica). Só
 //! disco, sem rede nem token: funciona com o servidor parado. Qualquer falha = sem saída e código 0,
-//! porque o hook roda na abertura de toda sessão.
+//! porque o hook roda na abertura de toda sessão; a que não é "fora de grupo" vai ao diário do Hangar.
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -17,7 +17,11 @@ const TMUX_DEADLINE: Duration = Duration::from_secs(3);
 
 pub fn run(args: &[String]) -> ExitCode {
     std::panic::set_hook(Box::new(|_| {}));
-    let out = std::panic::catch_unwind(|| args.get(1).and_then(|dir| context(Path::new(dir)))).ok().flatten();
+    let out = std::panic::catch_unwind(|| args.get(1).and_then(|dir| context(Path::new(dir))))
+        .unwrap_or_else(|panic| {
+            let what = panic.downcast_ref::<&str>().map(|s| (*s).to_owned()).or_else(|| panic.downcast_ref::<String>().cloned());
+            failed("pair_context_panic", what.unwrap_or_default())
+        });
     if let Some(out) = out {
         use std::io::Write;
         let _ = writeln!(std::io::stdout().lock(), "{out}");
@@ -27,8 +31,15 @@ pub fn run(args: &[String]) -> ExitCode {
 
 fn context(pair_dir: &Path) -> Option<String> {
     let me = session_name()?;
-    let raw = std::fs::read_to_string(pair_dir.join(format!("{}.json", file_stem(&me)))).ok()?;
-    let Value::Object(sidecar) = pyjson::loads_lossless(&raw)? else { return None };
+    let path = pair_dir.join(format!("{}.json", file_stem(&me)));
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => return failed("pair_context_sidecar_unreadable", format!("{}: {e}", path.display())),
+    };
+    let Some(Value::Object(sidecar)) = pyjson::loads_lossless(&raw) else {
+        return failed("pair_context_sidecar_unreadable", format!("{}: não é um objeto JSON", path.display()));
+    };
     let text = protocol(pair_dir, &me, &sidecar)?;
     // ASCII como o `json.dumps` do Python: o cmd do Windows não troca de página de código no meio.
     Some(pyjson::dumps(&json!({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}), false))
@@ -40,7 +51,8 @@ fn protocol(pair_dir: &Path, me: &str, d: &Map<String, Value>) -> Option<String>
     if d.get("orq") == Some(&Value::Bool(true)) {
         return Some(text::render(Kind::Orq, &TextArgs { task, ..Default::default() }));
     }
-    let peers: Vec<String> = d.get("peers")?.as_array()?.iter().filter_map(Value::as_str)
+    let Some(peers) = d.get("peers")?.as_array() else { return failed("pair_context_peers_invalid", "peers não é lista") };
+    let peers: Vec<String> = peers.iter().filter_map(Value::as_str)
         .filter(|p| !p.is_empty()).map(str::to_owned).collect();
     if peers.is_empty() {
         return None;
@@ -122,7 +134,14 @@ fn session_name() -> Option<String> {
         }
         let name = env("CP_SESSION_NAME")?;
         tmux(&["has-session", "-t", &format!("={name}")]).await.filter(|o| o.status.success()).map(|_| name)
-    }).await.ok().flatten() })
+    }).await.unwrap_or_else(|_| failed("pair_context_tmux_timeout", "tmux não respondeu no prazo")) })
+}
+
+/// Uma linha no diário do Hangar; `None` para quem chama seguir sem saída.
+fn failed<T>(code: &str, detail: impl Into<String>) -> Option<T> {
+    let line = json!({"evento": "grupo.contexto_sessao", "nivel": "erro", "codigo": code, "detalhe": detail.into()});
+    crate::diag::record_blocking(crate::diag::diary_dir().as_deref(), &[line], "contexto do grupo");
+    None
 }
 
 async fn tmux(args: &[&str]) -> Option<std::process::Output> {

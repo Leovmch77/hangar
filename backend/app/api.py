@@ -2179,8 +2179,11 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
     closed = marked("x-hangar-rust-closed")
     # Fechamento que não passou pelo Rust (Connect, convidado): a saída do grupo vai pela ponte, com
     # a fase do `orq` lida aqui antes, para o Rust não perguntar de volta.
-    phases = None if closed or marked("x-hangar-rust-leaves") or not groups_bridge.rust_owns_groups() \
+    skip_leave = closed or marked("x-hangar-rust-leaves")
+    phases = None if skip_leave or not groups_bridge.rust_owns_groups() \
         else await asyncio.to_thread(_orq_phases, name)
+    # Sem o Rust a saída do grupo não acontece: fechar segue, e a falta vai no aviso e no diário.
+    orphan = phases is None and not skip_leave and await asyncio.to_thread(lambda: PairLink(name).get() is not None)
     # Fechada pelo Rust a sessão já saiu da lista: o transcript vem no cabeçalho dele.
     if closed:
         jsonl = urllib.parse.unquote(request.headers.get("x-hangar-closed-transcript", "")) or None
@@ -2190,6 +2193,9 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
         errs = await asyncio.to_thread(registry.kill, name, closed_by_rust=closed) or []
         if phases is not None:
             errs = [*errs, *await asyncio.to_thread(_rust_leave, name, phases)]
+        if orphan:
+            diag.registrar("grupos.saida_sem_rust", "erro", sessao=name, codigo="groups_need_rust_server")
+            errs = [*errs, {"sessao": name, "erro": _groups_need_rust()}]
     except KillFailed as e:
         raise HTTPException(500, e.detail or str(e)) from None
     finally:
@@ -2484,6 +2490,9 @@ def _rename_group_first(old: str, new: str) -> bool:
     """Modo Rust: o grupo muda de nome antes do tmux e do sidecar sem terminal; se o Rust falha, o
     rename nem começa. True = renomeado lá (quem falhar depois desfaz)."""
     if not groups_bridge.rust_owns_groups():
+        # Sem o Rust ninguém renomeia o grupo: a sessão agrupada não muda de nome.
+        if PairLink(old).get():
+            _require_rust_groups()
         return False
     try:
         groups_bridge.call("group.rename", old=old, new=new)
@@ -4115,10 +4124,13 @@ def _bridge_reply(out: dict) -> JSONResponse:
     return JSONResponse(out.get("body"), status_code=status)
 
 
+def _groups_need_rust() -> dict:
+    return erro("groups_need_rust_server", "os grupos precisam do servidor Rust, que não está rodando")
+
+
 def _require_rust_groups() -> None:
     if not groups_bridge.rust_owns_groups():
-        raise HTTPException(503, detail=erro("groups_need_rust_server",
-                                             "os grupos precisam do servidor Rust, que não está rodando"))
+        raise HTTPException(503, detail=_groups_need_rust())
 
 
 async def _group_route(method: str, name: str, route: str, body: BaseModel | None = None):

@@ -238,6 +238,27 @@ def test_installer_without_binary_installs_no_pair_hook(tmp_path, monkeypatch):
     assert eventos == ["grupos.hook_sem_binario"]
 
 
+def test_pair_hook_failures_go_to_the_diary(tmp_path, monkeypatch):
+    """settings.json torto, escrita que falha e falha ao montar o comando: nada instalado, e cada uma
+    deixa uma linha de erro com código no diário."""
+    from app import diag
+    eventos = []
+    monkeypatch.setattr(diag, "registrar", lambda evento, nivel="ok", **k: eventos.append((nivel, k.get("codigo"))))
+    hi = _pair_setup(tmp_path, monkeypatch, Path("/b/hangar-server"))
+    (tmp_path / "settings.json").write_text("{torto")
+    assert hi.ensure_pair_hook_installed() == []
+    assert eventos == [("erro", "pair_hook_settings_unreadable")]
+    eventos.clear()
+    (tmp_path / "settings.json").write_text("{}")
+    monkeypatch.setattr(hi, "_write", lambda *a: (_ for _ in ()).throw(OSError(13, "negado")))
+    assert hi.ensure_pair_hook_installed() == []
+    assert eventos == [("erro", "pair_hook_write_failed")]
+    eventos.clear()
+    monkeypatch.setattr(hi, "list_config_dirs", lambda **_: (_ for _ in ()).throw(RuntimeError("x")))
+    assert hi.ensure_pair_hook_installed() == []
+    assert eventos == [("erro", "pair_hook_setup_failed")]
+
+
 def test_nav_hook_entra_no_user_prompt_submit(tmp_path, monkeypatch):
     from app import hook_installer as hi
     monkeypatch.setattr(hi, "list_config_dirs", lambda **_: [])

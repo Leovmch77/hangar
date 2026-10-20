@@ -383,20 +383,26 @@ def ensure_pair_hook_installed() -> list[str]:
         from app.pair import _pair_dir
         dirs = {Path(c.path) for c in list_config_dirs(ordered=False)} | {_backend_config_base().resolve()}
         command = (exe := rust_bins.find_bin("hangar-server", "CP_RUST_SERVER_BIN")) and f'"{exe}" pair-context "{_pair_dir()}"{_FALHA_NAO_BLOQUEIA}'
-    except Exception:
+    except Exception as e:
+        diag.registrar("grupos.hook_falhou", "erro", codigo="pair_hook_setup_failed", **diag.erro_campos(e))
         return []
     if command is None:
         diag.registrar("grupos.hook_sem_binario", "aviso")
     touched: list[str] = []
     for d in dirs:
         try:
-            data = _load_settings(d / "settings.json") if d.is_dir() else None
-            if data is not None and (_sync_hook(data, "SessionStart", None, por_nome=True, script="pair_hook.py")
-                                     | _sync_hook(data, "SessionStart", command, _PAIR_MATCHER, True, "pair-context")):
+            if not d.is_dir():
+                continue
+            data = _load_settings(d / "settings.json")
+            if data is None:
+                diag.registrar("grupos.hook_falhou", "erro", codigo="pair_hook_settings_unreadable", pasta=d.name)
+                continue
+            if (_sync_hook(data, "SessionStart", None, por_nome=True, script="pair_hook.py")
+                    | _sync_hook(data, "SessionStart", command, _PAIR_MATCHER, True, "pair-context")):
                 _write(d / "settings.json", data)
                 touched.append(str(d))
-        except Exception:
-            continue
+        except Exception as e:
+            diag.registrar("grupos.hook_falhou", "erro", codigo="pair_hook_write_failed", pasta=d.name, **diag.erro_campos(e))
     return touched
 
 

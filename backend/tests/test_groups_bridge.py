@@ -285,3 +285,52 @@ def test_child_gets_group_env(monkeypatch, tmp_path):
     assert env["HANGAR_PEERS_FILE"] == str(peers._PEERS_FILE)
     assert env["HANGAR_PAIR_ARCHIVE"] == str(pair._arquivo_dir())
     assert rust_server.RUST_SERVER_PROTOCOL == 85
+
+
+def _tmux_rename(monkeypatch, renamed):
+    monkeypatch.setattr(api, "_recusa_orq", lambda n: None)
+    monkeypatch.setattr(api, "_headless", lambda n: False)
+    monkeypatch.setattr(api, "_codex_sem_terminal", lambda n: False)
+    monkeypatch.setattr(api.headless_sessions, "exists", lambda n: False)
+    monkeypatch.setattr("app.tmux.has_session", lambda n: n in ("a", "c"))
+    monkeypatch.setattr("app.tmux.rename_session", lambda a, b: renamed.append((a, b)) or False)
+
+
+@pytest.mark.parametrize("mode", ["python", None])
+def test_python_mode_rename_of_a_grouped_session_refuses(monkeypatch, client, mode):
+    """Sem o Rust ninguém renomeia o grupo: renomear só a sessão deixaria o sidecar com o nome velho."""
+    monkeypatch.setattr(runtime_coordinator, "_current", mode and SimpleNamespace(mode=mode, legacy=None))
+    monkeypatch.setattr(groups_bridge, "call", lambda *a, **k: pytest.fail("sem Rust não há ponte"))
+    _sidecar("a", ["b"])
+    renamed = []
+    _tmux_rename(monkeypatch, renamed)
+    r = client.post("/api/sessions/a/rename", headers=H, json={"new": "z"})
+    assert r.status_code == 503, r.text
+    assert r.json()["detail"]["code"] == "groups_need_rust_server"
+    assert renamed == []
+    # Fora de grupo o rename segue (o tmux falso falha: 500 dele, não recusa de grupo).
+    r = client.post("/api/sessions/c/rename", headers=H, json={"new": "z"})
+    assert r.status_code == 500 and renamed == [("c", "z")]
+
+
+@pytest.mark.parametrize("mode", ["python", None])
+def test_python_mode_close_of_a_grouped_session_closes_and_warns(monkeypatch, client, mode):
+    """Fechar nunca é barrado; sem o Rust a saída do grupo não acontece e isso volta no aviso e no diário."""
+    monkeypatch.setattr(runtime_coordinator, "_current", mode and SimpleNamespace(mode=mode))
+    monkeypatch.setattr(groups_bridge, "call", lambda *a, **k: pytest.fail("sem Rust não há ponte"))
+    _sidecar("a", ["b"])
+    killed, recorded = [], []
+    monkeypatch.setattr(api, "_recusa_orq", lambda n: None)
+    monkeypatch.setattr(api.registry, "kill", lambda n, closed_by_rust=False: killed.append(n) or [])
+    monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
+    monkeypatch.setattr(api, "_jsonl_of_session", lambda n: None)
+    monkeypatch.setattr(api.share_bridge, "revoke_session", lambda n: None)
+    monkeypatch.setattr(api.diag, "registrar", lambda evento, nivel="ok", **f: recorded.append((nivel, f.get("codigo"))))
+    r = client.delete("/api/sessions/a", headers=H)
+    assert r.status_code == 200, r.text
+    assert killed == ["a"]
+    assert [x["erro"]["code"] for x in r.json()["warning"]["params"]["avisos"]] == ["groups_need_rust_server"]
+    assert ("erro", "groups_need_rust_server") in recorded
+    # Fora de grupo: sem aviso.
+    r = client.delete("/api/sessions/c", headers=H)
+    assert (r.status_code, r.json()["warning"]) == (200, None)

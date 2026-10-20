@@ -177,13 +177,7 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
             }
         }
     }
-    if let Some(groups) = st.groups.clone() {
-        match crate::groups::exit::leave_and_notify(&st, &groups, &name).await {
-            Ok((_, warnings)) if !warnings.is_empty() => tracing::warn!(session = %name, avisos = warnings.len(), "aviso de saída do grupo falhou ao encerrar"),
-            Err(error) => tracing::warn!(session = %name, error = %error, "saída do grupo falhou ao encerrar a sessão"),
-            _ => {}
-        }
-    }
+    let leave = match st.groups.clone() { Some(groups) => leave_warnings(&st, &groups, &name).await, None => Vec::new() };
     // Convites e par da sessão são do Rust: o Python marcado não volta a pedir a revogação.
     if let Some(share) = st.share.clone() {
         match share.store.revoke_session(&name, None) {
@@ -204,10 +198,11 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
                 "msg": "Sessão encerrada, mas convites, atalhos e caches dela não foram limpos."});
             let mut response = super::json_response(StatusCode::OK, json!({"ok": true, "warning": warning}));
             crate::routes::cors(req.headers(), response.headers_mut());
-            return response;
+            return with_warnings(&name, response, leave).await;
         }
     }
-    crate::routes::pass(&st, req, &fwd).await
+    let response = crate::routes::pass(&st, req, &fwd).await;
+    with_warnings(&name, response, leave).await
 }
 
 /// Fechamento feito pelo Python (sessão sem entrada aqui: Pi, omp, Kimi): sai do grupo depois do
@@ -215,7 +210,13 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
 async fn leave_after_forward(st: &AppState, name: &str, response: Response) -> Response {
     let Some(groups) = st.groups.clone() else { return response };
     if !response.status().is_success() { return response; }
-    let errs = match crate::groups::exit::leave_and_notify(st, &groups, name).await {
+    let errs = leave_warnings(st, &groups, name).await;
+    with_warnings(name, response, errs).await
+}
+
+/// Sai do grupo; os avisos que não saíram e a falha da própria saída viram `{sessao, erro}`.
+async fn leave_warnings(st: &AppState, groups: &crate::groups::service::GroupService, name: &str) -> Vec<Value> {
+    match crate::groups::exit::leave_and_notify(st, groups, name).await {
         Ok((_, warnings)) => warnings,
         Err(error) => {
             tracing::warn!(session = %name, error = %error, "saída do grupo falhou ao encerrar a sessão");
@@ -223,17 +224,22 @@ async fn leave_after_forward(st: &AppState, name: &str, response: Response) -> R
             vec![json!({"sessao": name, "erro": {"code": "erro_grupo_indisponivel", "params": {"detalhe": code},
                 "msg": "os grupos estão indisponíveis agora"}})]
         }
-    };
+    }
+}
+
+/// Os avisos de saída no `warning` da resposta do fechamento; corpo que não é objeto JSON vira `{"ok": true}`.
+async fn with_warnings(name: &str, response: Response, errs: Vec<Value>) -> Response {
     if errs.is_empty() { return response; }
     let (mut parts, body) = response.into_parts();
-    let Ok(bytes) = axum::body::to_bytes(body, 1 << 20).await else {
-        tracing::warn!(session = %name, avisos = errs.len(), "aviso de saída do grupo fora da resposta: corpo do Python ilegível");
-        return super::json_response(StatusCode::OK, json!({"ok": true, "warning": with_leave_warning(None, name, errs)}));
-    };
-    let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) else { return Response::from_parts(parts, Body::from(bytes)) };
+    let read = axum::body::to_bytes(body, 1 << 20).await.ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    let mut value = read.filter(Value::is_object).unwrap_or_else(|| {
+        tracing::warn!(session = %name, avisos = errs.len(), "corpo do fechamento ilegível; a resposta leva só os avisos de saída");
+        json!({"ok": true})
+    });
     let current = value.get("warning").filter(|w| !w.is_null()).cloned();
     value["warning"] = with_leave_warning(current, name, errs);
     parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    parts.headers.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/json"));
     Response::from_parts(parts, Body::from(value.to_string()))
 }
 

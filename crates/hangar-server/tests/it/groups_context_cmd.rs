@@ -17,7 +17,7 @@ fn fixtures() -> BTreeMap<String, Value> {
         .collect()
 }
 
-struct Run { rc: Option<i32>, stdout: String, elapsed: Duration }
+struct Run { rc: Option<i32>, stdout: String, elapsed: Duration, diary: String }
 
 /// Mesmo arranjo do `gen_golden.py`: pasta de grupo, HOME com `claude-headless`, PATH só com o tmux falso.
 /// `tmux` = Some((list-panes, código do has-session)) ou um script inteiro em `Err`.
@@ -26,7 +26,11 @@ fn run(files: &Value, headless: &Value, env: &Value, tmux: Option<Result<(&str, 
     let (pair, home, bin) = (root.path().join("pair"), root.path().join("home"), root.path().join("bin"));
     for d in [&pair, &home.join(".hangar/claude-headless"), &bin] { std::fs::create_dir_all(d).unwrap(); }
     for (dir, set) in [(&pair, files), (&home.join(".hangar/claude-headless"), headless)] {
-        for (name, text) in set.as_object().unwrap() { std::fs::write(dir.join(name), text.as_str().unwrap()).unwrap(); }
+        for (name, text) in set.as_object().unwrap() {
+            // Array de bytes: conteúdo que não é UTF-8.
+            let bytes: Vec<u8> = match text { Value::Array(b) => b.iter().map(|x| x.as_u64().unwrap() as u8).collect(), t => t.as_str().unwrap().into() };
+            std::fs::write(dir.join(name), bytes).unwrap();
+        }
     }
     let script = match tmux {
         None => None,
@@ -45,7 +49,9 @@ fn run(files: &Value, headless: &Value, env: &Value, tmux: Option<Result<(&str, 
     let started = Instant::now();
     let out = cmd.output().unwrap();
     let stdout = String::from_utf8(out.stdout).unwrap().replace(pair.to_str().unwrap(), "<pair>");
-    Run { rc: out.status.code(), stdout, elapsed: started.elapsed() }
+    let diary = std::fs::read_dir(home.join(".hangar/logs/diario/servidor-rust")).map(|d| d.flatten()
+        .map(|e| std::fs::read_to_string(e.path()).unwrap()).collect()).unwrap_or_default();
+    Run { rc: out.status.code(), stdout, elapsed: started.elapsed(), diary }
 }
 
 fn run_fixture(fx: &Value) -> Run {
@@ -166,4 +172,22 @@ fn pair_context_never_fails_the_open() {
     assert_eq!((missing.status.code(), missing.stdout.as_slice()), (Some(0), &b""[..]));
     let bare = Command::new(env!("CARGO_BIN_EXE_hangar-server")).arg("pair-context").env_clear().output().unwrap();
     assert_eq!((bare.status.code(), bare.stdout.as_slice()), (Some(0), &b""[..]));
+}
+
+/// Falha que não é "fora de grupo" (sidecar ilegível, `peers` torto) vai ao diário do Hangar, e a
+/// abertura continua: código 0 e nada no stdout. Sem sidecar é só sessão fora de grupo: diário vazio.
+#[test]
+fn pair_context_records_real_failures_in_the_diary() {
+    for (label, files, code) in [
+        ("não UTF-8", json!({"a.json": [0xff, 0xfe, b'{']}), "pair_context_sidecar_unreadable"),
+        ("sidecar torto", json!({"a.json": "{torto"}), "pair_context_sidecar_unreadable"),
+        ("peers torto", json!({"a.json": json!({"peers": "b"}).to_string()}), "pair_context_peers_invalid"),
+    ] {
+        let got = run(&files, &json!({}), &pane_a(), PANES);
+        assert_eq!((got.rc, got.stdout.as_str()), (Some(0), ""), "{label}");
+        let line: Value = serde_json::from_str(got.diary.lines().next().unwrap_or("null")).unwrap();
+        assert_eq!((line["nivel"].as_str(), line["codigo"].as_str()), (Some("erro"), Some(code)), "{label}: {}", got.diary);
+    }
+    let alone = run(&json!({}), &json!({}), &pane_a(), PANES);
+    assert_eq!((alone.rc, alone.stdout.as_str(), alone.diary.as_str()), (Some(0), "", ""));
 }
