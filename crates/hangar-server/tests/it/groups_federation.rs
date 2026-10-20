@@ -654,3 +654,49 @@ async fn leave_enqueued_while_waiting_for_the_lock_is_honoured() {
     assert_eq!(asked.await.unwrap().0, 200);
     assert!(sidecar(&n.lab, "s2").is_none(), "a saída pendente vale");
 }
+
+/// Ninguém de fora confirmou numa fusão: os dois contratos voltam como eram.
+#[tokio::test(flavor = "multi_thread")]
+async fn undo_restores_both_contracts() {
+    let n = net().await;
+    let (status, body) = pair(&n.casa, "s0", json!({"peers": ["lab::s1"]})).await;
+    assert_eq!(status, 200, "{body}");
+    let a = body["gid"].as_str().unwrap().to_owned();
+    assert_eq!(pair(&n.casa, "s2", json!({"peers": ["s3"]})).await.0, 200);
+    let b = sidecar(&n.casa, "s2").unwrap()["gid"].as_str().unwrap().to_owned();
+    let contract = |gid: &str| n.casa.pair.join(format!("grupo-{gid}.md"));
+    std::fs::write(contract(&a), "contrato A").unwrap();
+    std::fs::write(contract(&b), "contrato B").unwrap();
+    peers(&n.casa, &[("lab", n.lab.addr), ("vm", closed_port().await)]);
+    let (status, body) = pair(&n.casa, "s0", json!({"peers": ["s2", "vm::x"]})).await;
+    assert_eq!((status, body["detail"]["code"].clone()), (502, json!("erro_grupo_membro_nao_confirmado")), "{body}");
+    assert_eq!(std::fs::read_to_string(contract(&a)).unwrap(), "contrato A");
+    assert_eq!(std::fs::read_to_string(contract(&b)).unwrap(), "contrato B");
+}
+
+/// `op: join` que chega a uma máquina que não é a dona do grupo é recusado sem gravar nada.
+#[tokio::test(flavor = "multi_thread")]
+async fn misaddressed_join_is_refused() {
+    let n = net().await;
+    let (status, body) = pair(&n.casa, "s0", json!({"peers": ["lab::s1"]})).await;
+    assert_eq!(status, 200, "{body}");
+    let gid = body["gid"].as_str().unwrap().to_owned();
+    let ask = json!({"op": "join", "protocol": 1, "origin": "vm", "members": [member("lab", "s2")], "task": "", "replace_task": false, "expected": {}});
+    let (status, answer) = call(n.lab.addr, "POST", &format!("/api/groups/{gid}/ops"), Some(&ask)).await;
+    assert_eq!((status, answer["detail"]["code"].clone()), (404, json!("erro_grupo_inexistente")), "{answer}");
+    assert!(record(&n.lab, &gid).is_none() && sidecar(&n.lab, "s2").is_none());
+}
+
+/// Par de fora que não muda o registro não faz a lista reemitir.
+#[tokio::test(flavor = "multi_thread")]
+async fn outside_noop_does_not_touch_the_list() {
+    let n = net().await;
+    let (status, body) = pair(&n.casa, "s0", json!({"peers": ["lab::s1"]})).await;
+    assert_eq!(status, 200, "{body}");
+    let gid = body["gid"].as_str().unwrap().to_owned();
+    let groups = n.casa.state.groups.clone().unwrap();
+    let before = n.casa.changes.load(Ordering::SeqCst);
+    let gone = hangar_server::groups::outbox::OutsideOp::Unlink(hangar_server::groups::model::OutsideRef { server: "casa".into(), address: "pc-x::Y".into() });
+    federation::owner_outside(&n.casa.state, &groups, &gid, gone).await.ok().unwrap();
+    assert_eq!(n.casa.changes.load(Ordering::SeqCst), before);
+}

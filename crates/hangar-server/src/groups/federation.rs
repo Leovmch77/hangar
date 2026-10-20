@@ -367,6 +367,10 @@ struct OwnerPlan {
 fn base_record(dir: &PairDir, me: &str, gid: &str, outside: &HashSet<String>, all: &[(String, Sidecar)]) -> Result<Option<GroupRecord>, Refusal> {
     if let Some(record) = dir.record(gid).map_err(store_refusal)? { return Ok(Some(record)); }
     let locals: Vec<&(String, Sidecar)> = all.iter().filter(|(_, s)| s.gid == gid).collect();
+    // Grupo de outra dona que só tem membros aqui: pedido mandado à máquina errada, nunca vira registro dela.
+    if locals.iter().any(|(_, s)| s.fed.as_ref().is_some_and(|f| f.owner != me)) {
+        return Err(no(StatusCode::NOT_FOUND, "erro_grupo_inexistente", "grupo inexistente nesta máquina", json!({"gid": gid})));
+    }
     let Some((_, first)) = locals.first() else { return Ok(None) };
     let mut record = GroupRecord { protocol: PROTOCOL, gid: gid.into(), owner: me.into(), version: 0,
         task: first.task.clone().unwrap_or_default(), members: Vec::new(), outside: Vec::new() };
@@ -512,10 +516,8 @@ fn apply_owner(dir: &PairDir, outbox: &Outbox, me: &str, plan: &OwnerPlan) -> Re
     }
     let written = (|| -> Result<(), super::store::StoreError> {
         dir.write_record(&plan.record)?;
-        for loser in &plan.losers {
-            dir.remove_record(&loser.gid)?;
-            dir.merge_contract(&loser.gid, &plan.record.gid);
-        }
+        // O contrato do absorvido só se junta depois da confirmação: desfazer não separa texto.
+        for loser in &plan.losers { dir.remove_record(&loser.gid)?; }
         write_sidecars(dir, &[], &plan.writes)
     })();
     let queued = written.map_err(store_refusal).and_then(|()| outbox.enqueue(items).map_err(|e| {
@@ -526,7 +528,9 @@ fn apply_owner(dir: &PairDir, outbox: &Outbox, me: &str, plan: &OwnerPlan) -> Re
     if let Err(refused) = queued {
         restore_sidecars(dir, &plan.before);
         for (gid, record) in &plan.before_records {
-            let _ = match record { Some(r) => dir.write_record(r), None => dir.remove_record(gid) };
+            if let Err(error) = match record { Some(r) => dir.write_record(r), None => dir.remove_record(gid) } {
+                tracing::error!(code = "groups_record_restore_failed", gid = %gid, %error, "groups: o registro do grupo não voltou ao de antes");
+            }
         }
         return Err(refused);
     }
@@ -596,6 +600,14 @@ pub async fn owner_join(st: &AppState, groups: &GroupService, mut ask: JoinAsk) 
         let names: Vec<String> = unconfirmed.iter().map(key).collect();
         return Err(no(StatusCode::BAD_GATEWAY, "erro_grupo_membro_nao_confirmado",
             &format!("nenhuma outra máquina confirmou ({}); o grupo voltou ao que era", names.join(", ")), json!({"membros": names})));
+    }
+    if !plan.losers.is_empty() {
+        let (dir, losers, survivor) = (dir.clone(), plan.losers.iter().map(|r| r.gid.clone()).collect::<Vec<_>>(), gid.clone());
+        groups.locked(blocking(move || for loser in &losers {
+            if !dir.merge_contract(loser, &survivor) {
+                tracing::warn!(code = "groups_contract_merge_failed", loser = %loser, survivor = %survivor, "groups: a fusão não herdou o contrato");
+            }
+        })).await?;
     }
     let mut record = plan.record.clone();
     for gone in &unconfirmed {
@@ -686,7 +698,7 @@ pub async fn owner_outside(st: &AppState, groups: &GroupService, gid: &str, op: 
     let me = groups.server_id().to_owned();
     let fed = of(st, groups).await?;
     let (dir, outbox, gid) = (Arc::new(pair_dir(groups)), fed.outbox.clone(), gid.to_owned());
-    let version = groups.locked(blocking(move || -> Result<u64, Refusal> {
+    let version = groups.locked(blocking(move || -> Result<(u64, bool), Refusal> {
         let Some(mut record) = dir.record(&gid).map_err(store_refusal)?.filter(|r| r.owner == me) else {
             return Err(no(StatusCode::NOT_FOUND, "erro_grupo_inexistente", "grupo inexistente nesta máquina", json!({"gid": gid})));
         };
@@ -695,7 +707,7 @@ pub async fn owner_outside(st: &AppState, groups: &GroupService, gid: &str, op: 
             OutsideOp::Unlink(o) if record.outside.contains(o) => { record.outside.retain(|x| x != o); true }
             _ => false,
         };
-        if !changed { return Ok(record.version); }
+        if !changed { return Ok((record.version, false)); }
         record.version += 1;
         dir.write_record(&record).map_err(store_refusal)?;
         for m in record.members.iter().filter(|m| m.server == me) {
@@ -706,10 +718,10 @@ pub async fn owner_outside(st: &AppState, groups: &GroupService, gid: &str, op: 
         }
         outbox.enqueue(remote_servers(&record, &me).into_iter().map(|server| OutboxItem::Push {
             server, gid: gid.clone(), version: record.version, joining: Vec::new(), origin: me.clone() }).collect()).map_err(store_refusal)?;
-        Ok(record.version)
+        Ok((record.version, true))
     })).await??;
-    groups.changed();
-    Ok(version)
+    if version.1 { groups.changed(); }
+    Ok(version.0)
 }
 
 /// Depois de um par de fora entrar (`link`) ou sair do grupo de `sidecar` nesta máquina: em grupo
