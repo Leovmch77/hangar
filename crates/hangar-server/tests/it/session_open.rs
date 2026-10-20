@@ -125,7 +125,7 @@ fn install(root: &Path, env_file: &str) -> std::path::PathBuf {
     let bin = root.join("inst/bin/hangar-server");
     std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
     std::fs::create_dir_all(root.join("inst/backend")).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_hangar-server"), &bin).unwrap();
+    crate::copy_executable(Path::new(env!("CARGO_BIN_EXE_hangar-server")), &bin);
     std::fs::write(root.join("inst/backend/.env"), env_file).unwrap();
     bin
 }
@@ -224,7 +224,7 @@ async fn the_installed_command_finds_the_env_file_through_the_pointer() {
     let home = dir.path().join("home");
     let bin = home.join(".hangar/bin/hangar-server");
     std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_hangar-server"), &bin).unwrap();
+    crate::copy_executable(Path::new(env!("CARGO_BIN_EXE_hangar-server")), &bin);
     let backend = dir.path().join("checkout/backend");
     std::fs::create_dir_all(&backend).unwrap();
     std::fs::write(backend.join(".env"), format!("CP_AUTH_TOKEN=do-ponteiro\nCP_PORT={}\n", up.port())).unwrap();

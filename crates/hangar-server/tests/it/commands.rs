@@ -142,7 +142,7 @@ fn native_probe(root: &Path, mode: &str) -> hangar_server::commands::probe::Nati
     } else {
         "claude"
     });
-    fs::copy(env!("CARGO_BIN_EXE_hangar-commands-fixture"), target).unwrap();
+    crate::copy_executable(std::path::Path::new(env!("CARGO_BIN_EXE_hangar-commands-fixture")), &target);
     let mut env = std::collections::BTreeMap::from([
         ("PATH".into(), bin.to_string_lossy().into_owned()),
         ("HOME".into(), root.to_string_lossy().into_owned()),

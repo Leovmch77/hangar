@@ -101,6 +101,17 @@ pub fn write_executable(path: &std::path::Path, content: impl AsRef<[u8]>) {
     std::fs::remove_file(&source).unwrap();
 }
 
+/// Copia um executável pelo mesmo `install` à parte do `write_executable`, e pelo mesmo motivo; o Windows
+/// não tem ETXTBSY.
+pub fn copy_executable(source: &std::path::Path, path: &std::path::Path) {
+    if cfg!(windows) {
+        std::fs::copy(source, path).unwrap();
+        return;
+    }
+    let status = std::process::Command::new("install").arg("-m").arg("755").arg(source).arg(path).status().unwrap();
+    assert!(status.success(), "install não copiou {}", path.display());
+}
+
 /// Nome de um teste deste executável para o `--exact`: o caminho do módulo de `module_path!()` sem o
 /// do crate, que o libtest não mostra.
 pub fn exact_name(module: &str, test: &str) -> String {
