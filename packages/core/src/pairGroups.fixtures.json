@@ -97,6 +97,20 @@
       ]
     },
     {
+      "name": "par antigo: chave em ordem de ponto de código (bytes UTF-8), com acento e emoji fora do BMP",
+      "identities": { "srv-ａ": "casa", "srv-😀": "lab" },
+      "rows": [
+        { "server": "srv-😀", "name": "🚀", "pair_gid": "gb", "pair_peers": ["casa::joão"] },
+        { "server": "srv-ａ", "name": "joão", "pair_gid": "ga", "pair_peers": ["lab::🚀"] }
+      ],
+      "groups": [
+        { "key": "remote:[\"srv-ａ::joão\",\"srv-😀::🚀\"]", "label": "🚀, joão", "members": [
+          { "kind": "here", "server": "srv-😀", "name": "🚀" },
+          { "kind": "here", "server": "srv-ａ", "name": "joão" }
+        ] }
+      ]
+    },
+    {
       "name": "par antigo com sessão duplicada no destino não se junta",
       "rows": [
         { "server": "srv-a", "name": "x", "pair_gid": "ga", "pair_peers": ["lab::y"] },

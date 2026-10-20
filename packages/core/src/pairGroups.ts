@@ -76,6 +76,16 @@ export function legacyPair(a: GroupRow, b: GroupRow, identities: ReadonlyMap<str
   return points(a, b) && points(b, a);
 }
 
+// Ordem de ponto de código, a mesma dos bytes UTF-8 do `sort` de String no Rust; o `sort()` padrão compara UTF-16.
+function byCodePoint(a: string, b: string): number {
+  const [x, y] = [Array.from(a), Array.from(b)];
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    const diff = x[i].codePointAt(0)! - y[i].codePointAt(0)!;
+    if (diff) return diff;
+  }
+  return x.length - y.length;
+}
+
 /** Grupos de todas as máquinas do app. Membro citado numa máquina sem conexão aqui vira `missing`; com alguma
  * máquina do app sem identificador válido, quem não aparece fica de fora em vez de virar `missing` por palpite. */
 export function groupGlobal(rows: AggSession[], identities: ReadonlyMap<string, string>): GlobalGroup[] {
@@ -98,7 +108,7 @@ export function groupGlobal(rows: AggSession[], identities: ReadonlyMap<string, 
     const server = separator > 0 ? known.get(address.slice(0, separator)) : undefined;
     const peer = server ? sessions.get(`${server}::${address.slice(separator + 2)}`) : null;
     if (peer && sessions.get(sessionKey(row)) === row && legacyPair(row, peer, identities)) {
-      const key = `remote:${JSON.stringify([row, peer].map(sessionKey).sort())}`;
+      const key = `remote:${JSON.stringify([row, peer].map(sessionKey).sort(byCodePoint))}`;
       keys.set(row, key);
       keys.set(peer, key);
       continue;
