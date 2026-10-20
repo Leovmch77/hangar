@@ -113,7 +113,7 @@ pub struct RuntimeEngine {
     /// Canal em processo do hub: estado, erro e prévia saem por ele.
     live:Option<LiveSender>,
     lifecycle:Option<std::sync::Weak<super::gateway::RuntimeRegistry>>,
-    /// Esperas da religação ao mesmo cano (Claude sem terminal).
+    /// Esperas da religação ao mesmo cano (Claude e Codex sem terminal).
     reconnect_waits:super::cano_reconnect::ReconnectWaits,
     /// Nascimento do cano desta vida: sem ele, a religação não prova que o pid ainda é o mesmo processo.
     cano_birth:Option<f64>,
@@ -245,11 +245,11 @@ impl RuntimeEngine {
         Self::refresh_write_sources(&self.core,&mut sources,&guards);
         Ok(effects)
     }
-    /// Socket novo ao mesmo cano do Claude: o retrato dele repõe o estado.
+    /// Socket novo ao mesmo cano sem terminal: o retrato dele repõe o estado; o motor (e as identidades) segue.
     fn reattach(&mut self,snapshot:CanoSnapshot) -> Result<Vec<Effect>,RuntimeError> {
         let mut sources = self.write_sources.lock().map_err(|_|crate::interactions::runtime_error(crate::interactions::InteractionError::Unavailable))?;
         let guards = self.async_guards.lock().map_err(|_|crate::interactions::runtime_error(crate::interactions::InteractionError::Unavailable))?;
-        let result = match &mut self.core { Core::Claude(core)=>core.reattach(snapshot),Core::Codex(_)=>Err(failure("reattach_provider")) };
+        let result = match &mut self.core { Core::Claude(core)=>core.reattach(snapshot),Core::Codex(core)=>core.reattach(snapshot) };
         Self::refresh_write_sources(&self.core,&mut sources,&guards);
         result
     }
@@ -1287,6 +1287,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                     }
                     // Ação da pessoa: nova rodada de tentativas.
                     (respawn.failures,respawn.next_at,respawn.user) = (0,None,Some((operation_id.clone(),reply)));
+                    // Socket fora: a subida passa a ser dona do processo; a tentativa em voo sai e volta depois dela.
+                    if cano_lost { reconnect.cancel(); }
                     // O Python recusa como velho o campo que difere da vista salva: ela vai com o valor novo.
                     let saved = patch.as_object().map(|fields|{
                         let mut view = engine.view();
@@ -1718,6 +1720,11 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                             effects.extend(engine.set_problem("codex_headless_nao_subiu",Some(failure.message)));
                             effects.extend(after_exit(&mut respawn,&mut engine,&target,clock(start).monotonic_s,closed.load(Ordering::Acquire)));
                         }
+                        // Pedida no meio da queda do socket: a religação, parada durante a subida, recomeça (cano morto
+                        // vira queda pela tentativa ou pela conferência).
+                        if cano_lost && reconnect.task.is_none() && reconnect.next_at.is_none() {
+                            reconnect.schedule(clock(start).monotonic_s,stall_due.is_some() || stall_shown);
+                        }
                     }
                 }
             }
@@ -1773,20 +1780,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                         effects.extend(engine.set_problem(super::codex_terminal::DISCONNECTED,Some(failure.message)));
                         if let Some(adoption) = &adoption { adoption.cell.wake(); }
                     }
-                    // Daqui para baixo, o cano do Claude sem terminal.
+                    // Daqui para baixo, o cano do Claude e do Codex sem terminal.
                     _ if adoption.is_some() || !current || !cano_lost => {},
-                    // Codex sem terminal: termina como a subida que acha o cano vivo (motor renovado, retrato e
-                    // inicialização de novo), sem contar subida. Subida pedida em curso é dona do processo: espera.
-                    Reconnection::Connected(RuntimeConnection::Cano(connection)) if target.provider == "codex" => {
-                        if let Some(rc) = connection.snapshot.saiu { cano_gone = Some(Some(rc)); continue; }
-                        if respawn.task.is_some() { reconnect.schedule(clock(start).monotonic_s,stall_due.is_some() || stall_shown); continue; }
-                        transport_epoch += 1;
-                        reconnect.connected();
-                        (cano_lost,cano_check_at,stall_due,stall_shown) = (false,None,None,false);
-                        tracing::info!(key=%target.key,session=%target.name,"Codex sem terminal religado ao mesmo cano");
-                        let back = Relaunched { target:target.clone(),spawned:false,connection,patch:Value::Null };
-                        respawn.task = Some(tokio::spawn(async move { Ok(back) }));
-                    }
                     Reconnection::Connected(RuntimeConnection::Cano(connection)) => {
                         let snapshot = connection.snapshot.clone();
                         // Saiu entre a queda e a volta: é queda, com o código que o cano guardou.
@@ -1796,9 +1791,10 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                         io_open = true;
                         reconnect.connected();
                         (cano_lost,cano_check_at,stall_due) = (false,None,None);
-                        tracing::info!(key=%target.key,session=%target.name,"Claude sem terminal religado ao mesmo cano");
+                        tracing::info!(key=%target.key,session=%target.name,provider=%target.provider,"sessão sem terminal religada ao mesmo cano");
                         effects.extend(engine.reattach(snapshot)?);
-                        if std::mem::take(&mut boot_pending) {
+                        // O Codex abre a mesma thread de novo na conexão nova (o `initialize` repetido é sucesso).
+                        if std::mem::take(&mut boot_pending) || target.provider == "codex" {
                             let id = format!("bootstrap:{}:{}:{}",target.key,target.generation,unique());
                             match queue.exec(target.generation,&format!("prepare:{id}"),clock(start),Action::Prepare { id:id.clone(),payload:json!({"kind":"bootstrap"}),entry_id:None }).await {
                                 Ok(_)=>effects.extend(engine.initialize(id)?),
@@ -1817,17 +1813,17 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                     }
                     Reconnection::Connected(RuntimeConnection::WebSocket(_)) => {},
                     Reconnection::Retry(failure) => {
-                        if crate::warn_limit::allow(Some(&target.key),"claude_reconnect") {
-                            tracing::info!(key=%target.key,session=%target.name,code=%failure.code,"religação ao cano do Claude falhou; tentando de novo");
+                        if crate::warn_limit::allow(Some(&target.key),"cano_reconnect") {
+                            tracing::info!(key=%target.key,session=%target.name,provider=%target.provider,code=%failure.code,"religação ao cano falhou; tentando de novo");
                         }
                         reconnect.schedule(clock(start).monotonic_s,stall_due.is_some() || stall_shown);
                     }
                     Reconnection::Gone(_) => cano_gone = Some(None),
                     // Sem prova de que o pid é o mesmo processo, para de tentar; a sessão segue e a fila espera.
                     Reconnection::Stopped(failure) => {
-                        tracing::warn!(key=%target.key,session=%target.name,code=%failure.code,reason=%failure.message,"religação ao cano do Claude parou");
+                        tracing::warn!(key=%target.key,session=%target.name,provider=%target.provider,code=%failure.code,reason=%failure.message,"religação ao cano parou");
                         if let Some(policy) = &engine.policy {
-                            policy.diag.report("rust.claude_reconnect_stopped",&target.name,"claude_reconnect_stopped","a religação ao cano do Claude parou: falta o que prova que o processo é o desta vida");
+                            policy.diag.report("rust.cano_reconnect_stopped",&target.name,"cano_reconnect_stopped","a religação ao cano parou: falta o que prova que o processo é o desta vida");
                         }
                         reconnect.cancel();
                     }

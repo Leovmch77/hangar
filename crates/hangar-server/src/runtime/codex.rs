@@ -983,6 +983,24 @@ impl Engine {
         effects
     }
 
+    /// Sem terminal, socket novo ao MESMO cano: o motor segue (uso, limites, avisos e a identidade dos cartões).
+    /// Sai o pedido que o cano não reapresenta (resolvido durante a queda); o reapresentado igual mantém a época,
+    /// e com ela o ID do cartão. Resposta em curso que se perdeu volta a ser respondível.
+    pub fn reattach(&mut self,snapshot:CanoSnapshot) -> Result<Vec<Effect>,RuntimeError> {
+        let mut effects = Vec::new();
+        let presented:Vec<Value> = snapshot.pendentes.iter().filter_map(|raw|serde_json::from_str(raw).ok()).collect();
+        let resolved:Vec<RequestId> = self.server_requests.iter().filter(|(_,request)|!presented.contains(request)).map(|(id,_)|id.clone()).collect();
+        for id in &resolved { self.request_epochs.remove(id); }
+        self.server_requests.retain(|(id,_)|!resolved.contains(id));
+        self.answering.clear();
+        // O processo é o mesmo: a abertura não reaplica modo e esforço, e o turno que rodava é conferido.
+        self.fresh_process = false;
+        self.was_working = self.in_progress;
+        self.clear_preview(&mut effects);
+        effects.extend(self.hydrate(snapshot)?);
+        Ok(effects)
+    }
+
     pub fn bootstrap(&mut self,reconnect:bool,operation_id:String) -> Result<Vec<Effect>,RuntimeError> {
         // Terminal adota a thread que a TUI abriu: nunca cria conversa nem sobe outro processo.
         if !self.headless && self.thread_id.is_empty() { return Err(error("Codex com terminal sem conversa identificada")); }
