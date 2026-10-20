@@ -25,6 +25,7 @@ use hangar_server::list::bridge::{ListBridge, ListEnv, parse_dirs};
 use hangar_server::list::facts::FactsClient;
 use hangar_server::list::mux::Mux;
 use hangar_server::routes::{AppState, router};
+use hangar_server::runtime::gateway::RuntimeRegistry;
 use hangar_server::share::caller::{GuestGrant, guest_allowed};
 use hangar_server::share::store::Kind;
 use serde_json::{Value, json};
@@ -32,7 +33,7 @@ use serde_json::{Value, json};
 const NAMES: [&str; 4] = ["s0", "s1", "s2", "s3"];
 
 struct Machine { addr: SocketAddr, python: Arc<fake::Fake>, pair: PathBuf, root: PathBuf, state: Arc<AppState>,
-    share: Arc<hangar_server::share::ShareState>, changes: Arc<AtomicUsize> }
+    share: Arc<hangar_server::share::ShareState>, changes: Arc<AtomicUsize>, runtime: Arc<RuntimeRegistry> }
 
 async fn machine(root: &Path, id: &str) -> Machine {
     let script = list_support::sessions(root, NAMES.len());
@@ -54,12 +55,14 @@ async fn machine(root: &Path, id: &str) -> Machine {
     state.peers = Arc::new(PeerClient::new(PeerBook::new(Some(root.join("peers.json")))));
     let share = crate::share_pair_routes::share_state(&root.join("shares.json"), &pair, Arc::new(Mutex::new(1_000.0)));
     state.share = Some(share.clone());
+    let runtime = Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(), "s".into(), "i".into()));
+    assert!(state.state.runtime.set(runtime.clone()).is_ok());
     let state = Arc::new(state);
     let app = router(state.clone()).into_make_service_with_connect_info::<SocketAddr>();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    Machine { addr, python, pair, root: root.to_path_buf(), state, share, changes }
+    Machine { addr, python, pair, root: root.to_path_buf(), state, share, changes, runtime }
 }
 
 /// Endereço que recusa conexão: a máquina fora do ar.
@@ -463,4 +466,50 @@ async fn connect_forwarded_groups_routes_answer_with_code() {
     assert_eq!((status, got["detail"]["code"].clone()), (404, json!("erro_sessao_sem_grupo")));
     let (status, got) = body(bridged(reqwest::Method::GET, "/api/groups/nada").header("x-hangar-forwarded-guest", "1").send().await.unwrap()).await;
     assert_eq!((status, got["detail"]["code"].clone()), (403, json!("erro_fora_do_convite")));
+}
+
+/// Renomear pendente nesta máquina vence o envio da dona com o nome velho.
+#[tokio::test(flavor = "multi_thread")]
+async fn pending_rename_wins_over_old_push() {
+    let n = net().await;
+    peers(&n.lab, &[("casa", closed_port().await)]);
+    let old = json!([member("casa", "s0"), member("lab", "s1")]);
+    assert_eq!(push(&n.lab, "g1", json!({"protocol": 1, "owner": "casa", "version": 1, "members": old, "joining": ["s1"]})).await.0, 200);
+    // O que o renomear da Task 9 faz: aplica aqui e deixa o `Rename` na fila da dona.
+    n.lab.state.groups.clone().unwrap().rename("s1", "s2").await.unwrap();
+    federation::existing(&n.lab.pair).unwrap().outbox().enqueue(vec![OutboxItem::Rename { owner: "casa".into(), gid: "g1".into(),
+        from: "s1".into(), to: "s2".into(), origin: "lab".into() }]).unwrap();
+    let (status, answer) = push(&n.lab, "g1", json!({"protocol": 1, "owner": "casa", "version": 2, "task": "t2", "members": old, "joining": []})).await;
+    assert_eq!(status, 200, "{answer}");
+    let s2 = sidecar(&n.lab, "s2").expect("o nome novo continua no grupo");
+    assert_eq!((s2["task"].clone(), s2["fed"]["version"].clone()), (json!("t2"), json!(2)));
+    assert!(sidecar(&n.lab, "s1").is_none(), "o nome velho não volta");
+}
+
+/// Quem inicia solta o passe de `s0` antes de esperar a dona: um fechamento da porta (rename,
+/// troca de conta) não fica preso atrás de outra máquina.
+#[tokio::test(flavor = "multi_thread")]
+async fn initiator_releases_ingress_before_calling_the_owner() {
+    let n = net().await;
+    peers(&n.casa, &[("lab", n.lab.addr), ("vm", closed_port().await)]);
+    let addr = n.casa.addr;
+    let asked = tokio::spawn(async move { call(addr, "POST", "/api/sessions/s0/pair", Some(&json!({"peers": ["lab::s1", "vm::s2"]}))).await });
+    // O registro gravado = a dona já espera vm (1,5 s).
+    let pair_dir = n.casa.pair.clone();
+    fake::wait_until(move || std::fs::read_dir(pair_dir.join("groups")).is_ok_and(|d| d.flatten()
+        .any(|e| { let f = e.file_name().into_string().unwrap(); f.ends_with(".json") && !f.starts_with("outbox") && !f.starts_with("self") }))).await;
+    n.casa.runtime.ingress().close("s0", Duration::from_millis(300)).await.expect("o passe de s0 já saiu");
+    n.casa.runtime.ingress().open("s0");
+    assert_eq!(asked.await.unwrap().0, 200);
+}
+
+/// O `PUT` da dona não passa pela porta da sessão: com ela retida, o membro entra mesmo assim.
+#[tokio::test(flavor = "multi_thread")]
+async fn participant_put_does_not_enter_the_session_gate() {
+    let n = net().await;
+    n.lab.runtime.ingress().hold("s1", Duration::from_millis(10)).await.unwrap();
+    let (status, answer) = push(&n.lab, "g1", json!({"protocol": 1, "owner": "casa", "version": 1, "members": [member("casa", "s0"), member("lab", "s1")],
+        "joining": ["s1"]})).await;
+    assert_eq!(status, 200, "{answer}");
+    assert!(sidecar(&n.lab, "s1").is_some());
 }
