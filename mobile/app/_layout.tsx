@@ -18,6 +18,8 @@ import { Toaster, toast } from '../src/ui/Toast';
 import { LiveVoiceRoot } from '../src/features/voice/LiveVoiceRoot';
 import { setFatalErrorRoute, takeFatalErrorNotice } from '../src/net/fatalErrors';
 import * as m from '../src/paraglide/messages';
+import { registerExpoPush, useNotificationNavigation } from '../src/features/push/expoPush';
+import { registrarDiag } from '@hangar/core';
 
 configureCore();
 aplicarTemaSalvo();
@@ -57,6 +59,16 @@ export default function Layout() {
     const subscription = AppState.addEventListener('change', apply);
     return () => subscription.remove();
   }, []);
+
+  useNotificationNavigation();
+  // Só quando o conjunto de servidores muda: a lista se regrava por outros motivos (rede local aprendida).
+  const pushKey = servers.map((s) => s.id).join('\n');
+  useEffect(() => {
+    if (!ready || !pushKey) return;
+    registerExpoPush(useServers.getState().servers).catch((e: unknown) => {
+      registrarDiag({ evento: 'push.register_failed', nivel: 'erro', codigo: 'expo_push_register_failed', detalhe: e instanceof Error ? e.message : String(e) });
+    });
+  }, [ready, pushKey]);
 
   useEffect(() => {
     if (!ready) return;

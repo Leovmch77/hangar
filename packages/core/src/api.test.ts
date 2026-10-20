@@ -1488,3 +1488,24 @@ describe('pedido de atualização e reinício', () => {
     await expect(request()).resolves.toEqual({ ok: true, pid: 42 });
   });
 });
+
+describe('subscribeExpoPushForServer', () => {
+  it('posta o token Expo no servidor indicado, com o corpo pedido', async () => {
+    const { subscribeExpoPushForServer } = await import('./api');
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"ok":true}'));
+    const body = { token: 'ExponentPushToken[x]', server_id: 'b', label: 'Casa', locale: 'pt' };
+    await subscribeExpoPushForServer({ id: 'b', label: 'Casa', baseUrl: 'https://b.test', token: 'token-b' }, body);
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith('https://b.test/api/push/expo/subscribe', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify(body),
+      headers: expect.objectContaining({ Authorization: 'Bearer token-b' }),
+    }));
+  });
+
+  it('falha quando o servidor recusa', async () => {
+    const { subscribeExpoPushForServer } = await import('./api');
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"detail":"x"}', { status: 404 }));
+    await expect(subscribeExpoPushForServer({ id: 'b', label: 'Casa', baseUrl: 'https://b.test', token: 'token-b' },
+      { token: 't', server_id: 'b', label: 'Casa', locale: 'pt' })).rejects.toThrow();
+  });
+});
