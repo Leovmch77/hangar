@@ -8,6 +8,7 @@ use std::io::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::to_bytes;
 use axum::extract::{ConnectInfo, Request, State};
@@ -31,9 +32,14 @@ use crate::session_write::{BODY_LIMIT, detail_body, invalid_body, json_response}
 
 const OWNER_DOWN: &str = "erro_grupo_dono_indisponivel";
 
-/// Quanto a dona espera cada máquina receber o aviso. Bem menor que os 8 s de leitura do
-/// `PeerClient` de quem pediu: a resposta, com `pulados` certo, chega antes de ele desistir da dona.
-pub const DELIVER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Quanto a dona espera cada máquina, e as sessões dela, receberem o aviso (tudo em paralelo).
+/// Menor que `peers::OWNER_WAIT_TIMEOUT` de quem pediu: a resposta chega antes de ele desistir.
+pub const DELIVER_WAIT: Duration = Duration::from_secs(5);
+/// Quanto cada máquina espera as sessões dela no `deliver`: abaixo do `DELIVER_WAIT` da dona, para
+/// responder com as falhas dela antes de a dona dar a máquina inteira por pulada.
+fn session_wait(deliver: Duration) -> Duration { deliver * 3 / 5 }
+const _: () = assert!(DELIVER_WAIT.as_secs() < super::peers::OWNER_WAIT_TIMEOUT.as_secs()
+    && super::federation::JOIN_WAIT.as_secs() < super::peers::OWNER_WAIT_TIMEOUT.as_secs());
 
 static DELIVER_WAITS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<PathBuf, std::time::Duration>>> =
     std::sync::LazyLock::new(Default::default);
@@ -101,32 +107,38 @@ impl Notice {
 }
 
 /// Entrega às sessões daqui do grupo `gid` (menos quem mandou) e, se o aviso não veio de fora, aos
-/// pares de fora daqui. Devolve quem não recebeu: nome daqui ou endereço de fora, com o erro.
-async fn deliver_here(st: &AppState, groups: &GroupService, gid: &str, n: &Notice) -> Result<Vec<(String, Value)>, Refusal> {
+/// pares de fora daqui, todos ao mesmo tempo e cada um no máximo `wait`. Devolve quem não recebeu
+/// (ou não confirmou no prazo): nome daqui ou endereço de fora, com o erro.
+async fn deliver_here(st: &AppState, groups: &GroupService, gid: &str, n: &Notice, wait: Duration) -> Result<Vec<(String, Value)>, Refusal> {
     use crate::share::pair_routes::{Direct, notice_key, notice_mark, notice_seen, notify_outside};
+    use futures_util::FutureExt as _;
     let me = groups.server_id();
     let all = groups.sidecars().await.map_err(|e| { tracing::error!(code = "groups_store_failed", error = %e, "groups: sidecars ilegíveis no aviso"); unavailable("groups_store_failed") })?;
     let mine: Vec<(String, Sidecar)> = all.into_iter().filter(|(_, s)| s.gid == gid && s.fed.is_some()).collect();
     let line = n.line(me);
-    let mut failed = Vec::new();
+    let mut sends: Vec<(String, futures_util::future::BoxFuture<'_, Result<(), Value>>)> = Vec::new();
     for (name, _) in &mine {
         if !n.from_outside && n.origin == me && *name == n.sender { continue; }
         // O mesmo aviso pode chegar direto do par de fora e pela dona: entra uma vez.
         let key = notice_key(me, &n.notice, name);
         if notice_seen(&key) { continue; }
-        match deliver_text(st, name, &line).await {
-            Ok(()) => notice_mark(key),
-            Err(e) => failed.push((name.clone(), e)),
+        let line = &line;
+        sends.push((name.clone(), async move { deliver_text(st, name, line).await.map(|()| notice_mark(key)) }.boxed()));
+    }
+    if let Some(share) = st.share.as_ref().filter(|_| !n.from_outside) {
+        let outside = outside_addresses(st);
+        let addresses: BTreeSet<&String> = mine.iter().flat_map(|(_, s)| s.peers.iter()).filter(|p| outside.contains(*p)).collect();
+        for rec in addresses.into_iter().filter_map(|a| share.pairs.by_address(a)) {
+            let address = rec.address();
+            sends.push((address, async move { notify_outside(st, share, &Direct, &rec, &n.sender, &n.text, &n.notice).await }.boxed()));
         }
     }
-    let Some(share) = st.share.as_ref().filter(|_| !n.from_outside) else { return Ok(failed) };
-    let outside = outside_addresses(st);
-    let addresses: BTreeSet<&String> = mine.iter().flat_map(|(_, s)| s.peers.iter()).filter(|p| outside.contains(*p)).collect();
-    for address in addresses {
-        let Some(rec) = share.pairs.by_address(address) else { continue };
-        if let Err(e) = notify_outside(st, share, &Direct, &rec, &n.sender, &n.text, &n.notice).await { failed.push((address.clone(), e)); }
-    }
-    Ok(failed)
+    // shortcut: a entrega que estoura o prazo é abandonada e vai como pulada, mesmo se chegar depois.
+    let done = futures_util::future::join_all(sends.into_iter().map(|(label, send)| async move {
+        let late = || envelope("erro_envio_falhou", "não deu pra enviar: groups_notice_timeout".into(), json!({"erro": "groups_notice_timeout"}));
+        (label, tokio::time::timeout(wait, send).await.unwrap_or_else(|_| Err(late())))
+    })).await;
+    Ok(done.into_iter().filter_map(|(label, sent)| sent.err().map(|e| (label, e))).collect())
 }
 
 /// Na dona: limite de tempestade do grupo e o aviso a cada máquina dele menos a de origem (que
@@ -143,11 +155,14 @@ async fn owner_fanout(st: &AppState, groups: &GroupService, gid: &str, mut n: No
         .collect::<BTreeSet<_>>().into_iter().collect();
     let (path, body) = (format!("/api/groups/{}/deliver", segment(gid)), n.body());
     let (wait, path, body) = (deliver_wait(groups), &path, &body);
-    let answers = futures_util::future::join_all(servers.iter().map(|s| async move {
-        tokio::time::timeout(wait, st.peers.call_group(s, reqwest::Method::POST, &path, Some(&body))).await
+    let remote = futures_util::future::join_all(servers.iter().map(|s| async move {
+        tokio::time::timeout(wait, st.peers.call_group(s, reqwest::Method::POST, path, Some(body))).await
             .unwrap_or_else(|_| Err(PeerError::Transport(format!("{s} não respondeu ao aviso em {} s", wait.as_secs_f32()))))
-    })).await;
-    let mut skipped = Vec::new();
+    }));
+    // As sessões daqui ao mesmo tempo que as outras máquinas, no mesmo prazo; a de origem entrega as dela.
+    let here = async { if n.origin == me { Ok(Vec::new()) } else { deliver_here(st, groups, gid, &n, wait).await } };
+    let (answers, here) = tokio::join!(remote, here);
+    let mut skipped: Vec<String> = here?.into_iter().map(|(label, _)| qualify(&me, &label)).collect();
     for (server, answer) in servers.iter().zip(answers) {
         match answer {
             Ok(v) => skipped.extend(v["failed"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|f| qualify(server, f))),
@@ -156,9 +171,6 @@ async fn owner_fanout(st: &AppState, groups: &GroupService, gid: &str, mut n: No
                 skipped.extend(record.members.iter().filter(|m| m.server == *server).map(|m| format!("{}::{}", m.server, m.name)));
             }
         }
-    }
-    if n.origin != me {
-        skipped.extend(deliver_here(st, groups, gid, &n).await?.into_iter().map(|(label, _)| qualify(&me, &label)));
     }
     Ok((n.notice, skipped))
 }
@@ -177,7 +189,7 @@ pub(super) async fn group_message(asked: &Asked, link: &Sidecar, text: String) -
     } else {
         let mut ask = n.body();
         ask["op"] = json!("message");
-        match asked.st.peers.call_group(&owner, reqwest::Method::POST, &format!("/api/groups/{}/ops", segment(&link.gid)), Some(&ask)).await {
+        match asked.st.peers.call_group_waiting(&owner, &format!("/api/groups/{}/ops", segment(&link.gid)), &ask).await {
             Ok(v) => {
                 n.notice = v["notice"].as_str().unwrap_or_default().to_owned();
                 v["pulados"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()
@@ -195,7 +207,7 @@ pub(super) async fn group_message(asked: &Asked, link: &Sidecar, text: String) -
         }
     };
     if n.notice.is_empty() { n.notice = crate::mods::state::random_hex(8); }
-    let failed = match deliver_here(&asked.st, &asked.groups, &link.gid, &n).await {
+    let failed = match deliver_here(&asked.st, &asked.groups, &link.gid, &n, deliver_wait(&asked.groups)).await {
         Ok(failed) => failed,
         Err(Refusal(status, body)) => return asked.reply(status, body),
     };
@@ -227,7 +239,7 @@ pub fn relay_outside(st: Arc<AppState>, anchor: String, sender: String, text: St
         let done = if owner == me { owner_fanout(&st, &groups, &link.gid, n).await.map(|(_, skipped)| skipped.len()) } else {
             let mut ask = n.body();
             ask["op"] = json!("message");
-            st.peers.call_group(&owner, reqwest::Method::POST, &format!("/api/groups/{}/ops", segment(&link.gid)), Some(&ask)).await
+            st.peers.call_group_waiting(&owner, &format!("/api/groups/{}/ops", segment(&link.gid)), &ask).await
                 .map(|v| v["pulados"].as_array().map_or(0, Vec::len)).map_err(|e| from_owner(&owner, e))
         };
         match done {
@@ -291,7 +303,7 @@ pub(super) async fn deliver(State(st): State<Arc<AppState>>, ConnectInfo(peer): 
     let me = m.groups.server_id().to_owned();
     let known = m.groups.sidecars().await.map(|all| all.iter().any(|(_, s)| s.gid == m.gid && s.fed.is_some()));
     let result = match known {
-        Ok(true) => deliver_here(&m.st, &m.groups, &m.gid, &n).await
+        Ok(true) => deliver_here(&m.st, &m.groups, &m.gid, &n, session_wait(deliver_wait(&m.groups))).await
             .map(|failed| json!({"protocol": PROTOCOL, "failed": failed.into_iter().map(|(label, _)| qualify(&me, &label)).collect::<Vec<_>>()})),
         Ok(false) => Err(missing(&m.gid)),
         Err(_) => Err(unavailable("groups_store_failed")),

@@ -1099,7 +1099,7 @@ pub(super) async fn pair(asked: Asked, held: Option<IngressPass>, others: Vec<St
     } else {
         if asked.st.peers.base_url(&owner).is_none() { return respond(unregistered(&owner)); }
         let body = json!({"op": "join", "protocol": PROTOCOL, "origin": me, "members": candidates, "task": task, "replace_task": replace_task, "expected": expected});
-        match asked.st.peers.call_group(&owner, reqwest::Method::POST, &format!("/api/groups/{}/ops", segment(&gid)), Some(&body)).await {
+        match asked.st.peers.call_group_waiting(&owner, &format!("/api/groups/{}/ops", segment(&gid)), &body).await {
             Ok(done) => serde_json::from_value::<RemoteDone>(done).map(|d| JoinDone { gid: d.gid, version: d.version, task: d.task, members: d.members,
                 unconfirmed: d.unconfirmed, access_failed: d.access_failed })
                 .map_err(|_| no(StatusCode::BAD_GATEWAY, "erro_grupo_dono_indisponivel", "a dona respondeu fora do formato", json!({"servidor": owner}))),

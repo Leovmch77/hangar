@@ -275,6 +275,68 @@ async fn slow_machine_is_skipped_before_the_origin_gives_up() {
     reach(&n.casa, &["s0", "s1"], 2).await;
 }
 
+/// Sessão da própria dona que não recebe a tempo: a dona responde no prazo dela, com essas sessões
+/// em `pulados`, e as outras máquinas recebem em paralelo.
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_owner_session_is_skipped_in_time() {
+    let n = net().await;
+    group(&n).await;
+    federation_deliver_wait(&n.casa, Duration::from_secs(1));
+    n.casa.python.hold_input(true);
+    let started = std::time::Instant::now();
+    let (status, body) = say(&n.lab, "s2", "oi").await;
+    let took = started.elapsed();
+    n.casa.python.hold_input(false);
+    n.casa.python.release.notify_waiters();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!((body["pulados"].clone(), body["warning"].clone()), (json!(["casa::s0", "casa::s1"]), Value::Null), "{body}");
+    assert!(took < Duration::from_secs(5), "a dona não espera a sessão lenta além do prazo: {took:?}");
+    reach(&n.vm, &["s3"], 2).await;
+}
+
+/// `vm` atrás de um repasse que recusa o primeiro pedido com 503 de modo `python` (a fila tenta de
+/// novo depois da escada) e entrega os outros: a confirmação dela chega à dona depois de 8 s.
+async fn first_refused(target: SocketAddr) -> SocketAddr {
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let app = axum::Router::new().fallback(move |req: axum::extract::Request| {
+        let seen = seen.clone();
+        async move {
+            use axum::response::IntoResponse;
+            if seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return (axum::http::StatusCode::SERVICE_UNAVAILABLE, [("content-type", "application/json")],
+                    json!({"detail": {"code": "groups_need_rust_server"}}).to_string()).into_response();
+            }
+            let (parts, body) = req.into_parts();
+            let bytes = axum::body::to_bytes(body, 1 << 20).await.unwrap();
+            let resp = client().request(parts.method, format!("http://{target}{}", parts.uri.path())).bearer_auth(OWNER)
+                .header("content-type", "application/json").body(bytes).send().await.unwrap();
+            let status = resp.status();
+            (status, [("content-type", "application/json")], resp.bytes().await.unwrap()).into_response()
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
+}
+
+/// Entrada pedida por uma participante com um membro que confirma perto do prazo da dona: quem pediu
+/// espera a dona e recebe o resultado real, não "dona indisponível" aos 8 s.
+#[tokio::test(flavor = "multi_thread")]
+async fn join_from_participant_with_slow_member_reports_the_real_outcome() {
+    let n = net().await;
+    federation::configure(&n.casa.pair, Duration::from_secs(11), vec![Duration::from_secs(9)]);
+    let (status, body) = call(n.casa.addr, "POST", "/api/sessions/s0/pair", Some(&json!({"peers": ["lab::s1"]}))).await;
+    assert_eq!(status, 200, "{body}");
+    peers(&n.casa, &[("lab", n.lab.addr), ("vm", first_refused(n.vm.addr).await)]);
+    let started = std::time::Instant::now();
+    let (status, body) = call(n.lab.addr, "POST", "/api/sessions/s2/pair", Some(&json!({"peers": ["s1", "vm::s3"]}))).await;
+    assert!(started.elapsed() > Duration::from_secs(8), "a confirmação de vm chega depois de 8 s: {:?}", started.elapsed());
+    assert_eq!(status, 200, "{body}");
+    assert_eq!((body["owner"].clone(), body["warning"].clone()), (json!("casa"), Value::Null), "{body}");
+    assert!(body["members"].as_array().unwrap().contains(&json!("vm::s3")), "{body}");
+}
+
 fn federation_deliver_wait(m: &Machine, wait: Duration) {
     hangar_server::groups::fed_notice::configure_deliver_wait(&m.pair, wait);
 }

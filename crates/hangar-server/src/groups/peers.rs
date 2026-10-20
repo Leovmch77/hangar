@@ -10,6 +10,10 @@ use crate::transcript::py::py_str;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(8);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(16);
+/// Leitura e prazo total do pedido à dona que espera outras máquinas antes de responder (`op: join`
+/// espera até `federation::JOIN_WAIT`, `op: message` até `fed_notice::DELIVER_WAIT`): maior que as
+/// duas, senão quem pede desiste antes do resultado e relata o contrário do que a dona fez.
+pub const OWNER_WAIT_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_BODY: usize = 1 << 20;
 /// Texto do erro de sucesso acima de `MAX_BODY`; quem lê pode pedir menos.
 pub const TOO_LARGE: &str = "resposta maior que 1 MiB";
@@ -109,10 +113,10 @@ impl PeerError {
     }
 }
 
-pub struct PeerClient { book: Arc<PeerBook>, http: OnceLock<reqwest::Client> }
+pub struct PeerClient { book: Arc<PeerBook>, http: OnceLock<reqwest::Client>, waiting: OnceLock<reqwest::Client> }
 
 impl PeerClient {
-    pub fn new(book: PeerBook) -> Self { Self { book: Arc::new(book), http: OnceLock::new() } }
+    pub fn new(book: PeerBook) -> Self { Self { book: Arc::new(book), http: OnceLock::new(), waiting: OnceLock::new() } }
 
     pub fn enabled_ids(&self) -> Vec<String> { self.book.enabled_ids() }
 
@@ -138,26 +142,43 @@ impl PeerClient {
     /// Como `call`, com o status 2xx exato.
     pub async fn call_status(&self, server: &str, method: reqwest::Method, path: &str, body: Option<&Value>)
         -> Result<(u16, Option<Value>), PeerError> {
+        self.send(false, server, method, path, body).await
+    }
+
+    async fn send(&self, waiting: bool, server: &str, method: reqwest::Method, path: &str, body: Option<&Value>)
+        -> Result<(u16, Option<Value>), PeerError> {
         let book = self.book.clone();
         let key = server.to_owned();
         let cfg = tokio::task::spawn_blocking(move || book.get(&key)).await.ok().flatten().ok_or(PeerError::Unknown)?;
-        let http = match self.http.get() {
+        let (slot, read, total) = if waiting { (&self.waiting, OWNER_WAIT_TIMEOUT, OWNER_WAIT_TIMEOUT) } else { (&self.http, READ_TIMEOUT, TOTAL_TIMEOUT) };
+        let http = match slot.get() {
             Some(http) => http,
             None => {
-                let built = client(reqwest::Client::builder()).map_err(|e| transport(server, &e))?;
-                self.http.get_or_init(|| built)
+                let built = reqwest::Client::builder().connect_timeout(READ_TIMEOUT).read_timeout(read).timeout(total).build()
+                    .map_err(|e| transport(server, &e))?;
+                slot.get_or_init(|| built)
             }
         };
         request(http, server, &format!("{}{path}", cfg.base_url), Some(&cfg.token), method, body).await
+    }
+
+    /// `call_group` de um pedido à dona que espera outras máquinas (`op: join`, `op: message`), com
+    /// `OWNER_WAIT_TIMEOUT`.
+    pub async fn call_group_waiting(&self, server: &str, path: &str, body: &Value) -> Result<Value, PeerError> {
+        self.group(true, server, reqwest::Method::POST, path, Some(body)).await
     }
 
     /// Chamada a `/api/groups/*`: além do `call`, confere quem atendeu e se a máquina conhece
     /// grupos entre máquinas. Versão antiga só por sinal próprio: 404 sem `code` (a rota não
     /// existe lá) ou `GET /api/groups/{gid}` sem `protocol`; 404 com código é recusa comum.
     pub async fn call_group(&self, server: &str, method: reqwest::Method, path: &str, body: Option<&Value>) -> Result<Value, PeerError> {
+        self.group(false, server, method, path, body).await
+    }
+
+    async fn group(&self, waiting: bool, server: &str, method: reqwest::Method, path: &str, body: Option<&Value>) -> Result<Value, PeerError> {
         let group_get = method == reqwest::Method::GET
             && path.strip_prefix("/api/groups/").is_some_and(|rest| !rest.is_empty() && !rest.contains('/'));
-        let answer = match self.call(server, method, path, body).await {
+        let answer = match self.send(waiting, server, method, path, body).await.map(|(_, v)| v) {
             Err(PeerError::Refused { status: 404, detail }) if path.starts_with("/api/groups/") && detail.get("code").is_none() => {
                 return Err(PeerError::OldVersion);
             }
