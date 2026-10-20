@@ -327,6 +327,8 @@ mod tests {
         let future=(crate::accounts::quotas::now()+3600.0)*1000.0;
         write(json!({"accessToken":"a","expiresAt":future}));
         assert!(crate::accounts::claude_refresh::has_login(dir.path()));
+        write(json!({"accessToken":"a"}));
+        assert!(crate::accounts::claude_refresh::has_login(dir.path()), "sem prazo informado não é falta de login");
         write(json!({"accessToken":"a","expiresAt":1000,"refreshToken":"r"}));
         assert!(crate::accounts::claude_refresh::has_login(dir.path()));
         write(json!({"accessToken":"a","expiresAt":1000,"refreshToken":"r","refreshTokenExpiresAt":1000}));
