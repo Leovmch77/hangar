@@ -3,6 +3,7 @@ pub mod bridge;
 pub mod context_cmd;
 pub mod deliver;
 pub mod exit;
+pub mod federation;
 pub mod legacy;
 pub mod link_return;
 pub mod link_state;

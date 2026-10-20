@@ -261,7 +261,7 @@ async fn guest_goes_to_python_and_cross_machine_stays_in_rust() {
     assert_eq!((status, body), (200, json!("from-python")));
     // Sem `peers.json`, a máquina `lab` é desconhecida: recusa limpa, nada gravado.
     let (status, body) = call(srv.addr, "POST", "s0/pair", Some(&json!({"peers": ["lab::x"]})), OWNER).await;
-    assert_eq!((status, body["detail"]["code"].clone()), (502, json!("erro_pareamento_rejeitado")));
+    assert_eq!((status, body["detail"]["code"].clone()), (409, json!("erro_grupo_peer_nao_registrado")));
     assert!(!srv.pair.join("s0.json").exists());
 }
 
@@ -321,10 +321,12 @@ async fn local_session_joins_a_group_with_an_outside_member() {
     let (status, body) = call(srv.addr, "POST", "s3/pair", Some(&json!({"peers": ["s0"], "orq": true})), OWNER).await;
     assert_eq!((status, body["detail"]["code"].clone()), (409, json!("erro_grupo_orq_par_externo")));
     assert!(srv.groups.link("s3").await.unwrap().is_none());
-    let (status, body) = call(srv.addr, "POST", "s3/pair", Some(&json!({"peers": ["lab::x", "s0"]})), OWNER).await;
-    assert_eq!((status, body["detail"]["code"].clone()), (400, json!("erro_pareamento_cross_1_1")));
-    let (status, body) = call(srv.addr, "POST", "s0/pair", Some(&json!({"peers": ["lab::x"]})), OWNER).await;
-    assert_eq!((status, body["detail"]["code"].clone()), (400, json!("erro_pareamento_mistura_cross")));
+    // Máquina própria agora entra pelo grupo entre máquinas; `lab` fora do peers.json recusa antes de gravar.
+    for (name, peers) in [("s3", json!(["lab::x", "s0"])), ("s0", json!(["lab::x"]))] {
+        let (status, body) = call(srv.addr, "POST", &format!("{name}/pair"), Some(&json!({"peers": peers})), OWNER).await;
+        assert_eq!((status, body["detail"]["code"].clone()), (409, json!("erro_grupo_peer_nao_registrado")), "{name}");
+    }
+    assert!(srv.groups.link("s3").await.unwrap().is_none());
 }
 
 fn seed_outside(srv: &Server, local: &str, alias: &str, peer: &str, address: &str) {

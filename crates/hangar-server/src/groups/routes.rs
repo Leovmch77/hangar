@@ -47,6 +47,9 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/sessions/{name}/pair/contract", get(contract).fallback(pass_any))
         .route("/api/sessions/{name}/pair-remote", post(super::legacy::pair_remote).fallback(pass_any))
         .route("/api/sessions/{name}/unpair-remote", post(super::legacy::unpair_remote).fallback(pass_any))
+        .route("/api/sessions/{name}/group", get(super::federation::session_group).fallback(pass_any))
+        .route("/api/groups/{gid}", get(super::federation::get_record).put(super::federation::put_record))
+        .route("/api/groups/{gid}/ops", post(super::federation::ops))
 }
 
 /// Pedido do dono que o Rust atende, com o corpo já lido.
@@ -206,11 +209,17 @@ pub(super) async fn pair(State(st): State<Arc<AppState>>, ConnectInfo(peer): Con
     }
     let everyone: Vec<String> = std::iter::once(name.clone()).chain(others.iter().cloned()).collect();
     if let Some(refused) = asked.orchestrator(&everyone).await { return refused; }
-    if others.iter().any(|o| is_remote(o)) {
+    let mut federated = others.iter().any(|o| is_remote(o));
+    for n in &everyone {
+        if federated { break; }
+        // Sessão daqui num grupo entre máquinas: entrar nele é pedir à dona dele.
+        federated = asked.groups.link(n).await.ok().flatten().is_some_and(|s| s.fed.is_some());
+    }
+    if federated {
         if body.link {
             return asked.refuse(StatusCode::BAD_REQUEST, "erro_link_remoto", "a ligação só vale entre sessões desta máquina", json!({}));
         }
-        return super::legacy::pair_cross(asked, held, others, body.task, body.replace_task).await;
+        return super::federation::pair(asked, held, others, body.task, body.replace_task, body.orq).await;
     }
     let harness = match providers(&asked.st, &everyone).await {
         Ok(h) => h,

@@ -115,9 +115,12 @@ pub fn plan_join(read: &dyn Fn(&str) -> Option<Sidecar>, input: &JoinInput, fres
 
     let writes = members.iter().filter(|m| !is_remote(m)).map(|m| {
         let peers = members.iter().filter(|p| *p != m).cloned().collect();
+        let old = before.get(m).cloned().flatten();
         let linked_by = if input.linked && input.others.contains(m) { Some(input.name.to_owned()) }
-            else { before.get(m).cloned().flatten().and_then(|s| s.linked_by) };
-        (m.clone(), Sidecar { peers, task: Some(task.clone()), gid: gid.clone(), harness: harness.clone(), orq, fed: None, linked_by })
+            else { old.as_ref().and_then(|s| s.linked_by.clone()) };
+        // Grupo entre máquinas vai pela dona (`federation.rs`); aqui o `fed` só não se perde.
+        let fed = old.and_then(|s| s.fed);
+        (m.clone(), Sidecar { peers, task: Some(task.clone()), gid: gid.clone(), harness: harness.clone(), orq, fed, linked_by })
     }).collect();
     Ok(JoinPlan { members, gid, new_gid, task, orq, merged, writes, before })
 }
@@ -168,11 +171,11 @@ pub fn plan_rename(read: &dyn Fn(&str) -> Option<Sidecar>, old: &str, new: &str)
 }
 
 /// Por que o grupo de `link` não recebe um par de fora: `orq` (o árbitro sozinho tem aviso próprio),
-/// ou par com máquina própria (1:1).
+/// ou par antigo 1:1 com máquina própria. Grupo entre máquinas (`fed`) aceita: a dona fica sabendo.
 pub fn external_link_refusal(link: Option<&Sidecar>, outside: &dyn Fn(&str) -> bool) -> Option<JoinRefusal> {
     let link = link?;
     if link.orq { return Some(if link.peers.is_empty() { JoinRefusal::Orq } else { JoinRefusal::OrqOutside }); }
-    link.peers.iter().any(|p| is_remote(p) && !outside(p)).then_some(JoinRefusal::Mix)
+    (link.fed.is_none() && link.peers.iter().any(|p| is_remote(p) && !outside(p))).then_some(JoinRefusal::Mix)
 }
 
 /// Par com sessão de outra pessoa: o endereço entra no sidecar de cada membro local do grupo de

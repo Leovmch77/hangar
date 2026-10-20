@@ -43,6 +43,8 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
         Owned::ArchiveResume(project, sid)
     } else if let Some(name) = live_resume(method, &path) {
         Owned::Resume(name)
+    } else if crate::groups::federation::forwarded_route(method, &path) {
+        Owned::Groups(req.headers().get("x-hangar-forwarded-guest").is_some_and(|v| v == "1"))
     } else if crate::session_media::is_media(method, &path) {
         Owned::Media(path.clone(), req.headers().get("x-hangar-forwarded-guest").is_some_and(|v| v == "1"))
     } else {
@@ -61,6 +63,7 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
         Owned::Media(path, guest) => crate::session_media::serve_forwarded(&st, &path, req, guest).await
             .unwrap_or_else(|| crate::session_write::json_response(StatusCode::NOT_FOUND, json!({"code": "forwarded_route_not_owned"}))),
         Owned::JevDelivery => crate::session_write::delivery_timing::availability_reply(&st).await,
+        Owned::Groups(guest) => crate::groups::federation::serve_forwarded(st, peer, req, guest).await,
         Owned::ClientApi => crate::routes::client_api_reply(),
         Owned::Catalog => crate::claude_customizations::public_catalog(&st, req).await,
         Owned::Conductor => crate::orq_conductor::serve(&st, req).await,
@@ -100,4 +103,4 @@ fn live_resume(method: &Method, path: &str) -> Option<String> {
 }
 
 /// As rotas do Rust que aceitam o repasse.
-enum Owned { Conductor, Catalog, Commands, Mermaid, Plans, Worktrees, JevDelivery, ClientApi,ArchiveResume(String, String), Resume(String), Media(String, bool) }
+enum Owned { Groups(bool), Conductor, Catalog, Commands, Mermaid, Plans, Worktrees, JevDelivery, ClientApi,ArchiveResume(String, String), Resume(String), Media(String, bool) }

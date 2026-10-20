@@ -1,6 +1,6 @@
-//! Par 1:1 entre máquinas de hoje (`api.py`: `_pair_cross_server`, `pair_remote`, `unpair_remote`):
-//! sidecar sem `fed` com um peer `srv::x`, cada lado gravando o seu. Fica como está até o grupo
-//! entre máquinas existir; quem desfaz é a saída (`exit.rs`).
+//! Par 1:1 entre máquinas antigo (`api.py`: `pair_remote`, `unpair_remote`): sidecar sem `fed` com
+//! um peer `srv::x`. Só o lado que recebe fica, para máquina ainda em versão antiga; pedido novo
+//! nasce grupo entre máquinas (`federation.rs`). Quem desfaz é a saída (`exit.rs`).
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -12,12 +12,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::deliver::{Kind, TextArgs, protocol_text};
-use super::exit::{NO_SERVER_ID, segment};
 use super::local::{JoinRefusal, is_remote};
 use super::routes::{Asked, MIX_MSG, PREFIX, envelope, error_text, outside_addresses, providers};
 use super::service::{GroupError, JoinOutcome, JoinOwned};
 use crate::routes::AppState;
-use crate::runtime::ingress::IngressPass;
 use crate::session_write::input::deliver_text;
 use crate::transcript::py::py_repr;
 
@@ -38,57 +36,6 @@ fn joined(asked: &Asked, result: Result<JoinOutcome, GroupError>, mix: StatusCod
             &format!("o grupo já tem tarefa: {} — repita com --substituir-tarefa pra trocar", py_repr(&json!(existing))), json!({"existente": existing})),
         error => asked.store_failed(&error),
     })
-}
-
-/// Lado de quem inicia (`_pair_cross_server`), já passada a recusa de orquestrador: grava o vínculo
-/// daqui, pede ao outro lado o reverso pelo `/pair-remote` e desfaz este se ele não confirmar.
-pub(super) async fn pair_cross(asked: Asked, held: Option<IngressPass>, others: Vec<String>, task: String, replace_task: bool) -> Response {
-    if others.len() != 1 {
-        return asked.refuse(StatusCode::BAD_REQUEST, "erro_pareamento_cross_1_1",
-            "pareamento cross-server é 1:1 por enquanto: um peer remoto, sem misturar com grupo local", json!({}));
-    }
-    let server_id = asked.groups.server_id().to_owned();
-    if server_id.is_empty() {
-        return asked.refuse(StatusCode::BAD_REQUEST, "erro_pareamento_server_id_ausente", NO_SERVER_ID, json!({}));
-    }
-    let name = asked.name.clone();
-    let harness = match providers(&asked.st, std::slice::from_ref(&name)).await {
-        Ok(h) => h,
-        Err(failed) => return asked.reply(StatusCode::SERVICE_UNAVAILABLE, json!({"detail": failed})),
-    };
-    if !harness.contains_key(&name) {
-        return asked.refuse(StatusCode::NOT_FOUND, "erro_sessao_nao_encontrada_detalhe", &format!("sessão não encontrada: {name}"), json!({"detalhe": name}));
-    }
-    let peer = others[0].clone();
-    let outside = outside_addresses(&asked.st);
-    let result = asked.groups.join(JoinOwned { name: name.clone(), others, task, replace_task, harness: harness.clone(), orq: false, outside, linked: false }).await;
-    let JoinOutcome { members, task, before, .. } = match joined(&asked, result, StatusCode::BAD_REQUEST) { Ok(o) => o, Err(r) => return r };
-    drop(held);
-    let (srv, sess) = peer.split_once("::").unwrap_or((&peer, ""));
-    let initiator = format!("{server_id}::{name}");
-    let asked_remote = asked.st.peers.call(srv, reqwest::Method::POST, &format!("/api/sessions/{}/pair-remote", segment(sess)),
-        Some(&json!({"initiator": initiator, "task": task}))).await;
-    if let Err(e) = asked_remote {
-        if let Err(failed) = asked.restore(before).await { return failed; }
-        let text = e.text(srv);
-        if e.is_transport() {
-            // O outro lado pode ter gravado antes de a resposta se perder: tenta desfazer lá também.
-            let _ = asked.st.peers.call(srv, reqwest::Method::POST, &format!("/api/sessions/{}/unpair-remote", segment(sess)),
-                Some(&json!({"peer": initiator}))).await;
-            return asked.refuse(StatusCode::BAD_GATEWAY, "erro_pareamento_nao_confirmado",
-                &format!("pareamento NÃO confirmado (falha de rede com '{srv}'): desfeito deste lado; se o peer tiver ficado pareado, rode unpair lá. ({text})"),
-                json!({"srv": srv, "erro": text}));
-        }
-        return asked.refuse(StatusCode::BAD_GATEWAY, "erro_pareamento_rejeitado", &format!("pareamento desfeito (peer rejeitou): {text}"), json!({"erro": text}));
-    }
-    // O vínculo já vale dos dois lados: aviso local que falha só avisa, não desfaz.
-    let warning = match notify(&asked, &peer, &task, &harness).await {
-        Ok(()) => Value::Null,
-        Err(e) => envelope("erro_pareamento_aviso_local",
-            format!("vínculo criado, mas o aviso local falhou ({name}: {}) — refaça o pair se precisar", error_text(&e)),
-            json!({"sessao": name, "erro": e})),
-    };
-    asked.reply(StatusCode::OK, json!({"ok": true, "members": members, "warning": warning}))
 }
 
 #[derive(Deserialize)]

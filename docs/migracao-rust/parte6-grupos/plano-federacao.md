@@ -588,7 +588,7 @@ dona sai "não confirmado".
 
 **Fecha:** 1A, I-6A, D2, desenho-federacao §3–§4, Review Focus 1, 2, 3, 6.
 
-- [ ] **Step 1: Testes** com duas ou três instâncias (`casa`, `lab`, `vm`; `tempdir`,
+- [x] **Step 1: Testes** com duas ou três instâncias (`casa`, `lab`, `vm`; `tempdir`,
   `HANGAR_SERVER_ID` e `peers.json` cruzados): `three_locals_plus_one_remote` (o caso que motivou o plano);
   `join_partial_when_one_server_is_down`; `push_never_creates_sidecar_outside_joining`;
   `late_push_does_not_resurrect_pending_leave`; `stale_push_after_dissolve_is_ignored`;
@@ -600,12 +600,12 @@ dona sai "não confirmado".
   `asymmetric_peers_refuses_put`; `removed_member_is_cancelled_in_pending_push`;
   `outside_pair_on_fed_group_links_at_owner`.
 - [ ] **Step 2: Rodar e ver falhar.**
-- [ ] **Step 3: Implementar.**
-- [ ] **Step 4: Rodar.** Esperado: PASS.
+- [x] **Step 3: Implementar.**
+- [x] **Step 4: Rodar.** Esperado: PASS.
 - [ ] **Step 5: Portas de fora**: conferir que a 8768 repassa `/api/groups/*` e `GET …/group` (ou
   recusa com código) e que a 8766 recusa com código; teste Python
   `test_connect_forwards_groups_routes` e teste Rust `guest_groups_routes_refused_with_code`.
-- [ ] **Step 6: Commit** — `feat(groups): groups across the owner's machines with an owner machine`.
+- [x] **Step 6: Commit** — `feat(groups): groups across the owner's machines with an owner machine`.
 
 ---
 

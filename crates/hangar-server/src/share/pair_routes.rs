@@ -249,7 +249,10 @@ async fn join_external(app: &AppState, name: &str, peer: &str) -> Result<(), Ref
     let harness = providers(app, &wanted).await.map_err(|failed| (StatusCode::SERVICE_UNAVAILABLE, failed))?
         .into_iter().filter(|(n, _)| n == name).collect();
     match groups.external_link(name, peer, harness, outside_addresses(app)).await {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            if let Ok(Some(side)) = groups.link(name).await { crate::groups::federation::outside_changed(app, &side, peer, true).await; }
+            Ok(())
+        }
         Err(GroupError::Refused(r)) => Err(link_refused(&r)),
         Err(e) => {
             tracing::warn!(code = "external_pair_group_failed", session = name, error = %e, "par externo: o grupo não foi gravado");
@@ -620,8 +623,10 @@ async fn unlink_all(app: &AppState, address: &str) -> bool {
     // Um `external_unlink` já limpa o grupo inteiro: um por gid basta.
     let mut groups_done = std::collections::HashSet::new();
     for (stem, sidecar) in all.into_iter().filter(|(_, s)| s.peers.iter().any(|p| p == address)) {
-        if !sidecar.gid.is_empty() && !groups_done.insert(sidecar.gid) { continue }
-        ok &= guarded("tirar o par do grupo", groups.external_unlink(&stem, address).await);
+        if !sidecar.gid.is_empty() && !groups_done.insert(sidecar.gid.clone()) { continue }
+        let done = guarded("tirar o par do grupo", groups.external_unlink(&stem, address).await);
+        if done { crate::groups::federation::outside_changed(app, &sidecar, address, false).await; }
+        ok &= done;
     }
     ok
 }
@@ -650,10 +655,12 @@ pub async fn session_died(app: Arc<AppState>, share: Arc<ShareState>, remote: Ar
 /// tenta de novo com o token que ainda vale.
 async fn teardown(app: &AppState, share: &ShareState, rec: &ExternalPair, notify: bool) -> Result<(), Refusal> {
     let Some(groups) = &app.groups else { return Err(groups_unavailable("groups_unavailable")) };
+    let side = groups.link(&rec.local_session).await.ok().flatten();
     if let Err(e) = groups.external_unlink(&rec.local_session, &rec.address()).await {
         tracing::warn!(code = "external_pair_unlink_failed", session = %rec.local_session, error = %e, "par externo: o grupo não foi desfeito");
         return Err(groups_unavailable("groups_store_failed"));
     }
+    if let Some(side) = side { crate::groups::federation::outside_changed(app, &side, &rec.address(), false).await; }
     drop_record(share, &rec.share_id);
     if notify {
         let text = format!("[painel: par externo encerrado] '{}' saiu do pareamento. Volte a operar independente.", rec.address());
