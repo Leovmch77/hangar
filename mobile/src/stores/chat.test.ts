@@ -404,6 +404,51 @@ test('(b) reset zera tudo e recarrega o history novo', async () => {
   expect(created[0].url).not.toContain('last_event_id=old%3A2');
 });
 
+test.each(['claude', 'codex'])('reset do %s apaga a conversa e o eco de /clear antes do histórico responder', async (provider) => {
+  historyResponses = [[ev({ id: 'old:1', kind: 'assistant_msg', text: 'Conversa anterior' })]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const source = created[0];
+  source.trigger('state', JSON.stringify({ session: 'sess', provider, state: 'working' }));
+  source.trigger('preview', JSON.stringify({ text: 'Prévia anterior', md: true }));
+  chat.use.setState({ pending: [{ id: 'clear', text: ' /clear ' }, { id: 'next', text: 'Mensagem aguardando' }] });
+  const requests = fetchManual();
+
+  source.trigger('reset', '{}');
+  expect(chat.use.getState()).toMatchObject({ events: [], preview: '', stateEvent: null, loading: true,
+    pending: [{ id: 'next', text: 'Mensagem aguardando' }] });
+  // O índice antigo também sai: o primeiro evento da conversa nova pode reutilizar um ID.
+  source.trigger('message', JSON.stringify(ev({ id: 'old:1', text: 'Mensagem nova' })));
+  expect(chat.use.getState().events.map((e) => e.text)).toEqual(['Mensagem nova']);
+  requests[0].responder(null, { status: 503 });
+  await tick();
+  expect(chat.use.getState().events.map((e) => e.text)).toEqual(['Mensagem nova']);
+  expect(chat.use.getState().loading).toBe(false);
+  expect(chat.use.getState().error).not.toBe('');
+  chat.release();
+});
+
+test('/clear aceito só retira seu eco quando o servidor confirma a troca de conversa', async () => {
+  historyResponses = [[ev({ id: 'old:1', kind: 'assistant_msg', text: 'Conversa anterior' })]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const requests = fetchManual();
+  const sending = chat.send('/clear');
+  expect(chat.use.getState().events).toHaveLength(1);
+  requests[0].responder(null);
+  await sending;
+  expect(chat.use.getState().pending.map((p) => p.text)).toEqual(['/clear']);
+
+  created[0].trigger('reset', '{}');
+  requests[1].responder([]);
+  await tick();
+  expect(chat.use.getState().events).toEqual([]);
+  expect(chat.use.getState().pending).toEqual([]);
+  chat.release();
+});
+
 test('(c) preview some quando o assistant_msg real chega', async () => {
   historyResponses = [[]];
   const chat = chatStore('srv1', 'sess');

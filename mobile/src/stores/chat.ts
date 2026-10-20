@@ -696,6 +696,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       lastEventId = null;
       etag = null;
       baseLoaded = false;
+      prevState = null;
       previewMd = false;
       previewFull = false;
       cancelPreviewDrop();
@@ -704,7 +705,9 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       pensamentoTimer = undefined;
       clearTimeout(ferramentaTimer);
       ferramentaTimer = undefined;
-      publishEvents(useChatStore.getState().events, 'replace', {
+      publishEvents([], 'rebuild', {
+        // O /clear não vira user_msg na conversa nova para reconciliar seu eco.
+        pending: useChatStore.getState().pending.filter((p) => p.text.trim() !== '/clear'),
         pensamento: '',
         ferramenta: null,
         turnSeen: null,
@@ -721,6 +724,8 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         queuePanel: null,
         queueEdit: null,
         queueEditExit: null,
+        error: '',
+        olderFailed: '',
         loading: true,
       });
       void loadHistory();
