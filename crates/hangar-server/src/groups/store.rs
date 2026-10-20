@@ -162,7 +162,7 @@ impl PairDir {
 
     pub fn write_record(&self, record: &GroupRecord) -> Result<(), StoreError> {
         std::fs::create_dir_all(self.groups_dir())?;
-        replace_atomic(&self.record_path(&record.gid), &serde_json::to_vec(record)?)?;
+        replace_durable(&self.record_path(&record.gid), &serde_json::to_vec(record)?)?;
         Ok(())
     }
 
@@ -214,7 +214,7 @@ impl PairDir {
     /// Chamar só depois de `identity_check` passar: troca o id gravado pelo atual.
     pub fn remember_self(&self, server_id: &str) -> Result<(), StoreError> {
         std::fs::create_dir_all(self.groups_dir())?;
-        replace_atomic(&self.self_path(), &serde_json::to_vec(&SelfFile { server_id: server_id.to_owned() })?)?;
+        replace_durable(&self.self_path(), &serde_json::to_vec(&SelfFile { server_id: server_id.to_owned() })?)?;
         Ok(())
     }
 
@@ -262,12 +262,26 @@ fn parse_noting_fed(name: &str, data: &serde_json::Map<String, Value>) -> Option
 /// Troca o arquivo inteiro: temporário na mesma pasta + rename, com as novas tentativas do
 /// Windows (acesso negado no rename) copiadas de `hangar-workspace/src/files.rs:160-175`. Sem
 /// fsync e sem a conferência de conteúdo do `files::write`, que não servem aqui.
-pub(crate) fn replace_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn replace_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> { replace_with(target, bytes, false) }
+
+/// Como `replace_atomic`, com fsync do temporário antes do rename: registro, identidade e fila
+/// entre máquinas não podem voltar vazios de uma queda, porque os outros lados confiam neles.
+pub(crate) fn replace_durable(target: &Path, bytes: &[u8]) -> std::io::Result<()> { replace_with(target, bytes, true) }
+
+fn replace_with(target: &Path, bytes: &[u8], durable: bool) -> std::io::Result<()> {
     // Mesmo nome que o `PairLink.set` usa (`<stem>.json.tmp`), que o `clear_sidecar` também apaga.
     let mut tmp = target.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    std::fs::write(&tmp, bytes)?;
+    if durable {
+        let written = std::fs::File::create(&tmp).and_then(|mut f| { std::io::Write::write_all(&mut f, bytes)?; f.sync_all() });
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    } else {
+        std::fs::write(&tmp, bytes)?;
+    }
     let waits: &[u64] = if cfg!(windows) { &[20, 40, 60, 80, 100, 120] } else { &[] };
     let mut waits = waits.iter();
     loop {

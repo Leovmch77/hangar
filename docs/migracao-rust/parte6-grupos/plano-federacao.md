@@ -555,6 +555,17 @@ registro + sidecars + itens; fora do lock espera cada participante (`Outbox::wai
 recusado/sem resposta → `remove_member` (que chama `Outbox::cancel_joining` no mesmo passo) +
 `warning` `erro_grupo_membro_nao_confirmado`; nenhum confirmado → 502 e o grupo volta ao que era.
 
+**Resultado do `Outbox::wait`** (contrato da Task 7): `Delivery::{Confirmed, Refused { code },
+Pending, Dissolved}`. `Refused` (recusa definitiva com código) e `Pending` (prazo de 16 s sem
+resposta) levam ao `remove_member`. `Dissolved` quer dizer "não há mais o que confirmar": o grupo
+acabou para aquela máquina antes de o `Push` sair; não é falha e **não** dispara `remove_member`.
+A fila também devolve `erro_grupo_fila_cheia` no `enqueue` (destino com 1000 itens): erro visível
+a quem chamou, nada gravado.
+
+**Toda resposta JSON de `/api/groups/*` leva `server_id`.** O `PeerClient::call_group` exige o
+campo na sondagem (`GET /api/groups/{gid}`) e recusa `server_id` presente e diferente em qualquer
+rota (`IdentityMismatch`); só tolera ausência em operação sem corpo (204).
+
 **Passe de entrada (sem travamento entre máquinas):** quem inicia solta o passe de entrada da
 sessão (`routes.rs:209`, hoje só solto em `:251`) **antes** de chamar a dona e antes do
 `Outbox::wait`, como `legacy.rs:66` já faz. O `PUT /api/groups/{gid}` da participante nunca entra

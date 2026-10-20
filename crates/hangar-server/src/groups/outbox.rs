@@ -15,7 +15,7 @@ use tokio::sync::Notify;
 use super::model::{GroupRecord, OutsideRef};
 use super::peers::PeerError;
 use super::service::BoxFuture;
-use super::store::{OUTBOX_STEM, replace_atomic};
+use super::store::{OUTBOX_STEM, replace_durable};
 
 /// `origin` = server_id de quem enfileirou: o token de dono não diz quem chamou.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +64,9 @@ pub trait OutboxSend: Send + Sync {
     fn send<'a>(&'a self, item: &'a OutboxItem) -> BoxFuture<'a, Result<(), PeerError>>;
 }
 
+pub const MAX_PER_DESTINATION: usize = 1000;
+pub const QUEUE_FULL: &str = "erro_grupo_fila_cheia";
+
 /// Escada da regra "servidor que não responde": depois da última, fica nela.
 pub const LADDER: [Duration; 9] = [
     Duration::from_secs(2), Duration::from_secs(5), Duration::from_secs(30), Duration::from_secs(60),
@@ -72,12 +75,13 @@ pub const LADDER: [Duration; 9] = [
 ];
 
 /// Só tenta de novo o que passa sozinho (rede, qualquer 5xx, sessão ocupada, limite, token
-/// recusado por enquanto, prazo, máquina que ainda não está no `peers.json`); o resto é recusa
+/// recusado por enquanto, prazo, máquina que ainda não está no `peers.json` ou ainda sem grupo
+/// entre máquinas); o resto é recusa
 /// definitiva com o código de quem recusou.
 pub fn verdict(err: &PeerError) -> Verdict {
     match err {
-        PeerError::Transport(_) | PeerError::Unknown => Verdict::Retry,
-        PeerError::OldVersion => Verdict::Refused("erro_grupo_peer_versao_antiga".into()),
+        // Versão antiga pode estar atualizando, ou com o Python atendendo enquanto o Rust volta.
+        PeerError::Transport(_) | PeerError::Unknown | PeerError::OldVersion => Verdict::Retry,
         PeerError::IdentityMismatch { .. } => Verdict::Refused("erro_grupo_identificador_divergente".into()),
         PeerError::Refused { status, detail } => {
             let code = detail.get("code").and_then(Value::as_str);
@@ -127,7 +131,10 @@ struct Inner {
     sender: Arc<dyn OutboxSend>,
     ladder: Vec<Duration>,
     runtime: tokio::runtime::Handle,
+    /// Só leitura rápida e troca em memória: o disco nunca é escrito com ele preso.
     state: Mutex<State>,
+    /// Um escritor de cada vez: calcula sobre o estado atual, grava e só então troca a memória.
+    writer: Mutex<()>,
     /// Acorda quem espera no `wait` a cada entrega ou recusa.
     settled: Notify,
 }
@@ -137,24 +144,26 @@ pub struct Outbox { inner: Arc<Inner> }
 
 impl Outbox {
     /// Abre a fila em `dir` (a pasta `groups/`) e já põe para andar o que ficou no disco.
-    /// Precisa de um runtime tokio; arquivo torto é erro, nunca fila vazia calada.
+    /// Precisa de um runtime tokio. Arquivo torto ou ilegível vai para `outbox.json.bad` com
+    /// erro no diário e a fila começa vazia: a subida nunca trava nem esconde a perda.
     pub fn open(dir: PathBuf, sender: Arc<dyn OutboxSend>) -> io::Result<Outbox> {
         Self::open_with_ladder(dir, sender, LADDER.to_vec())
     }
 
     pub fn open_with_ladder(dir: PathBuf, sender: Arc<dyn OutboxSend>, ladder: Vec<Duration>) -> io::Result<Outbox> {
         let path = dir.join(format!("{OUTBOX_STEM}.json"));
-        let file: OutboxFile = match std::fs::read(&path) {
-            Ok(raw) => serde_json::from_slice(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        let file: OutboxFile = match std::fs::read(&path).map(|raw| serde_json::from_slice(&raw)) {
+            Ok(Ok(file)) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => OutboxFile::default(),
-            Err(e) => return Err(e),
+            Ok(Err(error)) => { set_aside(&path, &error); OutboxFile::default() }
+            Err(error) => { set_aside(&path, &error); OutboxFile::default() }
         };
         // `next` torto não pode repetir id de item vivo.
         let next = file.items.iter().map(|e| e.id + 1).max().unwrap_or(0).max(file.next);
         let ladder = if ladder.is_empty() { LADDER.to_vec() } else { ladder };
         let outbox = Outbox { inner: Arc::new(Inner {
             path, sender, ladder, runtime: tokio::runtime::Handle::current(),
-            state: Mutex::new(State { next, items: file.items, ..State::default() }), settled: Notify::new(),
+            state: Mutex::new(State { next, items: file.items, ..State::default() }), writer: Mutex::new(()), settled: Notify::new(),
         }) };
         let mut state = outbox.inner.lock();
         let destinations: BTreeSet<String> = state.items.iter().map(|e| e.item.destination().to_owned()).collect();
@@ -165,11 +174,31 @@ impl Outbox {
 
     /// Grava os itens com as regras de coalescência e acorda o trabalhador de cada destino, com a
     /// escada zerada. Escreve em disco: chamar de contexto que pode bloquear (sob o lock de grupo).
+    /// Destino com `MAX_PER_DESTINATION` itens recusa com `QUEUE_FULL` e nada é gravado.
     pub fn enqueue(&self, items: Vec<OutboxItem>) -> io::Result<()> {
-        let mut state = self.inner.lock();
-        let (mut queue, mut next) = (state.items.clone(), state.next);
         let mut touched = BTreeSet::new();
         let mut dissolved = Vec::new();
+        self.inner.mutate(|queue, next| {
+            Self::apply(queue, next, items, &mut touched, &mut dissolved);
+            if let Some(full) = touched.iter().find(|d| queue.iter().filter(|e| e.item.destination() == d.as_str()).count() > MAX_PER_DESTINATION) {
+                tracing::warn!(code = QUEUE_FULL, server = %full, "groups: fila de saída cheia para a máquina, nada enfileirado");
+                return Err(io::Error::other(QUEUE_FULL));
+            }
+            Ok(true)
+        })?;
+        let mut state = self.inner.lock();
+        for (key, version) in &dissolved {
+            let outcome = state.outcomes.entry(key.clone()).or_default();
+            outcome.dissolved = Some(outcome.dissolved.unwrap_or(0).max(*version));
+        }
+        for dest in touched { self.inner.start(&mut state, &dest); }
+        drop(state);
+        // Quem espera um `Push` que o `Dissolved` tirou da fila sai já, sem esperar o prazo.
+        if !dissolved.is_empty() { self.inner.settled.notify_waiters(); }
+        Ok(())
+    }
+
+    fn apply(queue: &mut Vec<Entry>, next: &mut u64, items: Vec<OutboxItem>, touched: &mut BTreeSet<String>, dissolved: &mut Vec<((String, String), u64)>) {
         for item in items {
             touched.insert(item.destination().to_owned());
             match item {
@@ -187,34 +216,24 @@ impl Outbox {
                 }
                 _ => {}
             }
-            queue.push(Entry { id: next, item });
-            next += 1;
+            queue.push(Entry { id: *next, item });
+            *next += 1;
         }
-        self.inner.persist(&queue, next)?;
-        (state.items, state.next) = (queue, next);
-        for (key, version) in &dissolved {
-            let outcome = state.outcomes.entry(key.clone()).or_default();
-            outcome.dissolved = Some(outcome.dissolved.unwrap_or(0).max(*version));
-        }
-        for dest in touched { self.inner.start(&mut state, &dest); }
-        drop(state);
-        // Quem espera um `Push` que o `Dissolved` tirou da fila sai já, sem esperar o prazo.
-        if !dissolved.is_empty() { self.inner.settled.notify_waiters(); }
-        Ok(())
     }
 
     /// Tira `member` do `joining` de todo `Push` pendente para (`server`, `gid`).
     pub fn cancel_joining(&self, server: &str, gid: &str, member: &str) -> io::Result<()> {
-        let mut state = self.inner.lock();
-        let mut queue = state.items.clone();
-        for entry in &mut queue {
-            if let OutboxItem::Push { server: s, gid: g, joining, .. } = &mut entry.item && s == server && g == gid {
-                joining.retain(|m| m != member);
+        self.inner.mutate(|queue, _| {
+            let mut changed = false;
+            for entry in queue.iter_mut() {
+                if let OutboxItem::Push { server: s, gid: g, joining, .. } = &mut entry.item && s == server && g == gid {
+                    let before = joining.len();
+                    joining.retain(|m| m != member);
+                    changed |= joining.len() != before;
+                }
             }
-        }
-        self.inner.persist(&queue, state.next)?;
-        state.items = queue;
-        Ok(())
+            Ok(changed)
+        })
     }
 
     /// Espera o `Push` de (`server`, `gid`) com versão `version` ou maior ser entregue, recusado
@@ -224,8 +243,9 @@ impl Outbox {
         let check = || {
             let state = self.inner.lock();
             let outcome = state.outcomes.get(&key)?;
-            if outcome.confirmed.is_some_and(|v| v >= version) { return Some(Delivery::Confirmed); }
+            // Antes do `Confirmed`: o `Push` em voo pode confirmar depois de o grupo acabar.
             if outcome.dissolved.is_some_and(|v| v >= version) { return Some(Delivery::Dissolved); }
+            if outcome.confirmed.is_some_and(|v| v >= version) { return Some(Delivery::Confirmed); }
             outcome.refused.as_ref().filter(|(v, _)| *v >= version).map(|(_, code)| Delivery::Refused { code: code.clone() })
         };
         let wait = async {
@@ -251,16 +271,35 @@ impl Outbox {
     }
 }
 
+/// Guarda o arquivo torto ao lado, para quem for conferir, e deixa a fila começar vazia.
+fn set_aside(path: &std::path::Path, error: &dyn std::fmt::Display) {
+    let mut bad = path.as_os_str().to_owned();
+    bad.push(".bad");
+    let moved = std::fs::rename(path, &bad);
+    tracing::error!(code = "groups_outbox_corrupt", %error, set_aside = moved.is_ok(), "groups: fila de saída ilegível, guardada em outbox.json.bad; a fila começa vazia");
+}
+
 impl Inner {
     fn lock(&self) -> MutexGuard<'_, State> { self.state.lock().unwrap_or_else(|e| e.into_inner()) }
 
-    /// Sem fsync: o pior caso de uma queda é reenviar, e o outro lado ignora versão repetida.
     fn persist(&self, items: &[Entry], next: u64) -> io::Result<()> {
         #[derive(Serialize)]
         struct View<'a> { next: u64, items: &'a [Entry] }
         if let Some(dir) = self.path.parent() { std::fs::create_dir_all(dir)?; }
         let body = serde_json::to_vec(&View { next, items }).map_err(io::Error::other)?;
-        replace_atomic(&self.path, &body)
+        replace_durable(&self.path, &body)
+    }
+
+    /// Muda a fila sob o escritor único: `f` trabalha numa cópia (devolve se mudou), o disco é
+    /// gravado fora do lock de estado e só depois a memória troca. Falha = nada muda.
+    fn mutate(&self, f: impl FnOnce(&mut Vec<Entry>, &mut u64) -> io::Result<bool>) -> io::Result<()> {
+        let _writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut queue, mut next) = { let state = self.lock(); (state.items.clone(), state.next) };
+        if !f(&mut queue, &mut next)? { return Ok(()); }
+        self.persist(&queue, next)?;
+        let mut state = self.lock();
+        (state.items, state.next) = (queue, next);
+        Ok(())
     }
 
     /// Acorda o trabalhador de `dest` zerando a escada, ou cria um.
@@ -296,53 +335,72 @@ impl Inner {
                         Some(Delivery::Refused { code })
                     }
                     Verdict::Retry => {
-                        if matches!(error, PeerError::Unknown) && crate::warn_limit::allow(Some(&dest), "grupos.peer_desconhecido") {
-                            tracing::warn!(code = "grupos.peer_desconhecido", server = %dest, "groups: máquina fora do peers.json, o item fica na fila");
+                        let quiet = match error {
+                            PeerError::Unknown => Some(("grupos.peer_desconhecido", "groups: máquina fora do peers.json, o item fica na fila")),
+                            PeerError::OldVersion => Some(("grupos.peer_versao_antiga", "groups: máquina sem grupo entre máquinas, o item fica na fila")),
+                            _ => None,
+                        };
+                        if let Some((code, text)) = quiet && crate::warn_limit::allow(Some(&dest), code) {
+                            tracing::warn!(code, server = %dest, "{text}");
                         }
                         None
                     }
                 },
             };
-            match delivery {
+            let settled = match delivery {
                 Some(delivery) => {
-                    step = 0;
                     let inner = self.clone();
-                    if let Err(error) = tokio::task::spawn_blocking(move || inner.settle(entry, delivery)).await {
-                        tracing::error!(code = "groups_outbox_settle_failed", server = %dest, %error, "groups: a baixa do item da fila não rodou");
+                    match tokio::task::spawn_blocking(move || inner.settle(entry, delivery)).await {
+                        Ok(Ok(())) => true,
+                        Ok(Err(error)) => {
+                            tracing::warn!(code = "groups_outbox_write_failed", server = %dest, %error, "groups: a baixa da fila não foi ao disco, o item volta a sair");
+                            false
+                        }
+                        Err(error) => {
+                            tracing::error!(code = "groups_outbox_settle_failed", server = %dest, %error, "groups: a baixa do item da fila não rodou");
+                            false
+                        }
                     }
                 }
-                None => {
-                    let delay = self.ladder[step.min(self.ladder.len() - 1)];
-                    step += 1;
-                    tokio::select! { _ = tokio::time::sleep(delay) => {}, _ = slot.wake.notified() => {} }
-                    if slot.reset.swap(false, Ordering::SeqCst) { step = 0; }
-                }
+                None => false,
+            };
+            if settled {
+                step = 0;
+                continue;
             }
+            // Falha de rede ou de disco: espera na escada, sem laço quente.
+            let delay = self.ladder[step.min(self.ladder.len() - 1)];
+            step += 1;
+            tokio::select! { _ = tokio::time::sleep(delay) => {}, _ = slot.wake.notified() => {} }
+            if slot.reset.swap(false, Ordering::SeqCst) { step = 0; }
         }
     }
 
     /// Dá baixa no item entregue ou recusado. Item que mudou durante o envio (coalescido ou com
-    /// `joining` cortado) fica para a próxima volta.
-    fn settle(&self, sent: Entry, delivery: Delivery) {
-        let mut state = self.lock();
-        if let Some(at) = state.items.iter().position(|e| *e == sent) {
-            let mut queue = state.items.clone();
+    /// `joining` cortado) fica para a próxima volta. O resultado vale mesmo se o disco falhar:
+    /// a entrega aconteceu, e reenviar a mesma versão é ignorado do outro lado.
+    fn settle(&self, sent: Entry, delivery: Delivery) -> io::Result<()> {
+        let written = self.mutate(|queue, _| {
+            let Some(at) = queue.iter().position(|e| *e == sent) else { return Ok(false) };
             queue.remove(at);
-            if let Err(error) = self.persist(&queue, state.next) {
-                // Fica só na memória: na subida o item é reenviado, e versão repetida é ignorada.
-                tracing::warn!(code = "groups_outbox_write_failed", %error, "groups: a baixa da fila não foi ao disco");
+            Ok(true)
+        });
+        let mut state = self.lock();
+        match sent.item {
+            OutboxItem::Push { server, gid, version, .. } => {
+                let outcome = state.outcomes.entry((server, gid)).or_default();
+                match delivery {
+                    Delivery::Confirmed => outcome.confirmed = Some(outcome.confirmed.unwrap_or(0).max(version)),
+                    Delivery::Refused { code } => outcome.refused = Some((version, code)),
+                    Delivery::Pending | Delivery::Dissolved => {}
+                }
             }
-            state.items = queue;
-        }
-        if let OutboxItem::Push { server, gid, version, .. } = sent.item {
-            let outcome = state.outcomes.entry((server, gid)).or_default();
-            match delivery {
-                Delivery::Confirmed => outcome.confirmed = Some(outcome.confirmed.unwrap_or(0).max(version)),
-                Delivery::Refused { code } => outcome.refused = Some((version, code)),
-                Delivery::Pending | Delivery::Dissolved => {}
-            }
+            // O grupo acabou para essa máquina: o resultado dela não serve mais a ninguém.
+            OutboxItem::Dissolved { server, gid, .. } => { state.outcomes.remove(&(server, gid)); }
+            _ => {}
         }
         drop(state);
         self.settled.notify_waiters();
+        written
     }
 }

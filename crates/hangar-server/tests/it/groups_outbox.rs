@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hangar_server::groups::model::{GroupRecord, Member, OutsideRef};
-use hangar_server::groups::outbox::{Delivery, Outbox, OutboxItem, OutboxSend, OutsideOp, Verdict, restart_pushes, verdict};
+use hangar_server::groups::outbox::{Delivery, Outbox, OutboxItem, OutboxSend, OutsideOp, MAX_PER_DESTINATION, QUEUE_FULL, Verdict, restart_pushes, verdict};
 use hangar_server::groups::peers::PeerError;
 use hangar_server::groups::service::BoxFuture;
 use serde_json::json;
@@ -162,7 +162,6 @@ fn busy_429_401_408_are_retried() {
     for (err, code) in [(refused(409, Some("erro_grupo_mudou")), "erro_grupo_mudou"),
                         (refused(404, Some("erro_grupo_inexistente")), "erro_grupo_inexistente"),
                         (refused(400, None), "http_400"),
-                        (PeerError::OldVersion, "erro_grupo_peer_versao_antiga"),
                         (PeerError::IdentityMismatch { key: "lab".into(), reported: "vm".into() }, "erro_grupo_identificador_divergente")] {
         assert_eq!(verdict(&err), Verdict::Refused(code.into()), "{err:?}");
     }
@@ -251,4 +250,93 @@ async fn wait_on_dissolved_push_returns_now() {
     };
     let (got, ()) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(waiting, dissolve) }).await.expect("o wait esperou o prazo inteiro");
     assert_eq!(got, Delivery::Dissolved);
+}
+
+#[tokio::test]
+async fn old_version_is_retried_not_dropped() {
+    assert_eq!(verdict(&PeerError::OldVersion), Verdict::Retry);
+    let tmp = tempfile::tempdir().unwrap();
+    let sender = Fake::new(vec![Err(PeerError::OldVersion)], || Ok(()));
+    let outbox = open(&tmp, sender.clone(), &SHORT);
+    outbox.enqueue(vec![push("lab", "g", 1, &[])]).unwrap();
+    // A máquina pode estar atualizando, ou com o Python atendendo enquanto o Rust volta.
+    assert_eq!(outbox.wait("lab", "g", 1, DEADLINE).await, Delivery::Confirmed);
+    assert_eq!(sender.sent().len(), 2);
+}
+
+#[tokio::test]
+async fn corrupt_outbox_is_set_aside_and_queue_starts() {
+    for raw in ["{", ""] {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("groups")).unwrap();
+        std::fs::write(tmp.path().join("groups/outbox.json"), raw).unwrap();
+        let outbox = open(&tmp, Fake::ok(), &LONG);
+        assert!(outbox.pending().is_empty(), "{raw:?}");
+        assert_eq!(std::fs::read_to_string(tmp.path().join("groups/outbox.json.bad")).unwrap(), raw, "o arquivo torto fica guardado");
+        outbox.enqueue(vec![push("lab", "g", 1, &[])]).unwrap();
+        assert_eq!(outbox.wait("lab", "g", 1, DEADLINE).await, Delivery::Confirmed, "a fila anda depois");
+    }
+}
+
+#[tokio::test]
+async fn queue_cap_is_a_visible_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outbox = open(&tmp, Fake::down(), &LONG);
+    let leave = |n: usize| OutboxItem::Leave { owner: "casa".into(), gid: "g".into(), member: format!("m{n}"), origin: "lab".into() };
+    outbox.enqueue((0..MAX_PER_DESTINATION).map(leave).collect()).unwrap();
+    let err = outbox.enqueue(vec![leave(MAX_PER_DESTINATION)]).unwrap_err();
+    assert_eq!(err.to_string(), QUEUE_FULL);
+    assert_eq!(outbox.pending().len(), MAX_PER_DESTINATION, "a recusa não grava nada");
+    // Outro destino segue livre.
+    outbox.enqueue(vec![push("vm", "g", 1, &[])]).unwrap();
+}
+
+/// Segura o envio do `Push` até `gate` abrir; o `Dissolved` fica na fila (rede fora).
+struct Gate { gate: tokio::sync::Semaphore, started: tokio::sync::Notify, next: tokio::sync::Notify }
+impl OutboxSend for Gate {
+    fn send<'a>(&'a self, item: &'a OutboxItem) -> BoxFuture<'a, Result<(), PeerError>> {
+        Box::pin(async move {
+            if !matches!(item, OutboxItem::Push { .. }) { self.next.notify_one(); return Err(PeerError::Transport("fora".into())); }
+            self.started.notify_one();
+            let _permit = self.gate.acquire().await.unwrap();
+            Ok(())
+        })
+    }
+}
+
+#[tokio::test]
+async fn push_confirmed_after_dissolve_reports_dissolved() {
+    let tmp = tempfile::tempdir().unwrap();
+    let gate = Arc::new(Gate { gate: tokio::sync::Semaphore::new(0), started: tokio::sync::Notify::new(), next: tokio::sync::Notify::new() });
+    let outbox = Outbox::open_with_ladder(tmp.path().join("groups"), gate.clone(), LONG.to_vec()).unwrap();
+    outbox.enqueue(vec![push("lab", "g", 1, &["a"])]).unwrap();
+    gate.started.notified().await;
+    outbox.enqueue(vec![OutboxItem::Dissolved { server: "lab".into(), gid: "g".into(), version: 2, origin: "casa".into() }]).unwrap();
+    gate.gate.add_permits(1);
+    // O Push em voo confirma depois do Dissolved (o trabalhador já passou ao item seguinte):
+    // quem espera ouve que não há o que confirmar.
+    gate.next.notified().await;
+    assert_eq!(outbox.wait("lab", "g", 1, Duration::from_secs(5)).await, Delivery::Dissolved);
+}
+
+/// Um FIFO no lugar do temporário prende a escrita do disco; a fila em memória segue legível.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enqueue_does_not_block_wait_during_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outbox = open(&tmp, Fake::ok(), &LONG);
+    outbox.enqueue(vec![push("lab", "g", 1, &[])]).unwrap();
+    assert_eq!(outbox.wait("lab", "g", 1, DEADLINE).await, Delivery::Confirmed);
+    let fifo = tmp.path().join("groups/outbox.json.tmp");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    let writer = { let o = outbox.clone(); tokio::task::spawn_blocking(move || o.enqueue(vec![push("vm", "g", 1, &[])])) };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let reader = { let o = outbox.clone(); tokio::task::spawn_blocking(move || o.pending().len()) };
+    let probe = tokio::time::timeout(Duration::from_secs(5), reader).await;
+    // Solta a escrita presa antes de qualquer asserção, para a thread não sobrar.
+    let drain = std::thread::spawn(move || { let mut s = String::new(); let _ = std::io::Read::read_to_string(&mut std::fs::File::open(&fifo).unwrap(), &mut s); });
+    let _ = writer.await;
+    drain.join().unwrap();
+    assert!(probe.is_ok(), "ler a fila esperou a escrita do disco");
+    assert!(tokio::time::timeout(Duration::from_secs(5), outbox.wait("lab", "g", 1, DEADLINE)).await.is_ok());
 }

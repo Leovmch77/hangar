@@ -164,8 +164,23 @@ async fn key_mismatch_is_refused_before_any_write() {
     assert!(matches!(&err, PeerError::IdentityMismatch { key, reported } if key == "lab" && reported == "vm"), "{err:?}");
     let text = err.text("lab");
     assert!(text.contains("'lab'") && text.contains("'vm'"), "{text}");
-    let err = client.call_group("lab", reqwest::Method::PUT, "/api/groups/sem-id", Some(&json!({}))).await.unwrap_err();
+    // Na sondagem (GET do grupo) o `server_id` é obrigatório.
+    let err = client.call_group("lab", reqwest::Method::GET, "/api/groups/sem-id", None).await.unwrap_err();
     assert!(matches!(&err, PeerError::IdentityMismatch { reported, .. } if reported.is_empty()), "{err:?}");
+}
+
+#[tokio::test]
+async fn missing_server_id_on_ok_op_is_accepted() {
+    let app = groups_app().route("/api/groups/vazio/ops", any(|| async { StatusCode::NO_CONTENT }));
+    let addr = serve(app).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = client_for(dir.path(), addr);
+    let got = client.call_group("lab", reqwest::Method::PUT, "/api/groups/sem-id", Some(&json!({}))).await.unwrap();
+    assert_eq!(got["protocol"], 1);
+    assert_eq!(client.call_group("lab", reqwest::Method::POST, "/api/groups/vazio/ops", Some(&json!({}))).await.unwrap(), serde_json::Value::Null);
+    // Presente e diferente continua recusado fora da sondagem.
+    let err = client.call_group("lab", reqwest::Method::POST, "/api/groups/outra", Some(&json!({}))).await.unwrap_err();
+    assert!(matches!(err, PeerError::IdentityMismatch { .. }), "{err:?}");
 }
 
 #[tokio::test]

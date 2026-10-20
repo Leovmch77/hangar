@@ -166,11 +166,13 @@ impl PeerClient {
         if group_get && answer.get("protocol").and_then(Value::as_u64).is_none_or(|p| p < u64::from(super::model::PROTOCOL)) {
             return Err(PeerError::OldVersion);
         }
-        let reported = answer.get("server_id").and_then(Value::as_str).unwrap_or_default();
-        if reported != server {
-            return Err(PeerError::IdentityMismatch { key: server.to_owned(), reported: reported.to_owned() });
+        // Só a sondagem (o GET do grupo) exige o `server_id`; nas operações, ausente é aceito e
+        // presente tem de bater (204 ou corpo vazio não dizem quem atendeu).
+        match answer.get("server_id").and_then(Value::as_str) {
+            Some(reported) if reported != server => Err(PeerError::IdentityMismatch { key: server.to_owned(), reported: reported.to_owned() }),
+            None if group_get => Err(PeerError::IdentityMismatch { key: server.to_owned(), reported: String::new() }),
+            _ => Ok(answer),
         }
-        Ok(answer)
     }
 }
 
