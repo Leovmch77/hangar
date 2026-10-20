@@ -149,6 +149,7 @@ mod groups_context_cmd;
 mod groups_deliver;
 mod groups_legacy;
 mod groups_local;
+mod groups_outbox;
 mod groups_peers;
 mod groups_routes;
 mod groups_store;

@@ -1,6 +1,6 @@
 use crate::common;
-use hangar_server::groups::model::{Fed, Sidecar};
-use hangar_server::groups::store::{PairDir, file_stem};
+use hangar_server::groups::model::{Fed, GroupRecord, Member, OutsideRef, Sidecar};
+use hangar_server::groups::store::{IdentityChanged, PairDir, file_stem};
 use serde_json::Value;
 
 fn golden_dir() -> std::path::PathBuf { common::contract().join("golden/pair_sidecars") }
@@ -187,4 +187,94 @@ fn archive_contracts_moves_both_files_with_a_local_timestamp() {
     let other = tempfile::tempdir().unwrap();
     fresh_dir(&other).archive_contracts("zzzz");
     assert!(!other.path().join("arquivo").exists());
+}
+
+fn record(gid: &str, version: u64) -> GroupRecord {
+    GroupRecord {
+        protocol: 1, gid: gid.into(), owner: "casa".into(), version, task: "t".into(),
+        members: vec![Member { server: "casa".into(), name: "a".into(), provider: "claude".into() },
+                      Member { server: "lab".into(), name: "a".into(), provider: String::new() }],
+        outside: vec![OutsideRef { server: "casa".into(), address: "ana::x".into() }],
+    }
+}
+
+#[test]
+fn group_record_round_trip_lives_under_groups() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = fresh_dir(&tmp);
+    assert_eq!(dir.record("ab12cd34").unwrap(), None);
+    dir.write_record(&record("ab12cd34", 3)).unwrap();
+    dir.write_record(&record("ff00ff00", 1)).unwrap();
+    assert!(tmp.path().join("groups/ab12cd34.json").is_file());
+    assert_eq!(dir.record("ab12cd34").unwrap(), Some(record("ab12cd34", 3)));
+    // A fila e a identidade moram na mesma pasta e não são registro.
+    std::fs::write(tmp.path().join("groups/outbox.json"), "[]").unwrap();
+    std::fs::write(tmp.path().join("groups/self.json"), r#"{"server_id":"casa"}"#).unwrap();
+    std::fs::write(tmp.path().join("groups/torto.json"), "{").unwrap();
+    let gids: Vec<String> = dir.records().unwrap().into_iter().map(|r| r.gid).collect();
+    assert_eq!(gids, ["ab12cd34", "ff00ff00"]);
+    dir.remove_record("ab12cd34").unwrap();
+    dir.remove_record("ab12cd34").unwrap();
+    assert_eq!(dir.record("ab12cd34").unwrap(), None);
+    // Registro sem `outside` (protocolo 1 antes do campo) ainda lê.
+    std::fs::write(tmp.path().join("groups/old.json"),
+        r#"{"protocol":1,"gid":"old","owner":"casa","version":1,"members":[]}"#).unwrap();
+    assert_eq!(dir.record("old").unwrap().unwrap().outside, []);
+}
+
+fn fed_sidecar(owner: &str, local: bool) -> Sidecar {
+    Sidecar { peers: vec!["lab::b".into()], task: Some(String::new()), gid: "ab12cd34".into(),
+              fed: Some(Fed { owner: owner.into(), local, version: 2 }), ..Default::default() }
+}
+
+#[test]
+fn server_id_change_with_live_group_is_refused() {
+    for (owner, local) in [("casa", true), ("lab", false)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = fresh_dir(&tmp);
+        assert_eq!(dir.self_id().unwrap(), None);
+        dir.remember_self("casa").unwrap();
+        assert_eq!(dir.self_id().unwrap().as_deref(), Some("casa"));
+        // Sem grupo entre máquinas vivo, trocar o id não prende ninguém.
+        assert_eq!(dir.identity_check("casa2").unwrap(), None);
+        dir.write_sidecar("a", &fed_sidecar(owner, local)).unwrap();
+        assert_eq!(dir.identity_check("casa").unwrap(), None, "{owner}");
+        assert_eq!(dir.identity_check("casa2").unwrap(),
+                   Some(IdentityChanged { saved: "casa".into(), current: "casa2".into() }), "{owner}: participante incluída");
+    }
+    // Grupo vivo sem `self.json` (nunca gravado) não tem com o que comparar: não recusa.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = fresh_dir(&tmp);
+    dir.write_sidecar("a", &fed_sidecar("casa", true)).unwrap();
+    assert_eq!(dir.identity_check("outra").unwrap(), None);
+}
+
+mod disk_proptest {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn json_ish() -> impl Strategy<Value = Vec<u8>> {
+        prop_oneof![
+            proptest::collection::vec(any::<u8>(), 0..64),
+            "[{}\\[\\]\":,a-z0-9 ]{0,64}".prop_map(String::into_bytes),
+            Just(br#"{"server_id":7}"#.to_vec()),
+            Just(br#"{"protocol":1,"gid":"g","owner":"o","version":-1,"members":[{}]}"#.to_vec()),
+            Just(br#"{"protocol":1,"gid":"g","owner":"o","version":1,"members":[],"outside":[{"server":1}]}"#.to_vec()),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn record_and_self_from_disk_never_panic(raw in json_ish()) {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = fresh_dir(&tmp);
+            std::fs::create_dir_all(tmp.path().join("groups")).unwrap();
+            std::fs::write(tmp.path().join("groups/g.json"), &raw).unwrap();
+            std::fs::write(tmp.path().join("groups/self.json"), &raw).unwrap();
+            let _ = dir.record("g");
+            let _ = dir.records();
+            let _ = dir.self_id();
+            let _ = dir.identity_check("x");
+        }
+    }
 }

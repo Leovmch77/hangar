@@ -38,7 +38,15 @@ pub struct GroupRecord {
     #[serde(default)]
     pub task: String,
     pub members: Vec<Member>,
+    /// Pares de fora, só informativo: o par vale na máquina da ponta e nenhuma outra o grava.
+    #[serde(default)]
+    pub outside: Vec<OutsideRef>,
 }
+
+/// Membro de fora visto pela dona: `server` é a máquina onde o par foi feito.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutsideRef { pub server: String, pub address: String }
 
 impl Sidecar {
     /// `PairLink.get` (pair.py:75-94), regra movida de `links.rs::pair_of` sem mudança.

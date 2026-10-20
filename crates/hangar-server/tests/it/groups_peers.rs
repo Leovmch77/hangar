@@ -138,3 +138,52 @@ fn enabled_ids_skip_disabled_and_app_only_entries() {
     std::fs::write(&path, r#"{"vps":{"base_url":"http://a","token":"t"},"off":{"base_url":"http://b","token":"t","enabled":false},"app":{"app":true}}"#).unwrap();
     assert_eq!(PeerClient::new(PeerBook::new(Some(path))).enabled_ids(), vec!["vps".to_owned()]);
 }
+
+/// Respostas de `lab` nas rotas entre máquinas: `server_id` de quem atendeu decide quem é.
+fn groups_app() -> Router {
+    Router::new()
+        .route("/api/groups/certo", any(|| async { js(StatusCode::OK, json!({"server_id": "lab", "protocol": 1, "gid": "certo"})) }))
+        .route("/api/groups/outra", any(|| async { js(StatusCode::OK, json!({"server_id": "vm", "protocol": 1})) }))
+        .route("/api/groups/sem-id", any(|| async { js(StatusCode::OK, json!({"protocol": 1})) }))
+        .route("/api/groups/sem-protocolo", any(|| async { js(StatusCode::OK, json!({"server_id": "lab"})) }))
+        .route("/api/groups/codigo", any(|| async {
+            js(StatusCode::NOT_FOUND, json!({"detail": {"code": "erro_grupo_inexistente", "params": {}, "msg": "não"}}))
+        }))
+        .route("/api/groups/fastapi", any(|| async { js(StatusCode::NOT_FOUND, json!({"detail": "Not Found"})) }))
+}
+
+#[tokio::test]
+async fn key_mismatch_is_refused_before_any_write() {
+    let addr = serve(groups_app()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = client_for(dir.path(), addr);
+    let got = client.call_group("lab", reqwest::Method::GET, "/api/groups/certo", None).await.unwrap();
+    assert_eq!(got["gid"], "certo");
+    // `lab` no peers.json atende como `vm`: recusa citando os dois, sem devolver o corpo a quem grava.
+    let err = client.call_group("lab", reqwest::Method::PUT, "/api/groups/outra", Some(&json!({}))).await.unwrap_err();
+    assert!(matches!(&err, PeerError::IdentityMismatch { key, reported } if key == "lab" && reported == "vm"), "{err:?}");
+    let text = err.text("lab");
+    assert!(text.contains("'lab'") && text.contains("'vm'"), "{text}");
+    let err = client.call_group("lab", reqwest::Method::PUT, "/api/groups/sem-id", Some(&json!({}))).await.unwrap_err();
+    assert!(matches!(&err, PeerError::IdentityMismatch { reported, .. } if reported.is_empty()), "{err:?}");
+}
+
+#[tokio::test]
+async fn coded_404_is_not_old_version() {
+    let addr = serve(groups_app()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let client = client_for(dir.path(), addr);
+    let err = client.call_group("lab", reqwest::Method::GET, "/api/groups/codigo", None).await.unwrap_err();
+    assert!(matches!(&err, PeerError::Refused { status: 404, .. }), "{err:?}");
+    // 404 sem código: a rota não existe lá, máquina antiga (o 404 do FastAPI e o do axum).
+    for path in ["/api/groups/fastapi", "/api/groups/nada/ops"] {
+        let err = client.call_group("lab", reqwest::Method::POST, path, Some(&json!({}))).await.unwrap_err();
+        assert!(matches!(err, PeerError::OldVersion), "{path}: {err:?}");
+    }
+    // O registro sem `protocol` é de antes do protocolo 1.
+    let err = client.call_group("lab", reqwest::Method::GET, "/api/groups/sem-protocolo", None).await.unwrap_err();
+    assert!(matches!(err, PeerError::OldVersion), "{err:?}");
+    // Fora de `/api/groups/*` o 404 sem código continua recusa comum.
+    let err = client.call("lab", reqwest::Method::GET, "/api/outra", None).await.unwrap_err();
+    assert!(matches!(err, PeerError::Refused { status: 404, .. }), "{err:?}");
+}

@@ -9,6 +9,7 @@ pub mod link_state;
 pub mod local;
 pub mod model;
 pub mod orq;
+pub mod outbox;
 pub mod peers;
 pub mod routes;
 pub mod service;
@@ -32,9 +33,17 @@ pub fn from_env(dirs: Option<&Dirs>, orq: Arc<dyn OrqFacts>, list: Arc<crate::li
     // Mesmo padrão do `pair._arquivo_dir`: o cofre `~/.hangar`, não a conta.
     let archive = var("HANGAR_PAIR_ARCHIVE").map(PathBuf::from).unwrap_or_else(|| dirs.home.join(".hangar").join("pair-arquivo"));
     let dir = PairDir::new(dirs.claude.join(".hangar-pair"), archive);
+    let server_id = var("HANGAR_SERVER_ID").unwrap_or_default();
+    // As outras máquinas guardam esta pelo id antigo; quem recusa as operações é quem as faz.
+    match dir.identity_check(&server_id) {
+        Ok(None) => {}
+        Ok(Some(changed)) => tracing::error!(code = "erro_grupo_identificador_trocado", saved = %changed.saved, current = %changed.current,
+            "groups: CP_SERVER_ID trocado com grupo entre máquinas vivo"),
+        Err(error) => tracing::warn!(code = "groups_identity_unreadable", %error, "groups: a identidade gravada não foi lida"),
+    }
     // Mudou o grupo: a lista relê o disco na hora, em vez de servir a descoberta de até 1 s atrás, e
     // o retorno da filha ligada confere se passou a ter filha para vigiar.
-    let service = GroupService::new(dir, orq, var("HANGAR_SERVER_ID").unwrap_or_default());
+    let service = GroupService::new(dir, orq, server_id);
     Some(Arc::new(service.with_change_hook(Arc::new(move || { list.invalidate(); link_return::wake(); }))))
 }
 

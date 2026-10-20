@@ -502,16 +502,16 @@ existe com item; subida reenvia (dona) ou pede (participante).
 
 **Fecha:** desenho-federacao §2, §3 "Fila", §4 `PeerError`; Review Focus 4.
 
-- [ ] **Step 1: Testes**: `key_mismatch_is_refused_before_any_write`; `outbox_survives_restart`;
+- [x] **Step 1: Testes**: `key_mismatch_is_refused_before_any_write`; `outbox_survives_restart`;
   `push_without_joining_coalesces`; `dissolved_replaces_pending_push`; `refusal_leaves_the_queue`;
   `python_mode_503_retries`; `worker_exists_only_with_items`; `server_id_change_with_live_group_is_refused`
   (participante incluída, pelo `self.json`); `wait_after_backoff_retries_now`;
   `busy_429_401_408_are_retried`; `unknown_peer_is_retried_with_warning`;
   `coded_404_is_not_old_version`; `cancel_joining_drops_member_from_pending_push`;
   proptest do `outbox.json`, do `self.json` e do `GroupRecord` lidos do disco sem pânico.
-- [ ] **Step 2: Rodar e ver falhar.**
-- [ ] **Step 3: Implementar.**
-- [ ] **Step 4: Rodar.** Esperado: PASS.
+- [x] **Step 2: Rodar e ver falhar.**
+- [x] **Step 3: Implementar.**
+- [x] **Step 4: Rodar.** Esperado: PASS.
 - [ ] **Step 5: Commit** — `feat(groups): group record, outbox and machine identity checks`.
 
 ---

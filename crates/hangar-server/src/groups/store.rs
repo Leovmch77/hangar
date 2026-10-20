@@ -1,6 +1,6 @@
 //! Leitura e escrita da pasta `.hangar-pair` e do arquivo de contratos. Sem lock aqui: quem
 //! escreve é o `GroupService`, um por processo, sob o lock dele.
-use super::model::Sidecar;
+use super::model::{GroupRecord, Sidecar};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -145,7 +145,100 @@ impl PairDir {
     }
 
     pub fn contract_path(&self, gid: &str) -> PathBuf { self.root.join(format!("grupo-{gid}.md")) }
+
+    /// `.hangar-pair/groups/`: registros da dona, a fila de saída e a identidade desta máquina.
+    pub fn groups_dir(&self) -> PathBuf { self.root.join("groups") }
+
+    fn record_path(&self, gid: &str) -> PathBuf { self.groups_dir().join(format!("{}.json", file_stem(gid))) }
+
+    /// Registro do grupo nesta máquina dona; ausente = `None`, torto = erro.
+    pub fn record(&self, gid: &str) -> Result<Option<GroupRecord>, StoreError> {
+        match std::fs::read(self.record_path(gid)) {
+            Ok(raw) => Ok(Some(serde_json::from_slice(&raw)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn write_record(&self, record: &GroupRecord) -> Result<(), StoreError> {
+        std::fs::create_dir_all(self.groups_dir())?;
+        replace_atomic(&self.record_path(&record.gid), &serde_json::to_vec(record)?)?;
+        Ok(())
+    }
+
+    pub fn remove_record(&self, gid: &str) -> Result<(), StoreError> {
+        match std::fs::remove_file(self.record_path(gid)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        }
+    }
+
+    /// Registros válidos por ordem de gid; torto fica de fora com aviso, como o sidecar.
+    pub fn records(&self) -> Result<Vec<GroupRecord>, StoreError> {
+        let entries = match std::fs::read_dir(self.groups_dir()) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let mut found = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            let Some(stem) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".json")) else { continue };
+            if [OUTBOX_STEM, SELF_STEM].contains(&stem) { continue; }
+            match std::fs::read(&path).map_err(StoreError::from).and_then(|raw| Ok(serde_json::from_slice::<GroupRecord>(&raw)?)) {
+                Ok(record) => found.push(record),
+                Err(error) => {
+                    if crate::warn_limit::allow(Some(stem), "groups_record_unreadable") {
+                        tracing::warn!(code = "groups_record_unreadable", stem, %error, "groups: registro de grupo ilegível ou torto, ignorado");
+                    }
+                }
+            }
+        }
+        found.sort_by(|a, b| a.gid.cmp(&b.gid));
+        Ok(found)
+    }
+
+    fn self_path(&self) -> PathBuf { self.groups_dir().join(format!("{SELF_STEM}.json")) }
+
+    /// O `server_id` gravado na primeira entrada desta máquina num grupo entre máquinas.
+    pub fn self_id(&self) -> Result<Option<String>, StoreError> {
+        let raw = match std::fs::read(self.self_path()) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let saved: SelfFile = serde_json::from_slice(&raw)?;
+        Ok(Some(saved.server_id))
+    }
+
+    /// Chamar só depois de `identity_check` passar: troca o id gravado pelo atual.
+    pub fn remember_self(&self, server_id: &str) -> Result<(), StoreError> {
+        std::fs::create_dir_all(self.groups_dir())?;
+        replace_atomic(&self.self_path(), &serde_json::to_vec(&SelfFile { server_id: server_id.to_owned() })?)?;
+        Ok(())
+    }
+
+    /// Os outros guardam esta máquina pelo id antigo: com grupo entre máquinas vivo, trocar o id
+    /// os deixaria apontando para ninguém. Sem grupo vivo ou sem id gravado, nada a comparar.
+    pub fn identity_check(&self, current: &str) -> Result<Option<IdentityChanged>, StoreError> {
+        let Some(saved) = self.self_id()? else { return Ok(None) };
+        if saved == current || !self.sidecars()?.iter().any(|(_, s)| s.fed.is_some()) {
+            return Ok(None);
+        }
+        Ok(Some(IdentityChanged { saved, current: current.to_owned() }))
+    }
 }
+
+/// Nomes reservados em `groups/`: não são registro de grupo.
+pub(crate) const OUTBOX_STEM: &str = "outbox";
+const SELF_STEM: &str = "self";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelfFile { server_id: String }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdentityChanged { pub saved: String, pub current: String }
 
 fn read_sidecar(path: &Path, name: &str) -> Result<Option<Sidecar>, StoreError> {
     let raw = match std::fs::read(path) {
@@ -169,7 +262,7 @@ fn parse_noting_fed(name: &str, data: &serde_json::Map<String, Value>) -> Option
 /// Troca o arquivo inteiro: temporário na mesma pasta + rename, com as novas tentativas do
 /// Windows (acesso negado no rename) copiadas de `hangar-workspace/src/files.rs:160-175`. Sem
 /// fsync e sem a conferência de conteúdo do `files::write`, que não servem aqui.
-fn replace_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn replace_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     // Mesmo nome que o `PairLink.set` usa (`<stem>.json.tmp`), que o `clear_sidecar` também apaga.
     let mut tmp = target.as_os_str().to_owned();
     tmp.push(".tmp");

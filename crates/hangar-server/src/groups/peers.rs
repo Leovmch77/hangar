@@ -87,6 +87,10 @@ pub enum PeerError {
     Refused { status: u16, detail: Value },
     /// Rede, prazo ou corpo ilegível: o outro lado pode ter gravado. O texto já vem completo.
     Transport(String),
+    /// A máquina não tem grupo entre máquinas (rota `/api/groups/*` inexistente ou sem `protocol`).
+    OldVersion,
+    /// Quem atendeu pela chave `key` do `peers.json` se diz `reported` (vazio = não disse).
+    IdentityMismatch { key: String, reported: String },
 }
 
 impl PeerError {
@@ -98,6 +102,9 @@ impl PeerError {
             PeerError::Unknown => format!("servidor '{server}' não está em peers.json (ou sem base_url/token)"),
             PeerError::Refused { status, detail } => format!("{server} respondeu HTTP {status}: {}", py_str(detail)),
             PeerError::Transport(text) => text.clone(),
+            PeerError::OldVersion => format!("{server} está numa versão do Hangar sem grupo entre máquinas"),
+            PeerError::IdentityMismatch { key, reported } =>
+                format!("a máquina '{key}' do peers.json responde como '{reported}': confira o CP_SERVER_ID dela"),
         }
     }
 }
@@ -142,6 +149,28 @@ impl PeerClient {
             }
         };
         request(http, server, &format!("{}{path}", cfg.base_url), Some(&cfg.token), method, body).await
+    }
+
+    /// Chamada a `/api/groups/*`: além do `call`, confere quem atendeu e se a máquina conhece
+    /// grupos entre máquinas. Versão antiga só por sinal próprio: 404 sem `code` (a rota não
+    /// existe lá) ou `GET /api/groups/{gid}` sem `protocol`; 404 com código é recusa comum.
+    pub async fn call_group(&self, server: &str, method: reqwest::Method, path: &str, body: Option<&Value>) -> Result<Value, PeerError> {
+        let group_get = method == reqwest::Method::GET
+            && path.strip_prefix("/api/groups/").is_some_and(|rest| !rest.is_empty() && !rest.contains('/'));
+        let answer = match self.call(server, method, path, body).await {
+            Err(PeerError::Refused { status: 404, detail }) if path.starts_with("/api/groups/") && detail.get("code").is_none() => {
+                return Err(PeerError::OldVersion);
+            }
+            other => other?.unwrap_or(Value::Null),
+        };
+        if group_get && answer.get("protocol").and_then(Value::as_u64).is_none_or(|p| p < u64::from(super::model::PROTOCOL)) {
+            return Err(PeerError::OldVersion);
+        }
+        let reported = answer.get("server_id").and_then(Value::as_str).unwrap_or_default();
+        if reported != server {
+            return Err(PeerError::IdentityMismatch { key: server.to_owned(), reported: reported.to_owned() });
+        }
+        Ok(answer)
     }
 }
 
