@@ -4,7 +4,8 @@
 Os testes do hangar-server comparam campo a campo com o que este script grava em golden/. Tudo aqui
 é inventado: nunca copie conversa real para cá.
 
-Uso, de backend/:  uv run python tests/fixtures/contract/gen_golden.py
+Uso, de backend/:  uv run python tests/fixtures/contract/gen_golden.py [--only pasta,...]
+(sem --only gera todas: golden, pair_text, pair_hook, groups_python_mode)
 """
 import json
 import logging
@@ -1486,7 +1487,233 @@ def cross_route_rows() -> list:
     return rows
 
 
-def main() -> None:
+# Caracterização do Python dos grupos antes de ele sair (pair_text, pair_hook, groups_python_mode): o
+# esperado vem de executar o Python; os testes do Rust leem estas pastas.
+GROUP_SECRET = "cd" * 32
+GROUP_INTERNAL = {"X-Hangar-Internal": GROUP_SECRET}
+SURROGATE = "\\ud800"   # escape JSON de um surrogate solto; o corpo vai cru para não passar pelo encoder
+
+PAIR_TEXT_CASES = [
+    # (nome, IDs do inventário, corpo, cabeçalhos)
+    ("group_with_task", ["TXT-01", "TXT-02", "TXT-04", "TXT-06", "TXT-08", "TXT-09"],
+     dict(kind="group", me="a", others=["b", "c"], task="T-1 filtro", contract="/p/grupo-ab12cd34.md",
+          harness={"a": "claude", "b": "codex"}), None),
+    ("group_without_task", ["TXT-02", "TXT-12"], dict(kind="group", me="a", others=["b"], task=""), None),
+    ("group_task_only_spaces", ["TXT-12"], dict(kind="group", me="a", others=["b"], task="   "), None),
+    ("group_task_padded", ["TXT-12"], dict(kind="group", me="a", others=["b"], task="  t2  "), None),
+    *[(f"group_harness_{h}", ["TXT-03", "TXT-05"],
+       dict(kind="group", me="a", others=["b"], task="t", harness={"a": h, "b": "claude"}), None)
+      for h in ("claude", "codex", "pi", "omp", "kimi")],
+    ("group_harness_missing_defaults_claude", ["TXT-05"],
+     dict(kind="group", me="a", others=["b"], task="t", harness={"b": "pi"}), None),
+    ("group_example_uses_first_other", ["TXT-05"], dict(kind="group", me="a", others=["z", "b"]), None),
+    ("group_with_contract", ["TXT-07"], dict(kind="group", me="a", others=["b"], contract="/p/grupo-g1.md"), None),
+    ("group_without_contract", ["TXT-07"], dict(kind="group", me="a", others=["b"], contract=None), None),
+    ("group_contract_remote_ignored", ["TXT-14"],
+     dict(kind="group", me="a", others=["b"], contract="/p/grupo-g1.md", contract_remote=True), None),
+    ("orq_with_task", ["TXT-10"], dict(kind="orq", task="T-9"), None),
+    ("orq_without_task", ["TXT-10"], dict(kind="orq", task=""), None),
+    ("external", ["TXT-11", "TXT-08"], dict(kind="external", me="a", peer="ana::rev", owner="Ana"), None),
+    ("group_task_surrogate", ["TXT-02"],
+     '{"kind":"group","me":"a","others":["b"],"task":"t' + SURROGATE + 'x"}', None),
+    ("group_task_accents", ["TXT-02"], dict(kind="group", me="nome com espaço", others=["b"], task="ação ✓"), None),
+    ("refused_without_secret", ["TXT-13"], dict(kind="orq"), {}),
+    ("refused_extra_field", ["TXT-13"], dict(kind="orq", bogus=1), None),
+    ("refused_bad_kind", ["TXT-13"], dict(kind="other"), None),
+    ("refused_group_without_others", ["TXT-13"], dict(kind="group", me="a"), None),
+]
+
+
+def _origin_commit() -> str:
+    import subprocess
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=HERE, capture_output=True, text=True,
+                          check=True).stdout.strip()
+
+
+def _command(area: str) -> str:
+    return f"cd backend && uv run python tests/fixtures/contract/gen_golden.py --only {area}"
+
+
+def _fresh(area: str) -> Path:
+    out = HERE / area
+    out.mkdir(parents=True, exist_ok=True)
+    for old in out.glob("*.json"):
+        old.unlink()
+    return out
+
+
+def _dump(path: Path, data) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=True, indent=1) + "\n", encoding="utf-8")
+
+
+def _require(area: str, ids: set[str], required: set[str]) -> None:
+    missing = sorted(required - ids)
+    assert not missing, f"{area}: variante obrigatória sem fixture: {missing}"
+
+
+def write_pair_text() -> None:
+    """Cada variante pela rota que o Rust chama (`POST /internal/pair/text`), com o segredo interno."""
+    from fastapi.testclient import TestClient
+    from app import api, internal_api
+
+    out, commit, seen = _fresh("pair_text"), _origin_commit(), set()
+    internal_api.set_secret(GROUP_SECRET)
+    try:
+        client = TestClient(api.app, client=("127.0.0.1", 50000), raise_server_exceptions=False)
+        for name, ids, body, headers in PAIR_TEXT_CASES:
+            hdr = GROUP_INTERNAL if headers is None else headers
+            if isinstance(body, str):
+                r = client.post("/internal/pair/text", content=body.encode(),
+                                headers={**hdr, "Content-Type": "application/json"})
+            else:
+                r = client.post("/internal/pair/text", json=body, headers=hdr)
+            try:
+                response = r.json()
+            except ValueError:
+                response = r.text
+            _dump(out / f"{name}.json", {
+                "name": name, "ids": ids, "origin_commit": commit, "command": _command("pair_text"),
+                "request": {"secret": "X-Hangar-Internal" in hdr,
+                            **({"raw_body": body} if isinstance(body, str) else {"body": body})},
+                "status": r.status_code, "response": response,
+            })
+            seen.update(ids)
+    finally:
+        internal_api.set_secret(None)
+    _require("pair_text", seen, {f"TXT-{n:02d}" for n in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)})
+
+
+# Hook de SessionStart rodado como processo. `tmux`: o que o tmux falso responde (`None` = sem tmux no
+# PATH); `files`: o que a pasta de grupo tem (texto cru); `headless`: ~/.hangar/claude-headless.
+PANE_A = {"list_panes": "%3\ta\n%4\tb\n", "has_session_rc": 1}
+EXT_ANA = [{"share_id": "sh1", "local_session": "a", "alias": "ana", "peer_owner": "Ana", "peer_session": "rev",
+            "peer_address": "https://ana.example.ts.net:8443", "peer_token": "tok", "created_at": 1.0}]
+EXT_VIA_B = [{**EXT_ANA[0], "local_session": "b"}]
+EXT_OTHER = [{**EXT_ANA[0], "local_session": "zz"}]
+
+
+def _sc(**kw) -> str:
+    return json.dumps({"peers": ["b"], "task": "", "gid": "ab12cd34", "harness": {}, **kw})
+
+
+PAIR_HOOK_CASES = [
+    # (nome, IDs, files, env, tmux, headless)
+    ("no_sidecar", ["HOOK-02"], {}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("group", ["HOOK-01", "HOOK-02", "HOOK-11"], {"a.json": _sc(task="T-1")}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("sidecar_not_json", ["HOOK-03"], {"a.json": "{nao é json"}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("sidecar_not_object", ["HOOK-03"], {"a.json": "[1, 2]"}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("sidecar_peers_not_list", ["HOOK-03"], {"a.json": json.dumps({"peers": 5})}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("orq_alone", ["HOOK-06"], {"a.json": json.dumps({"peers": [], "task": "T-9", "gid": "cd34ef56", "harness": {},
+                                                      "orq": True})}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("orq_with_peers", ["HOOK-06"], {"a.json": _sc(task="T-9", orq=True)}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("no_peers", ["HOOK-07"], {"a.json": _sc(peers=[])}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("empty_peer_names", ["HOOK-07"], {"a.json": _sc(peers=["", None])}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("external_direct", ["HOOK-08"], {"a.json": _sc(peers=["ana::rev"]), "external_pairs.json": json.dumps(EXT_ANA)},
+     {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("external_via_other_member", ["HOOK-08"],
+     {"a.json": _sc(peers=["b", "ana::rev"]), "external_pairs.json": json.dumps(EXT_VIA_B)},
+     {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("external_of_someone_else", ["HOOK-08", "HOOK-11"],
+     {"a.json": _sc(peers=["ana::rev"]), "external_pairs.json": json.dumps(EXT_OTHER)}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("external_registry_missing", ["HOOK-09", "HOOK-11"], {"a.json": _sc(peers=["b", "lab::c"])},
+     {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("external_registry_unreadable", ["HOOK-09"],
+     {"a.json": _sc(peers=["b", "lab::c"]), "external_pairs.json": "{quebrado"}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("external_registry_wrong_shape", ["HOOK-09"],
+     {"a.json": _sc(peers=["lab::c"]), "external_pairs.json": json.dumps([{"alias": "x"}])},
+     {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("external_registry_unreadable_no_cross", ["HOOK-09"],
+     {"a.json": _sc(peers=["b"]), "external_pairs.json": "{quebrado"}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("linked_child", ["HOOK-10"], {"a.json": _sc(peers=["pai"], linked_by="pai")}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("linked_parent_left", ["HOOK-10"], {"a.json": _sc(peers=["b"], linked_by="pai")}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("gid_empty", ["HOOK-11"], {"a.json": _sc(gid="")}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("gid_missing", ["HOOK-11"], {"a.json": json.dumps({"peers": ["b"]})}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("harness_self_forced_claude", ["HOOK-12"],
+     {"a.json": _sc(harness={"a": "pi", "b": "kimi"})}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("harness_not_object", ["HOOK-12"], {"a.json": _sc(harness=["x"])}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("task_surrogate", ["HOOK-02"],
+     {"a.json": '{"peers": ["b"], "task": "t' + SURROGATE + 'x", "gid": "ab12cd34"}'}, {"TMUX_PANE": "%3"}, PANE_A, {}),
+    ("name_from_headless_key", ["HOOK-04"], {"h.json": _sc(task="sem terminal")}, {"CP_SESSION_KEY": "k-1",
+     "TMUX_PANE": "%3"}, PANE_A,
+     {"aaa-broken.json": "{torto", "other.json": json.dumps({"key": "k-2", "name": "x"}),
+      "zz.json": json.dumps({"key": "k-1", "name": "h"})}),
+    ("headless_key_unknown_falls_to_pane", ["HOOK-04"], {"a.json": _sc()}, {"CP_SESSION_KEY": "k-9", "TMUX_PANE": "%3"},
+     PANE_A, {"zz.json": json.dumps({"key": "k-1", "name": "h"})}),
+    ("name_from_unique_pane", ["HOOK-04"], {"b.json": _sc(peers=["a"])}, {"TMUX_PANE": "%4"}, PANE_A, {}),
+    ("pane_ambiguous_falls_to_stamp", ["HOOK-04"], {"b.json": _sc(peers=["c"])},
+     {"TMUX_PANE": "%1", "CP_SESSION_NAME": "b"}, {"list_panes": "%1\ta\n%1\tb\n", "has_session_rc": 0}, {}),
+    ("stamp_session_gone", ["HOOK-04"], {"b.json": _sc(peers=["c"])},
+     {"TMUX_PANE": "%1", "CP_SESSION_NAME": "b"}, {"list_panes": "%1\ta\n%1\tb\n", "has_session_rc": 1}, {}),
+    ("stamp_without_pane", ["HOOK-04"], {"b.json": _sc(peers=["c"])}, {"CP_SESSION_NAME": "b"},
+     {"list_panes": "", "has_session_rc": 0}, {}),
+    ("no_tmux_on_path", ["HOOK-03", "HOOK-04"], {"a.json": _sc()}, {"TMUX_PANE": "%3", "CP_SESSION_NAME": "a"}, None, {}),
+    ("no_identity", ["HOOK-04"], {"a.json": _sc()}, {}, PANE_A, {}),
+    ("name_sanitized", ["HOOK-05"], {"nome-com-espa-o.json": _sc(peers=["b"])}, {"TMUX_PANE": "%7"},
+     {"list_panes": "%7\tnome com espaço\n", "has_session_rc": 1}, {}),
+]
+
+HOOK_STDIN = json.dumps({"hook_event_name": "SessionStart", "source": "clear"})
+
+
+def write_pair_hook() -> None:
+    """`python hooks/pair_hook.py <pair_dir>` como processo, com HOME, PATH e tmux falsos."""
+    import subprocess
+
+    hook = HERE.parents[2] / "hooks" / "pair_hook.py"
+    out, commit, seen = _fresh("pair_hook"), _origin_commit(), set()
+    for name, ids, files, env, tmux, headless in PAIR_HOOK_CASES:
+        with tempfile.TemporaryDirectory(prefix="grp-hook-") as tmp:
+            root = Path(tmp)
+            pair_dir, home, bin_ = root / "pair", root / "home", root / "bin"
+            for d in (pair_dir, home / ".hangar" / "claude-headless", bin_):
+                d.mkdir(parents=True)
+            for fname, text in files.items():
+                (pair_dir / fname).write_text(text, encoding="utf-8")
+            for fname, text in headless.items():
+                (home / ".hangar" / "claude-headless" / fname).write_text(text, encoding="utf-8")
+            if tmux is not None:
+                panes = tmux["list_panes"].replace("'", "'\\''")
+                sh = bin_ / "tmux"
+                sh.write_text("#!/bin/sh\n"
+                              f"if [ \"$1\" = list-panes ]; then printf '%s' '{panes}'; exit 0; fi\n"
+                              f"if [ \"$1\" = has-session ]; then exit {tmux['has_session_rc']}; fi\nexit 1\n",
+                              encoding="utf-8")
+                sh.chmod(0o755)
+            base = {"HOME": str(home), "PATH": str(bin_), "LANG": "C.UTF-8"}
+            r = subprocess.run([sys.executable, str(hook), str(pair_dir)], input=HOOK_STDIN.encode(),
+                               env={**base, **env}, capture_output=True, timeout=10)
+            clean = lambda b: b.decode("utf-8", "backslashreplace").replace(str(pair_dir), "<pair>")
+            _dump(out / f"{name}.json", {
+                "name": name, "ids": ids, "origin_commit": commit, "command": _command("pair_hook"),
+                "input": {"argv": ["<pair>"], "stdin": HOOK_STDIN, "env": env, "tmux": tmux,
+                          "pair_dir": files, "headless": headless},
+                "output": {"returncode": r.returncode, "stdout": clean(r.stdout), "stderr": clean(r.stderr)},
+            })
+            seen.update(ids)
+    _require("pair_hook", seen, {f"HOOK-{n:02d}" for n in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)})
+
+
+# As 6 rotas de grupo do FastAPI no modo `python` (sem Rust), pelos mesmos passos dos goldens de rota.
+PYTHON_MODE_ROUTES = {
+    "pair_post.json": ("POST", "/pair"), "pair_delete.json": ("DELETE", "/pair"),
+    "pair_remote.json": ("POST", "/pair-remote"), "unpair_remote.json": ("POST", "/unpair-remote"),
+    "group_message.json": ("POST", "/group-message"), "pair_contract.json": ("GET", "/pair/contract"),
+}
+
+
+def write_groups_python_mode() -> None:
+    from app import groups_bridge
+    assert not groups_bridge.rust_owns_groups(), "o gerador precisa rodar no modo python"
+    out, commit = _fresh("groups_python_mode"), _origin_commit()
+    rows = group_route_rows() + cross_route_rows()
+    for fname, (method, suffix) in PYTHON_MODE_ROUTES.items():
+        cases = [r for r in rows if r["method"] == method and r["path"].endswith(suffix)]
+        assert cases, fname
+        _dump(out / fname, {"origin_commit": commit, "command": _command("groups_python_mode"), "mode": "python",
+                            "method": method, "route": "/api/sessions/{name}" + suffix, "cases": cases})
+
+
+def write_transcript_golden() -> None:
     claude = TRANSCRIPTS / "claude.jsonl"
     rewrite = TRANSCRIPTS / "claude_rewrite_surrogate.jsonl"
     codex = TRANSCRIPTS / "codex.jsonl"
@@ -1515,6 +1742,23 @@ def main() -> None:
     write_pair_sidecars()
     write_golden("group_routes.json", group_route_rows())
     write_golden("group_cross_routes.json", cross_route_rows())
+
+
+AREAS = {"golden": write_transcript_golden, "pair_text": write_pair_text, "pair_hook": write_pair_hook,
+         "groups_python_mode": write_groups_python_mode}
+
+
+def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--only", help=f"pastas separadas por vírgula, entre {', '.join(AREAS)}")
+    only = parser.parse_args().only
+    names = only.split(",") if only else list(AREAS)
+    unknown = [n for n in names if n not in AREAS]
+    if unknown:
+        parser.error(f"pasta desconhecida: {', '.join(unknown)}")
+    for n in names:
+        AREAS[n]()
 
 
 if __name__ == "__main__":

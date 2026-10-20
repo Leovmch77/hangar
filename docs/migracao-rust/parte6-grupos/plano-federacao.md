@@ -198,12 +198,12 @@ harness claude/codex/pi/omp/kimi do destinatário (TXT-03, TXT-05), com e sem co
 (HOOK-08), `external_pairs.json` ausente e ilegível (HOOK-09), filha ligada e pai que saiu
 (HOOK-10), gid vazio (HOOK-11), resolução de nome pelos três caminhos (HOOK-04).
 
-- [ ] **Step 1: Gerador**: criar a flag `--only <pasta,…>` no `gen_golden.py` (sem ela, gera tudo
+- [x] **Step 1: Gerador**: criar a flag `--only <pasta,…>` no `gen_golden.py` (sem ela, gera tudo
   como hoje) e estendê-lo para as três pastas, com `pair_dir` e HOME temporários; o hook roda como
   processo (`python backend/hooks/pair_hook.py <pair_dir>`) com o ambiente da variante.
-- [ ] **Step 2: Gerar e conferir** que cada variante acima tem arquivo; `README.md` com commit e
+- [x] **Step 2: Gerar e conferir** que cada variante acima tem arquivo; `README.md` com commit e
   comando; criar o esqueleto da `conferencia.md`.
-- [ ] **Step 3: Commit** — `test(groups): record the Python protocol text, hook and python-mode routes`.
+- [x] **Step 3: Commit** — `test(groups): record the Python protocol text, hook and python-mode routes`.
 
 **Prova:** `cd backend && uv run python tests/fixtures/contract/gen_golden.py --only pair_text,pair_hook,groups_python_mode` → arquivos gerados, `git diff --stat` só nessas pastas.
 
