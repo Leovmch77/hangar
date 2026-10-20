@@ -2093,8 +2093,12 @@ if ($registrou) {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $log) | Out-Null
             # WScript oculta a janela e acompanha o processo ate o fim para o Agendador.
             # Aspas dobradas dentro da string VBS; `> log 2>&1` sobrescreve a cada subida.
+            # O backend abre o proprio log (`--log`): o `>` do cmd abre sem escrita compartilhada, e um
+            # neto que sobrevivia ao backend (jest, port-forward, navegador de teste) com a copia herdada
+            # fazia a subida seguinte morrer antes do python, sem uma linha no log.
             $vbs = Join-Path $env:LOCALAPPDATA "hangar\$($t.Nome).vbs"
-            $cmdLinha = "cmd /c """"$exe"" $($t.Args) > ""$log"" 2>&1"""
+            $cmdLinha = if ($t.Nome -eq 'hangar-backend') { """$exe"" $($t.Args) --log ""$log""" }
+                        else { "cmd /c """"$exe"" $($t.Args) > ""$log"" 2>&1""" }
             $linhaVbs = 'WScript.Quit CreateObject("WScript.Shell").Run("' + $cmdLinha.Replace('"', '""') + '", 0, True)'
             # O .vbs carrega o caminho do LOG, que fica em %LOCALAPPDATA% — ou seja, no perfil do
             # usuario, que pode ter acento no nome. Ver Escrever-Lancador.

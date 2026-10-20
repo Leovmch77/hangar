@@ -152,6 +152,18 @@ try {
     $cmdLinha = 'cmd /c "C:\repo com espaco\python.exe" -m app.main'
     . ([scriptblock]::Create($assignment.Extent.Text))
     Assert ($linhaVbs -match '^WScript\.Quit .*\.Run\(.*0, True\)$') 'Lancador nao acompanha o filho ou nao propaga seu codigo de saida'
+    # O backend abre o proprio log: o `>` do cmd deixava a tarefa presa a um neto com a copia herdada.
+    $assignment = $ast.Find({ param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$cmdLinha'
+    }, $true)
+    $exe = 'C:\repo com espaco\python.exe'; $log = 'C:\Users\x\hangar-backend.log'
+    $t = @{ Nome = 'hangar-backend'; Args = '-m app.main' }
+    . ([scriptblock]::Create($assignment.Extent.Text))
+    Assert ($cmdLinha -eq '"C:\repo com espaco\python.exe" -m app.main --log "C:\Users\x\hangar-backend.log"') "Backend voltou a abrir o log pelo cmd: $cmdLinha"
+    $exe = 'C:\node\npm.cmd'; $log = 'C:\Users\x\hangar-frontend.log'
+    $t = @{ Nome = 'hangar-frontend'; Args = 'run preview' }
+    . ([scriptblock]::Create($assignment.Extent.Text))
+    Assert ($cmdLinha -eq 'cmd /c ""C:\node\npm.cmd" run preview > "C:\Users\x\hangar-frontend.log" 2>&1"') "Frontend mudou de lancador: $cmdLinha"
     function New-ScheduledTaskSettingsSet {
         param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries,
             $ExecutionTimeLimit, $MultipleInstances, $RestartCount, $RestartInterval, $Priority)
