@@ -64,6 +64,11 @@ fn state_label(state: &str) -> Option<String> {
     }))
 }
 
+/// Quem o painel lista: esta sessão primeiro, marcada, e os pares; o título conta todos.
+fn sheet_members(me: &str, peers: &[String]) -> Vec<(String, bool)> {
+    std::iter::once((me.to_owned(), true)).chain(peers.iter().map(|p| (p.clone(), false))).collect()
+}
+
 fn dot(state: &str) -> Div { div().size(px(8.)).flex_shrink_0().rounded_full().bg(theme::status(state)) }
 
 /// Recados `[de: X]` que um membro recebeu de outro membro, de todos os históricos, em ordem de tempo; só a cauda.
@@ -462,7 +467,8 @@ impl Hangar {
                 .child(pick_list(self, "par_parear_aria", "forward_nenhuma_viva", cx))
                 .child(Input::new(&task).disabled(busy).aria_label(web("par_tarefa_placeholder")));
         }
-        let members = peers.iter().fold(div().flex().flex_col().gap(px(2.)), |list, peer| {
+        let members = sheet_members(&me, &peers).into_iter().fold(div().flex().flex_col().gap(px(2.)), |list, (peer, this)| {
+            let peer = &peer;
             let at = self.member_at(peer, &ids);
             let live = match &at { MemberAt::Here(t) => self.target_session(t).map(|s| (t.clone(), s.state.clone())), _ => None };
             let missing = match &at { MemberAt::Missing(id) => Some(tr_shared("grupo_membro_maquina_desconectada", &[("maquina", id)])), _ => None };
@@ -470,7 +476,9 @@ impl Hangar {
             list.child(div().flex().items_center().gap_3().px_2().py(px(6.)).rounded(px(8.))
                 .children(live.as_ref().map(|(_, state)| dot(state)))
                 .child(div().flex_1().min_w_0().flex().flex_col()
-                    .child(div().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(peer.clone()))
+                    .child(div().flex().items_center().gap_2().min_w_0()
+                        .child(div().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(peer.clone()))
+                        .when(this, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::accent_text()).child(tr_shared("worktree_esta_sessao", &[])))))
                     .children(missing.map(|text| div().truncate().text_xs().text_color(theme::muted()).child(text))))
                 .children(live.as_ref().and_then(|(_, state)| state_label(state)).map(|label| div().flex_shrink_0().text_xs().text_color(theme::muted()).child(label)))
                 // Só o membro numa máquina conectada aqui tem conversa para abrir.
@@ -554,7 +562,16 @@ impl Hangar {
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` do gpui_kit, que o `super::*` traz, esconderia o `#[test]` da linguagem.
-    use super::{ChatEvent, Delivery, Failure, FeedItem, build_feed, group_delivery};
+    use super::{ChatEvent, Delivery, Failure, FeedItem, build_feed, group_delivery, sheet_members};
+
+    #[test]
+    fn panel_lists_every_member_with_this_session_marked() {
+        let peers = ["ABC-1-proxy".to_owned(), "vm::ABC-1-app".into(), "vm::abc2-app".into()];
+        let got = sheet_members("ABC-1-coord", &peers);
+        assert_eq!(got.len(), 4, "o título diz quatro: a lista também");
+        assert_eq!(got[0], ("ABC-1-coord".to_owned(), true), "esta sessão primeiro, marcada");
+        assert!(got[1..].iter().all(|(_, me)| !me));
+    }
 
     fn msg(text: &str, ts: f64) -> ChatEvent { ChatEvent { kind: "user_msg".into(), text: Some(text.into()), ts: Some(ts), ..Default::default() } }
 

@@ -168,8 +168,8 @@ pub(super) fn qualified(from: &str, to: &str, name: &str, ids: &HashMap<String, 
     identity_of(from, ids).map(|id| format!("{id}::{name}"))
 }
 
-/// Cabeçalho do grupo: "tarefa ↔ máquina::sessão" para os membros de outras máquinas e "apelido::sessão (dono)" para cada
-/// par de fora.
+/// Cabeçalho do grupo: "tarefa ↔ máquina::sessão" para os membros de máquinas sem conexão aqui e "apelido::sessão (dono)"
+/// para cada par de fora.
 pub(super) fn pair_header_label(label: &str, elsewhere: &[String], pairs: &[PairExternalEntry]) -> String {
     let mut out = label.to_owned();
     if !elsewhere.is_empty() {
@@ -246,40 +246,50 @@ fn owner<'a>(row: Row<'a>, ids: &'a HashMap<String, String>) -> Option<&'a str> 
 pub(super) fn can_leave(s: &SessionInfo) -> bool { !s.orq() && (s.pair_gid.is_some() || !s.peers().is_empty()) }
 
 pub(super) enum ListRow<'a> {
-    Header { gid: String, label: String, members: Vec<&'a SessionInfo> },
-    Session(&'a SessionInfo),
-    /// A sessão da outra pessoa, logo abaixo dos membros do grupo; uma por par de fora.
-    External { gid: String, pair: PairExternalEntry },
+    /// `key`: a chave do bloco recolhido, a mesma para os membros de todas as máquinas.
+    Header { key: String, gid: String, label: String, members: Vec<Row<'a>> },
+    /// `block`: a chave do bloco em que a linha está.
+    Session { row: Row<'a>, block: Option<String> },
+    /// A sessão da outra pessoa, logo abaixo dos membros do grupo; uma por par de fora. `own`: a máquina do membro que tem o par.
+    External { block: String, gid: String, own: &'a str, pair: PairExternalEntry },
 }
 
-/// `clusterByPair` do web: cada grupo vira um cabeçalho no lugar do primeiro membro, seguido dos membros; o resto fica onde
-/// estava. O rótulo é a tarefa do primeiro que tiver uma, senão os nomes.
-// ponytail: busca dos membros quadrática no tamanho da fatia; a lista de sessões é curta.
-pub(super) fn cluster<'a>(list: &[&'a SessionInfo]) -> Vec<ListRow<'a>> {
-    let mut out = Vec::new();
-    let mut done: HashSet<&str> = HashSet::new();
-    for s in list {
-        let Some(gid) = s.pair_gid.as_deref() else { out.push(ListRow::Session(s)); continue };
-        if !done.insert(gid) { continue; }
-        let members: Vec<&SessionInfo> = list.iter().copied().filter(|m| m.pair_gid.as_deref() == Some(gid)).collect();
-        let label = members.iter().filter_map(|m| m.pair_task.as_deref().map(str::trim)).find(|t| !t.is_empty()).map(str::to_owned)
-            .unwrap_or_else(|| members.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", "));
-        let mut outside: Vec<PairExternalEntry> = Vec::new();
-        for m in &members {
-            for p in m.outside_pairs().iter() {
-                if !outside.iter().any(|o| o.alias == p.alias && o.session == p.session) { outside.push(p.clone()); }
+/// `clusterByPair` do web, entre máquinas: `sections` são as seções da barra na ordem da tela. Cada grupo do modelo global
+/// vira um bloco só, com o cabeçalho no lugar do primeiro membro seguido de todos os membros (de qualquer máquina e seção),
+/// que saem de onde estariam. O rótulo é a tarefa ou os nomes; só membro de máquina sem conexão aqui entra depois da seta.
+// ponytail: busca dos membros quadrática no número de linhas; a lista de sessões é curta.
+pub(super) fn cluster<'a>(sections: &[Vec<Row<'a>>], ids: &HashMap<String, String>) -> Vec<Vec<ListRow<'a>>> {
+    let all: Vec<Row<'a>> = sections.iter().flatten().copied().collect();
+    let groups = global_groups(&all, ids);
+    let of: Vec<Option<usize>> = all.iter().map(|r| groups.iter().position(|g| g.members.iter()
+        .any(|m| matches!(m, Member::Here { server, name } if server == r.server && *name == r.session.name)))).collect();
+    let mut done = vec![false; groups.len()];
+    let mut at = 0;
+    sections.iter().map(|section| {
+        let mut out = Vec::new();
+        for row in section {
+            at += 1;
+            let Some(g) = of[at - 1] else { out.push(ListRow::Session { row: *row, block: None }); continue };
+            if std::mem::replace(&mut done[g], true) { continue; }
+            let group = &groups[g];
+            let block = format!("pair:{}", group.key);
+            let members: Vec<Row<'a>> = all.iter().zip(&of).filter(|(_, o)| **o == Some(g)).map(|(r, _)| *r).collect();
+            let gid = members.iter().find_map(|m| m.session.pair_gid.clone().filter(|g| !g.is_empty())).unwrap_or_else(|| group.key.clone());
+            let mut outside: Vec<(&'a str, PairExternalEntry)> = Vec::new();
+            for m in &members {
+                for p in m.session.outside_pairs().iter() {
+                    if !outside.iter().any(|(_, o)| o.alias == p.alias && o.session == p.session) { outside.push((m.server, p.clone())); }
+                }
             }
+            let missing: Vec<String> = group.members.iter().filter_map(|m| match m {
+                Member::Missing { server_id, name } => Some(format!("{server_id}::{name}")), _ => None }).collect();
+            let pairs: Vec<PairExternalEntry> = outside.iter().map(|(_, p)| p.clone()).collect();
+            out.push(ListRow::Header { key: block.clone(), gid: gid.clone(), label: pair_header_label(&group.label, &missing, &pairs), members: members.clone() });
+            out.extend(members.into_iter().map(|row| ListRow::Session { row, block: Some(block.clone()) }));
+            out.extend(outside.into_iter().map(|(own, pair)| ListRow::External { block: block.clone(), gid: gid.clone(), own, pair }));
         }
-        // Membros de outras máquinas: os pares `máquina::nome` que não são par de fora.
-        let mut elsewhere: Vec<String> = Vec::new();
-        for p in members.iter().flat_map(|m| m.peers()) {
-            if p.contains("::") && !outside.iter().any(|o| *p == format!("{}::{}", o.alias, o.session)) && !elsewhere.contains(p) { elsewhere.push(p.clone()); }
-        }
-        out.push(ListRow::Header { gid: gid.to_owned(), label: pair_header_label(&label, &elsewhere, &outside), members: members.clone() });
-        out.extend(members.into_iter().map(ListRow::Session));
-        out.extend(outside.into_iter().map(|pair| ListRow::External { gid: gid.to_owned(), pair }));
-    }
-    out
+        out
+    }).collect()
 }
 
 /// `pairCodigo`/`pairResto` do web (`^([A-Za-z][\w.]*-\d+)\b\s*(.*)$`): a chave do ticket em destaque e o assunto em cinza.
@@ -293,11 +303,6 @@ pub(super) fn split_code(label: &str) -> (&str, &str) {
         (end > dash + 1 && !label[end..].starts_with(word)).then_some(end)
     };
     match code() { Some(end) => (&label[..end], label[end..].trim_start()), None => (label, "") }
-}
-
-/// Chave do bloco recolhido; noutra máquina leva a chave dela, como os grupos de projeto.
-pub(super) fn pair_key(gid: &str, remote: Option<&str>) -> String {
-    match remote { Some(key) => format!("{key}::pair:{gid}"), None => format!("pair:{gid}") }
 }
 
 /// O que anda com o arrasto: a sessão (máquina + nome).
@@ -421,11 +426,6 @@ pub(super) fn web_with(key: &str, name: &str, value: &str) -> String {
 }
 
 impl Hangar {
-    /// O bloco deste membro está recolhido.
-    pub(super) fn pair_collapsed(&self, s: &SessionInfo, remote: Option<&str>) -> bool {
-        s.pair_gid.as_deref().is_some_and(|gid| self.sidebar.is_collapsed(&pair_key(gid, remote)))
-    }
-
     /// Identificador de cada máquina do app já lido (`/api/peers/identificador`).
     pub(super) fn identities(&self) -> HashMap<String, String> {
         self.sidebar.grouping.ids.iter().filter_map(|(k, slot)| match slot { IdSlot::Known(id) => Some((k.clone(), id.clone())), _ => None }).collect()
@@ -677,19 +677,18 @@ impl Hangar {
 
     /// Cabeçalho do bloco (`.pair-head` do web): ▾, glifo, chave da tarefa em destaque e o resto em cinza, quantas esperam e o
     /// total. Clicar recolhe; soltar sobre ele agrupa com o bloco.
-    pub(super) fn render_pair_header(&self, gid: &str, label: &str, members: &[&SessionInfo], remote: Option<&str>, window: &mut Window,
+    pub(super) fn render_pair_header(&self, key: &str, gid: &str, label: &str, members: &[Row], window: &mut Window,
         cx: &mut Context<Self>) -> AnyElement {
-        let key = pair_key(gid, remote);
+        let key = key.to_owned();
         let open = !self.sidebar.is_collapsed(&key);
-        let awaiting = members.iter().filter(|s| s.state == "awaiting_input").count();
+        let awaiting = members.iter().filter(|m| m.session.state == "awaiting_input").count();
         let (code, rest) = split_code(label);
         let id = SharedString::from(format!("pair-head-{key}"));
         let focus = window.use_keyed_state(SharedString::from(format!("{id}-focus")), cx, |_, cx| cx.focus_handle().tab_stop(true)).read(cx).clone();
         let title = web_with("sessao_grupo_pareado", "label", label);
         let tip = title.clone();
-        let server = remote.map(str::to_owned).unwrap_or_else(|| self.active_key());
         // Sem membro o cabeçalho não é alvo de soltar: um `Target` de nome vazio não é sessão nenhuma.
-        let spot = members.first().map(|rep| DropSpot::Pair { gid: gid.to_owned(), rep: Target::new(&server, &rep.name) });
+        let spot = members.first().map(|rep| DropSpot::Pair { gid: gid.to_owned(), rep: Target::new(rep.server, &rep.session.name) });
         let pill = |text: String, color: Hsla, bg: Hsla| div().flex_shrink_0().min_w(px(18.)).px(px(6.)).rounded_full().bg(bg)
             .flex().justify_center().font_family(theme::MONO).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(color).child(text);
         let weak = cx.entity().downgrade();
@@ -1038,27 +1037,91 @@ mod tests {
         assert!(!can_leave(&SessionInfo { provider: "orq".into(), ..s("o", Some("g"), &["b"]) }), "o grupo do orq é dele");
     }
 
+    fn shape(sections: &[Vec<ListRow>]) -> Vec<Vec<String>> {
+        sections.iter().map(|rows| rows.iter().map(|row| match row {
+            ListRow::Header { label, members, .. } => format!("[{label} {}]", members.len()),
+            ListRow::Session { row, .. } => format!("{}:{}", row.server, row.session.name),
+            ListRow::External { pair, .. } => format!("ext {}", pair.session),
+        }).collect()).collect()
+    }
+
+    fn on<'a>(server: &'a str, list: &'a [SessionInfo]) -> Vec<Row<'a>> { list.iter().map(|session| Row { server, session, invite: false }).collect() }
+
     #[test]
     fn cluster_puts_the_header_where_the_first_member_was() {
         let all = [s("a", None, &[]), s("b", Some("g"), &["d"]), s("c", None, &[]), s("d", Some("g"), &["b"])];
-        let list: Vec<&SessionInfo> = all.iter().collect();
-        let shape: Vec<String> = cluster(&list).iter().map(|row| match row {
-            ListRow::Header { gid, label, members } => format!("[{gid} {label} {}]", members.len()),
-            ListRow::Session(s) => s.name.clone(),
-            ListRow::External { pair, .. } => format!("ext {}", pair.session),
-        }).collect();
-        assert_eq!(shape, ["a", "[g b, d 2]", "b", "d", "c"], "sem tarefa o rótulo são os nomes");
+        let ids = HashMap::new();
+        assert_eq!(shape(&cluster(&[on("h", &all)], &ids)), [["h:a", "[b, d 2]", "h:b", "h:d", "h:c"]], "sem tarefa o rótulo são os nomes");
         let tasked = [s("x", Some("g"), &["y"]), SessionInfo { pair_task: Some(" ABC-1 tela ".into()), ..s("y", Some("g"), &["x"]) }];
-        let list: Vec<&SessionInfo> = tasked.iter().collect();
-        assert!(matches!(&cluster(&list)[0], ListRow::Header { label, .. } if label == "ABC-1 tela"));
+        assert!(matches!(&cluster(&[on("h", &tasked)], &ids)[0][0], ListRow::Header { label, .. } if label == "ABC-1 tela"));
+    }
+
+    // O grupo g1 do relato: duas sessões em cada máquina, dono lab.
+    fn fed(name: &str, peers: &[&str]) -> SessionInfo {
+        SessionInfo { pair_owner: Some("lab".into()), ..s(name, Some("g1"), peers) }
+    }
+
+    fn two_machines() -> (Vec<SessionInfo>, Vec<SessionInfo>, HashMap<String, String>) {
+        let nb = vec![s("aaa", None, &[]),
+            fed("ABC-1-coord", &["ABC-1-proxy", "vm::ABC-1-app", "vm::abc2-app"]),
+            fed("ABC-1-proxy", &["ABC-1-coord", "vm::ABC-1-app", "vm::abc2-app"])];
+        let dp = vec![fed("ABC-1-app", &["abc2-app", "lab::ABC-1-coord", "lab::ABC-1-proxy"]),
+            fed("abc2-app", &["ABC-1-app", "lab::ABC-1-coord", "lab::ABC-1-proxy"]),
+            s("zzz", None, &[])];
+        (nb, dp, HashMap::from([("nb".to_owned(), "lab".to_owned()), ("dp".to_owned(), "vm".to_owned())]))
+    }
+
+    #[test]
+    fn a_group_across_machines_is_one_block_where_its_first_member_is() {
+        let (nb, dp, ids) = two_machines();
+        let got = cluster(&[on("dp", &dp), on("nb", &nb)], &ids);
+        assert_eq!(shape(&got), [vec!["[ABC-1-app, abc2-app, ABC-1-coord, ABC-1-proxy 4]", "dp:ABC-1-app",
+            "dp:abc2-app", "nb:ABC-1-coord", "nb:ABC-1-proxy", "dp:zzz"], vec!["nb:aaa"]],
+            "os quatro juntos na seção do primeiro, sem os da outra máquina no cabeçalho, e fora da seção deles");
+        let blocks: Vec<&str> = got.iter().flatten().filter_map(|r| match r { ListRow::Session { block: Some(b), .. } => Some(b.as_str()), _ => None }).collect();
+        assert!(blocks.len() == 4 && blocks.iter().all(|b| *b == blocks[0]), "um bloco só recolhe os quatro: {blocks:?}");
+        assert!(matches!(&got[0][0], ListRow::Header { key, .. } if key == blocks[0]));
+
+        // Com "Aguardando" no topo: o primeiro membro na ordem da barra está lá, e o bloco inteiro vai junto.
+        assert_eq!(shape(&cluster(&[on("nb", &nb[2..]), on("nb", &nb[..2]), on("dp", &dp)], &ids)),
+            [vec!["[ABC-1-proxy, ABC-1-coord, ABC-1-app, abc2-app 4]", "nb:ABC-1-proxy",
+                "nb:ABC-1-coord", "dp:ABC-1-app", "dp:abc2-app"], vec!["nb:aaa"], vec!["dp:zzz"]]);
+
+        let mut tasked = nb.clone();
+        tasked[1].pair_task = Some("ABC-1 bulas".into());
+        assert!(matches!(&cluster(&[on("dp", &dp), on("nb", &tasked)], &ids)[0][0], ListRow::Header { label, .. } if label == "ABC-1 bulas"),
+            "com tarefa, só ela");
+    }
+
+    #[test]
+    fn every_sidebar_mode_shows_the_group_once_and_counts_what_each_section_shows() {
+        use super::super::sidebar::{MachineList, layout, section_counts, sections};
+        let (nb, dp, ids) = two_machines();
+        let none = std::collections::HashSet::new();
+        for by_project in [false, true] {
+            let machines = [MachineList { entry: None, key: "nb".into(), remote: None, layout: layout(&nb, "", by_project, &none) },
+                MachineList { entry: None, key: "dp".into(), remote: Some("dp".into()), layout: layout(&dp, "", by_project, &none) }];
+            // Por máquina: Aguardando, Trabalhando, nb, dp. Nos outros: nb, Aguardando dela, o grupo dela; o mesmo para dp.
+            for (by_machine, want) in [(true, vec![0, 0, 5, 1]), (false, vec![5, 0, 5, 1, 0, 1])] {
+                let parts = sections(&machines, by_machine, true);
+                let got = cluster(&parts.iter().map(|p| p.rows.clone()).collect::<Vec<_>>(), &ids);
+                let mode = format!("por máquina {by_machine}, por projeto {by_project}");
+                let shown = shape(&got);
+                let block = shown.iter().position(|rows| rows.iter().any(|r| r.ends_with(" 4]"))).expect(&mode);
+                assert_eq!(shown[block].iter().filter(|r| r.contains("ABC-1") || r.contains("abc2")).count(), 5, "{mode}: cabeçalho e os quatro");
+                assert!(shown.iter().enumerate().all(|(i, rows)| i == block || rows.iter().all(|r| !r.contains("ABC-1") && !r.contains("abc2"))),
+                    "{mode}: nenhum membro fora do bloco: {shown:?}");
+                assert_eq!(section_counts(&parts, &got), want, "{mode}");
+            }
+        }
     }
 
     #[test]
     fn external_peer_row_follows_its_group() {
-        let x = SessionInfo { pair_external: Some(PairExternal { alias: "pc-ana".into(), owner: "pc-ana".into(), session: "Y".into() }),
-            ..s("X", Some("g"), &["pc-ana::Y"]) };
-        let rows = cluster(&[&x]);
-        assert!(matches!(rows.last(), Some(ListRow::External { gid, pair }) if pair.session == "Y" && gid == "g"));
+        let x = [SessionInfo { pair_external: Some(PairExternal { alias: "pc-ana".into(), owner: "pc-ana".into(), session: "Y".into() }),
+            ..s("X", Some("g"), &["pc-ana::Y"]) }];
+        let rows = cluster(&[on("h", &x)], &HashMap::new()).remove(0);
+        assert!(matches!(rows.last(), Some(ListRow::External { gid, own, pair, .. }) if pair.session == "Y" && gid == "g" && *own == "h"));
         assert_eq!(rows.len(), 3, "cabeçalho, membro e a linha da outra pessoa");
     }
 
@@ -1070,9 +1133,9 @@ mod tests {
     #[test]
     fn cluster_lists_every_outside_pair_once_and_names_them_in_the_header() {
         let pairs = vec![ext("ana", "Ana", "Y", "view", false), ext("bia", "Bia", "Z", "full", false)];
-        let x = SessionInfo { pair_externals: Some(pairs.clone()), pair_task: Some("ABC-1".into()), ..s("X", Some("g"), &["W", "ana::Y", "bia::Z"]) };
-        let w = SessionInfo { pair_externals: Some(pairs), ..s("W", Some("g"), &["X", "ana::Y", "bia::Z"]) };
-        let rows = cluster(&[&x, &w]);
+        let xw = [SessionInfo { pair_externals: Some(pairs.clone()), pair_task: Some("ABC-1".into()), ..s("X", Some("g"), &["W", "ana::Y", "bia::Z"]) },
+            SessionInfo { pair_externals: Some(pairs), ..s("W", Some("g"), &["X", "ana::Y", "bia::Z"]) }];
+        let rows = cluster(&[on("h", &xw)], &HashMap::new()).remove(0);
         let outside: Vec<&str> = rows.iter().filter_map(|r| match r { ListRow::External { pair, .. } => Some(pair.session.as_str()), _ => None }).collect();
         assert_eq!(outside, ["Y", "Z"], "um por par, mesmo com dois membros locais o tendo");
         let ListRow::Header { label, .. } = &rows[0] else { panic!("cabeçalho primeiro") };
@@ -1095,12 +1158,12 @@ mod tests {
     }
 
     #[test]
-    fn header_names_the_members_on_other_machines_before_the_outside_pairs() {
-        let x = SessionInfo { pair_externals: Some(vec![ext("ana", "Ana", "Y", "view", false)]), pair_task: Some("ABC-1".into()),
-            ..s("X", Some("g"), &["W", "casa::a", "ana::Y"]) };
-        let w = s("W", Some("g"), &["X", "casa::a", "lab::b", "ana::Y"]);
-        let ListRow::Header { label, .. } = &cluster(&[&x, &w])[0] else { panic!("cabeçalho primeiro") };
-        assert_eq!(label, "ABC-1 ↔ casa::a, lab::b, ana::Y (Ana)", "cada membro de fora da máquina uma vez, o par de fora por último");
+    fn header_names_the_members_on_machines_not_connected_before_the_outside_pairs() {
+        let xw = [SessionInfo { pair_externals: Some(vec![ext("ana", "Ana", "Y", "view", false)]), pair_task: Some("ABC-1".into()),
+            ..s("X", Some("g"), &["W", "casa::a", "ana::Y"]) }, s("W", Some("g"), &["X", "casa::a", "lab::b", "ana::Y"])];
+        let ids = HashMap::from([("h".to_owned(), "pc".to_owned())]);
+        let ListRow::Header { label, .. } = &cluster(&[on("h", &xw)], &ids)[0][0] else { panic!("cabeçalho primeiro") };
+        assert_eq!(label, "ABC-1 ↔ casa::a, lab::b, ana::Y (Ana)", "cada membro de máquina sem conexão uma vez, o par de fora por último");
         assert_eq!(pair_header_label("t", &["casa::a".into()], &[]), "t ↔ casa::a");
     }
 

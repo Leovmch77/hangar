@@ -5376,40 +5376,42 @@ impl Hangar {
         let still = cx.reduce_motion() || !window.is_window_active();
         // Membros de um grupo vêm juntos, sob o cabeçalho do bloco, como o `clusterByPair` do web.
         let seals = self.group_seals(cx);
-        let rows = |list: &[&SessionInfo], remote: Option<&str>, at: &'static str, children: &mut Vec<(String, &'static str, AnyElement)>, window: &mut Window, cx: &mut Context<Self>| for row in grouping::cluster(list) {
+        let active = self.active_key();
+        // A máquina da linha como a lista a trata: `None` é a ativa.
+        let remote_of = |server: &str| (server != active).then(|| server.to_owned());
+        // `home`: a máquina do bloco da seção (`None` a ativa); membro de outra máquina dentro do grupo mostra a dele.
+        let rows = |list: &[grouping::ListRow], home: Option<&str>, at: &'static str, children: &mut Vec<(String, &'static str, AnyElement)>, window: &mut Window, cx: &mut Context<Self>| for row in list {
             let (session, remote) = match row {
-                grouping::ListRow::Header { gid, label, members } => {
-                    children.push((format!("{at}/pair:{}:{gid}", remote.unwrap_or("")), at, self.render_pair_header(&gid, &label, &members, remote, window, cx)));
+                grouping::ListRow::Header { key, gid, label, members } => {
+                    children.push((format!("{at}/{key}"), at, self.render_pair_header(key, gid, label, members, window, cx)));
                     continue;
                 }
-                grouping::ListRow::External { gid, .. } if self.sidebar.is_collapsed(&grouping::pair_key(&gid, remote)) => continue,
+                grouping::ListRow::Session { block: Some(b), .. } | grouping::ListRow::External { block: b, .. } if self.sidebar.is_collapsed(b) => continue,
                 // A sessão de fora é a linha de verdade, lida da entrada de convite da máquina dela; antes da lista dela chegar,
                 // fica a linha simples que abre por lá.
-                grouping::ListRow::External { gid, pair } => match self.outside_row(&gid, &pair, remote) {
-                    // Grupo com membros em seções diferentes repete a sessão de fora em cada uma: a chave leva a seção.
-                    Some((session, at_server)) => {
-                        let selected = selected_name == Some(session.name.as_str()) && self.open_key() == at_server;
-                        let key = format!("{at}/row:{}::{}", at_server.as_deref().unwrap_or(""), session.name);
-                        let show_server = sidebar::row_server_visible(conversations, by_machine, at == "machine" && at_server.as_deref() == remote);
-                        children.push((key, at, if conversations { self.render_conversation_row(session, selected, at_server, show_server, None, window, cx) }
-                            else { self.render_session_row(session, selected, at_server, show_server, None, window, cx) }));
-                        continue;
+                grouping::ListRow::External { gid, own, pair, .. } => {
+                    let remote = remote_of(own);
+                    match self.outside_row(gid, pair, remote.as_deref()) {
+                        Some((session, at_server)) => {
+                            let selected = selected_name == Some(session.name.as_str()) && self.open_key() == at_server;
+                            let key = format!("{at}/row:{}::{}", at_server.as_deref().unwrap_or(""), session.name);
+                            let show_server = sidebar::row_server_visible(conversations, by_machine, at == "machine" && at_server.as_deref() == home);
+                            children.push((key, at, if conversations { self.render_conversation_row(session, selected, at_server, show_server, None, window, cx) }
+                                else { self.render_session_row(session, selected, at_server, show_server, None, window, cx) }));
+                        }
+                        None => children.push((format!("{at}/ext:{}:{gid}", remote.as_deref().unwrap_or("")), at,
+                            self.render_external_pair_row(gid, &pair.owner, &pair.session, &pair.alias, remote.as_deref(), window, cx))),
                     }
-                    None => {
-                        children.push((format!("{at}/ext:{}:{gid}", remote.unwrap_or("")), at,
-                            self.render_external_pair_row(&gid, &pair.owner, &pair.session, &pair.alias, remote, window, cx)));
-                        continue;
-                    }
-                },
-                grouping::ListRow::Session(session) if self.pair_collapsed(session, remote) => continue,
-                grouping::ListRow::Session(session) => (session.clone(), remote.map(str::to_owned)),
+                    continue;
+                }
+                grouping::ListRow::Session { row, .. } => (row.session.clone(), remote_of(row.server)),
             };
             let selected = selected_name == Some(session.name.as_str()) && self.open_key() == remote;
             let key = format!("row:{}::{}", remote.as_deref().unwrap_or(""), session.name);
             // A linha que troca de seção é pintada depois das outras, fora da ordem que a camada dos avatares animados lê:
             // no trajeto ela leva o avatar parado.
             self.sidebar.still_avatar.set(by_machine && self.sidebar.flip.borrow().lifting(&key, now));
-            let show_server = sidebar::row_server_visible(conversations, by_machine, at == "machine");
+            let show_server = sidebar::row_server_visible(conversations, by_machine, at == "machine" && remote.as_deref() == home);
             // O selo vai em qualquer seção: também na linha que o agrupar por máquina puxou para "Aguardando" ou "Trabalhando".
             let seal = seals.get(&sidebar::Target::new(&remote.clone().unwrap_or_else(|| self.active_key()), &session.name)).cloned();
             let row = if conversations { self.render_conversation_row(session, selected, remote, show_server, seal, window, cx) }
@@ -5417,80 +5419,74 @@ impl Hangar {
             self.sidebar.still_avatar.set(false);
             children.push((key, at, row));
         };
-        let place = |layout: &sidebar::Layout, remote: Option<&str>, children: &mut Vec<(String, &'static str, AnyElement)>, window: &mut Window, cx: &mut Context<Self>| {
-            if !layout.waiting.is_empty() {
-                children.push((String::new(), "", section(tr("sidebar_awaiting"), Some(layout.waiting.len())).into_any_element()));
-                rows(&layout.waiting, remote, "", children, window, cx);
-            }
-            for group in &layout.groups {
-                if layout.by_project {
-                    let awaiting = group.sessions.iter().filter(|s| s.state == "awaiting_input").count();
-                    children.push((String::new(), "", self.render_group_header(group, awaiting, window, cx)));
-                    if self.sidebar.is_collapsed(&group.key) { continue; }
-                } else if remote.is_none() && !self.multi_server() {
-                    children.push((String::new(), "", section(group.label.clone(), None).into_any_element()));
-                }
-                rows(&group.sessions, remote, "", children, window, cx);
-            }
-        };
-        let mut total = layout.total;
-        let mut remote_rows = 0;
+        // Por máquina, como o app do celular: "Aguardando você" e "Trabalhando" de todas as máquinas no topo, e um bloco por
+        // máquina com o resto; quem começa a trabalhar sobe, quem para volta. Nos outros modos, com mais de uma máquina, um
+        // bloco por servidor na ordem da lista (entrada só de par não vira seção: a sessão de fora mora dentro do grupo).
+        // Em todos, cada grupo é um bloco só, com os membros de todas as máquinas, onde o primeiro deles estaria.
+        let machines = self.machine_lists(cx);
+        let multi = self.multi_server();
+        let parts = sidebar::sections(&machines, by_machine, multi);
+        let clustered = grouping::cluster(&parts.iter().map(|p| p.rows.clone()).collect::<Vec<_>>(), &self.identities());
+        let counts = sidebar::section_counts(&parts, &clustered);
+        let total: usize = machines.iter().map(|m| m.layout.total).sum();
+        let remote_rows: usize = machines.iter().filter(|m| m.remote.is_some()).map(|m| m.layout.total).sum();
+        let at_of = |head: &sidebar::Head| match head { sidebar::Head::Top(at) if by_machine => *at, sidebar::Head::Machine(_) if by_machine => "machine", _ => "" };
         if by_machine {
-            // Como o app do celular: "Aguardando você" e "Trabalhando" de todas as máquinas no topo, e um bloco por máquina
-            // com o resto. Quem começa a trabalhar sobe; quem para volta ao bloco da máquina dele.
-            let machines = self.machine_lists(cx);
-            let split: Vec<sidebar::MachineSplit> = machines.iter().map(|m| sidebar::machine_split(&m.layout)).collect();
-            let sections: Vec<(String, String)> = machines.iter().zip(&split).flat_map(|(m, p)| {
-                let row = |at: &'static str| move |s: &&SessionInfo| (format!("row:{}::{}", m.remote.as_deref().unwrap_or(""), s.name), at.to_owned());
-                p.waiting.iter().map(row("waiting")).chain(p.working.iter().map(row("working"))).chain(p.rest.iter().map(row("machine")))
+            let sections: Vec<(String, String)> = parts.iter().zip(&clustered).flat_map(|(part, list)| {
+                let at = at_of(&part.head);
+                list.iter().filter_map(move |r| match r {
+                    grouping::ListRow::Session { row, .. } => Some((format!("row:{}::{}", remote_of(row.server).unwrap_or_default(), row.session.name), at.to_owned())),
+                    _ => None,
+                })
             }).collect();
             self.sidebar.flip.borrow_mut().sections(&sections, now, still);
-            total = machines.iter().map(|m| m.layout.total).sum();
-            remote_rows = machines.iter().filter(|m| m.remote.is_some()).map(|m| m.layout.total).sum();
-            let top = |label: String, state: &str, count: usize| div().flex().items_center().gap(px(8.)).px(px(8.)).pt(px(12.)).pb(px(6.))
-                .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(theme::pill(state).1))
-                .child(div().flex_1().min_w_0().child(chrome::section_label(label)))
-                .child(div().font_family(theme::MONO).text_size(px(11.)).text_color(theme::faint()).child(count.to_string()))
-                .into_any_element();
-            for (at, label, state) in [("waiting", "sidebar_awaiting", "awaiting_input"), ("working", "sidebar_state_working", "working")] {
-                let parts: Vec<&[&SessionInfo]> = split.iter().map(|p| if at == "waiting" { p.waiting.as_slice() } else { p.working.as_slice() }).collect();
-                let count: usize = parts.iter().map(|p| p.len()).sum();
-                if count == 0 { continue; }
-                children.push((format!("{at}/head"), at, top(tr(label), state, count)));
-                for (m, part) in machines.iter().zip(&parts) { rows(part, m.remote.as_deref(), at, &mut children, window, cx); }
-            }
-            let multi = self.multi_server();
-            for (m, p) in machines.iter().zip(&split) {
-                let (id, label, invite) = m.entry.map_or_else(|| (m.key.clone(), host.clone(), false), |e| (e.id.clone(), e.label.clone(), e.invite));
-                let error = match &m.remote {
-                    Some(key) => self.remote.get(key).and_then(|l| l.error.clone()),
-                    // Num servidor só, a falha da lista já aparece embaixo dela.
-                    None if multi => self.invite_ended.contains(&m.key).then(|| tr_shared("convite_encerrado", &[])).or(self.list_error.clone()),
-                    None => None,
-                };
-                children.push((format!("machine/{}", m.key), "machine", self.render_server_header(&id, &m.key, &label, p.rest.len(), invite, error, cx)));
-                if !self.sidebar.is_collapsed(&format!("server:{}", m.key)) { rows(&p.rest, m.remote.as_deref(), "machine", &mut children, window, cx); }
-            }
-        } else if self.multi_server() {
-            // Como o web com mais de uma máquina: um bloco por servidor, na ordem da lista.
-            let active = self.active_key();
-            // Entrada só de par não vira seção: a sessão de fora mora dentro do grupo.
-            for entry in self.servers.iter().filter(|s| servers::has_section(s)) {
-                let key = servers::norm(&entry.address);
-                if key == active {
-                    let error = self.invite_ended.contains(&key).then(|| tr_shared("convite_encerrado", &[])).or(self.list_error.clone());
-                    children.push((String::new(), "", self.render_server_header(&entry.id, &key, &entry.label, layout.total, entry.invite, error, cx)));
-                    if !self.sidebar.is_collapsed(&format!("server:{key}")) { place(&layout, None, &mut children, window, cx); }
-                } else if let Some(list) = self.remote.get(&key) {
-                    let remote = self.remote_layout(&key, &list.sessions, cx);
-                    total += remote.total;
-                    remote_rows += remote.total;
-                    children.push((String::new(), "", self.render_server_header(&entry.id, &key, &entry.label, remote.total, entry.invite, list.error.clone(), cx)));
-                    if !self.sidebar.is_collapsed(&format!("server:{key}")) { place(&remote, Some(&key), &mut children, window, cx); }
+        }
+        let top = |label: String, state: &str, count: usize| div().flex().items_center().gap(px(8.)).px(px(8.)).pt(px(12.)).pb(px(6.))
+            .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(theme::pill(state).1))
+            .child(div().flex_1().min_w_0().child(chrome::section_label(label)))
+            .child(div().font_family(theme::MONO).text_size(px(11.)).text_color(theme::faint()).child(count.to_string()))
+            .into_any_element();
+        let mut hidden = false;
+        for ((part, list), count) in parts.iter().zip(&clustered).zip(counts) {
+            let at = at_of(&part.head);
+            match part.head {
+                sidebar::Head::Top(which) => {
+                    hidden = false;
+                    if count == 0 { continue; }
+                    let (label, state) = if which == "waiting" { ("sidebar_awaiting", "awaiting_input") } else { ("sidebar_state_working", "working") };
+                    children.push((format!("{which}/head"), at, top(tr(label), state, count)));
+                    rows(list, None, at, &mut children, window, cx);
+                }
+                sidebar::Head::Machine(i) => {
+                    let m = &machines[i];
+                    let (id, label, invite) = m.entry.map_or_else(|| (m.key.clone(), host.clone(), false), |e| (e.id.clone(), e.label.clone(), e.invite));
+                    let error = match &m.remote {
+                        Some(key) => self.remote.get(key).and_then(|l| l.error.clone()),
+                        // Num servidor só, a falha da lista já aparece embaixo dela.
+                        None if multi => self.invite_ended.contains(&m.key).then(|| tr_shared("convite_encerrado", &[])).or(self.list_error.clone()),
+                        None => None,
+                    };
+                    let key = if by_machine { format!("machine/{}", m.key) } else { String::new() };
+                    children.push((key, at, self.render_server_header(&id, &m.key, &label, count, invite, error, cx)));
+                    hidden = self.sidebar.is_collapsed(&format!("server:{}", m.key));
+                    if !hidden { rows(list, m.remote.as_deref(), at, &mut children, window, cx); }
+                }
+                _ if hidden || list.is_empty() => {}
+                sidebar::Head::Waiting => {
+                    children.push((String::new(), "", section(tr("sidebar_awaiting"), Some(count)).into_any_element()));
+                    rows(list, None, "", &mut children, window, cx);
+                }
+                sidebar::Head::Group(i, group) => {
+                    if machines[i].layout.by_project {
+                        let awaiting = list.iter().filter(|r| matches!(r, grouping::ListRow::Session { row, .. } if row.session.state == "awaiting_input")).count();
+                        children.push((String::new(), "", self.render_group_header(group, count, awaiting, window, cx)));
+                        if self.sidebar.is_collapsed(&group.key) { continue; }
+                    } else if !multi {
+                        children.push((String::new(), "", section(group.label.clone(), None).into_any_element()));
+                    }
+                    rows(list, None, "", &mut children, window, cx);
                 }
             }
-        } else {
-            place(&layout, None, &mut children, window, cx);
         }
         children.extend(self.render_recents(window, cx).into_iter().enumerate().map(|(i, el)| (format!("recent/{i}"), "recent", el)));
         let children: Vec<AnyElement> = if by_machine {

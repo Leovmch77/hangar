@@ -430,6 +430,52 @@ pub(super) fn machine_split<'a>(layout: &Layout<'a>) -> MachineSplit<'a> {
     MachineSplit { waiting: layout.waiting.clone(), working, rest }
 }
 
+/// O que encabeça uma seção da barra; o número é o índice em `machines`. Fora do agrupar por máquina, cada seção é da
+/// última `Machine` antes dela (ou da única máquina).
+pub(super) enum Head<'b> {
+    /// "Aguardando você" ou "Trabalhando" de todas as máquinas (agrupar por máquina).
+    Top(&'static str),
+    /// O bloco da máquina: no agrupar por máquina, com as linhas dela; nos outros modos vazio, e as seções seguintes são dela.
+    Machine(usize),
+    /// "Aguardando você" de uma máquina.
+    Waiting,
+    /// Grupo de projeto, ou "Sessões", de uma máquina.
+    Group(usize, &'b Group<'b>),
+}
+
+pub(super) struct Section<'b> { pub(super) head: Head<'b>, pub(super) rows: Vec<super::grouping::Row<'b>> }
+
+/// As seções da barra na ordem da tela, com as linhas antes de juntar os grupos (`grouping::cluster`).
+pub(super) fn sections<'b>(machines: &'b [MachineList<'_>], by_machine: bool, multi: bool) -> Vec<Section<'b>> {
+    let rows = |i: usize, list: &[&'b SessionInfo]| -> Vec<super::grouping::Row<'b>> {
+        let m = &machines[i];
+        list.iter().map(|session| super::grouping::Row { server: &m.key, session, invite: m.entry.is_some_and(|e| e.invite) }).collect()
+    };
+    let mut out = Vec::new();
+    if by_machine {
+        let split: Vec<MachineSplit> = machines.iter().map(|m| machine_split(&m.layout)).collect();
+        out.push(Section { head: Head::Top("waiting"), rows: split.iter().enumerate().flat_map(|(i, p)| rows(i, &p.waiting)).collect() });
+        out.push(Section { head: Head::Top("working"), rows: split.iter().enumerate().flat_map(|(i, p)| rows(i, &p.working)).collect() });
+        out.extend(split.iter().enumerate().map(|(i, p)| Section { head: Head::Machine(i), rows: rows(i, &p.rest) }));
+        return out;
+    }
+    for (i, m) in machines.iter().enumerate() {
+        if multi { out.push(Section { head: Head::Machine(i), rows: Vec::new() }); }
+        out.push(Section { head: Head::Waiting, rows: rows(i, &m.layout.waiting) });
+        out.extend(m.layout.groups.iter().map(|g| Section { head: Head::Group(i, g), rows: rows(i, &g.sessions) }));
+    }
+    out
+}
+
+/// Quantas sessões cada seção mostra depois de juntar os grupos; a da máquina soma as seções dela até a próxima máquina.
+pub(super) fn section_counts(parts: &[Section], clustered: &[Vec<super::grouping::ListRow>]) -> Vec<usize> {
+    let own: Vec<usize> = clustered.iter().map(|rows| rows.iter().filter(|r| matches!(r, super::grouping::ListRow::Session { .. })).count()).collect();
+    parts.iter().enumerate().map(|(i, part)| match part.head {
+        Head::Machine(_) => own[i] + (i + 1..parts.len()).take_while(|&j| !matches!(parts[j].head, Head::Machine(_) | Head::Top(_))).map(|j| own[j]).sum::<usize>(),
+        _ => own[i],
+    }).collect()
+}
+
 fn collapsed_path() -> Option<PathBuf> {
     Some(crate::appearance::dir()?.join("sidebar-collapsed.json"))
 }
@@ -534,37 +580,30 @@ impl Hangar {
         if appearance::get().navigation.tabs() {
             return self.tab_targets();
         }
-        // Na ordem dos blocos de grupo, sem os membros de um bloco recolhido.
-        let shown = |key: &str, remote: Option<&str>, l: &Layout| -> Vec<Target> {
-            let rows = |list: &[&SessionInfo]| super::grouping::cluster(list).into_iter().filter_map(|row| match row {
-                super::grouping::ListRow::Session(s) if !self.pair_collapsed(s, remote) => Some(Target::new(key, &s.name)),
-                super::grouping::ListRow::External { gid, pair } if !self.sidebar.is_collapsed(&super::grouping::pair_key(&gid, remote)) =>
-                    self.outside_row(&gid, &pair, remote).map(|(s, at)| Target::new(&at.unwrap_or_else(|| self.active_key()), &s.name)),
-                _ => None,
-            }).collect::<Vec<_>>();
-            rows(&l.waiting).into_iter()
-                .chain(l.groups.iter().filter(|g| !(l.by_project && self.sidebar.collapsed.contains(&g.key))).flat_map(|g| rows(&g.sessions)))
-                .collect()
-        };
-        if Self::by_machine() {
-            let machines = self.machine_lists(cx);
-            let split: Vec<MachineSplit> = machines.iter().map(|m| machine_split(&m.layout)).collect();
-            let mut order = Vec::new();
-            // Na ordem da barra: "Aguardando você" e "Trabalhando" de todas as máquinas, depois o bloco de cada uma.
-            for (m, p) in machines.iter().zip(&split) { order.extend(shown(&m.key, m.remote.as_deref(), &p.only(&p.waiting))); }
-            for (m, p) in machines.iter().zip(&split) { order.extend(shown(&m.key, m.remote.as_deref(), &p.only(&p.working))); }
-            for (m, p) in machines.iter().zip(&split) {
-                if !self.sidebar.collapsed.contains(&format!("server:{}", m.key)) { order.extend(shown(&m.key, m.remote.as_deref(), &p.only(&p.rest))); }
-            }
-            return order;
-        }
-        if !self.multi_server() { return shown(&active, None, &self.sidebar_layout(cx)); }
+        // Na ordem da barra e dos blocos de grupo, sem máquina, projeto ou bloco recolhido.
+        use super::grouping::ListRow;
+        let machines = self.machine_lists(cx);
+        let parts = sections(&machines, Self::by_machine(), self.multi_server());
+        let clustered = super::grouping::cluster(&parts.iter().map(|p| p.rows.clone()).collect::<Vec<_>>(), &self.identities());
         let mut order = Vec::new();
-        for entry in self.servers.iter().filter(|s| servers::has_section(s)) {
-            let key = servers::norm(&entry.address);
-            if self.sidebar.collapsed.contains(&format!("server:{key}")) { continue; }
-            if key == active { order.extend(shown(&key, None, &self.sidebar_layout(cx))); }
-            else if let Some(list) = self.remote.get(&key) { order.extend(shown(&key, Some(&key), &self.remote_layout(&key, &list.sessions, cx))); }
+        let mut hidden = false;
+        for (part, list) in parts.iter().zip(&clustered) {
+            match part.head {
+                Head::Top(_) => hidden = false,
+                Head::Machine(m) => hidden = self.sidebar.is_collapsed(&format!("server:{}", machines[m].key)),
+                Head::Group(m, g) if machines[m].layout.by_project && self.sidebar.is_collapsed(&g.key) => continue,
+                _ => {}
+            }
+            if hidden { continue; }
+            for row in list {
+                match row {
+                    ListRow::Session { block: Some(b), .. } | ListRow::External { block: b, .. } if self.sidebar.is_collapsed(b) => {}
+                    ListRow::Session { row, .. } => order.push(Target::new(row.server, &row.session.name)),
+                    ListRow::External { gid, own, pair, .. } => order.extend(self.outside_row(gid, pair, (*own != active).then_some(*own))
+                        .map(|(s, at)| Target::new(&at.unwrap_or_else(|| active.clone()), &s.name))),
+                    ListRow::Header { .. } => {}
+                }
+            }
         }
         order
     }
@@ -1234,17 +1273,18 @@ impl Hangar {
 
     /// Cabeçalho do grupo de projeto: ▾, rótulo, contagem e quantos aguardam; clicar recolhe. O `AccordionTrigger` anuncia
     /// aberto/fechado e entra no Tab com Enter e Espaço, como os disparadores das configurações.
-    pub(super) fn render_group_header(&self, group: &Group, awaiting: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// `count`: as sessões que a seção mostra, com os grupos juntados.
+    pub(super) fn render_group_header(&self, group: &Group, count: usize, awaiting: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let open = !self.sidebar.collapsed.contains(&group.key);
         let id = SharedString::from(format!("group-{}", group.key));
         let focus = window.use_keyed_state(SharedString::from(format!("{id}-focus")), cx, |_, cx| cx.focus_handle().tab_stop(true)).read(cx).clone();
         let (key, weak) = (group.key.clone(), cx.entity().downgrade());
-        AccordionTrigger::new(id).open(open).track_focus(&focus).aria_label(format!("{} · {}", group.label, group.sessions.len()))
+        AccordionTrigger::new(id).open(open).track_focus(&focus).aria_label(format!("{} · {count}", group.label))
             .flex_shrink_0().mt(px(8.)).h(px(28.)).px(px(8.)).rounded(px(8.)).border_1().border_color(transparent_black())
             .flex().items_center().gap(px(6.)).cursor_pointer().hover(|el| el.bg(theme::hover())).focus_visible(|el| el.border_color(theme::accent_focus()))
             .child(chrome::small_icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 14., theme::faint()))
             .child(div().min_w_0().truncate().text_xs().font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(group.label.clone()))
-            .child(div().flex_shrink_0().font_family(theme::MONO).text_size(px(11.)).text_color(theme::faint()).child(group.sessions.len().to_string()))
+            .child(div().flex_shrink_0().font_family(theme::MONO).text_size(px(11.)).text_color(theme::faint()).child(count.to_string()))
             .when(awaiting > 0, |el| el.child(div().flex_shrink_0().font_family(theme::MONO).text_size(px(11.)).text_color(theme::warning())
                 .child(format!("{awaiting} {}", tr("sidebar_awaiting_short")))))
             .on_change(move |_, _, _, cx| { let _ = weak.update(cx, |this, cx| this.toggle_group(key.clone(), cx)); })
