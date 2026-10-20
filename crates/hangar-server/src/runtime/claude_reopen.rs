@@ -822,17 +822,12 @@ impl RuntimeRegistry {
                     return Err(refused("reopen_terminal_spawn",&format!("o terminal não abriu: {}",error.stderr)));
                 }
                 let io=crate::terminal_input::ProcessIo::default();
-                let mux=crate::state::capture::MuxProcess::new(watcher.mux_program(),Duration::from_secs(5));
                 let deadline=tokio::time::Instant::now()+STARTUP_WAIT;
                 loop {
                     if let Some(Ok(()))=watcher.adopt_claude(self,name).await
                         && let Some((target,_))=self.claude_terminal_entry(name).await
                         && target.binding.conversation==sid
-                        && let Ok(shown)=super::lifecycle::permission_mode(&io,&target.binding).await {
-                        if shown!=mode {
-                            self.drop_failed_terminal(name).await?;
-                            return Err(refused("relaunch_confirmation","o Claude voltou no terminal num modo diferente do pedido"));
-                        }
+                        && super::lifecycle::permission_mode(&io,&target.binding).await.is_ok_and(|shown|shown==mode) {
                         let pid=i64::from(target.metadata.agent_pid);
                         let running=process_spec(pid,&next.key,name,next.cwd.clone(),0.0).map(|(spec,_)|identity(&env,&spec));
                         if running.as_ref().is_ok_and(|running|*running==identity(&env,next)) {return Ok(());}
@@ -841,13 +836,9 @@ impl RuntimeRegistry {
                             return Err(refused("reopen_identity","o Claude reabriu com uma identidade diferente da escolhida (conta, motor ou Fast)"));
                         }
                     }
-                    if mux.has_session(name).await==Some(false) {
-                        self.drop_failed_terminal(name).await?;
-                        return Err(refused("relaunch_confirmation","o terminal fechou antes de o Claude voltar"));
-                    }
                     if tokio::time::Instant::now()>=deadline {
                         self.drop_failed_terminal(name).await?;
-                        return Err(refused("relaunch_confirmation","o Claude não voltou no terminal em 5 minutos; travou"));
+                        return Err(refused("relaunch_confirmation","o Claude não voltou no terminal na conversa e no modo pedidos em 5 minutos"));
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }

@@ -36,6 +36,8 @@ fn open_trace_clock() -> &'static std::sync::Mutex<Option<std::time::Instant>> {
 
 pub const MAX_BYTES: u64 = 100 * 1024 * 1024;
 const UPLOAD_SECONDS: u64 = 180;
+/// Reabrir a sessão: o servidor espera até 5 min o Claude novo e, se falhar, mais 5 min a volta.
+pub const REOPEN_SECONDS: u64 = 720;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 /// `Memory` é o anexo ainda no compositor (nome, bytes): não passa pela rede.
@@ -542,9 +544,7 @@ impl Api {
         if let Some((key, value)) = query { url.query_pairs_mut().append_pair(key, value); }
         let mut req = self.client.request(method, url);
         if let Some(body) = body { req = req.json(&body); }
-        // `0`: sem prazo, para quem espera o Claude subir; a máquina carregada não tem tempo fixo.
-        if seconds > 0 { req = req.timeout(Duration::from_secs(seconds)); }
-        let r = req.send().await.map_err(|_| Failure::transport(true))?;
+        let r = req.timeout(Duration::from_secs(seconds)).send().await.map_err(|_| Failure::transport(true))?;
         let r = Self::checked(r, true).await?;
         r.json().await.map_err(|_| Failure::transport(true))
     }

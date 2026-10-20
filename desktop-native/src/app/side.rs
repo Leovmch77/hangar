@@ -525,7 +525,7 @@ impl Hangar {
         self.side.reloading.insert(key.clone());
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
-            let result = api.act(&key.name, &["recarregar"], None, false, 0).await;
+            let result = api.act(&key.name, &["recarregar"], None, false, crate::api::REOPEN_SECONDS).await;
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::Reload, result) }).await;
         });
         cx.notify();
