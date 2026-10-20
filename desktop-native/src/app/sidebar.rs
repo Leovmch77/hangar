@@ -865,9 +865,10 @@ impl Hangar {
                 Write::Editor => match editor { Some(open) => open.await, None => api.act(name, &["open-editor"], None, false, 15).await },
                 Write::Delete => api.act(name, &[], None, true, 30).await,
                 Write::Rename(new, _) => api.act(name, &["rename"], Some(json!({"new": new})), false, 30).await,
-                Write::Mode(terminal) => api.act(name, &["modo-execucao"], Some(json!({"terminal": terminal})), false, 60).await,
-                Write::Reload => api.act(name, &["recarregar"], None, false, 60).await,
-                Write::Account { path, engine_account, .. } => api.act(name, &["conta"], Some(account_body(path, engine_account.as_deref())), false, 120).await,
+                // Reabrir espera o Claude subir (até 60 s) e, se falhar, a volta: o prazo cobre os dois.
+                Write::Mode(terminal) => api.act(name, &["modo-execucao"], Some(json!({"terminal": terminal})), false, 180).await,
+                Write::Reload => api.act(name, &["recarregar"], None, false, 180).await,
+                Write::Account { path, engine_account, .. } => api.act(name, &["conta"], Some(account_body(path, engine_account.as_deref())), false, 180).await,
             };
             tell.send(SidebarReply::Wrote(target, what, result)).await;
         });
