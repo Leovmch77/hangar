@@ -10,8 +10,31 @@ import { getLocale } from '../../paraglide/runtime';
 // Convite (token de convidado), desligado e entrada montada para par externo não recebem push do dono.
 const pushable = (s: Server) => !s.disabled && !s.invite && !s.removed && !s.ephemeral;
 
+type PushResult = 'registered' | 'denied' | 'unsupported';
+let lastResult: PushResult | null = null;
+
 // ponytail: só Android; o iOS do SideStore não assina o entitlement de push.
-export async function registerExpoPush(servers: Server[]): Promise<'registered' | 'denied' | 'unsupported'> {
+export async function registerExpoPush(servers: Server[]): Promise<PushResult> {
+  lastResult = await register(servers);
+  return lastResult;
+}
+
+/** Volta dos ajustes do sistema: quem negou e depois liberou precisa mandar o token agora. */
+export async function retryExpoPushIfDenied(servers: Server[]): Promise<PushResult | null> {
+  return lastResult === 'denied' ? registerExpoPush(servers) : null;
+}
+
+let handlerInstalled = false;
+// Sem o handler, o push que chega com o app aberto é descartado.
+export function installNotificationHandler(): void {
+  if (handlerInstalled) return;
+  handlerInstalled = true;
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: false, shouldSetBadge: false }),
+  });
+}
+
+async function register(servers: Server[]): Promise<PushResult> {
   if (Platform.OS !== 'android') return 'unsupported';
   // O canal precisa existir antes do pedido: no Android 13+ é ele que dispara a pergunta do sistema.
   await Notifications.setNotificationChannelAsync('default', {
@@ -40,14 +63,19 @@ export function openFromNotification(data: unknown, servers: Server[]): void {
   }
 }
 
+export function handleNotificationResponse(response: Notifications.NotificationResponse, servers: Server[]): void {
+  if (response.actionIdentifier !== Notifications.DEFAULT_ACTION_IDENTIFIER) return;
+  openFromNotification(response.notification.request.content.data, servers);
+  // Sem limpar, o hook devolve a mesma resposta na próxima montagem e abre de novo.
+  Notifications.clearLastNotificationResponse();
+}
+
 /** Toque na notificação, inclusive com o app fechado: espera a lista de servidores carregar. */
 export function useNotificationNavigation(): void {
   const response = Notifications.useLastNotificationResponse();
   const ready = useServers((s) => s.ready);
   useEffect(() => {
-    if (!ready || !response || response.actionIdentifier !== Notifications.DEFAULT_ACTION_IDENTIFIER) return;
-    openFromNotification(response.notification.request.content.data, useServers.getState().servers);
-    Notifications.clearLastNotificationResponse();
+    if (ready && response) handleNotificationResponse(response, useServers.getState().servers);
   }, [ready, response]);
 }
 

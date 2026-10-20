@@ -8,6 +8,8 @@ const h = vi.hoisted(() => ({
   getToken: vi.fn(async () => ({ data: 'ExponentPushToken[abc]' })),
   request: vi.fn(),
   channel: vi.fn(async () => null),
+  handler: vi.fn(),
+  clear: vi.fn(),
 }));
 
 vi.mock('react-native', () => ({ Platform: { get OS() { return h.os; } }, Linking: { openSettings: vi.fn() } }));
@@ -19,12 +21,15 @@ vi.mock('expo-notifications', () => ({
   getPermissionsAsync: vi.fn(async () => ({ status: h.permission })),
   requestPermissionsAsync: h.request.mockImplementation(async () => ({ status: h.permission })),
   getExpoPushTokenAsync: h.getToken,
+  setNotificationHandler: h.handler,
+  clearLastNotificationResponse: h.clear,
+  DEFAULT_ACTION_IDENTIFIER: 'default-action',
 }));
 vi.mock('@hangar/core', () => ({ subscribeExpoPushForServer: h.subscribe }));
 vi.mock('../../paraglide/runtime', () => ({ getLocale: () => 'pt' }));
 vi.mock('../../stores/servers', () => ({ useServers: vi.fn() }));
 
-import { openFromNotification, registerExpoPush } from './expoPush';
+import { handleNotificationResponse, installNotificationHandler, openFromNotification, registerExpoPush, retryExpoPushIfDenied } from './expoPush';
 
 const casa = { id: 'casa', label: 'Casa', baseUrl: 'https://casa.test', token: 't1' };
 const work = { id: 'work', label: 'Trabalho', baseUrl: 'https://work.test', token: 't2' };
@@ -37,6 +42,7 @@ beforeEach(() => {
   h.getToken.mockClear();
   h.request.mockClear();
   h.channel.mockClear();
+  h.clear.mockClear();
 });
 
 describe('registerExpoPush', () => {
@@ -88,5 +94,50 @@ describe('openFromNotification', () => {
   it('servidor fora da lista do aparelho abre a lista', () => {
     openFromNotification({ server: 'outro', session: 'x' }, [casa]);
     expect(h.push).toHaveBeenCalledWith('/');
+  });
+});
+
+describe('permissão liberada nos ajustes', () => {
+  it('registra de novo ao voltar quando a última tentativa foi negada', async () => {
+    h.permission = 'denied';
+    await registerExpoPush([casa]);
+    h.permission = 'granted';
+    expect(await retryExpoPushIfDenied([casa])).toBe('registered');
+    expect(h.subscribe).toHaveBeenCalledWith(casa, expect.objectContaining({ server_id: 'casa' }));
+  });
+
+  it('não registra de novo quando a última tentativa deu certo', async () => {
+    await registerExpoPush([casa]);
+    h.subscribe.mockClear();
+    expect(await retryExpoPushIfDenied([casa])).toBeNull();
+    expect(h.subscribe).not.toHaveBeenCalled();
+  });
+});
+
+describe('installNotificationHandler', () => {
+  it('instala uma vez só, com banner e lista e sem som', async () => {
+    installNotificationHandler();
+    installNotificationHandler();
+    expect(h.handler).toHaveBeenCalledTimes(1);
+    const behavior = await h.handler.mock.calls[0][0].handleNotification();
+    expect(behavior).toMatchObject({ shouldShowBanner: true, shouldShowList: true, shouldPlaySound: false });
+  });
+});
+
+describe('handleNotificationResponse', () => {
+  const response = (actionIdentifier: string) => ({
+    actionIdentifier, notification: { request: { content: { data: { server: 'casa', session: 's1' } } } },
+  });
+
+  it('ignora ação que não é o toque padrão', () => {
+    handleNotificationResponse(response('reply') as never, [casa]);
+    expect(h.push).not.toHaveBeenCalled();
+    expect(h.clear).not.toHaveBeenCalled();
+  });
+
+  it('navega e limpa a última resposta para não abrir duas vezes', () => {
+    handleNotificationResponse(response('default-action') as never, [casa]);
+    expect(h.push).toHaveBeenCalledTimes(1);
+    expect(h.clear).toHaveBeenCalledTimes(1);
   });
 });
