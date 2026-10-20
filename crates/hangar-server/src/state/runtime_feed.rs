@@ -298,9 +298,9 @@ impl RuntimeFeed {
             }
         };
         // Como no `Monitor`: sem retrato, a sugestão e a sessão parada podem estar velhas, e a tela diz isso.
-        // Sem ator não há vínculo nem plugin a ler: é a sessão parada, não estado velho. Ator vivo com vínculo
-        // quebrado já sai acima como `state_feed_binding_unavailable`.
-        if let Some(code) = self.facts.as_ref().and_then(|w| w.error.as_ref()).filter(|code| *code != "runtime_binding") {
+        // Sessão parada (sem ator) não tem vínculo nem plugin a ler: é o normal dela, não estado velho.
+        let parked = matches!(value, Some(None));
+        if let Some(code) = self.facts.as_ref().and_then(|w| w.error.as_ref()).filter(|code| !(parked && *code == "runtime_binding")) {
             if state.problema.is_none() {
                 state.problema = Some(super::facts::UNAVAILABLE.into());
                 state.problema_detalhe = Some(code.clone());

@@ -146,10 +146,19 @@ fn headless_state(row: &mut SessionRow, retrato: Option<&BTreeMap<String, Value>
         || (s["view"]["alive"] == true && !s["view"]["public_state"]["state"].is_string()));
     if broken { row.problema = Some("list_runtime_unavailable".into()); }
     let live = snapshot.filter(|s| !broken && s["view"]["alive"] == true).map(|s| &s["view"]["public_state"]);
-    // Sem ator vivo não há turno rodando: o marcador do hook fica em "working" quando o turno acaba sem
-    // o hook final (Esc, limite de uso, queda), e o chat (feed estacionado) já diz parada.
     let Some(state) = live else {
+        // Retrato quebrado (ator subindo, erro): o turno pode estar rodando, vale o marcador.
+        // No Codex, sem marcador, fica o fato do Python, como antes.
+        if broken {
+            if row.provider != "codex" {
+                row.state = marker.map(|m| m.state.as_str()).filter(|s| ["working", "idle"].contains(s)).unwrap_or("idle").into();
+            }
+            return;
+        }
+        // Sem ator não há turno: o marcador fica em "working" quando o turno acaba sem o hook final (Esc,
+        // limite de uso, queda), e o chat (feed estacionado) já diz parada.
         row.state = "idle".into();
+        (row.label, row.question, row.options, row.interaction_id) = (None, None, None, None);
         return;
     };
     let text = |k: &str| state[k].as_str().map(str::to_owned);

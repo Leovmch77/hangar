@@ -301,10 +301,15 @@ impl Sources for LiveSources {
             Some(registry) => super::facts::plugin_reading(registry, &self.name).await,
             None => Err("plugin_runtime_absent".into()),
         };
-        // Claude com terminal ainda sem ator (servidor recém-subido, sessão reaberta): adota como a lista, com o mesmo teto.
+        // Vida fechada com o processo de pé (sessão reaberta): adota o Claude do pane como a lista, com o mesmo teto.
         if local.as_ref().is_err_and(|code| code == "runtime_binding") && let Some(registry) = self.env.runtime.get()
-            && crate::list::classify::adoption_due(&self.name, Instant::now()) && registry.adopt_claude_terminal(&self.name).await.is_ok() {
-            local = super::facts::plugin_reading(registry, &self.name).await;
+            && crate::list::classify::adoption_due(&self.name, Instant::now()) {
+            match registry.adopt_claude_terminal(&self.name).await {
+                Ok(()) => local = super::facts::plugin_reading(registry, &self.name).await,
+                Err(error) => if crate::warn_limit::allow(Some(&self.name), "state_adopt_failed") {
+                    tracing::warn!(session = %self.name, code = %error.code, "estado: adoção do Claude com terminal falhou");
+                },
+            }
         }
         match local {
             Ok(reading) => {
@@ -326,12 +331,6 @@ impl Sources for LiveSources {
                         facts.suggestion = Some(local.suggestion);
                     }
                     Err(code) => facts.unavailable = Some(code),
-                }
-            }
-            // Sem vínculo o estado sai do pane, como no Python: não há o que a pessoa fazer, então vai só ao log.
-            Err(code) if code == "runtime_binding" => {
-                if crate::warn_limit::allow(Some(&self.name), "state_runtime_binding") {
-                    tracing::warn!(session = %self.name, code = %code, "estado: Claude com terminal sem vínculo no runtime; segue pelo pane");
                 }
             }
             Err(code) => facts.unavailable = Some(code),
