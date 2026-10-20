@@ -61,13 +61,19 @@ pub(super) fn groups(entries: Vec<(Target, &SessionInfo)>, ids: &HashMap<String,
 }
 
 impl Hangar {
-    fn tab_groups(&self) -> Vec<TabGroup> {
-        groups(self.ungrouped_tab_targets().into_iter()
-            .filter_map(|target| self.target_session(&target).map(|session| (target, session))).collect(), &self.identities())
+    /// Recalculado só quando muda o que `groups` lê: as abas, os campos de grupo delas e os identificadores.
+    fn tab_groups(&self) -> std::rc::Rc<Vec<TabGroup>> {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let entries: Vec<(Target, &SessionInfo)> = self.ungrouped_tab_targets().into_iter()
+            .filter_map(|target| self.target_session(&target).map(|session| (target, session))).collect();
+        let mut hasher = DefaultHasher::new();
+        self.hash_identities(&mut hasher);
+        for (t, s) in &entries { (t, &s.pair_gid, &s.pair_owner, s.peers(), &s.pair_task, s.orq()).hash(&mut hasher); }
+        super::grouping::memo(&self.sidebar.grouping.tabs, hasher.finish(), || groups(entries, &self.identities()))
     }
 
     pub(super) fn tab_targets(&self) -> Vec<Target> {
-        self.tab_groups().into_iter().flat_map(|group| group.members).collect()
+        self.tab_groups().iter().flat_map(|group| group.members.iter().cloned()).collect()
     }
 
     pub(super) fn scroll_target_tab(&mut self, target: &Target) {
@@ -108,7 +114,8 @@ impl Hangar {
 
     pub(super) fn render_tab_groups(&self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut order = 0;
-        self.tab_groups().into_iter().map(|group| {
+        let bands = self.tab_groups();
+        bands.iter().map(|group| {
             let first = order;
             order += group.members.len();
             let Some(label) = group.label.as_deref() else {

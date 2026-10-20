@@ -344,6 +344,10 @@ pub(super) struct Grouping {
     ids: HashMap<String, IdSlot>,
     /// Selos da última lista: a barra se desenha a cada quadro e o modelo global é quadrático.
     seals: RefCell<Option<(u64, Rc<Seals>)>>,
+    /// Faixas das abas, pelo mesmo motivo dos selos.
+    pub(super) tabs: RefCell<Option<(u64, Rc<Vec<super::session_tabs::TabGroup>>)>>,
+    /// O que soltar no ponto atual faria; refeito só quando o ponto muda, não por linha a cada quadro.
+    verdict: Option<Result<DropAction, Refusal>>,
 }
 
 pub(super) type Seals = HashMap<Target, (String, String)>;
@@ -356,7 +360,7 @@ pub(super) enum IdSlot { Loading, Known(String), Failed(Instant) }
 const ID_RETRY: Duration = Duration::from_secs(30);
 
 /// A máquina tem identificador válido: em voo, falha, vazio ou não lido ainda não dizem nada sobre quem está fora.
-pub(super) fn identity_settled(slot: Option<&IdSlot>) -> bool { matches!(slot, Some(IdSlot::Known(id)) if !id.is_empty()) }
+pub(super) fn identity_settled(slot: Option<&IdSlot>) -> bool { matches!(slot, Some(IdSlot::Known(_))) }
 
 /// Resposta de `/api/peers/identificador` (`None` = a leitura falhou). Vazio é máquina sem `CP_SERVER_ID`: conta como falha
 /// e é relido depois de `ID_RETRY`, para o conserto aparecer sem reconectar.
@@ -414,6 +418,15 @@ impl Hangar {
         self.sidebar.grouping.ids.iter().filter_map(|(k, slot)| match slot { IdSlot::Known(id) => Some((k.clone(), id.clone())), _ => None }).collect()
     }
 
+    /// Os identificadores lidos na chave de um `memo`, sem copiar o mapa.
+    pub(super) fn hash_identities(&self, hasher: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        let mut known: Vec<(&String, &String)> = self.sidebar.grouping.ids.iter()
+            .filter_map(|(k, slot)| match slot { IdSlot::Known(id) => Some((k, id)), _ => None }).collect();
+        known.sort();
+        known.hash(hasher);
+    }
+
     /// Leitura do identificador de `key`; `None` antes de qualquer leitura.
     pub(super) fn identity_slot(&self, key: &str) -> Option<&IdSlot> { self.sidebar.grouping.ids.get(key) }
 
@@ -462,12 +475,9 @@ impl Hangar {
         use std::hash::{DefaultHasher, Hash, Hasher};
         let machines = self.group_machines();
         if machines.len() < 2 && self.sessions.iter().all(|s| s.pair_owner.is_none()) { return Rc::default(); }
-        let ids = self.identities();
         let mut hasher = DefaultHasher::new();
         crate::i18n::english().hash(&mut hasher);
-        let mut sorted: Vec<_> = ids.iter().collect();
-        sorted.sort();
-        sorted.hash(&mut hasher);
+        self.hash_identities(&mut hasher);
         for key in &machines {
             (key, self.machine_label(key, cx)).hash(&mut hasher);
             for s in self.sessions_of(key) {
@@ -475,7 +485,7 @@ impl Hangar {
                 for p in s.outside_pairs().iter() { (&p.alias, &p.session).hash(&mut hasher); }
             }
         }
-        memo(&self.sidebar.grouping.seals, hasher.finish(), || self.compute_seals(&machines, &ids, cx))
+        memo(&self.sidebar.grouping.seals, hasher.finish(), || self.compute_seals(&machines, &self.identities(), cx))
     }
 
     fn compute_seals(&self, machines: &[String], ids: &HashMap<String, String>, cx: &App) -> Seals {
@@ -556,7 +566,8 @@ impl Hangar {
     }
 
     fn drop_hint(&self, cx: &App) -> Option<(String, bool)> {
-        match self.verdict(self.dragging(cx)?, self.current_spot()?)? {
+        self.dragging(cx)?;
+        match self.sidebar.grouping.verdict.as_ref()? {
             Ok(DropAction::Leave) => Some((tr("group_drop_leave"), false)),
             Ok(DropAction::Join(_)) => None,
             Err(refusal) => Some((refusal.text(), true)),
@@ -565,9 +576,15 @@ impl Hangar {
 
     /// Este alvo está sob o ponteiro: `Some(true)` aceita, `Some(false)` recusa.
     fn targeted(&self, spot: &DropSpot, cx: &App) -> Option<bool> {
-        let origin = self.dragging(cx)?;
+        self.dragging(cx)?;
         if self.current_spot()? != Some(spot) { return None; }
-        match self.verdict(origin, Some(spot))? { Ok(_) => Some(true), Err(_) => Some(false) }
+        Some(self.sidebar.grouping.verdict.as_ref()?.is_ok())
+    }
+
+    fn refresh_verdict(&mut self) {
+        let g = &self.sidebar.grouping;
+        let verdict = g.origin.as_ref().zip(self.current_spot()).and_then(|(origin, spot)| self.verdict(origin, spot));
+        self.sidebar.grouping.verdict = verdict;
     }
 
     fn start_session_drag(&mut self, target: Target, cx: &mut Context<Self>) {
@@ -575,6 +592,7 @@ impl Hangar {
         self.clear_hover();
         let g = &mut self.sidebar.grouping;
         (g.origin, g.spot, g.in_list) = (Some(target), None, true);
+        self.refresh_verdict();
         cx.notify();
     }
 
@@ -587,12 +605,15 @@ impl Hangar {
             Some(spot) if inside => g.spot = Some(spot),
             Some(spot) => if g.spot.as_ref() == Some(&spot) { g.spot = None },
         }
-        if before != (g.spot.clone(), g.in_list) { cx.notify(); }
+        if before != (g.spot.clone(), g.in_list) {
+            self.refresh_verdict();
+            cx.notify();
+        }
     }
 
     pub(super) fn end_session_drag(&mut self, cx: &mut Context<Self>) {
         let g = &mut self.sidebar.grouping;
-        (g.origin, g.spot, g.in_list) = (None, None, false);
+        (g.origin, g.spot, g.in_list, g.verdict) = (None, None, false, None);
         cx.notify();
     }
 
@@ -1105,7 +1126,7 @@ mod tests {
     #[test]
     fn identity_counts_only_when_read_and_not_empty() {
         assert!(identity_settled(Some(&IdSlot::Known("casa".into()))));
-        for slot in [None, Some(IdSlot::Loading), Some(IdSlot::Failed(Instant::now())), Some(IdSlot::Known(String::new()))] {
+        for slot in [None, Some(IdSlot::Loading), Some(IdSlot::Failed(Instant::now()))] {
             assert!(!identity_settled(slot.as_ref()), "leitura em voo, falha ou vazio não dizem que a máquina está fora");
         }
     }

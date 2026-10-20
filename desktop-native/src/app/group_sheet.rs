@@ -445,7 +445,7 @@ impl Hangar {
         let notes: Vec<String> = machines.iter().filter(|_| multi).filter_map(|k| {
             let label = self.machine_label(k, cx);
             match self.identity_slot(k) {
-                Some(IdSlot::Known(id)) if !id.is_empty() => None,
+                Some(IdSlot::Known(_)) => None,
                 None | Some(IdSlot::Loading) => Some(format!("{label}: {}", web("comum_carregando"))),
                 _ => Some(format!("⚠ {label}: {}", Refusal::NoIdentity.text())),
             }
