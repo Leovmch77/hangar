@@ -24,7 +24,11 @@ export function TabletShell({ selected, children, active = true }: Props) {
   const voiceServer = selected?.serverId ?? activeId;
   const bar = (position: typeof placement) => active && placement === position ? (
     <SessionsBar placement={placement} selected={selected}
-      onPick={s => router.replace(`/s/${encodeURIComponent(s.serverId)}/${encodeURIComponent(s.name)}` as never)}
+      onPick={s => {
+        const path = `/s/${encodeURIComponent(s.serverId)}/${encodeURIComponent(s.name)}` as never;
+        if (selected) router.replace(path);
+        else router.push(path);
+      }}
       onNew={() => router.push('/create')} />
   ) : null;
 
@@ -42,6 +46,9 @@ export function TabletShell({ selected, children, active = true }: Props) {
         </Pressable>
         <View style={styles.spacer} />
         {voiceServer ? <LiveVoiceChatButton serverId={voiceServer} name={selected?.name} /> : null}
+        <Pressable onPress={() => router.push('/costs')} accessibilityRole="button" accessibilityLabel={m.nav_custos()} style={styles.button}>
+          <Icon name="ChartNoAxesCombined" size={20} color={theme.tokens.text.secondary} />
+        </Pressable>
         <Pressable onPress={() => router.push('/config')} accessibilityRole="button" accessibilityLabel={m.config_modal_titulo()} style={styles.button}>
           <Icon name="Settings" size={20} color={theme.tokens.text.secondary} />
         </Pressable>

@@ -86,6 +86,26 @@ it('troca a sessão sem empilhar e abre criação, busca, configuração e Iníc
   click(m.chat_ir_inicio()); expect(h.router.dismissTo).toHaveBeenCalledWith('/');
 });
 
+it('abrir uma sessão pelo Início conserva o Início na pilha para o voltar', () => {
+  act(() => root.render(createElement(TabletShell, { children: createElement('main', null, 'new-conversation') })));
+  click('pick-b');
+  expect(h.router.push).toHaveBeenCalledWith('/s/srv/b');
+  expect(h.router.replace).not.toHaveBeenCalled();
+});
+
+it.each([true, false])('Custos fica acessível na barra com sessão selecionada: %s', selected => {
+  act(() => root.render(createElement(TabletShell, {
+    selected: selected ? { serverId: 'srv', name: 'a' } : undefined,
+    children: createElement('main', null, 'conversation'),
+  })));
+  const button = host.querySelector<HTMLButtonElement>(`[aria-label="${m.nav_custos()}"]`);
+  expect(button).not.toBeNull();
+  expect(button!.style.minWidth).toBe('44px');
+  expect(button!.style.minHeight).toBe('44px');
+  click(m.nav_custos());
+  expect(h.router.push).toHaveBeenCalledWith('/costs');
+});
+
 it('a rota inicial conserva a criação ao girar e usa a barra no lugar da lista no tablet', async () => {
   h.size = { ...h.size, width: 390, height: 844 };
   await act(async () => root.render(createElement(Index)));
