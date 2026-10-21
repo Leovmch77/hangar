@@ -1977,20 +1977,27 @@ def test_merge_que_muda_o_contrato_conta_pelo_primeiro_pai(repo, rust):
 
 
 
+@pytest.mark.parametrize("marker", [None, '{"sem_build": true}', '{"version": "0.1.0.1"}'])
 @pytest.mark.parametrize("stage", ["reiniciar", "nativo"])
-def test_motor_morto_pelo_proprio_reinicio_conclui_quando_o_servidor_e_o_novo(repo, stage):
+def test_motor_morto_pelo_proprio_reinicio_conclui_quando_o_servidor_e_o_novo(repo, stage, marker, tmp_path, monkeypatch):
     """Sem escopo próprio do systemd (o gerenciador do usuário recusa unidade transiente), o motor
     nasce no cgroup do backend e o restart que ele dispara o mata antes de gravar "pronto". Quem
     responde depois é o backend novo, com o disco no commit da atualização: isso é sucesso."""
     import os as _os
+    home = tmp_path / "home"
+    monkeypatch.setattr(atualizar.Path, "home", lambda: home)
+    if marker:
+        (home / ".hangar" / "native").mkdir(parents=True)
+        (home / ".hangar" / "native" / "release.json").write_text(marker, encoding="utf-8")
     head = atualizar._git("rev-parse", "HEAD").stdout.strip()
     atualizar._escrever(fase="rodando", etapa=stage, passo=5, total=6, pid=_pid_morto(),
                         backend_pid=_os.getpid() + 1, commit_para=head, avisos=["aviso anterior"])
     d = atualizar.estado_para_tela()
     assert (d["fase"], d["ok"]) == ("pronto", True)
-    assert d["avisos"] == ["aviso anterior", (
+    native_warning = ([] if marker is None or "sem_build" in marker else [
         "app nativo nao atualizou: a atualizacao foi concluida pelo servidor novo" if stage == "reiniciar"
-        else "app nativo nao atualizou: o processo que o atualizava nao existe mais")]
+        else "app nativo nao atualizou: o processo que o atualizava nao existe mais"])
+    assert d["avisos"] == ["aviso anterior", *native_warning]
     assert atualizar.estado_para_tela()["avisos"] == d["avisos"]
 
 

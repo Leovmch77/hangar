@@ -200,7 +200,12 @@ def estado_para_tela() -> dict:
         _log.info("atualizacao concluida pelo backend novo: o motor %s morreu no reinicio que pediu", dono)
         reason = ("a atualizacao foi concluida pelo servidor novo" if atual.get("etapa") == "reiniciar"
                   else "o processo que o atualizava nao existe mais")
-        _avisar(f"app nativo nao atualizou: {reason}")
+        try:
+            nativo = _nativo_instalado()
+        except (OSError, ValueError):
+            nativo = True
+        if nativo:
+            _avisar(f"app nativo nao atualizou: {reason}")
         _dist_velho_apagar()
         _escrever(fase="pronto", ok=True, texto="Atualizado")
         _soltar_a_vez()
@@ -1015,18 +1020,22 @@ def _renovar_chromium(agora: float | None = None) -> None:
         _log.warning("install-chromium.sh: %s", _cauda(p, 4))
 
 
+def _nativo_instalado() -> bool:
+    marker = Path.home() / ".hangar" / "native" / "release.json"
+    if not marker.is_file():
+        return False
+    installed = json.loads(marker.read_text(encoding="utf-8"))
+    if not isinstance(installed, dict):
+        raise ValueError("marca do app nativo nao e um objeto")
+    return not installed.get("sem_build")
+
+
 def _instalar_nativo(alvo: str, porta: int) -> None:
     """Atualiza só o app já instalado e compatível com o servidor que ficou no ar."""
     if alvo != "main":
         return
-    marker = Path.home() / ".hangar" / "native" / "release.json"
-    if not marker.is_file():
-        return
     try:
-        installed = json.loads(marker.read_text(encoding="utf-8"))
-        if not isinstance(installed, dict):
-            raise ValueError("marca do app nativo nao e um objeto")
-        if installed.get("sem_build"):
+        if not _nativo_instalado():
             return
         release = os.environ.get("HANGAR_NATIVE_UPDATE_URL") or f"{rust_release.RELEASES_URL}/native-latest"
         manifest = json.loads(rust_release._get(f"{release.rstrip('/')}/native-latest.json", 30))

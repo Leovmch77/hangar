@@ -35,7 +35,8 @@ impl Status {
             Self::Offline(_) => "update_all_offline", Self::Updated => "update_all_updated",
             Self::UpdatedManual => "update_all_updated_manual",
             Self::Failed(error) => return tr_shared("update_all_failed", &[("erro", error)]),
-            Self::Silent => "update_all_silent", Self::Timeout => "update_all_timeout",
+            Self::Silent => return tr_shared("update_all_failed", &[("erro", &tr_shared("update_all_silent", &[]))]),
+            Self::Timeout => return tr_shared("update_all_failed", &[("erro", &tr_shared("update_all_timeout", &[]))]),
         };
         tr_shared(key, &[])
     }
