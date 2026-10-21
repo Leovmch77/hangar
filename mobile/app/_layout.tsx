@@ -12,7 +12,8 @@ import { discoverSavedMachines } from '../src/features/machines/importMachines';
 import { setChatsForeground } from '../src/stores/chat';
 import { setQueueDeliveryForeground } from '../src/chat/useQueueDelivery';
 import { setMachineDiscovery, useSessions } from '../src/stores/sessions';
-import { aplicarTemaSalvo, useAparencia } from '../src/stores/aparencia';
+import { aplicarTemaSalvo, setTabletTextScale, useAparencia } from '../src/stores/aparencia';
+import { useTabletLandscape } from '../src/features/tablet/layout';
 import { aplicarMaterial } from '../src/theme/aplicarMaterial';
 import { Toaster, toast } from '../src/ui/Toast';
 import { LiveVoiceRoot } from '../src/features/voice/LiveVoiceRoot';
@@ -32,6 +33,8 @@ const reportPushError = (e: unknown) => {
 };
 
 export default function Layout() {
+  const tablet = useTabletLandscape();
+  useEffect(() => { setTabletTextScale(tablet); }, [tablet]);
   const router = useRouter();
   const segments = useSegments();
   setFatalErrorRoute(segments);

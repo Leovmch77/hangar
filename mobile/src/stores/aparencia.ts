@@ -229,6 +229,12 @@ interface Aparencia {
 // "Reduzir transparência" do sistema não é preferência do app: não persiste, e vale por cima do
 // que estiver gravado. Mora aqui, e não em cada componente, porque quem apaga o vidro é o TEMA.
 let reduzirTransparencia = false;
+let tabletTextScale = 1;
+
+export function setTabletTextScale(on: boolean): void {
+  tabletTextScale = on ? 19 / 17 : 1;
+  reaplicarMaterial();
+}
 AccessibilityInfo.isReduceTransparencyEnabled()
   .then((v) => { reduzirTransparencia = v; if (v) reaplicarMaterial(); })
   .catch(() => {});
@@ -238,7 +244,7 @@ AccessibilityInfo.addEventListener('reduceTransparencyChanged', (v) => {
 });
 
 function reaplicarMaterial() {
-  aplicarMaterial(useAparencia.getState(), { reduzir: reduzirTransparencia });
+  aplicarMaterial(useAparencia.getState(), { reduzir: reduzirTransparencia, escalaTexto: tabletTextScale });
 }
 
 export const useAparencia = create<Aparencia>((set, get) => {
@@ -254,7 +260,7 @@ export const useAparencia = create<Aparencia>((set, get) => {
     if (agendado) return;
     agendado = setTimeout(() => {
       agendado = null;
-      aplicarMaterial(get(), { reduzir: reduzirTransparencia });
+      aplicarMaterial(get(), { reduzir: reduzirTransparencia, escalaTexto: tabletTextScale });
       for (const f of aGravar.splice(0)) f();
     }, 0);
   };
