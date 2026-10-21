@@ -2283,6 +2283,7 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
             provider = getattr(await _cached_info(name), "provider", None)
         except (list_bridge.ListBridgeError, tmux.MuxIndisponivel) as e:
             _log.warning("kill(%s): provedor desconhecido sem a lista, fecha pelo Python: %s", name, e)
+            diag.registrar("sessao.fechar_sem_provedor", "erro", sessao=name, codigo=type(e).__name__)
     if provider == "claude":
         from app import runtime_coordinator
         reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, "close", "POST", b"", headers=_who_asked(request))
