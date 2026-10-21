@@ -2505,6 +2505,9 @@ def cmd_storage(a) -> int:
     else:
         args += [flag for flag in ("--apply", "--check", "--receipt") if getattr(a, flag[2:], False)]
     try:
+        # O sinal mandado ao orq precisa chegar a quem limpa a prova; no Windows o execv não preserva o código de saída.
+        if a.cmd == "proof" and os.name != "nt":
+            os.execv(binary, args)
         return subprocess.run(args).returncode
     except OSError as error:
         raise OrqError(f"não foi possível executar o hangar-server: {error}") from error

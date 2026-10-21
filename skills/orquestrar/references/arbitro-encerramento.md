@@ -89,7 +89,8 @@ and report unresolved impediments; do not declare all closed or silently disarm.
 Depois da retrospectiva, de `execucao_fim` e da conferência de que nenhuma sessão ou prova
 continua em andamento, rode `orq podar` para listar os diretórios regeneráveis e seus bytes
 lógicos; depois `orq podar --apply` e `orq podar --check`. A poda conserva relatórios, registro,
-eventos e capturas; recusa execução ativa, retomada ou registro ilegível. `--check` acusa também
+eventos e capturas. Registro ilegível falha nos dois modos; execução ativa ou retomada só é
+recusada pelo `--apply`, e a simulação apenas lista o que seria removido. `--check` acusa também
 sandbox órfão e termina com código 1 enquanto houver diretório regenerável. Registre o resultado
 em `orq log`; falha na poda permanece como impedimento de encerramento.
 

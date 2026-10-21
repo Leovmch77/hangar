@@ -2,9 +2,11 @@
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -85,6 +87,39 @@ class OrqStorageCliTests(unittest.TestCase):
         self.assertFalse(root.is_relative_to(path))
         self.assertTrue(target.is_relative_to(root))
         self.assertFalse(root.exists())
+
+    @unittest.skipIf(os.name == "nt", "SIGHUP só existe no Unix")
+    def test_hangup_on_the_cli_stops_the_proof_and_discards_the_build(self):
+        path = self.make_run(ended=False)
+        code = (
+            "import json, os, sys, time; "
+            "print(json.dumps([os.getpid(), os.environ['ORQ_PROOF_ROOT']]), flush=True); "
+            "time.sleep(60)"
+        )
+        proc = subprocess.Popen([sys.executable, str(ORQ), "--dir", str(path), "proof", "--",
+                                 sys.executable, "-c", code],
+                                env=self.env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                text=True, encoding="utf-8")
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        ceiling = threading.Timer(30, proc.kill)
+        ceiling.start()
+        self.addCleanup(ceiling.cancel)
+        assert proc.stdout is not None
+        with proc.stdout as out:
+            pid, root = json.loads(out.readline())
+            self.addCleanup(lambda: self._kill_if_alive(pid))
+            os.kill(proc.pid, signal.SIGHUP)
+            proc.wait(timeout=30)
+        self.assertFalse(Path(root).exists())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    @staticmethod
+    def _kill_if_alive(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
     def test_update_step_schedules_cleanup_without_requiring_the_new_binary(self):
         update = REPO / "docs/atualizacoes/2026-10-21-orq-durable-cleanup.md"

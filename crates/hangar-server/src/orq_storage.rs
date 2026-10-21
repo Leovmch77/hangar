@@ -251,6 +251,13 @@ pub async fn proof(dir: &Path, command: &[String]) -> io::Result<i32> {
             "O temporário da prova deve ficar fora da pasta durável.",
         ));
     }
+    // Registrados antes do temporário: sinal sem tratador mataria o processo e deixaria a etapa órfã.
+    #[cfg(unix)]
+    let mut terminate =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    // Fechar o painel tmux manda SIGHUP; o filho, em outro grupo, não o recebe.
+    #[cfg(unix)]
+    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
     let temp = tempfile::Builder::new()
         .prefix("hangar-orq-proof-")
         .tempdir_in(parent)?;
@@ -285,9 +292,6 @@ pub async fn proof(dir: &Path, command: &[String]) -> io::Result<i32> {
             cmd.env(key, path);
         }
         cmd.env("ORQ_PROOF_ROOT", temp.path()).env("ORQ_DIR", &dir);
-        #[cfg(unix)]
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut tree = CommandTree::configure(&mut cmd)?;
         let mut child = cmd.spawn()?;
         if let Err(error) = tree.attach(&child) {
@@ -300,7 +304,7 @@ pub async fn proof(dir: &Path, command: &[String]) -> io::Result<i32> {
             result = tokio::signal::ctrl_c() => result.map(|_| true),
             _ = async {
                 #[cfg(unix)]
-                terminate.recv().await;
+                tokio::select! { _ = terminate.recv() => {}, _ = hangup.recv() => {} }
                 #[cfg(not(unix))]
                 std::future::pending::<()>().await;
             } => Ok(true),
@@ -405,7 +409,7 @@ pub fn cli(args: &[String]) -> std::process::ExitCode {
         Ok(i32::from(check && remains))
     })();
     match result {
-        Ok(code) => std::process::ExitCode::from(code.clamp(0, 255) as u8),
+        Ok(code) => std::process::ExitCode::from(exit_code(code)),
         Err(error) => {
             eprintln!("orq: {error}");
             std::process::ExitCode::from(2)
@@ -413,10 +417,24 @@ pub fn cli(args: &[String]) -> std::process::ExitCode {
     }
 }
 
+// No Windows a falha do processo chega como NTSTATUS negativo; só o 0 real é sucesso.
+fn exit_code(code: i32) -> u8 {
+    u8::try_from(code).unwrap_or(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn exit_code_never_turns_a_failure_into_success() {
+        assert_eq!(exit_code(0), 0);
+        assert_eq!(exit_code(7), 7);
+        // NTSTATUS de violação de acesso, como o Windows entrega em `ExitStatus::code()`.
+        assert_ne!(exit_code(0xC000_0005_u32 as i32), 0);
+        assert_ne!(exit_code(256), 0);
+    }
 
     fn run_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
