@@ -26,7 +26,8 @@ const LABEL: &str = "hangar";
 const TRUST_WAIT: Duration = Duration::from_secs(120);
 
 pub struct UsbLink {
-    /// Cache do RPPairing: gerar outro a cada gravação deixaria um pareamento novo no aparelho.
+    /// Cache do RPPairing de UMA instalação: o arquivo assinado no IPA e o gravado no app têm de ser
+    /// o mesmo. Reset do aparelho ou troca de confiança o invalidam, por isso cada instalação gera outro.
     state_dir: PathBuf,
 }
 
@@ -81,6 +82,13 @@ impl UsbLink {
             return Err(DeviceError::Other(format!("invalid udid {udid:?}")));
         }
         Ok(self.state_dir.join(format!("rppairing-{udid}.plist")))
+    }
+
+    fn forget_rppairing(&self, udid: &str) -> Result<(), DeviceError> {
+        match std::fs::remove_file(self.rppairing_path(udid)?) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io_err(e)),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -198,6 +206,8 @@ impl DeviceLink for UsbLink {
     fn pairing_file<'a>(&'a self, udid: &'a str) -> BoxFuture<'a, Result<Vec<u8>, DeviceError>> {
         Box::pin(async move {
             let p = provider(udid).await?;
+            // É o começo de cada instalação: o `write_pairing` dela reaproveita o que for gerado aqui.
+            self.forget_rppairing(udid)?;
             // O primeiro é o que o SideStore lê nesta versão (o mesmo que o spike provou).
             let (_, bytes) = self.pairing_files(udid, &p).await?.into_iter().next()
                 .ok_or_else(|| DeviceError::Other("no pairing file".into()))?;
@@ -314,6 +324,18 @@ mod tests {
         let link = UsbLink::new(Path::new("/h"));
         assert!(link.rppairing_path("../x").is_err());
         assert_eq!(link.rppairing_path("0000-AB").unwrap(), Path::new("/h/devices/rppairing-0000-AB.plist"));
+    }
+
+    #[test]
+    fn each_install_starts_without_the_cached_rppairing() {
+        let home = tempfile::tempdir().unwrap();
+        let link = UsbLink::new(home.path());
+        assert!(link.forget_rppairing("0000-AB").is_ok(), "nothing cached yet is fine");
+        let file = link.rppairing_path("0000-AB").unwrap();
+        create_private_dir(&link.state_dir).unwrap();
+        std::fs::write(&file, b"stale").unwrap();
+        link.forget_rppairing("0000-AB").unwrap();
+        assert!(!file.exists());
     }
 
     #[test]
