@@ -1,4 +1,4 @@
-import { View } from 'react-native';
+import { Platform, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useRouter, useSegments } from 'expo-router';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
@@ -14,7 +14,7 @@ export default function CreateRoute() {
     else router.replace('/');
   };
   return (
-    <Screen independent>
+    <Screen independent={Platform.OS !== 'android'}>
       <KeyboardAvoidingView behavior="padding" automaticOffset style={styles.wrap}>
         {segments[0] === 'create' ? <CreateSessionSheet layout="form" onClose={close} /> : <View />}
       </KeyboardAvoidingView>

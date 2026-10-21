@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { useRouter } from 'expo-router';
+import { usePathname, useRouter } from 'expo-router';
 import { useTabletPrefs } from '../../stores/tabletPrefs';
 import { useServers } from '../../stores/servers';
 import { Screen } from '../../ui/Screen';
@@ -17,6 +17,7 @@ type Props = { selected?: { serverId: string; name: string }; children: ReactNod
 // A área central conserva o mesmo lugar na árvore ao girar ou mudar a posição da barra.
 export function TabletShell({ selected, children, active = true }: Props) {
   const router = useRouter();
+  const pathname = usePathname();
   const { theme } = useUnistyles();
   const placement = useTabletPrefs(s => s.placement);
   const collapsed = useTabletPrefs(s => s.collapsed);
@@ -28,7 +29,8 @@ export function TabletShell({ selected, children, active = true }: Props) {
     <SessionsBar placement={placement} selected={selected}
       onPick={s => {
         const path = `/s/${encodeURIComponent(s.serverId)}/${encodeURIComponent(s.name)}` as never;
-        if (selected) router.replace(path);
+        if (selected && /^\/s\/[^/]+\/[^/]+\/?$/.test(pathname)) router.replace(path);
+        else if (selected) router.dismissTo(path);
         else router.push(path);
       }}
       onNew={() => router.push('/create')} />

@@ -45,6 +45,7 @@ function TabletTextScaleSync() {
 export default function Layout() {
   const router = useRouter();
   const segments = useSegments();
+  const withoutServer = segments[0] === 'login' || segments[0] === 'convite' || segments[0] === 'importar';
   const pathname = usePathname();
   const params = useGlobalSearchParams<{ server?: string | string[]; name?: string | string[] }>();
   const tablet = useTabletLandscape();
@@ -107,11 +108,10 @@ export default function Layout() {
 
   useEffect(() => {
     if (!ready) return;
-    const withoutServer = segments[0] === 'login' || segments[0] === 'convite' || segments[0] === 'importar';
     if (servers.length === 0 && !withoutServer) {
       router.replace('/login');
     }
-  }, [ready, servers.length, segments]);
+  }, [ready, servers.length, withoutServer]);
 
   // Aqui, e não na lista de sessões: as duas formas de perder um servidor (keystore que recusou a
   // escrita, token que o servidor rejeitou) acontecem com qualquer tela aberta, inclusive dentro
@@ -133,7 +133,7 @@ export default function Layout() {
     <KeyboardProvider>
       <TabletTextScaleSync />
       <GestureHandlerRootView style={{ flex: 1 }}>
-        <TabletShell active={tablet} selected={selected}>
+        <TabletShell active={tablet && !withoutServer} selected={selected}>
         <ThemeProvider value={windowTheme}>
         <Stack screenOptions={{ headerShown: false }}>
           {/* Android: o formSheet sobe a folha com o teclado (o KeyboardAvoidingView compensava de novo)

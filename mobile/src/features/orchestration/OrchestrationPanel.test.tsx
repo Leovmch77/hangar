@@ -19,7 +19,7 @@ vi.mock('react-native', async importOriginal => {
 const navigation = vi.hoisted(() => ({ focused: true, push: vi.fn(), back: vi.fn() }));
 vi.mock('expo-router', () => ({ useIsFocused: () => navigation.focused, useRouter: () => navigation, useLocalSearchParams: () => ({ server: 'b', name: 'orq-fixture' }), Stack: { Screen: () => null } }));
 vi.mock('expo-secure-store', () => ({ setItemAsync: vi.fn().mockResolvedValue(undefined), getItemAsync: vi.fn().mockResolvedValue(null) }));
-vi.mock('../../ui/Screen', () => ({ Screen: ({ children }: { children: ReactNode }) => createElement('main', null, children) }));
+vi.mock('../../ui/Screen', () => ({ Screen: ({ children, independent }: { children: ReactNode; independent?: boolean }) => createElement('main', { 'data-independent': independent }, children) }));
 vi.mock('../../ui/Sheet', () => ({ Sheet: ({ children }: { children: ReactNode }) => createElement('section', null, children) }));
 vi.mock('../../chat/AssistantBubble', () => ({ mkMarkdownStyle: () => ({ paragraph: {} }) }));
 vi.mock('react-native-enriched-markdown', () => ({
@@ -63,6 +63,11 @@ beforeEach(() => {
   fetcher = vi.fn().mockResolvedValue(reply(panelFixture())); vi.stubGlobal('fetch', fetcher);
 });
 afterEach(async () => { await act(async () => root.unmount()); _resetSessionsForTests(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+it('a folha de orquestração pede fundo próprio mesmo dentro da janela de tablet', async () => {
+  await renderPanel();
+  expect(container.querySelector('main')?.getAttribute('data-independent')).toBe('true');
+});
 
 it.each([false, true])('panel metadata error separates the warning title from the complete smaller detail with history=%s', async (history) => {
   const panel = panelFixture();

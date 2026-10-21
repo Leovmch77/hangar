@@ -174,6 +174,31 @@ it('abrir uma sessão pelo Início conserva o Início na pilha para o voltar', (
   expect(h.router.replace).not.toHaveBeenCalled();
 });
 
+it.each(['files', 'orchestration', 'ask'])('trocar de sessão com a folha %s aberta fecha a folha', async sheet => {
+  h.pathname = `/s/srv/a/${sheet}`;
+  await act(async () => root.render(createElement(Layout)));
+  click('pick-b');
+  expect(h.router.dismissTo).toHaveBeenCalledExactlyOnceWith('/s/srv/b');
+  expect(h.router.replace).not.toHaveBeenCalled();
+  expect(h.router.push).not.toHaveBeenCalled();
+});
+
+it.each(['/login', '/convite/code', '/importar'])('a rota pública %s esconde a barra sem remontar o Stack', async pathname => {
+  await act(async () => root.render(createElement(Layout)));
+  const stack = host.querySelector('[data-stack]');
+  expect(host.querySelector('nav')).not.toBeNull();
+  h.pathname = pathname;
+  await act(async () => root.render(createElement(Layout)));
+  expect(host.querySelector('nav')).toBeNull();
+  expect(host.querySelector('aside')).toBeNull();
+  expect(host.querySelector('[data-stack]')).toBe(stack);
+  expect(host.querySelector(`[aria-label="${m.chat_ir_inicio()}"]`)).toBeNull();
+  h.pathname = '/';
+  await act(async () => root.render(createElement(Layout)));
+  expect(host.querySelector('nav')).not.toBeNull();
+  expect(host.querySelector('[data-stack]')).toBe(stack);
+});
+
 it.each([true, false])('Custos fica acessível na barra com sessão selecionada: %s', selected => {
   act(() => root.render(createElement(TabletShell, {
     selected: selected ? { serverId: 'srv', name: 'a' } : undefined,
