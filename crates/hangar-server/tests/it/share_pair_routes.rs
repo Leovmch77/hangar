@@ -1201,6 +1201,40 @@ async fn concurrent_same_notice_is_written_once_and_failure_releases_it() {
     assert_eq!((e.inputs("s0"), e.inputs("s2")), (3, 3), "a falha não marca: o reenvio entra nas duas");
 }
 
+/// A segunda chegada do mesmo `notice` espera a primeira, em andamento; a primeira falha e a
+/// segunda entrega ela mesma: o aviso não se perde.
+#[tokio::test(flavor = "multi_thread")]
+async fn notice_waiting_on_a_failed_delivery_delivers_it_itself() {
+    let e = env().await;
+    let (_, t1) = e.seed_pair("s0", "pc-ana", "Y", ADDR);
+    e.python.hold_input(true);
+    e.python.set_input_reply(Some((StatusCode::INTERNAL_SERVER_ERROR, json!({"detail": "x"}))));
+    let body = json!({"text": "oi", "session": "s0", "from": "Y", "group": true, "notice": "w1"});
+    let py = &e.python;
+    let wait_calls = |n: usize| async move {
+        while py.input_calls() < n { tokio::time::sleep(Duration::from_millis(10)).await; }
+    };
+    let first = e.message(&t1, body.clone());
+    let second = async {
+        wait_calls(1).await;
+        e.message(&t1, body.clone()).await
+    };
+    let drive = async {
+        wait_calls(1).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(e.python.input_calls(), 1, "a segunda espera a primeira, sem escrever");
+        e.python.release.notify_one(); // a primeira responde 500
+        tokio::time::timeout(Duration::from_secs(5), wait_calls(2)).await.expect("a segunda entrega depois da falha");
+        e.python.set_input_reply(Some((StatusCode::OK, json!({"ok": true}))));
+        e.python.hold_input(false);
+        for _ in 0..50 { e.python.release.notify_waiters(); tokio::time::sleep(Duration::from_millis(10)).await; }
+    };
+    let (a, b, ()) = tokio::join!(first, second, drive);
+    assert_ne!(a.0, 200, "{a:?}");
+    assert_eq!(b.0, 200, "{b:?}");
+    assert_eq!(e.inputs("s0"), 2);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn message_with_invalid_from_is_400() {
     let e = env().await;

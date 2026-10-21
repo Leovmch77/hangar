@@ -68,6 +68,8 @@ fn context(stdout: &str) -> String {
 
 /// Variantes que a I-3A muda: o texto de grupo vem antes do bloco externo.
 const MIXED: [&str; 2] = ["external_registry_unreadable", "external_via_other_member"];
+/// Sidecar sem `gid` (ou vazio): o Python omitia a linha do contrato.
+const GID_DERIVED: [&str; 2] = ["gid_empty", "gid_missing"];
 
 #[test]
 fn pair_context_matches_the_python_hook() {
@@ -76,7 +78,16 @@ fn pair_context_matches_the_python_hook() {
         if MIXED.contains(&name.as_str()) { continue; }
         let got = run_fixture(&fx);
         assert_eq!(got.rc, Some(0), "{name}");
-        assert_eq!(got.stdout, fx["output"]["stdout"].as_str().unwrap(), "{name}");
+        if GID_DERIVED.contains(&name.as_str()) {
+            // Mudança decidida: sem `gid`, o contrato é o do gid derivado (a+b), o mesmo da tool `contract`.
+            let gid = &sha1_smol::Sha1::from("a\nb").digest().to_string()[..8];
+            let line = format!("- Decisões que o grupo consulta vão em <pair>/grupo-{gid}.md (criar se não existir, curto).\n");
+            let ours = context(&got.stdout);
+            assert!(ours.contains(&line), "{name}: {ours}");
+            assert_eq!(ours.replace(&line, ""), context(fx["output"]["stdout"].as_str().unwrap()), "{name}");
+        } else {
+            assert_eq!(got.stdout, fx["output"]["stdout"].as_str().unwrap(), "{name}");
+        }
         checked += 1;
     }
     assert_eq!(checked, 30);
@@ -138,7 +149,11 @@ fn legacy_peer_sidecar_reinjects_like_peers() {
     let of = |sidecar: Value| run(&json!({"a.json": sidecar.to_string()}), &json!({}), &pane_a(), PANES).stdout;
     let current = of(json!({"peers": ["b"], "task": ""}));
     assert!(!current.is_empty());
-    assert_eq!(of(json!({"peer": "b", "task": ""})), current);
+    let legacy = of(json!({"peer": "b", "task": ""}));
+    assert_eq!(legacy, current);
+    // Sem `gid` no arquivo, o contrato é o do gid que o servidor deriva (`legacy_gid` de a+b).
+    let gid = &sha1_smol::Sha1::from("a\nb").digest().to_string()[..8];
+    assert!(context(&legacy).contains(&format!("<pair>/grupo-{gid}.md")), "{legacy}");
 }
 
 /// I-4A: grupo entre máquinas cita o caminho na dona e a dona pela tool `contract` nas outras.

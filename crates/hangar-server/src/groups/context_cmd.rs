@@ -55,7 +55,7 @@ fn protocol(pair_dir: &Path, me: &str, d: &Map<String, Value>) -> Option<String>
         return failed("pair_context_peers_invalid", "peers não é lista");
     }
     // `Sidecar::parse` lê também o formato 1:1 legado (`peer`), como o servidor.
-    let peers = Sidecar::parse(me, d)?.peers;
+    let Sidecar { peers, gid, .. } = Sidecar::parse(me, d)?;
     let outside = outside_of(pair_dir, me, &peers);
     let others: Vec<String> = peers.iter().filter(|p| !outside.iter().any(|o| &o.address == *p)).cloned().collect();
     // Filha ligada não recebe o protocolo (cobraria tokens do pai a cada /clear); o aviso de par de
@@ -67,8 +67,8 @@ fn protocol(pair_dir: &Path, me: &str, d: &Map<String, Value>) -> Option<String>
         })).collect();
         return (!blocks.is_empty()).then(|| blocks.join("\n"));
     }
-    let gid = d.get("gid").and_then(Value::as_str).unwrap_or_default();
-    let path = (!gid.is_empty()).then(|| pair_dir.join(format!("grupo-{gid}.md")));
+    // Sem `gid` no arquivo vale o derivado (`legacy_gid`), o mesmo que a tool `contract` usa.
+    let path = Some(pair_dir.join(format!("grupo-{gid}.md")));
     // `fed` torto vale como grupo de uma máquina, como no servidor; o diário guarda o porquê.
     let fed = match d.get("fed") {
         None | Some(Value::Null) => None,

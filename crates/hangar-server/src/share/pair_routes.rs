@@ -800,13 +800,19 @@ fn pair_of(share: &ShareState, caller: Option<&Caller>, session: Option<&str>) -
     }
 }
 
+/// Aviso em entrega (`Pending`: quem chega depois espera o `rx` fechar) ou já entregue.
+enum Seen {
+    Pending { id: u64, rx: tokio::sync::watch::Receiver<()> },
+    Done(std::time::Instant),
+}
+
 /// O mesmo aviso de grupo chega por cada par que a outra máquina tem conosco; só o primeiro
-/// entregue entra. Chave → hora da entrega.
+/// entregue entra.
 // ponytail: mapa do processo podado pela janela da tempestade, como o `storm`.
-fn seen_notices() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, std::time::Instant>> {
+fn seen_notices() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, Seen>> {
     use std::collections::HashMap;
     use std::sync::{LazyLock, Mutex};
-    static SEEN: LazyLock<Mutex<HashMap<String, std::time::Instant>>> = LazyLock::new(Mutex::default);
+    static SEEN: LazyLock<Mutex<HashMap<String, Seen>>> = LazyLock::new(Mutex::default);
     SEEN.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -814,28 +820,52 @@ fn seen_notices() -> std::sync::MutexGuard<'static, std::collections::HashMap<St
 /// mesmo aviso vindo por duas máquinas do outro dono, ou pelo par e pela dona do grupo, entra uma vez.
 pub(crate) fn notice_key(me: &str, notice: &str, session: &str) -> String { format!("{me}\n{notice}\n{session}") }
 
-/// Reserva do aviso para uma entrega: `None` = já entregue (ou em entrega) dentro da janela da
-/// tempestade. Checar e reservar sob a mesma trava impede que duas chegadas simultâneas entreguem.
-pub(crate) fn notice_claim(key: String) -> Option<NoticeClaim> {
-    let mut seen = seen_notices();
-    seen.retain(|_, t| t.elapsed() < STORM_WINDOW);
-    if seen.contains_key(&key) { return None; }
-    seen.insert(key.clone(), std::time::Instant::now());
-    Some(NoticeClaim(Some(key)))
+/// Reserva do aviso para uma entrega: `None` = já entregue dentro da janela da tempestade. Em
+/// entrega por outra chegada: espera ela acabar; entregou = `None`, falhou = reserva aqui. Checar e
+/// reservar sob a mesma trava impede que duas chegadas simultâneas entreguem. Quem chama limita a espera.
+pub(crate) async fn notice_claim(key: String) -> Option<NoticeClaim> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    loop {
+        let mut rx = {
+            let mut seen = seen_notices();
+            seen.retain(|_, s| !matches!(s, Seen::Done(t) if t.elapsed() >= STORM_WINDOW));
+            match seen.get(&key) {
+                Some(Seen::Done(_)) => return None,
+                Some(Seen::Pending { rx, .. }) => rx.clone(),
+                None => {
+                    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let (tx, rx) = tokio::sync::watch::channel(());
+                    seen.insert(key.clone(), Seen::Pending { id, rx });
+                    return Some(NoticeClaim { key: Some(key), id, _tx: tx });
+                }
+            }
+        };
+        // Fecha quando a reserva é firmada ou solta (o `tx` cai junto); o laço relê o estado.
+        let _ = rx.changed().await;
+    }
 }
 
-/// Solta a reserva ao sair sem `delivered()` (falha, prazo estourado, future abandonado): o reenvio entra.
-pub(crate) struct NoticeClaim(Option<String>);
+/// Solta a reserva ao sair sem `delivered()` (falha, prazo estourado, future abandonado): o reenvio
+/// entra. Só mexe na entrada se ela ainda for desta reserva.
+pub(crate) struct NoticeClaim { key: Option<String>, id: u64, _tx: tokio::sync::watch::Sender<()> }
 
 impl NoticeClaim {
     pub(crate) fn delivered(mut self) {
-        if let Some(k) = self.0.take() { seen_notices().insert(k, std::time::Instant::now()); }
+        let Some(k) = self.key.take() else { return };
+        let mut seen = seen_notices();
+        if matches!(seen.get(&k), Some(Seen::Pending { id, .. }) if *id == self.id) {
+            seen.insert(k, Seen::Done(std::time::Instant::now()));
+        }
     }
 }
 
 impl Drop for NoticeClaim {
     fn drop(&mut self) {
-        if let Some(k) = self.0.take() { seen_notices().remove(&k); }
+        let Some(k) = self.key.take() else { return };
+        let mut seen = seen_notices();
+        if matches!(seen.get(&k), Some(Seen::Pending { id, .. }) if *id == self.id) {
+            seen.remove(&k);
+        }
     }
 }
 
@@ -879,9 +909,11 @@ async fn pair_message(State(st): St, caller: Option<Extension<Caller>>, bytes: B
         let notice = map.get("notice").and_then(Value::as_str).filter(|n| !n.is_empty() && n.len() <= 64);
         let me = server_id(&st.app);
         for session in &locals {
-            let claim = match notice.map(|n| notice_claim(notice_key(&me, n, session))) {
-                Some(None) => { delivered = true; continue; }
-                Some(Some(c)) => Some(c),
+            let claim = match notice {
+                Some(n) => match notice_claim(notice_key(&me, n, session)).await {
+                    None => { delivered = true; continue; }
+                    c => c,
+                },
                 None => None,
             };
             let (status, reply) = write_input(&st.app, session, &text, true).await;
@@ -926,4 +958,25 @@ pub fn guest_pair_router(state: Arc<PairState>) -> Router {
         .route("/api/pair/message", post(pair_message))
         .route("/api/pair", delete(pair_leave))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Entrada trocada por outra reserva (poda): soltar ou firmar a antiga não mexe na nova.
+    #[tokio::test]
+    async fn old_claim_never_touches_a_newer_one() {
+        let k = "teste\nold-claim\ns".to_owned();
+        let still_new = || matches!(seen_notices().get(&k), Some(Seen::Pending { .. }));
+        for firm in [false, true] {
+            let old = notice_claim(k.clone()).await.unwrap();
+            seen_notices().remove(&k); // a poda
+            let new = notice_claim(k.clone()).await.unwrap();
+            if firm { old.delivered() } else { drop(old) }
+            assert!(still_new(), "firm={firm}: a reserva nova segue valendo");
+            drop(new);
+            assert!(seen_notices().get(&k).is_none());
+        }
+    }
 }
