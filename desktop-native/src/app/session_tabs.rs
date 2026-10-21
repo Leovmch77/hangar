@@ -53,8 +53,8 @@ pub(super) fn groups(entries: Vec<(Target, &SessionInfo)>, ids: &HashMap<String,
     }
     let mut out: Vec<TabGroup> = Vec::new();
     let mut indexes = HashMap::new();
-    // Quem abriu cada filha ligada (mesma máquina: o vínculo é só local) e o líder `orq`, por grupo.
-    let mut openers: Vec<Vec<Target>> = Vec::new();
+    // (filha, quem a abriu) por grupo; o vínculo é só local, então quem abriu está na máquina da filha.
+    let mut openers: Vec<Vec<(Target, Target)>> = Vec::new();
     for (target, session) in entries {
         let Some(key) = keys.get(&target).cloned() else {
             out.push(TabGroup { label: None, members: vec![target], mother: false });
@@ -70,7 +70,7 @@ pub(super) fn groups(entries: Vec<(Target, &SessionInfo)>, ids: &HashMap<String,
         if group.label.as_ref().is_some_and(|s| s.is_empty()) {
             group.label = Some(session.pair_task.as_deref().unwrap_or("").trim().to_owned());
         }
-        if let Some(parent) = session.linked_by.as_deref() { openers[index].push(Target::new(&target.server, parent)); }
+        if let Some(parent) = session.linked_by.as_deref() { openers[index].push((target.clone(), Target::new(&target.server, parent))); }
         if session.orq() {
             group.mother = true;
             group.members.insert(0, target);
@@ -81,7 +81,10 @@ pub(super) fn groups(entries: Vec<(Target, &SessionInfo)>, ids: &HashMap<String,
             group.label = Some(group.members.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", "));
         }
         if group.members.len() < 2 { group.mother = false; continue; }
-        if let Some(at) = group.members.iter().position(|t| openers.contains(t)) {
+        // Numa cadeia (A abriu B, B abriu C) a mãe é a do topo: quem abriu e não foi aberta por ninguém do grupo.
+        let opened = |t: &Target| openers.iter().any(|(child, parent)| child == t && group.members.contains(parent));
+        let opener = |t: &Target| openers.iter().any(|(_, parent)| parent == t);
+        if let Some(at) = group.members.iter().position(|t| opener(t) && !opened(t)).or_else(|| group.members.iter().position(|t| opener(t))) {
             let mother = group.members.remove(at);
             group.members.insert(0, mother);
             group.mother = true;
@@ -111,6 +114,11 @@ impl Hangar {
         self.tab_groups().iter().flat_map(|group| group.members.iter().take(if group.mother { 1 } else { usize::MAX }).cloned()).collect()
     }
 
+    /// A aba da faixa que mostra `target`: a própria, ou a da mãe quando ela é filha escondida.
+    pub(super) fn tab_stop_of(&self, target: &Target) -> Target {
+        self.tab_groups().iter().find(|g| g.mother && g.members.contains(target)).map_or_else(|| target.clone(), |g| g.members[0].clone())
+    }
+
     pub(super) fn scroll_target_tab(&mut self, target: &Target) {
         self.pending_tab_reveal = Some(target.clone());
         self.reveal_target_tab(target);
@@ -134,7 +142,10 @@ impl Hangar {
             let Some(member) = group.members.iter().position(|t| t == target) else { continue; };
             let viewport = self.tabs_scroll.bounds();
             if let Some(bounds) = self.tabs_scroll.bounds_for_item(index) {
-                let (left, width) = group.slot(member).unwrap_or((0., f32::from(bounds.size.width)));
+                // Filha de um grupo com mãe não tem aba própria na faixa: vale a aba inteira da mãe.
+                let whole = (0., f32::from(bounds.size.width));
+                let (left, width) = if group.mother { whole } else { group.slot(member).unwrap_or(whole) };
+                let member = if group.mother { 0 } else { member };
                 let start = bounds.left() + px(left + if member > 0 { OVERLAP } else { 0. });
                 let end = bounds.left() + px(left + width);
                 let offset = self.tabs_scroll.offset();
@@ -181,17 +192,28 @@ impl Hangar {
         let remote = mother.server != self.active_key();
         let names: Vec<&str> = group.members.iter().map(|t| t.name.as_str()).collect();
         let short = short_names(&names);
-        let dot = |s: &SessionInfo| if s.pending_questions > 0 || s.state == "awaiting_input" { theme::warning() }
-            else if s.state == "working" { theme::accent() } else { theme::success() };
-        let kids: Vec<(Target, &SessionInfo, String)> = group.members.iter().zip(short).skip(1)
+        let waits = |s: &SessionInfo| s.pending_questions > 0 || s.state == "awaiting_input" || s.limited == Some(true);
+        let dot = |s: &SessionInfo| if waits(s) { theme::warning() } else if s.state == "working" { theme::accent() }
+            else if s.state == "idle" { theme::success() } else { theme::faint() };
+        let mut kids: Vec<(Target, &SessionInfo, String)> = group.members.iter().zip(short).skip(1)
             .filter_map(|(t, text)| self.target_session(t).map(|s| (t.clone(), s, text))).collect();
+        // Quem espera a pessoa vem primeiro: com muitas filhas as últimas etiquetas ficam fora da aba.
+        kids.sort_by_key(|(_, s, _)| !waits(s));
+        let waiting = kids.iter().filter(|(_, s, _)| waits(s)).count();
+        let state = |s: &SessionInfo| tr(&format!("chip_{}", if s.limited == Some(true) { "limited" } else { s.state.as_str() }));
+        let host = self.server_label(cx);
+        let machine = |t: &Target| self.server_entry(&t.server).map(|s| s.label.clone()).unwrap_or_else(|| host.clone());
+        // O botão que desce na etiqueta desce antes na aba-mãe (o bubble vai do filho ao pai): ela não alterna a janela.
+        let chip_down = std::rc::Rc::new(std::cell::Cell::new(false));
         let chips = kids.iter().map(|(target, kid, text)| {
             let pick = target.clone();
             let kid_on = selected.as_ref() == Some(target);
+            let pressed = chip_down.clone();
             div().id(SharedString::from(format!("tab-kid-{}", target.id()))).flex_shrink_0().max_w(px(76.)).h(px(12.)).px(px(4.))
+                .on_mouse_down(MouseButton::Left, move |_, _, _| pressed.set(true))
                 .flex().items_center().gap(px(3.)).rounded(px(3.)).cursor_pointer()
                 .bg(if kid_on { theme::accent_dim() } else { theme::hover() }).hover(|el| el.bg(theme::accent_dim()))
-                .role(Role::Button).aria_label(format!("{} · {}", kid.name, tr(&format!("chip_{}", kid.state))))
+                .role(Role::Button).aria_label(format!("{} · {} · {}", kid.name, machine(target), state(kid)))
                 .child(div().size(px(5.)).flex_shrink_0().rounded_full().bg(dot(kid)))
                 .child(div().min_w_0().truncate().text_size(px(9.)).line_height(px(12.))
                     .text_color(if kid_on { theme::text() } else { theme::muted() }).child(text.clone()))
@@ -202,7 +224,7 @@ impl Hangar {
                 }))
         }).collect::<Vec<_>>();
         let count = tr_shared("tab_group_children", &[("n", &kids.len().to_string())]);
-        let aria = self.session_number_label(mother, format!("{} · {} · {count}", session.name, label));
+        let aria = self.session_number_label(mother, format!("{} · {} · {} · {label} · {count}", session.name, machine(mother), state(session)));
         let mark = self.avatar_slot(panes::Area::Nav, format!("tab-mark-{}", mother.id()), sidebar::session_look(session), 20.);
         let window_tabs = was_open.then(|| {
             let tabs = kids.iter().enumerate().filter_map(|(i, (t, _, _))| self.render_session_tab(t, None, None, tab_index + 1 + i, window, cx))
@@ -213,18 +235,19 @@ impl Hangar {
                 .children(tabs)
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| { this.tab_group_open = None; cx.notify(); }))
                 .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| { this.tab_group_open = None; cx.notify(); }));
-            deferred(anchored().anchor(if bottom { gpui_kit::Anchor::BottomLeft } else { gpui_kit::Anchor::TopLeft })
+            // Âncora num canto fixo da aba: dentro da linha `items_center` a origem do `anchored` seria o meio dela.
+            div().absolute().top_0().left_0().child(deferred(anchored().anchor(if bottom { gpui_kit::Anchor::BottomLeft } else { gpui_kit::Anchor::TopLeft })
                 .snap_to_window_with_margin(px(8.))
-                .child(div().map(|el| if bottom { el.pb(px(6.)) } else { el.pt(px(36.)) }).child(chrome::popover(body.into_any_element(), false))))
+                .child(div().map(|el| if bottom { el.pb(px(6.)) } else { el.pt(px(36.)) }).child(chrome::popover(body.into_any_element(), false)))))
         });
-        let (pick, open, menu_target, key) = (mother.clone(), mother.clone(), mother.clone(), mother.clone());
+        let (pick, open, menu_target, key, toggle) = (mother.clone(), mother.clone(), mother.clone(), mother.clone(), mother.clone());
         let weak = cx.entity().downgrade();
         let tooltip = aria.clone();
         let tab = div().id(SharedString::from(format!("tab-{}", mother.id()))).relative().track_focus(&focus)
             .flex_shrink_0().max_w(px(280.)).h(px(30.)).px(px(8.)).flex().items_center().gap(px(6.)).rounded(px(6.)).border_1().cursor_pointer()
             .map(|el| if on { el.bg(theme::accent_dim()).border_color(theme::accent()).text_color(theme::text()).font_weight(FontWeight::SEMIBOLD) }
-                else { el.bg(theme::raised()).border_color(if was_open { theme::accent() } else { theme::border() }).text_color(theme::muted())
-                    .hover(|el| el.border_color(theme::accent())) })
+                else { el.bg(theme::raised()).border_color(if waiting > 0 { theme::warning() } else if was_open { theme::accent() } else { theme::border() })
+                    .text_color(theme::muted()).hover(|el| el.border_color(theme::accent())) })
             .when(focus.is_focused(window), |el| el.focus_ring_style(window, cx))
             .role(Role::Tab).aria_selected(on).aria_label(aria)
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx))
@@ -232,18 +255,23 @@ impl Hangar {
             .child(div().min_w_0().flex_1().flex().flex_col().gap(px(1.))
                 .child(div().min_w_0().flex().gap(px(2.)).overflow_hidden().children(chips))
                 .child(div().truncate().text_size(px(12.)).line_height(px(14.)).child(session.name.clone())))
+            .when(remote, |el| el.child(div().flex_shrink_0().max_w(px(48.)).truncate().text_size(px(9.)).text_color(theme::faint()).child(machine(mother))))
             .child(div().flex_shrink_0().px(px(4.)).rounded(px(8.)).text_size(px(10.)).line_height(px(14.)).bg(theme::accent_dim())
                 .text_color(theme::accent_text()).child(kids.len().to_string()))
-            .when(session.pending_questions > 0, |el| el.child(div().flex_shrink_0().text_size(px(12.)).text_color(theme::warning())
-                .child(format!("? {}", session.pending_questions))))
+            .when(session.pending_questions > 0 || waiting > 0, |el| el.child(div().flex_shrink_0().text_size(px(12.)).text_color(theme::warning())
+                .child(format!("? {}", session.pending_questions as usize + waiting))))
             .child(chrome::small_icon(if bottom { IconName::ChevronUp } else { IconName::ChevronDown }, 10., theme::faint()))
-            // O fechar pelo clique fora chega antes deste clique: com a janela aberta, o clique só a deixa fechada.
-            .on_click(cx.listener(move |this, _, window, cx| {
+            // Alterna no botão descendo, no mesmo despacho do "clique fora" (captura, que já fechou): `was_open` ainda é o
+            // do quadro em que a janela estava aberta, então o clique nela a deixa fechada.
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                if chip_down.replace(false) { return; }
                 this.tab_group_open = (!was_open).then(|| key.clone());
-                this.open_target(&pick, window, cx);
+                cx.notify();
             }))
+            .on_click(cx.listener(move |this, _, window, cx| this.open_target(&pick, window, cx)))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.tab_group_open = (this.tab_group_open.as_ref() != Some(&toggle)).then(|| toggle.clone());
                     this.select_target(&open, window, cx);
                     cx.stop_propagation();
                 }
@@ -371,6 +399,11 @@ mod tests {
         assert_eq!(grouped[0].members[0], Target::new("a", "ABC-42-Lead"));
         assert_eq!(grouped[0].members.len(), 3);
         assert!(!grouped[1].mother);
+        // Cadeia: a abriu b, b abriu c; a mãe é a do topo, mesmo listada depois.
+        let link = |name: &str, by: &str| SessionInfo { linked_by: Some(by.into()), ..session(name, Some("k"), None) };
+        let (b, c, a) = (link("b", "a"), link("c", "b"), session("a", Some("k"), Some("Cadeia")));
+        let chain = groups(vec![(Target::new("a", "b"), &b), (Target::new("a", "c"), &c), (Target::new("a", "a"), &a)], &HashMap::new());
+        assert_eq!(chain[0].members[0], Target::new("a", "a"));
         // Pareamento de iguais, sem quem abriu: fica a pilha de sempre.
         let (x, y) = (session("x", Some("h"), Some("Par")), session("y", Some("h"), None));
         assert!(!groups(vec![(Target::new("a", "x"), &x), (Target::new("a", "y"), &y)], &HashMap::new())[0].mother);

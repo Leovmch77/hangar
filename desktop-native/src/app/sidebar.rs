@@ -676,7 +676,7 @@ impl Hangar {
         for t in rows { self.sidebar.remote_focus.entry(t).or_insert_with(|| cx.focus_handle().tab_stop(true)); }
         if removed_focus && appearance::get().navigation.tabs() {
             let targets = self.tab_stops();
-            let next = self.selected_target().and_then(|selected| targets.iter().position(|t| t == &selected))
+            let next = self.selected_target().and_then(|selected| { let stop = self.tab_stop_of(&selected); targets.iter().position(|t| t == &stop) })
                 .or_else(|| (!targets.is_empty()).then_some(0));
             if let Some(index) = next && let Some(focus) = self.row_focus(&targets[index]) {
                 focus.focus(window, cx);
