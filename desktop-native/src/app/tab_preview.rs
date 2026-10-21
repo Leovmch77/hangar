@@ -179,7 +179,7 @@ impl Hangar {
 
     /// Clique ou tecla dentro da prévia: a conversa dela entra no lugar até o fim deste evento, para todo handler do chat
     /// (enviar, colar, anexar, modelo, permissão, histórico) agir na sessão dela.
-    fn enter_tab_preview_event(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn enter_tab_preview_event(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tab_preview_parked.is_some() { return; }
         let Some(mut slot) = self.tab_preview.as_mut().and_then(|p| p.slot.take()) else { return; };
         self.swap_conversation(&mut slot);
@@ -228,8 +228,14 @@ impl Hangar {
         key.as_ref() == Some(open.session())
     }
 
+    /// O painel aberto pela prévia é desenhado na raiz, fora da caixa dela: a camada cobre a janela para que todo clique
+    /// enquanto ele está aberto (nele ou no fundo que o fecha) troque para a conversa da prévia antes de agir.
     pub(super) fn render_tab_preview_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        self.with_tab_preview_slot(cx, |this, cx| this.render_popup(window, cx)).flatten()
+        let popup = self.with_tab_preview_slot(cx, |this, cx| this.render_popup(window, cx)).flatten()?;
+        Some(div().absolute().inset_0()
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| this.enter_tab_preview_event(window, cx)))
+            .capture_any_mouse_up(cx.listener(|this, _, window, cx| this.enter_tab_preview_event(window, cx)))
+            .child(popup).into_any_element())
     }
 
     /// Foco no campo só segura a prévia depois que a pessoa clicou ou digitou nela: foco que chegou sozinho não conta.
@@ -246,10 +252,13 @@ impl Hangar {
     }
 
     /// Roda do mouse ou clique na faixa: a prévia sai e só volta depois de mexer e parar sobre uma aba.
-    pub(super) fn cancel_tab_hover(&mut self, window: &Window, cx: &mut Context<Self>) {
+    pub(super) fn cancel_tab_hover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.tab_hover_epoch += 1;
         self.tab_hover = None;
-        if self.tab_preview.as_ref().is_some_and(|p| !p.hovered) && !self.tab_preview_held(window, cx) { self.close_tab_preview(cx); }
+        if !self.tab_preview.as_ref().is_some_and(|p| !p.hovered) { return; }
+        // Segurada (texto, painel, ditado), ela fica; o prazo de fechar volta a contar para ela sair quando soltar.
+        if self.tab_preview_held(window, cx) { self.schedule_tab_preview_close(self.tab_hover_epoch, window, cx); }
+        else { self.close_tab_preview(cx); }
     }
 
     /// A aba sob o mouse na faixa mudou (`None`: saiu das abas). Pela posição, não por entrar e sair de cada aba: o que é
@@ -266,10 +275,13 @@ impl Hangar {
             self.schedule_tab_preview_close(epoch, window, cx);
             return;
         };
-        match &self.tab_preview {
-            Some(preview) if preview.target == target => {}
+        let open = self.tab_preview.as_ref().map(|preview| preview.target == target);
+        match open {
+            Some(true) => {}
             // Com uma aberta, passar para outra aba troca na hora.
-            Some(_) => self.open_tab_preview(target, window, cx),
+            // Segurada, ela não troca: passar por outra aba no caminho levaria o rascunho ou o ditado dela.
+            Some(false) if self.tab_preview_held(window, cx) => {}
+            Some(false) => self.open_tab_preview(target, window, cx),
             // Abre só com o mouse parado sobre a aba: passar por ela, mesmo devagar, não abre.
             None => {
                 cx.spawn_in(window, async move |this, cx| {

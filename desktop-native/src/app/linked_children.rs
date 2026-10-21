@@ -20,8 +20,9 @@ fn state_label(tone: &str) -> String {
 
 impl Hangar {
     /// O avatar do agente com o estado (o giro de trabalhando é pintado fora da faixa guardada, como nas abas).
-    fn linked_avatar(&self, server: &str, session: &SessionInfo, size: f32) -> AnyElement {
-        self.avatar_slot(panes::Area::Bottom, format!("linked-mark-{}", Target::new(server, &session.name).id()), sidebar::session_look(session), size)
+    /// `place` separa o chip do cabeçalho da linha da lista: a mesma chave faria um lugar apagar o outro.
+    fn linked_avatar(&self, place: &str, server: &str, session: &SessionInfo, size: f32) -> AnyElement {
+        self.avatar_slot(panes::Area::Bottom, format!("linked-{place}-{}", Target::new(server, &session.name).id()), sidebar::session_look(session), size)
     }
 
     /// Filhas ligadas à conversa aberta; sem filhas, a faixa de volta ao pai quando ela mesma é filha; senão nada.
@@ -58,7 +59,7 @@ impl Hangar {
             .child(div().flex().flex_1().gap(px(6.)).min_w_0().overflow_hidden()
                 .children(children.iter().map(|c| div().flex_shrink_0().flex().items_center().gap(px(5.)).pl(px(4.)).pr(px(7.))
                     .rounded(px(5.)).bg(theme::hover()).font_family(theme::SANS).text_size(px(12.5))
-                    .child(self.linked_avatar(&server, c, 14.)).child(c.name.clone()))))
+                    .child(self.linked_avatar("chip", &server, c, 14.)).child(c.name.clone()))))
             .child(div().flex_shrink_0().whitespace_nowrap().text_color(theme::muted())
                 .child(tr_shared("linked_children_done", &[("done", &done), ("total", &total)])));
 
@@ -76,7 +77,7 @@ impl Hangar {
                     let target = Target::new(&server, &c.name);
                     // O estado está no avatar; o nome falado o leva em palavras.
                     div().flex().items_center().gap(px(10.)).min_h(px(24.)).pl(px(22.))
-                        .child(self.linked_avatar(&server, c, 16.))
+                        .child(self.linked_avatar("row", &server, c, 16.))
                         .child(div().w(px(150.)).flex_shrink_0().min_w_0().truncate().font_weight(FontWeight::BOLD).child(c.name.clone()))
                         .child(div().w(px(160.)).flex_shrink_0().min_w_0().truncate().text_color(theme::muted()).child(kind))
                         .child(div().flex_1().min_w_0().truncate().text_color(theme::muted()).child(last))
@@ -102,7 +103,7 @@ impl Hangar {
                 .bg(theme::hover()).cursor_pointer().hover(|el| el.bg(theme::accent_dim()))
                 .font_family(theme::SANS).text_size(px(12.5)).font_weight(FontWeight::BOLD)
                 .role(Role::Button).aria_label(format!("{back}: {name} · {}", state_label(tone(&parent.state))))
-                .child(self.linked_avatar(server, parent, 14.))
+                .child(self.linked_avatar("parent", server, parent, 14.))
                 .child(div().min_w_0().truncate().child(name.clone()))
                 .on_click(cx.listener(move |this, _, window, cx| this.open_target(&pick, window, cx))))
             .child(div().flex_1())

@@ -46,10 +46,14 @@ enum Mark {
 
 fn hex(color: u32) -> String { format!("#{color:06x}") }
 
-fn escape(text: &str) -> String { text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;") }
+/// Caractere de controle colado no campo (tab, ESC) não é XML válido e derrubaria o SVG inteiro: sai.
+fn escape(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect::<String>()
+        .replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
 
-/// As marcações como SVG do tamanho da original; `k` leva os pixels da mostrada aos da original.
-fn marks_svg(marks: &[Mark], size: (u32, u32), k: f32) -> String {
+/// As marcações como SVG do tamanho da original; `k` leva os pixels da mostrada aos da original, em cada eixo.
+fn marks_svg(marks: &[Mark], size: (u32, u32), k: (f32, f32)) -> String {
     let mut body = String::new();
     for mark in marks {
         match mark {
@@ -75,25 +79,29 @@ fn marks_svg(marks: &[Mark], size: (u32, u32), k: f32) -> String {
             }
         }
     }
-    format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}"><g transform="scale({k})">{body}</g></svg>"#, size.0, size.1)
+    format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}"><g transform="scale({},{})">{body}</g></svg>"#, size.0, size.1, k.0, k.1)
 }
 
 /// Grava as marcações na imagem original, em PNG. `shown` é o tamanho da mostrada, que pode vir reduzida da original.
 fn burn(bytes: &[u8], shown: (f32, f32), marks: &[Mark]) -> Option<Vec<u8>> {
-    let mut image = image::load_from_memory(bytes).ok()?.to_rgba8();
+    // De pé como o visor a mostra (foto de celular com orientação EXIF): senão as marcações cairiam giradas.
+    let mut image = crate::media::oriented(bytes)?.to_rgba8();
     let (w, h) = image.dimensions();
     let mut options = resvg::usvg::Options::default();
     // A fonte do app, embutida: o texto da nota sai igual em qualquer máquina.
     options.fontdb_mut().load_font_data(include_bytes!("../../assets/fonts/Geist-SemiBold.ttf").to_vec());
     options.fontdb_mut().load_font_data(include_bytes!("../../assets/fonts/Geist-Bold.ttf").to_vec());
-    let tree = resvg::usvg::Tree::from_str(&marks_svg(marks, (w, h), w as f32 / shown.0), &options).ok()?;
+    let tree = resvg::usvg::Tree::from_str(&marks_svg(marks, (w, h), (w as f32 / shown.0, h as f32 / shown.1)), &options).ok()?;
     let mut layer = resvg::tiny_skia::Pixmap::new(w, h)?;
     resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut layer.as_mut());
-    // A camada vem com alfa pré-multiplicado: por cima da original é `cor + fundo × (1 − alfa)`.
+    // Camada pré-multiplicada sobre fundo de alfa reto (a original pode ser PNG transparente): "por cima" e de volta ao reto.
     for (dst, src) in image.pixels_mut().zip(layer.data().chunks_exact(4)) {
-        let rest = 255 - src[3] as u32;
-        for c in 0..3 { dst[c] = (src[c] as u32 + dst[c] as u32 * rest / 255).min(255) as u8; }
-        dst[3] = (src[3] as u32 + dst[3] as u32 * rest / 255).min(255) as u8;
+        let sa = src[3] as f32 / 255.;
+        if sa == 0. { continue; }
+        let da = dst[3] as f32 / 255.;
+        let out = sa + da * (1. - sa);
+        for c in 0..3 { dst[c] = ((src[c] as f32 / 255. + dst[c] as f32 / 255. * da * (1. - sa)) / out * 255.).round().min(255.) as u8; }
+        dst[3] = (out * 255.).round() as u8;
     }
     let mut out = Vec::new();
     image::DynamicImage::ImageRgba8(image).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).ok()?;
@@ -393,6 +401,12 @@ impl Viewer {
             cx.notify();
             return;
         }
+        // Nota que não chegou a ser medida sairia do PNG calada: melhor não gravar e dizer.
+        if unmeasured {
+            self.problem = Some(tr("viewer_burn_failed").replace("{reason}", &tr("viewer_note_unmeasured")));
+            cx.notify();
+            return;
+        }
         let Some(shown) = self.image_size() else { return };
         if self.marks.is_empty() || self.burning { return; }
         self.burning = true;
@@ -420,6 +434,9 @@ impl Viewer {
 
     /// A cópia riscada entra como anexo no campo da conversa aberta, como um print colado; o visor fecha.
     fn send_burned(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Só uma nota vazia em edição: ela some ao fechar, e não há o que enviar.
+        self.finish_note(cx);
+        if self.marks.is_empty() { self.problem = Some(tr("viewer_nothing_drawn")); cx.notify(); return; }
         self.burned(window, cx, |this, bytes, file, window, cx| {
             let attached = this.hangar.update(cx, |hangar, cx| {
                 let key = hangar.composer_key().ok_or_else(|| tr("viewer_send_no_field"))?;
@@ -439,7 +456,12 @@ impl Viewer {
         self.burned(window, cx, |_, bytes, file, _, cx| {
             let prompt = cx.prompt_for_new_path(&downloads_folder(), Some(&file));
             cx.spawn(async move |this, cx| {
-                let Ok(Ok(Some(path))) = prompt.await else { return };
+                let path = match prompt.await {
+                    Ok(Ok(Some(path))) => path,
+                    // O seletor que falhou não é a pessoa desistindo: diz.
+                    Ok(Err(_)) => { let _ = this.update(cx, |this, cx| { this.problem = Some(tr("save_failed")); cx.notify(); }); return; }
+                    _ => return,
+                };
                 let written = cx.background_executor().spawn(async move { std::fs::write(&path, bytes) }).await;
                 let _ = this.update(cx, |this, cx| {
                     if written.is_err() { this.problem = Some(tr("save_failed")); cx.notify(); }
@@ -474,8 +496,9 @@ impl Viewer {
 
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         // Ctrl+Z (Cmd+Z no Mac) tira o último traço.
-        // Com a nota em edição, o Ctrl+Z é do campo de texto.
-        if event.keystroke.modifiers.secondary() && event.keystroke.key == "z" && self.editing.is_none() {
+        // Nota em edição: toda tecla é do campo (o "-" e o "0" não podem virar zoom, nem o Ctrl+Z tirar a marcação).
+        if self.editing.is_some() { return; }
+        if event.keystroke.modifiers.secondary() && event.keystroke.key == "z" {
             self.undo(cx);
             cx.stop_propagation();
             return;
@@ -536,7 +559,11 @@ impl Render for Viewer {
                 .on_click(cx.listener(|this, _, _, cx| this.keep(true, cx)))))
             // Com traços, Salvar grava a cópia riscada; sem eles, a original como antes.
             .child(Button::new("viewer-save").ghost().small().icon(IconName::Download).label(tr("save")).loading(self.burning)
-                .on_click(cx.listener(|this, _, window, cx| if this.marks.is_empty() { this.keep(false, cx) } else { this.save_burned(window, cx) })));
+                // A nota vazia em edição some aqui: sobrando nada, Salvar grava a original.
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.finish_note(cx);
+                    if this.marks.is_empty() { this.keep(false, cx) } else { this.save_burned(window, cx) }
+                })));
 
         let tools = self.pen.then(|| {
             let kinds = [(Tool::Pen, IconName::Pencil, "viewer_tool_pen"), (Tool::Rect, IconName::Square, "viewer_tool_rect"),

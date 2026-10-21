@@ -258,8 +258,12 @@ function ServerAccounts({ server }: { server: Server | null }) {
   const sortOptions: SortOption[] = [
     { key: 'name', label: m.accounts_list_sort_name() },
     ...windows.map((label) => ({ key: label, label: windowLabel(label) })),
-    { key: 'reset', label: m.accounts_list_sort_reset() },
+    ...(windows.includes('7d') ? [{ key: 'reset', label: m.accounts_list_sort_reset() }] : []),
   ];
+  // A ordem salva continua escolhível mesmo quando a janela dela sumiu da lista.
+  if (sort && !sortOptions.some((o) => o.key === sort.key)) {
+    sortOptions.push({ key: sort.key, label: sort.key === 'reset' ? m.accounts_list_sort_reset() : windowLabel(sort.key) });
+  }
   handlersNow.current = {
     signIn: (id) => startLogin(id),
     remove: (account) => removeAccount(account),

@@ -63,6 +63,9 @@ export function accountSortValue(c: Pick<Credencial, 'nome' | 'cota'>, key: Acco
 /** Sem ordem escolhida: as contas em uso primeiro, o resto na ordem recebida. Empate mantém a ordem recebida. */
 export function sortAccounts<T extends Pick<Credencial, 'nome' | 'cota' | 'ativa'>>(list: T[], sort: AccountSort): T[] {
   const indexed = list.map((c, i) => ({ c, i }));
+  // Ordem guardada por uma coluna que nenhuma conta tem agora (janela de outra conta, filtro): vale a padrão.
+  const key = sort?.key;
+  if (key && key !== 'name' && !list.some((c) => accountSortValue(c, key) != null)) sort = null;
   if (!sort) return indexed.sort((a, b) => Number(b.c.ativa) - Number(a.c.ativa) || a.i - b.i).map((x) => x.c);
   return indexed.sort((a, b) => {
     const x = accountSortValue(a.c, sort.key);

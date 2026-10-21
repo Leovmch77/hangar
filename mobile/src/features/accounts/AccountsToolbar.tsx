@@ -47,7 +47,8 @@ export const FilterChips = memo(function FilterChips({ value, counts, onChange }
     setBoxes((prev) => (prev[f]?.x === x && prev[f]?.width === w ? prev : { ...prev, [f]: { x, width: w } }));
   };
   return (
-    <View style={[styles.chips, { borderColor: c.borderStrong }]} accessibilityRole="radiogroup">
+    <View style={[styles.chips, { borderColor: c.borderStrong }]} accessibilityRole="radiogroup"
+      accessibilityLabel={m.accounts_list_filter_label()}>
       {box ? <Animated.View pointerEvents="none" style={[styles.pill, { backgroundColor: c.accentDim }, pill]} /> : null}
       {ACCOUNT_FILTERS.map((f) => {
         const on = f === value;

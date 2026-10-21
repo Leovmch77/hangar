@@ -1462,17 +1462,21 @@ impl Executor {
         // o turno com ela: uma leitura basta, sem as esperas.
         let deadline=tokio::time::Instant::now()+if idle {STEER_HINT_WAIT_IDLE} else {STEER_HINT_WAIT};
         let mut steered=driver.steer().await;
+        // Só o prazo esgotado é "a dica não veio": o turno acabando no meio entregou a mensagem como envio comum.
+        let mut turn_ended=false;
         while steered.disposition==input::Disposition::Deferred && tokio::time::Instant::now()<deadline {
             tokio::time::sleep(self.options.limits.settle).await;
-            if !self.expected_work(payload) {break;}
+            if !self.expected_work(payload) {turn_ended=true; break;}
             steered=driver.steer().await;
         }
+        // O ctrl+x ctrl+s pode ter ido sem se comprovar: nem "orientou" nem "a dica não veio", e quem clicou confere.
         if steered.disposition==input::Disposition::Unknown {
             tracing::warn!(key=%self.target.key,session=%self.target.name,code=%steered.code,"a mensagem entrou na fila do Claude Code, mas o ctrl+x ctrl+s não se comprovou");
+            return Ok(reply(id,Disposition::Unknown,json!({"code":"queue_steer_uncertain"})));
         }
         let accepted=steered.disposition==input::Disposition::Accepted;
         // Trabalhando e sem a dica no prazo: a mensagem espera a próxima pausa do Claude, e quem clicou precisa saber.
-        if !accepted && !idle {
+        if steered.disposition==input::Disposition::Deferred && !turn_ended && !idle {
             tracing::warn!(key=%self.target.key,session=%self.target.name,code=%steered.code,"Orientar: a dica do ctrl+x ctrl+s não apareceu no prazo");
             return Ok(reply(id,Disposition::Accepted,json!({"steered":false,"drained":1,"code":"queue_steer_hint_missing"})));
         }

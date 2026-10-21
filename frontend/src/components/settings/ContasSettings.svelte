@@ -1001,7 +1001,7 @@ import { apagarConta, accountHolders, type AccountHolders, claudeAccountFolder, 
     {@render secao(m.contas_secao_outros(), m.contas_secao_outros_leg(), secaoOutros, m.contas_secao_outros_vazio())}
   {:else}
     <div class="ct-ferramentas">
-      <div class="ct-filtros" role="group" bind:this={filtrosEl}>
+      <div class="ct-filtros" role="group" aria-label={m.accounts_list_filter_label()} bind:this={filtrosEl}>
         <span class="ct-pilula" aria-hidden="true" class:pronta={pilula.w > 0}
           style:transform="translateX({pilula.x}px)" style:width="{pilula.w}px"></span>
         {#each ACCOUNT_FILTERS as f (f)}

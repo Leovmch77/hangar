@@ -880,9 +880,14 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       if (ok) publishEvents(dropQueuedBubbles(useChatStore.getState().events, [`queued-${id}`]));
       return error;
     },
-    // `steered: false` = entrou na frente da fila; a própria conversa mostra a entrega, sem aviso a mais.
+    // `steered: false` = entrou na frente da fila e a conversa mostra a entrega; só a dica que não
+    // apareceu a tempo (a mensagem fica para a próxima pausa) merece aviso.
     async steerQueued(id: string) {
-      await queueAction((t) => steerQueuedMessage(name, id, t));
+      let hintMissing = false;
+      await queueAction(async (t) => {
+        hintMissing = (await steerQueuedMessage(name, id, t)).code === 'queue_steer_hint_missing';
+      });
+      if (hintMissing) showQueueError(m.native_queue_steer_hint_missing());
     },
     async moveQueued(id: string, delta: -1 | 1) {
       const before = moveTarget(queueEntries(), id, delta);

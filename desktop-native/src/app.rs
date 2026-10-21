@@ -1348,6 +1348,9 @@ impl Hangar {
     /// O que é da conexão atual sai da tela e os pedidos em voo passam a ser descartados. Serve à troca de servidor e ao Sair.
     fn drop_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_terminal(false, window, cx);
+        // As respostas da conexão velha são descartadas: a prévia ficaria esperando para sempre.
+        self.close_tab_preview(cx);
+        self.tab_preview_wallpaper_loading = false;
         self.mention.close();
         self.active_token.clear();
         self.connection += 1;
@@ -4679,15 +4682,29 @@ impl Hangar {
         let can_stop = self.can_interrupt();
         let focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
         let paste_target = cx.entity().downgrade();
-        let textarea = Textarea::new(&self.composer).accessibility_id("composer-input").appearance(false).disabled((!readable && !new_chat && !reopen) || creating || resuming).on_paste(move |item, _, cx| {
-            paste_target.update(cx, |this, cx| this.paste(item, cx)).unwrap_or(false)
+        // Desenhado na prévia da aba, o campo é o dela: ações e colar chegam antes dos ouvintes de tecla da prévia, que
+        // trocam a conversa, e trocam aqui mesmo para não agirem na sessão principal.
+        let preview = self.in_tab_preview;
+        let textarea = Textarea::new(&self.composer).accessibility_id("composer-input").appearance(false).disabled((!readable && !new_chat && !reopen) || creating || resuming).on_paste(move |item, window, cx| {
+            paste_target.update(cx, |this, cx| { if preview { this.enter_tab_preview_event(window, cx); } this.paste(item, cx) }).unwrap_or(false)
         });
         let field = div().id("composer-field").text_base()
             // Teclas do campo que o compositor intercepta; sem uso aqui, seguem para o editor.
-            .capture_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_suggestion(-1, cx)))
-            .capture_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_suggestion(1, cx)))
-            .capture_action(cx.listener(|this, _: &IndentInline, window, cx| this.tab(window, cx)))
-                .capture_action(cx.listener(|this, _: &Escape, window, cx| this.escape(window, cx)))
+            .capture_action(cx.listener(move |this, _: &MoveUp, window, cx| { if preview { this.enter_tab_preview_event(window, cx); } this.move_suggestion(-1, cx) }))
+            .capture_action(cx.listener(move |this, _: &MoveDown, window, cx| { if preview { this.enter_tab_preview_event(window, cx); } this.move_suggestion(1, cx) }))
+            .capture_action(cx.listener(move |this, _: &IndentInline, window, cx| { if preview { this.enter_tab_preview_event(window, cx); } this.tab(window, cx) }))
+                .capture_action(cx.listener(move |this, _: &Escape, window, cx| {
+                    if !preview { return this.escape(window, cx); }
+                    this.enter_tab_preview_event(window, cx);
+                    // Na prévia o Esc fecha o que é do campo dela (confirmação, menção, sugestões, edição da fila) e, sem
+                    // nada disso, a própria prévia: nunca interrompe sessão nem fecha painel da principal.
+                    if this.confirm.is_some() || this.mention_is_open(cx) || !this.visible_suggestions(cx).is_empty() || this.queue_edit_active() {
+                        this.escape(window, cx);
+                    } else {
+                        this.close_tab_preview(cx);
+                        cx.stop_propagation();
+                    }
+                }))
             .child(textarea);
 
         // Aviso e sugestões seguem o que se digita: ficam presos à borda de cima, sem cortina. Os painéis abertos por

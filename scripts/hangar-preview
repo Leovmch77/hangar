@@ -663,6 +663,8 @@ function screenshotDir() {
     process.on('exit', () => {
       try { rmSync(screenshotDirPath, { recursive: true, force: true }); } catch { /* o tmp do sistema limpa depois */ }
     });
+    // Morto no prazo de quem chamou, o Node não dispara o 'exit' sozinho: sem isto o print ficava no /tmp.
+    for (const [signal, code] of [['SIGTERM', 143], ['SIGINT', 130]]) process.once(signal, () => process.exit(code));
   }
   return screenshotDirPath;
 }

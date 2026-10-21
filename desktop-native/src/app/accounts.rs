@@ -642,6 +642,8 @@ fn row_number(row: &Row, key: &str) -> Option<f64> {
 /// Sem ordem escolhida, as contas em uso sobem e o resto fica como veio; empate também fica como veio.
 fn sort_rows<'a>(rows: Vec<&'a Row>, sort: Option<&(String, i8)>) -> Vec<&'a Row> {
     use std::cmp::Ordering;
+    // Ordem guardada por uma coluna que nenhuma linha tem agora (janela de outra conta, filtro): vale a padrão.
+    let sort = sort.filter(|(key, _)| key == "name" || rows.iter().any(|row| row_number(row, key).is_some()));
     let mut indexed: Vec<(usize, &Row)> = rows.into_iter().enumerate().collect();
     indexed.sort_by(|(i, a), (j, b)| {
         let Some((key, dir)) = sort else { return b.active.cmp(&a.active).then(i.cmp(j)) };

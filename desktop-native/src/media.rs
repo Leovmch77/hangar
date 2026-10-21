@@ -52,17 +52,23 @@ fn limits() -> Limits {
     limits
 }
 
-/// Decodifica com limite de memória e reduz ao lado pedido; `None` = bytes que não são imagem legível.
-pub(crate) fn decode(bytes: &[u8], w: u32, h: u32, effect: Option<(crate::effects::BackgroundEffect, bool)>) -> Option<Arc<RenderImage>> {
+/// A imagem inteira, com limite de memória e já de pé pela orientação EXIF (foto de celular): é assim que ela aparece.
+pub(crate) fn oriented(bytes: &[u8]) -> Option<DynamicImage> {
     let format = sniff(bytes)?;
     // GIF aqui guarda só o 1º quadro; quem anima é `animated`.
     let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
     reader.limits(limits());
     let mut decoder = reader.into_decoder().ok()?;
     let orientation = decoder.orientation().ok()?;
-    let started = std::time::Instant::now();
     let mut picture = DynamicImage::from_decoder(decoder).ok()?;
     picture.apply_orientation(orientation);
+    Some(picture)
+}
+
+/// Decodifica com limite de memória e reduz ao lado pedido; `None` = bytes que não são imagem legível.
+pub(crate) fn decode(bytes: &[u8], w: u32, h: u32, effect: Option<(crate::effects::BackgroundEffect, bool)>) -> Option<Arc<RenderImage>> {
+    let started = std::time::Instant::now();
+    let picture = oriented(bytes)?;
     let (decoded, (pw, ph)) = (ms(started), (picture.width(), picture.height()));
     let started = std::time::Instant::now();
     let pixels = fit(picture, w, h, effect);

@@ -3325,8 +3325,12 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     // A bolha da entrada apagada sai junto: sem isto ela voltava à conversa ao deixar o painel.
     dropQueuedBubbles([`queued-${id}`]);
   });
-  // `steered: false` = entrou na frente da fila; a própria conversa mostra a entrega, sem aviso a mais.
-  const steerQueued = (id: string) => queueAction(() => steerQueuedMessage(sessionName, id, sessionServer()));
+  // `steered: false` = entrou na frente da fila e a conversa mostra a entrega; só a dica que não
+  // apareceu a tempo (a mensagem fica para a próxima pausa) merece aviso.
+  const steerQueued = (id: string) => queueAction(async () => {
+    const r = await steerQueuedMessage(sessionName, id, sessionServer());
+    if (r.code === 'queue_steer_hint_missing') mostrarAviso(m.native_queue_steer_hint_missing());
+  });
   const reorderQueued = (id: string, before: string | null) =>
     queueAction(() => reorderQueuedMessage(sessionName, id, before, sessionServer()));
 

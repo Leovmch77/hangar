@@ -427,7 +427,8 @@ pub fn remember_accounts_sort(sort: Option<&(String, i8)>) {
             .and_then(|_| std::fs::write(&file, serde_json::json!({"key": key, "dir": dir_}).to_string())),
         None => std::fs::remove_file(&file).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }),
     };
-    if let Err(error) = result { eprintln!("ordem das contas não gravou: {error}"); }
+    // Diagnóstico, não aviso: a ordem vale nesta abertura e o log do app guarda por que não ficou para a próxima.
+    if let Err(error) = result { crate::log_line(&format!("ordem das contas não gravou: {error}")); }
 }
 
 pub fn search_all_folders() -> Result<bool, String> {

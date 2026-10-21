@@ -26,6 +26,10 @@ describe('lista única de contas', () => {
     expect(nomes(sortAccounts(lista, { key: '5h', dir: 1 }))).toEqual(['Felizardo', 'Rafael', 'Jefferson', 'GPT 6.1 Sol']);
   });
 
+  it('ordem por coluna que nenhuma conta tem vira a ordem padrão', () => {
+    expect(nomes(sortAccounts(lista, { key: 'Fable', dir: -1 }))).toEqual(nomes(sortAccounts(lista, null)));
+  });
+
   it('reset ordena pelo instante da janela de 7 dias, o mais próximo primeiro', () => {
     expect(nomes(sortAccounts(lista, nextAccountSort(null, 'reset')))).toEqual(['Jefferson', 'Felizardo', 'Rafael', 'GPT 6.1 Sol']);
   });

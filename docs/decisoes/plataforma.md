@@ -907,7 +907,7 @@ auxiliar (`jev_aux_*`) continua de reserva nos dois.
   laço tira um print (teto de 5 s; navegador que não compõe quadro desliga a captura pelo resto da
   execução) e refaz a mesma pergunta com a imagem e a pergunta `bloqueado`; ainda fraca, vai ao
   auxiliar. O `confere` refaz com o print quando a probabilidade cai em `CONFERE_DOUBT_RANGE` (0,25 a
-  0,75). Pedido com imagem recusado refaz sem ela e desliga a imagem pelo resto da execução. O
+  0,75). Pedido com imagem que falha (recusa, erro ou tempo esgotado) refaz sem ela e desliga a imagem pelo resto da execução. O
   trajeto registra `imagem` (`nao_precisou`, `enviada`, `falhou`, `desligada`, `fora_do_limite`,
   `sem_print`), `motivo` e `bloqueado`.
 - **O `box` saiu.** A resposta `box` do Jev (bordas do elemento em fração do print) foi medida para

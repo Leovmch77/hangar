@@ -1086,6 +1086,8 @@ impl Hangar {
                     Self::insert_into_field(&field, &text, window, cx);
                     self.mark_ask_input_written(&field, cx);
                     field.focus_handle(cx).focus(window, cx);
+                    // Organização que falhou deixa o texto cru: a causa aparece, como no compositor.
+                    if let Some(warning) = organization_warning(&value) { window.push_notification(Notification::warning(warning), cx); }
                 }
                 Err(error) => self.dictation.result_error = Some(Self::dictation_failure(&error)),
             }
