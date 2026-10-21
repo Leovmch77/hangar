@@ -10,21 +10,42 @@ import { getLocale } from '../../paraglide/runtime';
 // Convite (token de convidado), desligado e entrada montada para par externo não recebem push do dono.
 const pushable = (s: Server) => isOwnMachine(s) && !s.disabled;
 
-type PushResult = 'registered' | 'denied' | 'unsupported';
+// 'failed' = nenhum servidor aceitou o token (ou nem houve token): a volta ao app tenta de novo.
+type PushResult = 'registered' | 'denied' | 'unsupported' | 'failed';
 let lastResult: PushResult | null = null;
+let inflight: Promise<PushResult> | null = null;
+let pending: Server[] | null = null;
 
 // ponytail: só Android; o iOS do SideStore não assina o entitlement de push.
-export async function registerExpoPush(servers: Server[]): Promise<PushResult> {
-  lastResult = await register(servers, true);
-  return lastResult;
+export function registerExpoPush(servers: Server[]): Promise<PushResult> {
+  return run(servers, true);
 }
 
 /** Volta dos ajustes do sistema: quem negou e depois liberou precisa mandar o token agora. */
 export async function retryExpoPushIfDenied(servers: Server[]): Promise<PushResult | null> {
-  if (lastResult !== 'denied') return null;
+  if (lastResult !== 'denied' && lastResult !== 'failed') return null;
   // Só lê: perguntar a cada volta ao app insistiria com quem já negou.
-  lastResult = await register(servers, false);
-  return lastResult;
+  return run(servers, false);
+}
+
+// Uma rodada por vez: duas juntas perguntariam duas vezes e buscariam dois tokens. Quem chega no
+// meio recebe a rodada em curso, e a lista dele é registrada no fim dela, sem perguntar de novo.
+function run(servers: Server[], ask: boolean): Promise<PushResult> {
+  if (inflight) { pending = servers; return inflight; }
+  inflight = cycle(servers, ask)
+    .then((r) => (lastResult = r), (e: unknown) => { lastResult = 'failed'; throw e; })
+    .finally(() => { inflight = null; pending = null; });
+  return inflight;
+}
+
+async function cycle(servers: Server[], ask: boolean): Promise<PushResult> {
+  let result = await register(servers, ask);
+  while (pending && result === 'registered') {
+    const next = pending;
+    pending = null;
+    result = await register(next, false);
+  }
+  return result;
 }
 
 let handlerInstalled = false;
@@ -52,9 +73,9 @@ async function register(servers: Server[], ask: boolean): Promise<PushResult> {
   const { data: token } = await Notifications.getExpoPushTokenAsync({ projectId });
   const locale = getLocale();
   // Servidor fora do ar não impede os outros; a falha de cada um já vai ao diário pelo apiFetch.
-  await Promise.allSettled(servers.filter(pushable).map((s) =>
+  const results = await Promise.allSettled(servers.filter(pushable).map((s) =>
     subscribeExpoPushForServer(s, token, locale)));
-  return 'registered';
+  return results.some((r) => r.status === 'fulfilled') ? 'registered' : 'failed';
 }
 
 /** Muda quando o registro precisa ser refeito: servidor entrou ou saiu, foi renomeado, ou o idioma mudou. */

@@ -77,6 +77,27 @@ describe('registerExpoPush', () => {
     expect(h.subscribe).toHaveBeenCalledWith(work, 'ExponentPushToken[abc]', 'pt');
   });
 
+  it('nenhum servidor aceitou (ou lista vazia) é falha, não registro', async () => {
+    h.subscribe.mockRejectedValue(new Error('500'));
+    expect(await registerExpoPush([casa, work])).toBe('failed');
+    expect(await registerExpoPush([])).toBe('failed');
+  });
+
+  it('chamada no meio da pergunta não pergunta de novo e registra a lista nova no fim', async () => {
+    h.permission = 'undetermined';
+    let answer!: () => void;
+    h.request.mockImplementationOnce(() => new Promise((r) => { answer = () => r({ status: 'granted' }); }));
+    const first = registerExpoPush([casa]);
+    const second = registerExpoPush([casa, work]);
+    expect(second).toBe(first);
+    await vi.waitFor(() => expect(answer).toBeDefined());
+    h.permission = 'granted';
+    answer();
+    expect(await first).toBe('registered');
+    expect(h.request).toHaveBeenCalledTimes(1);
+    expect(h.subscribe).toHaveBeenCalledWith(work, 'ExponentPushToken[abc]', 'pt');
+  });
+
   it('cria o canal Android default com importância alta', async () => {
     await registerExpoPush([casa]);
     expect(h.channel).toHaveBeenCalledWith('default', expect.objectContaining({ importance: 4 }));
@@ -118,6 +139,18 @@ describe('permissão liberada nos ajustes', () => {
     expect(h.request).not.toHaveBeenCalled();
     expect(h.channel).not.toHaveBeenCalled();
     expect(h.getToken).not.toHaveBeenCalled();
+  });
+
+  it('tenta de novo na volta quando o token não veio', async () => {
+    h.getToken.mockRejectedValueOnce(new Error('FIS_AUTH_ERROR'));
+    await expect(registerExpoPush([casa])).rejects.toThrow('FIS_AUTH_ERROR');
+    expect(await retryExpoPushIfDenied([casa])).toBe('registered');
+  });
+
+  it('tenta de novo na volta quando nenhum servidor aceitou', async () => {
+    h.subscribe.mockRejectedValueOnce(new Error('500'));
+    expect(await registerExpoPush([casa])).toBe('failed');
+    expect(await retryExpoPushIfDenied([casa])).toBe('registered');
   });
 
   it('não registra de novo quando a última tentativa deu certo', async () => {
