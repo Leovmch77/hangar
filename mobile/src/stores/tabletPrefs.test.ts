@@ -80,4 +80,20 @@ describe('useTabletPrefs', () => {
     expect(useTabletPrefs.getState().panelOpen).toBe(true);
     expect(prefs.getBoolean('tablet.panelOpen')).toBe(true);
   });
+
+  it('começa compacto e restaura o modo completo sem alterar a posição ou o recolhimento', async () => {
+    const { useTabletPrefs } = await import('./tabletPrefs');
+    expect(useTabletPrefs.getState().tabsDetail).toBe('compact');
+    useTabletPrefs.getState().setTabsDetail('full');
+    expect(prefs.getString('tablet.tabsDetail')).toBe('full');
+    vi.resetModules();
+    const reopened = await import('./tabletPrefs');
+    expect(reopened.useTabletPrefs.getState()).toMatchObject({ tabsDetail: 'full', placement: 'bottom', collapsed: false });
+  });
+
+  it('detalhe desconhecido gravado cai em compacto', async () => {
+    prefs.set('tablet.tabsDetail', 'outro');
+    const { useTabletPrefs } = await import('./tabletPrefs');
+    expect(useTabletPrefs.getState().tabsDetail).toBe('compact');
+  });
 });

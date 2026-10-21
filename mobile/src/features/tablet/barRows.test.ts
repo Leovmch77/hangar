@@ -8,6 +8,14 @@ const session = (name: string, serverId = 'nb', extra: Partial<AggSession> = {})
 const identities = new Map([['nb', 'notebook'], ['vm', 'casa']]);
 
 describe('barRows', () => {
+  it('coloca grupos antes das sessões soltas, preservando a ordem da barra à esquerda', () => {
+    const single = session('pergunta', 'vm', { state: 'awaiting_input' });
+    const parent = session('mae');
+    const child = session('filha', 'nb', { linked_by: 'mae' });
+    const rows = [single, parent, child];
+    expect(barRows(rows, identities).map(item => item.kind)).toEqual(['group', 'single']);
+    expect(barRows(rows, identities, false).map(item => item.kind)).toEqual(['single', 'group']);
+  });
   it('mistura os servidores sem cabeçalhos, na ordem de estado da lista do celular', () => {
     const idle = session('pronta');
     const working = session('trabalhando', 'vm', { state: 'working' });

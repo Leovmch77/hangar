@@ -26,10 +26,12 @@ vi.mock('./Pagina', () => ({ Pagina: ({ children }: { children: ReactNode }) => 
 vi.mock('./Slider', () => ({ Slider: () => null }));
 vi.mock('react-native', async (original) => ({
   ...await original<typeof import('react-native')>(),
-  Pressable: ({ children, onPress, accessibilityRole, accessibilityLabel, accessibilityState }: {
+  Pressable: ({ children, onPress, style, accessibilityRole, accessibilityLabel, accessibilityState }: {
     children?: ReactNode; onPress?: () => void; accessibilityRole?: string; accessibilityLabel?: string;
     accessibilityState?: { selected?: boolean };
+    style?: unknown;
   }) => createElement('button', { onClick: onPress, role: accessibilityRole, 'aria-label': accessibilityLabel,
+    style: Object.assign({}, ...[typeof style === 'function' ? style({ pressed: false }) : style].flat(Infinity).filter(Boolean)),
     'aria-selected': accessibilityState?.selected }, children),
 }));
 
@@ -37,8 +39,32 @@ let root: Root;
 let container: HTMLDivElement;
 beforeEach(() => {
   memory.clear();
-  useTabletPrefs.setState({ placement: 'bottom', collapsed: false });
+  useTabletPrefs.setState({ placement: 'bottom', collapsed: false, tabsDetail: 'compact' });
   container = document.createElement('div'); root = createRoot(container);
+});
+
+it.each(['pt', 'en'] as const)('Aparência permite guardar Compacto/Completa só para as abas horizontais (%s)', async locale => {
+  const resolveLocale = getLocale;
+  overwriteGetLocale(() => locale);
+  try {
+    await act(async () => root.render(createElement(Aparencia)));
+    const group = container.querySelector(`[role="radiogroup"][aria-label="${m.native_settings_tabs_detail()}"]`);
+    expect(group).not.toBeNull();
+    const buttons = [...group!.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+    expect(buttons.map(b => b.textContent)).toEqual([m.native_settings_style_compact(), m.native_settings_tabs_full()]);
+    for (const button of buttons) expect(parseFloat(button.style.minHeight)).toBeGreaterThanOrEqual(44);
+    expect(buttons[0].getAttribute('aria-selected')).toBe('true');
+    await act(async () => buttons[1].click());
+    expect(useTabletPrefs.getState().tabsDetail).toBe('full');
+    expect(memory.get('tablet.tabsDetail')).toBe('full');
+    expect(buttons[1].getAttribute('aria-selected')).toBe('true');
+    expect(container.textContent).toContain(m.native_settings_tabs_only());
+    expect(useTabletPrefs.getState().placement).toBe('bottom');
+    await act(async () => buttons[0].click());
+    expect(memory.get('tablet.tabsDetail')).toBe('compact');
+  } finally {
+    overwriteGetLocale(resolveLocale);
+  }
 });
 afterEach(() => act(() => root.unmount()));
 

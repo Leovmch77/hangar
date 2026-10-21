@@ -5,7 +5,7 @@ export type BarItem = { kind: 'single'; session: AggSession } | { kind: 'group';
 
 const keyOf = (s: AggSession) => `${s.serverId}::${s.name}`;
 
-export function barRows(rows: AggSession[], identities: ReadonlyMap<string, string>): BarItem[] {
+export function barRows(rows: AggSession[], identities: ReadonlyMap<string, string>, groupsFirst = true): BarItem[] {
   const ordered = buildSessionSections(rows, 'none', '', new Set()).flatMap(s => s.data);
   const byKey = new Map(ordered.map(s => [keyOf(s), s]));
   type Group = { key: string | null; members: Set<AggSession> };
@@ -41,7 +41,7 @@ export function barRows(rows: AggSession[], identities: ReadonlyMap<string, stri
     }
   }
   const placed = new Set<Group>();
-  return ordered.flatMap((session): BarItem[] => {
+  const items = ordered.flatMap((session): BarItem[] => {
     const group = groupOf.get(session);
     if (!group || group.members.size < 2) return [{ kind: 'single', session }];
     if (placed.has(group)) return [];
@@ -57,4 +57,5 @@ export function barRows(rows: AggSession[], identities: ReadonlyMap<string, stri
     const label = sorted.map(s => s.pair_task?.trim()).find(Boolean) || null;
     return [{ kind: 'group', key, label, members: sorted }];
   });
+  return groupsFirst ? items.sort((a, b) => Number(b.kind === 'group') - Number(a.kind === 'group')) : items;
 }

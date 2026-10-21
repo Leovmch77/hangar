@@ -16,6 +16,7 @@ export function Segmented<T extends string>({
   onChange,
   label,
   disabled = false,
+  minHeight,
 }: {
   options: ReadonlyArray<Option<T>>;
   value: T;
@@ -24,6 +25,7 @@ export function Segmented<T extends string>({
   label: string;
   /** Escolha sem efeito agora (outra opção manda nela): fica à vista e apagada, como no Rust. */
   disabled?: boolean;
+  minHeight?: number;
 }) {
   const c = useSettingsColors();
   return (
@@ -37,6 +39,7 @@ export function Segmented<T extends string>({
             disabled={disabled}
             style={({ pressed }) => [
               styles.option,
+              minHeight !== undefined && { minHeight },
               i > 0 && { borderLeftWidth: 1, borderLeftColor: c.borderStrong },
               { backgroundColor: on ? c.accentDim : pressed ? c.hover : 'transparent' },
             ]}

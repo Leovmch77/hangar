@@ -30,13 +30,14 @@ export function SessionsBar({ placement, selected, onPick, onNew }: Props) {
   const crossMachine = rows.some(s => s.pair_owner || s.pair_peers?.some(p => p.includes('::')));
   const identityServers = useMemo(() => crossMachine ? servers : [], [crossMachine, servers]);
   const { identities } = useIdentities(identityServers);
-  const items = useMemo(() => barRows(rows, identities), [rows, identities]);
+  const horizontal = placement === 'bottom' || placement === 'top';
+  const items = useMemo(() => barRows(rows, identities, horizontal), [rows, identities, horizontal]);
+  const tabsDetail = useTabletPrefs(s => s.tabsDetail);
   const collapsed = useTabletPrefs(s => s.collapsed);
   const toggleCollapsed = useTabletPrefs(s => s.toggleCollapsed);
   const keyboardVisible = useKeyboardState(s => s.isVisible);
   useEffect(() => useSessions.getState().retain(), []);
 
-  const horizontal = placement === 'bottom' || placement === 'top';
   if ((horizontal && collapsed) || (placement === 'bottom' && keyboardVisible)) return null;
   const rail = placement === 'left' && collapsed;
   const isSelected = (s: AggSession) => s.serverId === selected?.serverId && s.name === selected?.name;
@@ -50,24 +51,21 @@ export function SessionsBar({ placement, selected, onPick, onNew }: Props) {
         <View style={styles.dot}><StateDot state={s.state} size={6} /></View>
       </Pressable>
     );
-    return <SessionChip key={keyOf(s)} session={s} selected={isSelected(s)} onPress={() => onPick(s)} />;
+    return <SessionChip key={keyOf(s)} session={s} selected={selected} full={tabsDetail === 'full'} onPick={onPick} />;
   };
-  const renderItem = ({ item }: { item: BarItem }) => item.kind === 'single' ? sessionItem(item.session) : (
-    <View style={[styles.group, horizontal && styles.horizontalGroup]}>
-      {!horizontal && !rail && item.label ? <Text numberOfLines={1}
+  const renderItem = ({ item }: { item: BarItem }) => item.kind === 'single' ? sessionItem(item.session) : horizontal ? (
+    <SessionChip session={item.members[0]} members={item.members.slice(1)} label={item.label}
+      selected={selected} full={tabsDetail === 'full'} onPick={onPick} />
+  ) : (
+    <View style={styles.group}>
+      {!rail && item.label ? <Text numberOfLines={1}
         style={[styles.groupLabel, { color: theme.tokens.text.muted }]}>{item.label}</Text> : null}
-      {horizontal && item.label ? <>
-        <View key={keyOf(item.members[0])} style={styles.mother}>
-          <Text numberOfLines={1} style={[styles.groupLabel, styles.horizontalLabel, { color: theme.tokens.text.muted }]}>{item.label}</Text>
-          {sessionItem(item.members[0])}
-        </View>
-        {item.members.slice(1).map(sessionItem)}
-      </> : item.members.map(sessionItem)}
+      {item.members.map(sessionItem)}
     </View>
   );
 
   return (
-    <Glass variant="panel" style={[styles.bar, horizontal ? styles.horizontal : rail ? styles.rail : styles.left]}>
+    <Glass variant="panel" style={[styles.bar, horizontal ? [styles.horizontal, tabsDetail === 'full' && styles.fullHorizontal] : rail ? styles.rail : styles.left]}>
       <FlatList key={horizontal ? 'horizontal' : 'vertical'} data={items} horizontal={horizontal}
         style={styles.list} contentContainerStyle={[styles.items, horizontal && styles.horizontalItems]}
         keyExtractor={item => item.kind === 'single' ? keyOf(item.session) : item.key}
@@ -97,17 +95,15 @@ const styles = StyleSheet.create((theme) => ({
   bar: { flexShrink: 0 },
   left: { width: 250, flexDirection: 'column' },
   rail: { width: 64, flexDirection: 'column' },
-  horizontal: { height: 62, flexDirection: 'row', alignItems: 'center' },
+  horizontal: { height: 110, flexDirection: 'row', alignItems: 'center' },
+  fullHorizontal: { height: 126 },
   list: { flex: 1 },
   items: { padding: theme.base.space[1], gap: theme.base.space[1], flexGrow: 1 },
   horizontalItems: { paddingVertical: 0, alignItems: 'center' },
   railItem: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: theme.base.radius.md },
   dot: { position: 'absolute', right: 5, bottom: 5 },
   group: { borderWidth: 1, borderColor: theme.tokens.border.subtle, borderRadius: theme.base.radius.md, overflow: 'hidden' },
-  horizontalGroup: { flexDirection: 'row', alignItems: 'center' },
-  mother: { maxWidth: 220 },
   groupLabel: { fontSize: theme.base.text.xxxs, paddingHorizontal: theme.base.space[3], paddingTop: theme.base.space[1] },
-  horizontalLabel: { paddingTop: 0, lineHeight: 12 },
   empty: { fontSize: theme.base.text.xxxs, padding: theme.base.space[1], alignSelf: 'center', flexShrink: 1 },
   emptyState: { justifyContent: 'center', flexShrink: 1 },
   controls: { alignItems: 'center', padding: theme.base.space[1] },

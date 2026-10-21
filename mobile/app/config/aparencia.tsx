@@ -38,7 +38,7 @@ import {
 import * as m from '../../src/paraglide/messages';
 import { opacidadeDe, transparenciaDe } from '../../src/theme/superficie';
 import { ACENTO_PALETA, SEM_TINTA, TINTAS, type Paleta } from '../../src/theme/paleta';
-import { useTabletPrefs, type SessionsBarPlacement } from '../../src/stores/tabletPrefs';
+import { useTabletPrefs, type SessionsBarPlacement, type TabsDetail } from '../../src/stores/tabletPrefs';
 
 // Destaques do desktop Rust (theme.rs ACCENTS / ACCENTS_LIGHT). O primeiro é o de fábrica: escolhê-lo
 // grava "sem acento" e o tema volta à cor própria de cada modo.
@@ -76,6 +76,8 @@ export default function Aparencia() {
   const homeScreen = useAparencia((s) => s.homeScreen);
   const placement = useTabletPrefs((s) => s.placement);
   const setPlacement = useTabletPrefs((s) => s.setPlacement);
+  const tabsDetail = useTabletPrefs((s) => s.tabsDetail);
+  const setTabsDetail = useTabletPrefs((s) => s.setTabsDetail);
   const ap = useAparencia.getState;
 
   const scroll = useRef<ScrollView>(null);
@@ -147,6 +149,10 @@ export default function Aparencia() {
   const HOME_SCREENS: ReadonlyArray<Option<HomeScreen>> = [
     { v: 'sessions', label: m.home_open_app_sessions() },
     { v: 'newConversation', label: m.home_open_app_conversation() },
+  ];
+  const TAB_DETAILS: ReadonlyArray<Option<TabsDetail>> = [
+    { v: 'compact', label: m.native_settings_style_compact() },
+    { v: 'full', label: m.native_settings_tabs_full() },
   ];
   const TABLET_PLACEMENTS: ReadonlyArray<Option<SessionsBarPlacement>> = [
     { v: 'left', label: m.tablet_bar_left() },
@@ -480,7 +486,10 @@ export default function Aparencia() {
       </SectionCard>
       <SectionCard icon="PanelLeft" title={m.tablet_landscape()} onLayout={at('tablet')}>
         <SettingsRow title={m.tablet_bar_position()}>
-          <Segmented options={TABLET_PLACEMENTS} value={placement} onChange={setPlacement} label={m.tablet_bar_position()} />
+          <Segmented options={TABLET_PLACEMENTS} value={placement} onChange={setPlacement} label={m.tablet_bar_position()} minHeight={44} />
+        </SettingsRow>
+        <SettingsRow title={m.native_settings_tabs_detail()} description={m.native_settings_tabs_only()}>
+          <Segmented options={TAB_DETAILS} value={tabsDetail} onChange={setTabsDetail} label={m.native_settings_tabs_detail()} minHeight={44} />
         </SettingsRow>
       </SectionCard>
     </Pagina>
