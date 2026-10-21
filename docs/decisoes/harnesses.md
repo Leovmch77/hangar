@@ -265,8 +265,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   [religação ao mesmo cano](#religação-ao-mesmo-cano-vivo-e-avisos-fora-da-tela-20102026).
 - **Cano que não repassa a saída do Claude: o estado segue o transcript.** Turno aberto, o transcript
   já termina nele (`assistant` com `end_turn` ou `stop_hook_summary` depois da última mensagem da
-  pessoa, toda entrega provada) e nenhuma linha da CLI pelo cano por `OUTPUT_LOST` (60 s, contados
-  também do carimbo do fim): o turno sai da vista (idle, sem resposta inventada) e, nessa vida, o fim
+  pessoa e de qualquer `assistant` ou `tool_result` da thread principal, toda entrega provada) e nenhuma
+  linha da CLI pelo cano por `OUTPUT_LOST` (60 s, contados também do carimbo do fim; sem carimbo, da
+  primeira vez que o fim foi visto): o turno sai da vista (idle, sem resposta inventada) e, nessa vida, o fim
   de cada turno vem do transcript, conferido a cada 250 ms. Vale na adoção da subida com o retrato de
   turno aberto. A sessão segue usável: entrega, fila e Reabrir como sempre, nada na tela; o diário
   recebe `cano_output_lost` uma vez por vida. Linha da CLI que volte a chegar devolve o fim ao

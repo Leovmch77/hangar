@@ -104,10 +104,10 @@ impl ReceiptIndex {
     }
 
     /// O transcript lido termina num fim de turno (nenhuma mensagem da pessoa depois da última linha de fim):
-    /// `Some` com o carimbo dessa linha, quando ela o tem.
-    pub fn turn_ended(&self) -> Option<Option<f64>> {
+    /// `Some` com o início dessa linha e o carimbo dela, quando ela o tem.
+    pub fn turn_ended(&self) -> Option<(u64,Option<f64>)> {
         let (end,stamp) = self.turn_end?;
-        self.occurrences.last().is_none_or(|last|last.offset < end).then_some(stamp)
+        self.occurrences.last().is_none_or(|last|last.offset < end).then_some((end,stamp))
     }
 
     /// Troca de conversa (a TUI adotou outra thread): o que foi lido e os cursores antigos não provam nada nela.
@@ -170,9 +170,15 @@ impl ReceiptIndex {
                 (parser.feed(&raw,start).into_iter().filter(|e|e.kind == hangar_api::chat::ChatKind::UserMsg)
                     .filter_map(|e|e.text).collect::<Vec<_>>().join("\n"),"user")
             } else {
-                let ends = obj["isSidechain"] != true && (obj["type"] == "assistant" && obj["message"]["stop_reason"] == "end_turn"
-                    || obj["type"] == "system" && obj["subtype"] == "stop_hook_summary");
-                if ends { self.turn_end = Some((start,obj["timestamp"].as_str().and_then(crate::transcript::ts_of_iso))); continue; }
+                if obj["isSidechain"] != true {
+                    if obj["type"] == "assistant" && obj["message"]["stop_reason"] == "end_turn" || obj["type"] == "system" && obj["subtype"] == "stop_hook_summary" {
+                        self.turn_end = Some((start,obj["timestamp"].as_str().and_then(crate::transcript::ts_of_iso)));
+                        continue;
+                    }
+                    // O turno seguiu depois do fim (hook de parada que bloqueou): o fim de antes não vale mais.
+                    let tool_result = obj["message"]["content"].as_array().is_some_and(|blocks|blocks.iter().any(|b|b["type"] == "tool_result"));
+                    if obj["type"] == "assistant" || obj["type"] == "user" && tool_result { self.turn_end = None; }
+                }
                 match obj["type"].as_str() {
                     Some("user") => (content_text(&obj["message"]["content"]),"user"),
                     // `remove` (absorbed_mid_turn): a CLI tirou a mensagem da fila interna porque o turno a consumiu.

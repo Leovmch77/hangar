@@ -305,3 +305,29 @@ fn codex_rollout_without_session_meta_falls_back_to_the_cursor_without_file() {
     let proof=index.match_after(&path,&cursor,&json!({"text":"um"}),&BTreeMap::new()).unwrap().expect("sem session_meta vale o cursor sem arquivo");
     assert!(proof.occurrence.identity_unprovable);
 }
+
+/// O fim de turno só vale enquanto nada do turno vem depois dele: outra resposta do assistente ou o resultado de uma
+/// ferramenta (a CLI seguiu, por exemplo por um hook de parada que bloqueou) o desfazem; o subagente não.
+#[test]
+fn a_turn_end_is_undone_by_a_later_assistant_or_tool_result_of_the_main_thread() {
+    let end = json!({"type":"assistant","isSidechain":false,"message":{"stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}});
+    let user = json!({"type":"user","uuid":"u1","message":{"content":"oi"}});
+    let cases = [
+        (json!({"type":"assistant","isSidechain":false,"message":{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"t1"}]}}),false),
+        (json!({"type":"user","isSidechain":false,"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"x"}]}}),false),
+        (json!({"type":"assistant","isSidechain":true,"message":{"stop_reason":"tool_use","content":[]}}),true),
+        (json!({"type":"system","subtype":"stop_hook_summary","isSidechain":false}),true),
+    ];
+    for (after,ended) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chat.jsonl");
+        std::fs::write(&path,format!("{user}\n{end}\n")).unwrap();
+        let mut index = ReceiptIndex::new("claude","sid");
+        index.scan(&path).unwrap();
+        assert!(index.turn_ended().is_some());
+        use std::io::Write;
+        writeln!(std::fs::OpenOptions::new().append(true).open(&path).unwrap(),"{after}").unwrap();
+        index.scan(&path).unwrap();
+        assert_eq!(index.turn_ended().is_some(),ended,"{after}");
+    }
+}

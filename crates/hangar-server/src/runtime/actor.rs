@@ -649,7 +649,7 @@ enum Job {
     Confirmed { response:Option<oneshot::Sender<Result<Value,RuntimeError>>>,result:Result<(Vec<String>,usize,Option<f64>),RuntimeError> },
     Steered { id:String,result:Result<Vec<String>,RuntimeError> },
     /// Conferência do fim do turno no transcript. `since`: a última saída do cano quando ela começou.
-    TurnCheck { since:f64,result:Result<Option<f64>,RuntimeError> },
+    TurnCheck { since:f64,result:Result<Option<(u64,Option<f64>)>,RuntimeError> },
     NativeInput { id:String,result:Result<Value,RuntimeError> },
     /// `persisted`: o que o disco tem depois da gravação (None = nem a leitura respondeu).
     Reserved { operation_id:String,reservation:ReservedAsyncAnswer,result:Result<(),RuntimeError>,persisted:Option<bool> },
@@ -810,6 +810,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
     let mut turn_checking = false;
     let mut turn_check_after = 0.0_f64;
     let mut output_lost_reported = false;
+    // Fim de turno sem carimbo (início da linha) e quando ele foi visto pela primeira vez, no relógio de parede.
+    let mut end_seen:Option<(u64,f64)> = None;
     // Operações cujo quadro foi entregue ao transporte desta época: na queda, só estas podem ter saído.
     let mut handed:BTreeSet<String> = BTreeSet::new();
     let mut effects:VecDeque<Effect> = VecDeque::new();
@@ -1616,6 +1618,8 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                     // Erro de UMA mensagem segue (como o leitor Python); só o erro de leitura encerra.
                     Some(IoEvent::Line(line)) => {
                         last_output = clock(start).monotonic_s;
+                        // A saída voltou: uma nova perda nesta vida vai ao diário de novo.
+                        if engine.output_lost() { output_lost_reported = false; }
                         effects.extend(engine.heard());
                         match engine.apply(EngineInput::Line(line),clock(start)) {
                             Ok(next)=>effects.extend(next),
@@ -2240,6 +2244,16 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                         let now = sample.monotonic_s;
                         let lost = engine.output_lost();
                         let after = engine.reconnect_waits.output_lost.as_secs_f64();
+                        // O instante do fim: o carimbo da linha; sem ele, a primeira vez que esta conferência a viu.
+                        let result = result.map(|found|found.map(|(offset,stamp)|stamp.unwrap_or_else(|| {
+                            match end_seen { Some((seen,at)) if seen == offset => at, _ => {
+                                if crate::warn_limit::allow(Some(&target.key),"turn_end_stamp") {
+                                    tracing::warn!(key=%target.key,session=%target.name,offset,"fim de turno sem carimbo legível; o silêncio conta de agora");
+                                }
+                                end_seen = Some((offset,sample.epoch_s));
+                                sample.epoch_s
+                            } }
+                        })));
                         // Antes da saída perdida, o silêncio conta também do fim do turno: o `result` sai logo depois dele.
                         let quiet = |ended:f64|lost || since == last_output && sample.epoch_s - ended >= after;
                         match result {
@@ -2351,7 +2365,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                 if turn_check_due.is_some_and(|due|sample.monotonic_s >= due) {
                     turn_checking = true;
                     let view = engine.view();
-                    let job = transcript_turn_ended(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),engine.active_input(),sample.epoch_s);
+                    let job = transcript_turn_ended(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),engine.active_input());
                     let since = last_output;
                     jobs.spawn(async move { Job::TurnCheck { since,result:job.await } });
                 }
@@ -2514,9 +2528,9 @@ const TURN_POLL:Duration = Duration::from_millis(250);
 
 /// O transcript termina no fim de um turno que já consumiu toda entrada entregue: a entrada ativa (`active`)
 /// e toda outra despachada estão provadas nele, e nenhuma mensagem da pessoa veio depois do fim. `Some` com o
-/// instante do fim (o carimbo da linha; sem ele, `now`).
+/// início da linha do fim e o carimbo dela, quando legível.
 async fn transcript_turn_ended(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<ReceiptIndex>>,path:std::path::PathBuf,conversation:Option<String>,
-    active:Option<String>,now:f64) -> Result<Option<f64>,RuntimeError> {
+    active:Option<String>) -> Result<Option<(u64,Option<f64>)>,RuntimeError> {
     let scanner = receipt.clone();
     let ended = tokio::task::spawn_blocking(move || {
         let mut receipt = scanner.lock().map_err(|_|failure("receipt_panic"))?;
@@ -2524,14 +2538,14 @@ async fn transcript_turn_ended(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mute
         receipt.scan(&path).map_err(io_failure)?;
         Ok::<_,RuntimeError>(receipt.turn_ended())
     }).await.map_err(|_|failure("receipt_job"))??;
-    let Some(stamp) = ended else { return Ok(None) };
+    let Some(end) = ended else { return Ok(None) };
     // Lida depois do transcript: entrada que chegou a ele depois da leitura ainda aparece aqui sem prova.
     let state = queue.snapshot().await.map_err(io_failure)?;
     // A operação pode seguir `accepted` com a linha da fila já confirmada: vale qualquer das duas provas.
     let proved = |id:&str|state.operations.get(id).is_some_and(|op|op.status == Status::Confirmed
         || op.entry_id.as_deref().is_some_and(|entry|state.rows.iter().any(|row|row["id"] == entry && row["confirmed"] == true)));
     let consumed = active.as_deref().is_none_or(proved) && unproved_inputs(&state).is_empty() && super::queue::legacy_rows(&state).is_empty();
-    Ok(consumed.then(||stamp.unwrap_or(now)))
+    Ok(consumed.then_some(end))
 }
 
 /// Entradas despachadas (com cursor) ainda sem a linha delas provada no transcript.

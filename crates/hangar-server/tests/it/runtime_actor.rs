@@ -2517,9 +2517,11 @@ mod cano_reconnect {
     /// Cano falso que aceita várias conexões, como o de verdade: a n-ésima (1 = abertura) recebe o retrato
     /// (`Serve`), fecha sem ele (`Refuse`) ou fica muda até o ator largar o socket (`Hang`). `cut` derruba a
     /// conexão atual sem `cano_saiu`; `garble` manda um envelope que o leitor não conhece, com o socket de pé;
-    /// `aberto` vai nos retratos seguintes; com `unacked`, o quadro chega e a escrita fica sem confirmação.
+    /// `aberto` vai nos retratos seguintes; com `unacked`, o quadro chega e a escrita fica sem confirmação; `speak`
+    /// repassa uma linha da CLI (`keep_alive`).
     struct LiveCano { escuta:String, accepts:Arc<Mutex<Vec<Instant>>>, frames:Arc<Mutex<Vec<Value>>>, cut:Arc<tokio::sync::Notify>,
-        garble:Arc<tokio::sync::Notify>, aberto:Arc<AtomicBool>, busy:Arc<AtomicBool>, unacked:Arc<AtomicBool>, hung_closed:Arc<tokio::sync::Notify>, server:tokio::task::JoinHandle<()> }
+        garble:Arc<tokio::sync::Notify>, aberto:Arc<AtomicBool>, busy:Arc<AtomicBool>, unacked:Arc<AtomicBool>, hung_closed:Arc<tokio::sync::Notify>,
+        speak:Arc<tokio::sync::Notify>, server:tokio::task::JoinHandle<()> }
     impl Drop for LiveCano { fn drop(&mut self) { self.server.abort(); } }
     impl LiveCano {
         fn accepts(&self) -> usize { self.accepts.lock().unwrap().len() }
@@ -2538,6 +2540,8 @@ mod cano_reconnect {
             Arc::new(tokio::sync::Notify::new()),Arc::new(AtomicBool::new(false)),Arc::new(tokio::sync::Notify::new()));
         let (garble,busy,unacked) = (Arc::new(tokio::sync::Notify::new()),Arc::new(AtomicBool::new(false)),Arc::new(AtomicBool::new(false)));
         let (seen,written,cutting,open,hung,garbling,working,silent) = (accepts.clone(),frames.clone(),cut.clone(),aberto.clone(),hung_closed.clone(),garble.clone(),busy.clone(),unacked.clone());
+        let speak = Arc::new(tokio::sync::Notify::new());
+        let speaking = speak.clone();
         let pendentes:Vec<String> = pendentes.iter().map(Value::to_string).collect();
         let server = tokio::spawn(async move {
             while let Ok((stream,_)) = listener.accept().await {
@@ -2558,6 +2562,10 @@ mod cano_reconnect {
                     tokio::select! {
                         _ = cutting.notified() => break,
                         _ = garbling.notified() => { if reader.get_mut().write_all(b"{\"type\":\"cano_desconhecido\"}\n").await.is_err() { break; } },
+                        _ = speaking.notified() => {
+                            let line = json!({"type":"cano_output","frame":json!({"type":"keep_alive"}).to_string()});
+                            if reader.get_mut().write_all(format!("{line}\n").as_bytes()).await.is_err() { break; }
+                        },
                         read = next_line(&mut reader,&mut raw) => {
                             if !read { break; }
                             let envelope:Value = serde_json::from_str(&raw).unwrap();
@@ -2594,7 +2602,7 @@ mod cano_reconnect {
                 }
             }
         });
-        LiveCano { escuta,accepts,frames,cut,garble,aberto,busy,unacked,hung_closed,server }
+        LiveCano { escuta,accepts,frames,cut,garble,aberto,busy,unacked,hung_closed,speak,server }
     }
 
     struct Waits { normal:Vec<Duration>, pending:Vec<Duration>, stall:Duration, output_lost:Duration }
@@ -2999,6 +3007,69 @@ mod cano_reconnect {
         wait_for("o diário registra",||lost(&fake) == 1).await;
         handle.command(input("in-1","oi")).await.unwrap();
         wait_for("a próxima mensagem é entregue",||cano.said("oi") == 1).await;
+        handle.stop().await.unwrap();
+    }
+
+    /// A mensagem que esperou na fila durante o turno preso sai quando ele fecha pelo transcript, como no `result`.
+    #[tokio::test]
+    async fn a_message_queued_during_the_stuck_turn_goes_out_when_the_transcript_ends_it() {
+        let dir = tempfile::tempdir().unwrap();
+        append(dir.path(),&[said_by_user("antes")]);
+        let proc = sleeper(dir.path());
+        let (_fake,diag) = crate::fake::spawn_fake().await;
+        let cano = live_cano(|_|Answer::Serve).await;
+        cano.aberto.store(true,Ordering::Release);
+        let (handle,_rx) = actor(dir.path(),&cano,proc.0.id(),birth(&proc),diag,Waits { output_lost:ms(300),..waits(&[0,50],&[0,50],60_000) }).await;
+        state_until(&handle,"o turno do retrato",|state|state["state"] == "working").await;
+        let reply = handle.command(input("in-1","oi")).await.unwrap();
+        assert!(reply.disposition == Disposition::Deferred,"com o turno aberto, a mensagem espera: {reply:?}");
+        append(dir.path(),&turn_end("antes"));
+        wait_for("a mensagem da fila sai quando o turno fecha",||cano.said("oi") == 1).await;
+        handle.stop().await.unwrap();
+    }
+
+    /// Fim gravado sem carimbo legível: o silêncio conta da primeira vez em que ele foi visto, e o turno fecha.
+    #[tokio::test]
+    async fn a_turn_end_without_a_readable_stamp_still_closes_the_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        append(dir.path(),&[said_by_user("antes")]);
+        let mut end = turn_end("antes");
+        for line in &mut end { line.as_object_mut().unwrap().remove("timestamp"); }
+        append(dir.path(),&end);
+        let proc = sleeper(dir.path());
+        let (fake,diag) = crate::fake::spawn_fake().await;
+        let cano = live_cano(|_|Answer::Serve).await;
+        cano.aberto.store(true,Ordering::Release);
+        let (handle,_rx) = actor(dir.path(),&cano,proc.0.id(),birth(&proc),diag,Waits { output_lost:ms(300),..waits(&[0,50],&[0,50],60_000) }).await;
+        state_until(&handle,"o fim sem carimbo fecha o turno",|state|state["state"] == "idle").await;
+        wait_for("o diário registra",||lost(&fake) == 1).await;
+        handle.stop().await.unwrap();
+    }
+
+    /// Uma linha da CLI pelo cano (aqui um `keep_alive`) prova que ele lê o stdout: o fim volta a ser o `result`, e
+    /// uma nova perda espera o prazo de silêncio outra vez em vez de fechar pelo transcript na hora.
+    #[tokio::test]
+    async fn output_coming_back_restores_the_wait_before_the_next_loss() {
+        let dir = tempfile::tempdir().unwrap();
+        append(dir.path(),&[said_by_user("antes")]);
+        append(dir.path(),&turn_end("antes"));
+        let proc = sleeper(dir.path());
+        let (fake,diag) = crate::fake::spawn_fake().await;
+        let cano = live_cano(|_|Answer::Serve).await;
+        cano.aberto.store(true,Ordering::Release);
+        let prazo = 1_500;
+        let (handle,_rx) = actor(dir.path(),&cano,proc.0.id(),birth(&proc),diag,Waits { output_lost:ms(prazo),..waits(&[0,50],&[0,50],60_000) }).await;
+        idle_within(&handle,Duration::from_secs(5),"primeira perda").await;
+        wait_for("primeiro registro",||lost(&fake) == 1).await;
+        cano.speak.notify_one();
+        tokio::time::sleep(ms(200)).await;
+        handle.command(input("in-1","oi")).await.unwrap();
+        wait_for("a mensagem sai",||cano.said("oi") == 1).await;
+        append(dir.path(),&[said_by_user("oi")]);
+        append(dir.path(),&turn_end("oi"));
+        let ended = Instant::now();
+        idle_within(&handle,Duration::from_secs(5),"a segunda perda fecha o turno").await;
+        assert!(ended.elapsed() >= ms(prazo - 200),"a saída voltou: espera o prazo de novo, {:?}",ended.elapsed());
         handle.stop().await.unwrap();
     }
 

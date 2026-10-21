@@ -247,7 +247,8 @@ impl ClaudeEngine {
         state.claude_permission_mode = self.permission_mode.clone();
         state.claude_previous_non_plan = self.previous_non_plan.clone();
         state.codex_question = self.question.as_ref().and_then(|q|q.as_object().cloned());
-        state.question = None; state.options = None; state.claude_plan_pending = None;        // Processo morto não é "Sessão encerrada": a faixa mostra o problema e o próximo prompt sobe outro.
+        state.question = None; state.options = None; state.claude_plan_pending = None;
+        // Processo morto não é "Sessão encerrada": a faixa mostra o problema e o próximo prompt sobe outro.
         state.state = if !self.alive { "idle" } else if !self.pending.is_empty() || self.question.is_some() { "awaiting_input" }
             else if self.in_progress || self.initializing { "working" } else { "idle" }.into();
         let mut label = self.label.clone();
@@ -364,6 +365,9 @@ impl ClaudeEngine {
         }
         self.clear_streams(&mut effects);
         self.changed(&mut effects,false);
+        // Como no `result`: o esforço preparado sai antes da fila.
+        if self.effort_intent.as_ref().is_some_and(|intent|intent["status"] == "prepared") { self.dispatch_effort(&mut effects); }
+        else { effects.push(Effect::WakeQueue); }
         effects
     }
 
@@ -710,7 +714,8 @@ impl ClaudeEngine {
         match input {
             EngineInput::Line(event) => {
                 // Batimento e stderr do cano chegam com a sessão parada: não são atividade (o Python também os ignorava).
-                if !matches!(event["type"].as_str(),Some("keep_alive" | "cano_stderr")) { self.active_at = clock.monotonic_s; }                self.on_line(event,&mut effects)?
+                if !matches!(event["type"].as_str(),Some("keep_alive" | "cano_stderr")) { self.active_at = clock.monotonic_s; }
+                self.on_line(event,&mut effects)?
             },
             EngineInput::WriteAck { operation_id,outcome } => self.on_ack(operation_id,outcome,&mut effects),
             EngineInput::Tick => self.on_tick(&mut effects),
