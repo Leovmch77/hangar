@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement, useEffect, type ReactNode } from 'react';
+import { act, createElement, useEffect, useRef, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { SessionsBarPlacement } from '../../stores/tabletPrefs';
@@ -8,10 +8,22 @@ import type { SessionsBarPlacement } from '../../stores/tabletPrefs';
 const h = vi.hoisted(() => ({
   placement: 'bottom' as SessionsBarPlacement, panelOpen: true, collapsed: false, toggleCollapsed: vi.fn(),
   size: { width: 1180, height: 820, scale: 1, fontScale: 1 },
-  router: { replace: vi.fn(), push: vi.fn(), dismissTo: vi.fn() },
+  pathname: '/s/srv/a', params: { server: 'srv', name: 'a' }, barMounts: 0, panelMounts: 0,
+  router: { replace: vi.fn(), push: vi.fn(), dismissTo: vi.fn(), setParams: vi.fn(), canGoBack: () => true, back: vi.fn() },
 }));
 vi.mock('expo-router', () => ({
-  useRouter: () => h.router, useIsFocused: () => true, useLocalSearchParams: () => ({}),
+  useRouter: () => h.router, useIsFocused: () => true, useLocalSearchParams: () => h.params,
+  useGlobalSearchParams: () => h.params, usePathname: () => h.pathname,
+  useTheme: () => ({ colors: { background: '#123456' } }),
+  ThemeProvider: ({ children, value }: { children: ReactNode; value: { colors: { background: string } } }) =>
+    createElement('div', { 'data-navigation-background': value.colors.background }, children),
+  useSegments: () => h.pathname.startsWith('/s/') ? ['s', '[server]', '[name]', ...h.pathname.split('/').slice(4)] : h.pathname.split('/').filter(Boolean),
+  useNavigation: () => ({ getState: () => ({ routes: [] }), addListener: () => () => {} }), useRoute: () => ({ key: h.pathname }),
+  Stack: Object.assign(({ children, screenOptions }: { children: ReactNode; screenOptions: unknown }) => {
+    const content = h.pathname.startsWith('/s/') ? createElement(ChatScreen, { key: h.pathname })
+      : h.pathname === '/' ? createElement(Index) : createElement('main', { 'data-page': h.pathname });
+    return createElement('div', { 'data-stack': true, 'data-options': JSON.stringify(screenOptions) }, children, content);
+  }, { Screen: ({ name, options }: { name: string; options?: unknown }) => createElement('i', { 'data-screen': name, 'data-options': JSON.stringify(options) }) }),
   useFocusEffect: (effect: () => void | (() => void)) => useEffect(effect, [effect]),
 }));
 vi.mock('react-native', async (original) => ({
@@ -20,12 +32,40 @@ vi.mock('react-native', async (original) => ({
   PanResponder: { create: () => ({ panHandlers: {} }) },
 }));
 vi.mock('../../stores/tabletPrefs', () => ({ useTabletPrefs: (select: (s: typeof h) => unknown) => select(h) }));
-vi.mock('../../stores/servers', () => ({ useServers: (select: (s: unknown) => unknown) => select({ activeId: 'srv' }) }));
-vi.mock('../../stores/sessions', () => {
-  const state = { rows: [], retain: () => () => {} };
-  return { useSessions: Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state }) };
+vi.mock('../../stores/servers', () => {
+  const state = { activeId: 'srv', ready: true, servers: [{ id: 'srv' }], aviso: null, limparAviso: () => {}, load: async () => {} };
+  return { useServers: Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state }) };
 });
-vi.mock('../../stores/aparencia', () => ({ useAparencia: { getState: () => ({ homeScreen: 'sessions' }) } }));
+vi.mock('../../stores/sessions', () => {
+  const state = { rows: [], retain: () => () => {}, setForeground: () => {} };
+  return { setMachineDiscovery: () => {}, useSessions: Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state }) };
+});
+vi.mock('../../stores/aparencia', () => {
+  const state = { homeScreen: 'sessions', idioma: 'pt' };
+  return { aplicarTemaSalvo: () => {}, setTabletTextScale: () => {},
+    useAparencia: Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state }) };
+});
+vi.mock('react-native-url-polyfill/auto', () => ({}));
+vi.mock('../../theme/unistyles', () => ({}));
+vi.mock('../../theme/aplicarMaterial', () => ({ aplicarMaterial: () => {} }));
+vi.mock('../../net/configureCore', () => ({ configureCore: () => {} }));
+vi.mock('../machines/importMachines', () => ({ discoverSavedMachines: () => {} }));
+vi.mock('../../stores/chat', () => ({ setChatsForeground: () => {} }));
+vi.mock('../../chat/useQueueDelivery', () => ({ setQueueDeliveryForeground: () => {} }));
+vi.mock('../../net/fatalErrors', () => ({ setFatalErrorRoute: () => {}, takeFatalErrorNotice: () => false }));
+vi.mock('../push/expoPush', () => ({ installNotificationHandler: () => {}, pushRegistrationKey: () => '',
+  registerExpoPush: async () => {}, retryExpoPushIfDenied: async () => {}, useNotificationNavigation: () => {} }));
+vi.mock('../voice/LiveVoiceRoot', () => ({ LiveVoiceRoot: () => null }));
+vi.mock('../../ui/Toast', () => ({ Toaster: () => null, toast: { aviso: vi.fn(), erro: vi.fn() } }));
+vi.mock('react-native-keyboard-controller', () => ({ KeyboardProvider: ({ children }: { children: ReactNode }) => children }));
+vi.mock('react-native-gesture-handler', async original => ({ ...await original<typeof import('react-native-gesture-handler')>(),
+  GestureHandlerRootView: ({ children }: { children: ReactNode }) => children }));
+vi.mock('../../chat/ChatBody', () => ({ ChatBody: () => createElement('article', null, 'conversation') }));
+vi.mock('../files/FilesPanel', () => ({ FilesPanel: () => null }));
+vi.mock('../activity/ActivityPanel', () => ({ ActivityPanel: () => null }));
+vi.mock('../git/GitPanel', () => ({ GitPanel: ({ name }: { name: string }) => createElement('section', { 'data-git-session': name }) }));
+vi.mock('./ContextTab', () => ({ ContextTab: ({ name }: { name: string }) => createElement('section', { 'data-context-session': name }) }));
+vi.mock('../../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) => createElement('aside', null, children) }));
 vi.mock('../sessions/SessionsDrawer', () => ({ SessionsDrawer: ({ children }: { children: ReactNode }) => children }));
 vi.mock('../sessions/ServerSheet', () => ({ ServerSheet: () => null }));
 vi.mock('../sessions/SessionList', () => ({ SessionList: () => createElement('section', { 'data-home-sessions': true }) }));
@@ -35,17 +75,30 @@ vi.mock('../../ui/Screen', () => ({ Screen: ({ children }: { children: ReactNode
 vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('../../ui/HangarMark', () => ({ HangarMark: () => null }));
 vi.mock('../voice/LiveVoiceChatButton', () => ({ LiveVoiceChatButton: () => null }));
-vi.mock('./SessionsBar', () => ({ SessionsBar: ({ onPick, onNew }: { onPick: (s: unknown) => void; onNew: () => void }) =>
-  createElement('nav', null, createElement('button', { onClick: () => onPick({ serverId: 'srv', name: 'b' }) }, 'pick-b'),
-    createElement('button', { onClick: onNew }, 'new-session')) }));
-vi.mock('./ContextPanel', () => ({ ContextPanel: () => createElement('aside', null, 'session-context') }));
+vi.mock('./SessionsBar', () => ({ SessionsBar: ({ onPick, onNew, selected }: {
+  onPick: (s: unknown) => void; onNew: () => void; selected?: { name: string };
+}) => {
+  const instance = useRef<number | null>(null);
+  if (instance.current === null) instance.current = ++h.barMounts;
+  return createElement('nav', { 'data-instance': instance.current, 'data-selected': selected?.name },
+    createElement('button', { onClick: () => onPick({ serverId: 'srv', name: 'b' }) }, 'pick-b'),
+    createElement('button', { onClick: onNew }, 'new-session'));
+} }));
+vi.mock('./ContextPanel', () => ({ ContextPanel: ({ name }: { name: string }) => {
+  const instance = useRef<number | null>(null);
+  if (instance.current === null) instance.current = ++h.panelMounts;
+  return createElement('aside', { 'data-instance': instance.current, 'data-selected': name }, 'session-context');
+} }));
 import { TabletShell } from './TabletShell';
 import Index from '../../../app/index';
+import ChatScreen from '../../../app/s/[server]/[name]/index';
+import Layout from '../../../app/_layout';
 import * as m from '../../paraglide/messages';
 let root: Root;
 let host: HTMLDivElement;
 beforeEach(() => {
   vi.clearAllMocks(); h.placement = 'bottom'; h.panelOpen = true; h.collapsed = false;
+  h.pathname = '/s/srv/a'; h.params = { server: 'srv', name: 'a' }; h.barMounts = 0; h.panelMounts = 0;
   h.size = { width: 1180, height: 820, scale: 1, fontScale: 1 };
   host = document.createElement('div'); root = createRoot(host);
 });
@@ -135,15 +188,84 @@ it.each([true, false])('Custos fica acessível na barra com sessão selecionada:
 });
 
 it('a rota inicial conserva a criação ao girar e usa a barra no lugar da lista no tablet', async () => {
+  h.pathname = '/';
   h.size = { ...h.size, width: 390, height: 844 };
-  await act(async () => root.render(createElement(Index)));
+  await act(async () => root.render(createElement(Layout)));
   const field = host.querySelector('textarea');
+  const stack = host.querySelector('[data-stack]');
   expect(host.querySelector('[data-home-sessions]')).not.toBeNull();
   h.size = { ...h.size, width: 1180, height: 820 };
-  await act(async () => root.render(createElement(Index)));
+  await act(async () => root.render(createElement(Layout)));
   expect(host.querySelector('nav')).not.toBeNull();
   expect(host.querySelector('[data-create-mode]')?.getAttribute('data-create-mode')).toBe('newConversation');
   expect(host.querySelector('[data-home-sessions]')).toBeNull();
   expect(host.querySelector('aside')).toBeNull();
   expect(host.querySelector('textarea')).toBe(field);
+  expect(host.querySelector('[data-stack]')).toBe(stack);
+  h.size = { ...h.size, width: 820, height: 1180 };
+  await act(async () => root.render(createElement(Layout)));
+  expect(host.querySelector('textarea')).toBe(field);
+  expect(host.querySelector('[data-stack]')).toBe(stack);
+  expect(host.querySelector('nav')).toBeNull();
+});
+
+it('trocar de sessão no Stack conserva a mesma barra e o mesmo painel da janela', async () => {
+  await act(async () => root.render(createElement(Layout)));
+  const bar = host.querySelector('nav');
+  const panel = host.querySelector('aside');
+  const stack = host.querySelector('[data-stack]');
+  expect(bar).not.toBeNull(); expect(panel).not.toBeNull(); expect(stack).not.toBeNull();
+  click('pick-b');
+  expect(h.router.replace).toHaveBeenCalledWith('/s/srv/b');
+  h.pathname = '/s/srv/b'; h.params = { server: 'srv', name: 'b' };
+  await act(async () => root.render(createElement(Layout)));
+  expect(host.querySelector('nav')).toBe(bar);
+  expect(host.querySelector('aside')).toBe(panel);
+  expect(host.querySelector('[data-stack]')).toBe(stack);
+  expect(bar!.getAttribute('data-selected')).toBe('b');
+  expect(panel!.getAttribute('data-selected')).toBe('b');
+  expect(h.barMounts).toBe(1); expect(h.panelMounts).toBe(1);
+});
+
+it('só a rota da sessão e suas subrotas selecionam a barra e o painel', async () => {
+  h.pathname = '/s/srv/a/files';
+  await act(async () => root.render(createElement(Layout)));
+  expect(host.querySelector('aside')?.getAttribute('data-selected')).toBe('a');
+  h.pathname = '/config';
+  await act(async () => root.render(createElement(Layout)));
+  expect(host.querySelector('nav')).not.toBeNull();
+  expect(host.querySelector('aside')).toBeNull();
+  expect(host.querySelector('[data-page="/config"]')).not.toBeNull();
+});
+
+it('só o chat no tablet deitado desliga a animação de navegação', async () => {
+  await act(async () => root.render(createElement(Layout)));
+  const stack = host.querySelector('[data-stack]');
+  const chatOptions = () => JSON.parse(host.querySelector('[data-screen="s/[server]/[name]/index"]')!.getAttribute('data-options') ?? '{}');
+  expect(chatOptions().animation).toBe('none');
+  expect(host.querySelector('[data-navigation-background]')?.getAttribute('data-navigation-background')).toBe('transparent');
+  expect(JSON.parse(host.querySelector('[data-screen="s/[server]/[name]/files"]')!.getAttribute('data-options')!).presentation).toBe('formSheet');
+  expect(JSON.parse(host.querySelector('[data-screen="s/[server]/[name]/files"]')!.getAttribute('data-options')!).contentStyle.backgroundColor).toBe('#123456');
+  h.size = { ...h.size, width: 820, height: 1180 };
+  await act(async () => root.render(createElement(Layout)));
+  expect(chatOptions().animation).toBeUndefined();
+  expect(host.querySelector('nav')).toBeNull();
+  expect(host.querySelector('[data-stack]')).toBe(stack);
+  expect(host.querySelector('[data-navigation-background]')?.getAttribute('data-navigation-background')).toBe('#123456');
+});
+
+it('o painel real mantém a estrutura ao trocar de sessão e volta a Contexto', async () => {
+  const { ContextPanel } = await vi.importActual<typeof import('./ContextPanel')>('./ContextPanel');
+  await act(async () => root.render(createElement(ContextPanel, { serverId: 'srv', name: 'a' })));
+  const tabs = host.querySelector('[role="tablist"]');
+  const panel = host.querySelector('aside');
+  click(m.tablet_tab_git());
+  const content = host.querySelector('[data-git-session="a"]');
+  expect(content).not.toBeNull();
+  await act(async () => root.render(createElement(ContextPanel, { serverId: 'srv', name: 'b' })));
+  expect(host.querySelector('aside')).toBe(panel);
+  expect(host.querySelector('[role="tablist"]')).toBe(tabs);
+  expect(host.querySelector('[data-context-session="b"]')).not.toBeNull();
+  expect(host.querySelector('[data-git-session]')).toBeNull();
+  expect(host.querySelector('[data-git-session="a"]')).toBeNull();
 });

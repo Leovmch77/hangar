@@ -2,7 +2,7 @@ import 'react-native-url-polyfill/auto';
 import '../src/theme/unistyles';
 import { useEffect } from 'react';
 import { AppState, Dimensions, Platform, type AppStateStatus } from 'react-native';
-import { Stack, useRouter, useSegments } from 'expo-router';
+import { Stack, ThemeProvider, useGlobalSearchParams, usePathname, useRouter, useSegments, useTheme } from 'expo-router';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 // Sem o KeyboardProvider, KeyboardStickyView/KeyboardChatScrollView lançam em runtime
 import { KeyboardProvider } from 'react-native-keyboard-controller';
@@ -14,6 +14,7 @@ import { setQueueDeliveryForeground } from '../src/chat/useQueueDelivery';
 import { setMachineDiscovery, useSessions } from '../src/stores/sessions';
 import { aplicarTemaSalvo, setTabletTextScale, useAparencia } from '../src/stores/aparencia';
 import { isTabletLandscape, useTabletLandscape } from '../src/features/tablet/layout';
+import { TabletShell } from '../src/features/tablet/TabletShell';
 import { aplicarMaterial } from '../src/theme/aplicarMaterial';
 import { Toaster, toast } from '../src/ui/Toast';
 import { LiveVoiceRoot } from '../src/features/voice/LiveVoiceRoot';
@@ -44,6 +45,18 @@ function TabletTextScaleSync() {
 export default function Layout() {
   const router = useRouter();
   const segments = useSegments();
+  const pathname = usePathname();
+  const params = useGlobalSearchParams<{ server?: string | string[]; name?: string | string[] }>();
+  const tablet = useTabletLandscape();
+  const navigationTheme = useTheme();
+  const windowTheme = tablet ? { ...navigationTheme, colors: { ...navigationTheme.colors, background: 'transparent' } } : navigationTheme;
+  const sheetOptions = {
+    presentation: 'formSheet' as const, headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true,
+    ...(tablet ? { contentStyle: { backgroundColor: navigationTheme.colors.background } } : {}),
+  };
+  const serverId = Array.isArray(params.server) ? params.server[0] : params.server;
+  const name = Array.isArray(params.name) ? params.name[0] : params.name;
+  const selected = pathname.startsWith('/s/') && serverId && name ? { serverId, name } : undefined;
   setFatalErrorRoute(segments);
   const ready = useServers((s) => s.ready);
   const servers = useServers((s) => s.servers);
@@ -120,6 +133,8 @@ export default function Layout() {
     <KeyboardProvider>
       <TabletTextScaleSync />
       <GestureHandlerRootView style={{ flex: 1 }}>
+        <TabletShell active={tablet} selected={selected}>
+        <ThemeProvider value={windowTheme}>
         <Stack screenOptions={{ headerShown: false }}>
           {/* Android: o formSheet sobe a folha com o teclado (o KeyboardAvoidingView compensava de novo)
               e retém os eventos de animação do teclado, e aí a folha de Opções nunca abria. */}
@@ -127,31 +142,33 @@ export default function Layout() {
             name="create"
             options={Platform.OS === 'android'
               ? { presentation: 'card', headerShown: false }
-              : { presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }}
+              : sheetOptions}
           />
           {/* Página inteira, como no desktop: são várias páginas com ida e volta, e na folha arrastar fechava tudo. */}
           <Stack.Screen name="config" options={{ headerShown: false }} />
           <Stack.Screen name="costs" options={{ presentation: 'card', headerShown: false }} />
           <Stack.Screen name="stats" options={{ presentation: 'card', headerShown: false }} />
           {/* A borda esquerda do chat é o voltar do iOS; a gaveta abre mais para dentro (SessionsDrawer `edgeStart`). */}
-          <Stack.Screen name="s/[server]/[name]/index" />
+          <Stack.Screen name="s/[server]/[name]/index" options={tablet ? { animation: 'none' } : {}} />
           {/* Página inteira, como a do T3: voltar pelo cabeçalho e pelo gesto. */}
           <Stack.Screen name="s/[server]/[name]/page" options={{ headerShown: false }} />
-          <Stack.Screen name="s/[server]/[name]/ask" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
-          <Stack.Screen name="s/[server]/[name]/activity" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
-          <Stack.Screen name="s/[server]/[name]/orchestration" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
-          <Stack.Screen name="s/[server]/[name]/loop" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
-          <Stack.Screen name="s/[server]/[name]/pair" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
-          <Stack.Screen name="s/[server]/[name]/files" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
+          <Stack.Screen name="s/[server]/[name]/ask" options={sheetOptions} />
+          <Stack.Screen name="s/[server]/[name]/activity" options={sheetOptions} />
+          <Stack.Screen name="s/[server]/[name]/orchestration" options={sheetOptions} />
+          <Stack.Screen name="s/[server]/[name]/loop" options={sheetOptions} />
+          <Stack.Screen name="s/[server]/[name]/pair" options={sheetOptions} />
+          <Stack.Screen name="s/[server]/[name]/files" options={sheetOptions} />
           <Stack.Screen name="s/[server]/[name]/git" options={Platform.OS === 'android'
             ? { presentation: 'card', headerShown: true }
-            : { presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
-          <Stack.Screen name="s/[server]/[name]/account" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
-          <Stack.Screen name="s/[server]/[name]/terminal" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
-          <Stack.Screen name="s/[server]/[name]/attachments" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
-          <Stack.Screen name="s/[server]/[name]/codex-limits" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
-          <Stack.Screen name="s/[server]/[name]/bastao" options={{ presentation: 'formSheet', headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true }} />
+            : sheetOptions} />
+          <Stack.Screen name="s/[server]/[name]/account" options={sheetOptions} />
+          <Stack.Screen name="s/[server]/[name]/terminal" options={sheetOptions} />
+          <Stack.Screen name="s/[server]/[name]/attachments" options={sheetOptions} />
+          <Stack.Screen name="s/[server]/[name]/codex-limits" options={sheetOptions} />
+          <Stack.Screen name="s/[server]/[name]/bastao" options={sheetOptions} />
         </Stack>
+        </ThemeProvider>
+        </TabletShell>
         <LiveVoiceRoot />
         <Toaster position="top-center" />
       </GestureHandlerRootView>

@@ -14,7 +14,7 @@ export default function CreateRoute() {
     else router.replace('/');
   };
   return (
-    <Screen>
+    <Screen independent>
       <KeyboardAvoidingView behavior="padding" automaticOffset style={styles.wrap}>
         {segments[0] === 'create' ? <CreateSessionSheet layout="form" onClose={close} /> : <View />}
       </KeyboardAvoidingView>

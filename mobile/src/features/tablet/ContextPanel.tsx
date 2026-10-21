@@ -18,12 +18,11 @@ const tabs: { value: Tab; label: () => string }[] = [
   { value: 'git', label: () => m.tablet_tab_git() },
 ];
 
-export function ContextPanel(props: Props) {
-  return <SessionPanel key={`${props.serverId}::${props.name}`} {...props} />;
-}
-
-function SessionPanel({ serverId, name }: Props) {
-  const [tab, setTab] = useState<Tab>('context');
+export function ContextPanel({ serverId, name }: Props) {
+  const sessionKey = `${serverId}::${name}`;
+  const [selection, setSelection] = useState<{ key: string; tab: Tab }>({ key: sessionKey, tab: 'context' });
+  if (selection.key !== sessionKey) setSelection({ key: sessionKey, tab: 'context' });
+  const tab = selection.key === sessionKey ? selection.tab : 'context';
   const ready = useServers((s) => s.ready);
   const server = useServers((s) => s.servers.find((item) => item.id === serverId));
 
@@ -31,12 +30,12 @@ function SessionPanel({ serverId, name }: Props) {
     <Glass variant="panel" style={styles.panel}>
       <View style={styles.tabs} accessibilityRole="tablist">
         {tabs.map((item) => <Pressable key={item.value} accessibilityRole="tab" accessibilityLabel={item.label()}
-          accessibilityState={{ selected: tab === item.value }} onPress={() => setTab(item.value)}
+          accessibilityState={{ selected: tab === item.value }} onPress={() => setSelection({ key: sessionKey, tab: item.value })}
           style={[styles.tab, tab === item.value && styles.selectedTab]}>
           <Text style={[styles.tabLabel, tab === item.value && styles.selectedLabel]}>{item.label()}</Text>
         </Pressable>)}
       </View>
-      <View style={styles.body}>
+      <View key={sessionKey} style={styles.body}>
         {tab === 'context' ? <ContextTab serverId={serverId} name={name} />
           : !ready ? <View style={styles.feedback}><ActivityIndicator accessibilityLabel={m.comum_carregando()} /></View>
           : !server ? <View style={styles.feedback}><Text style={styles.error} accessibilityRole="alert">{m.chat_servidor_removido()}</Text></View>

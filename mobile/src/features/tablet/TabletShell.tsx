@@ -35,7 +35,7 @@ export function TabletShell({ selected, children, active = true }: Props) {
   ) : null;
 
   return (
-    <Screen edges={active ? undefined : []}>
+    <Screen edges={active ? undefined : []} background={active}>
       {active ? <View style={styles.top}>
         {collapsed && placement !== 'left' ? <Pressable onPress={toggleCollapsed} accessibilityRole="button"
           accessibilityLabel={m.tablet_bar_expand()} accessibilityState={{ expanded: false }} style={styles.button}>

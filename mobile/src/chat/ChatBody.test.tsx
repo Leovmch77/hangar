@@ -26,6 +26,11 @@ vi.mock('react-native', async (original) => ({
 vi.mock('expo-router', () => ({
   useRouter: () => h.router, useIsFocused: () => true,
   useLocalSearchParams: () => ({ server: 'srv', name: 'chat' }),
+  useGlobalSearchParams: () => ({ server: 'srv', name: 'chat' }),
+  usePathname: () => '/s/srv/chat', useSegments: () => ['s', '[server]', '[name]'],
+  useTheme: () => ({ colors: { background: '#fff' } }),
+  ThemeProvider: ({ children }: { children: ReactNode }) => children,
+  Stack: Object.assign(() => createElement(ChatScreen), { Screen: () => null }),
   useNavigation: () => h.navigation, useRoute: () => ({ key: 'chat' }),
   useFocusEffect: (effect: () => void | (() => void)) => useEffect(effect, [effect]),
 }));
@@ -38,15 +43,16 @@ vi.mock('../stores/chat', () => {
     stateEvent: { session: 'chat', state: 'idle' }, askOpen: false,
   }));
   const chat = { use, retain: h.retain, release: h.release };
-  return { chatStore: () => chat };
+  return { chatStore: () => chat, setChatsForeground: () => {} };
 });
 vi.mock('../stores/servers', () => {
-  const state = { ready: true, servers: [{ id: 'srv', label: 'local' }], ensureActive: () => true, ensureOwnActive: () => {} };
+  const state = { ready: true, servers: [{ id: 'srv', label: 'local' }], ensureActive: () => true, ensureOwnActive: () => {},
+    load: async () => {}, limparAviso: () => {}, aviso: null };
   return { useServers: Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state }) };
 });
 vi.mock('../stores/sessions', () => {
-  const state = { rows: [h.session], retain: () => () => {} };
-  return { useSessions: Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state }) };
+  const state = { rows: [h.session], retain: () => () => {}, setForeground: () => {} };
+  return { setMachineDiscovery: () => {}, useSessions: Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state }) };
 });
 vi.mock('../stores/newConversation', () => ({
   useNewConversation: (select: (s: unknown) => unknown) => select({ attempts: {}, busy: {}, issues: {} }),
@@ -54,9 +60,28 @@ vi.mock('../stores/newConversation', () => ({
 }));
 vi.mock('../features/voice/liveVoiceStore', () => ({ useLiveVoice: { getState: () => ({ registerChat: () => () => {} }) } }));
 vi.mock('../features/activity/useActivity', () => ({ useActivity: () => ({ agents: [] }) }));
-vi.mock('../ui/Screen', () => ({ Screen: ({ children }: { children: ReactNode }) => children }));
+vi.mock('expo-blur', () => ({ BlurTargetView: ({ children, ref }: { children: ReactNode; ref: React.Ref<HTMLDivElement> }) =>
+  createElement('div', { ref }, children) }));
+vi.mock('../ui/Background', () => ({ Background: () => createElement('div', { 'data-wallpaper': true }) }));
+vi.mock('react-native-url-polyfill/auto', () => ({}));
+vi.mock('../theme/unistyles', () => ({}));
+vi.mock('../theme/aplicarMaterial', () => ({ aplicarMaterial: () => {} }));
+vi.mock('../net/configureCore', () => ({ configureCore: () => {} }));
+vi.mock('../features/machines/importMachines', () => ({ discoverSavedMachines: () => {} }));
+vi.mock('./useQueueDelivery', () => ({ setQueueDeliveryForeground: () => {} }));
+vi.mock('../net/fatalErrors', () => ({ setFatalErrorRoute: () => {}, takeFatalErrorNotice: () => false }));
+vi.mock('../features/push/expoPush', () => ({ installNotificationHandler: () => {}, pushRegistrationKey: () => '',
+  registerExpoPush: async () => {}, retryExpoPushIfDenied: async () => {}, useNotificationNavigation: () => {} }));
+vi.mock('../features/voice/LiveVoiceRoot', () => ({ LiveVoiceRoot: () => null }));
+vi.mock('../ui/Toast', () => ({ Toaster: () => null, toast: { aviso: vi.fn(), erro: vi.fn() } }));
+vi.mock('../stores/aparencia', () => {
+  const state = { idioma: 'pt' };
+  return { aplicarTemaSalvo: () => {}, setTabletTextScale: () => {},
+    useAparencia: Object.assign((select: (s: typeof state) => unknown) => select(state), { getState: () => state }) };
+});
 vi.mock('react-native-gesture-handler', () => ({
   GestureDetector: ({ children }: { children: ReactNode }) => children,
+  GestureHandlerRootView: ({ children }: { children: ReactNode }) => children,
   Gesture: {
     Pan: () => {
       const pan = { enabled: () => pan, runOnJS: () => pan, hitSlop: () => pan, activeOffsetX: () => pan, failOffsetY: () => pan, onEnd: () => pan };
@@ -88,7 +113,8 @@ vi.mock('../stores/tabletPrefs', () => {
   return { useTabletPrefs };
 });
 vi.mock('../features/sessions/ServerSheet', () => ({ ServerSheet: () => null }));
-vi.mock('react-native-keyboard-controller', () => ({ KeyboardAvoidingView: ({ children }: { children: ReactNode }) => children }));
+vi.mock('react-native-keyboard-controller', () => ({ KeyboardAvoidingView: ({ children }: { children: ReactNode }) => children,
+  KeyboardProvider: ({ children }: { children: ReactNode }) => children }));
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('../ui/EdgeButton', () => ({ EdgeButton: ({ children, onPress, accessibilityLabel }: { children: ReactNode; onPress: () => void; accessibilityLabel: string }) =>
   createElement('button', { onClick: onPress, 'aria-label': accessibilityLabel }, children) }));
@@ -129,6 +155,7 @@ import ChatScreen from '../../app/s/[server]/[name]/index';
 import { ChatBody } from './ChatBody';
 import * as m from '../paraglide/messages';
 import { useTabletPrefs } from '../stores/tabletPrefs';
+import Layout from '../../app/_layout';
 
 let root: Root;
 let host: HTMLDivElement;
@@ -145,7 +172,7 @@ afterEach(() => act(() => root.unmount()));
 
 it.each(['android', 'ios'])('%s: girar e estreitar a janela conserva o ChatBody, o rascunho e a conexão', async os => {
   h.os = os;
-  await act(async () => root.render(createElement(ChatScreen)));
+  await act(async () => root.render(createElement(Layout)));
   expect(host.querySelector('[data-body-instance]')).not.toBeNull();
   const instance = host.querySelector('[data-body-instance]')!.getAttribute('data-body-instance');
   const field = host.querySelector('textarea')!;
@@ -156,9 +183,10 @@ it.each(['android', 'ios'])('%s: girar e estreitar a janela conserva o ChatBody,
   expect(field.value).toBe('rascunho ao girar');
   for (const size of [{ width: 1180, height: 820 }, { width: 507, height: 820 }, { width: 820, height: 1180 }]) {
     h.size = { ...h.size, ...size };
-    await act(async () => root.render(createElement(ChatScreen)));
+    await act(async () => root.render(createElement(Layout)));
     const tablet = size.width === 1180;
     expect(host.querySelector('[data-tablet-bar]') !== null).toBe(tablet);
+    expect(host.querySelectorAll('[data-tablet-bar]')).toHaveLength(tablet ? 1 : 0);
     expect(host.querySelector('[data-drawer-enabled]')!.getAttribute('data-drawer-enabled')).toBe(String(!tablet));
     expect(host.querySelector('[data-drawer-navigation]')!.getAttribute('data-drawer-navigation')).toBe(String(!tablet));
     expect(host.querySelector('[data-body-instance]')!.getAttribute('data-body-instance')).toBe(instance);
@@ -166,6 +194,8 @@ it.each(['android', 'ios'])('%s: girar e estreitar a janela conserva o ChatBody,
     expect(host.querySelector('textarea')!.value).toBe('rascunho ao girar');
     expect(h.retain).toHaveBeenCalledTimes(1);
     expect(h.release).not.toHaveBeenCalled();
+    expect(h.bodyMounts).toBe(1);
+    expect(host.querySelectorAll('[data-wallpaper]')).toHaveLength(1);
   }
 });
 
@@ -192,7 +222,7 @@ it('cabeçalho de tablet troca a navegação pelo painel sem remontar o campo', 
 
 it('a rota transmite painel aberto e limita a leitura só ao fechar o painel no tablet', async () => {
   h.size = { ...h.size, width: 1180, height: 820 };
-  await act(async () => root.render(createElement(ChatScreen)));
+  await act(async () => root.render(createElement(Layout)));
   const panel = () => host.querySelector(`[aria-label="${m.ctx_painel_titulo()}"]`);
   expect(panel()?.getAttribute('aria-expanded')).toBe('true');
   expect(host.querySelector('section')?.getAttribute('data-max-reading')).toBeNull();
@@ -201,6 +231,6 @@ it('a rota transmite painel aberto e limita a leitura só ao fechar o painel no 
   expect(host.querySelector('aside')).toBeNull();
   expect(host.querySelector('section')?.getAttribute('data-max-reading')).toBe('760');
   h.size = { ...h.size, width: 390, height: 844 };
-  await act(async () => root.render(createElement(ChatScreen)));
+  await act(async () => root.render(createElement(Layout)));
   expect(host.querySelector('section')?.getAttribute('data-max-reading')).toBeNull();
 });

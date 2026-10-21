@@ -4,7 +4,7 @@ import { useIsFocused, useLocalSearchParams, useNavigation, useRoute, useRouter 
 import { ChatBody } from '../../../../src/chat/ChatBody';
 import { SessionsDrawer } from '../../../../src/features/sessions/SessionsDrawer';
 import { ServerSheet } from '../../../../src/features/sessions/ServerSheet';
-import { TabletShell } from '../../../../src/features/tablet/TabletShell';
+import { Screen } from '../../../../src/ui/Screen';
 import { useTabletLandscape } from '../../../../src/features/tablet/layout';
 import { useTabletPrefs } from '../../../../src/stores/tabletPrefs';
 import { READING_MAX } from '../../../../src/chat/conversationColumn';
@@ -31,7 +31,7 @@ export default function ChatScreen() {
 
   return (
     <WorkingMarkPaused.Provider value={!focused}>
-    <TabletShell selected={{ serverId, name }} active={tablet}>
+    <Screen edges={[]}>
       <SessionsDrawer enabled={!tablet} edgeStart={Platform.OS === 'ios' ? IOS_BACK_EDGE : undefined} onClose={() => router.dismissTo('/')} onOpenServers={() => setServersOpen(true)}>
         <ChatBody key={`${serverId}::${name}`} serverId={serverId} name={name}
                   header={tablet ? 'tablet' : 'phone'} panelOpen={panelOpen} onTogglePanel={togglePanel}
@@ -39,7 +39,7 @@ export default function ChatScreen() {
                   askFallback={params.askFallback} onBack={onBack} deepStack={deepStack} />
       </SessionsDrawer>
       <ServerSheet open={serversOpen} onFechar={() => setServersOpen(false)} />
-    </TabletShell>
+    </Screen>
     </WorkingMarkPaused.Provider>
   );
 }

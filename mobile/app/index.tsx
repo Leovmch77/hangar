@@ -5,7 +5,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useFocusEffect, useIsFocused, useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DrawerLayoutMethods } from 'react-native-gesture-handler/ReanimatedDrawerLayout';
-import { TabletShell } from '../src/features/tablet/TabletShell';
+import { Screen } from '../src/ui/Screen';
 import { useTabletLandscape } from '../src/features/tablet/layout';
 import { WorkingMarkPaused } from '../src/ui/WorkingMark';
 import { Icon } from '../src/ui/Icon';
@@ -76,7 +76,7 @@ export default function Index() {
   // Com o chat por cima, as marcas desta tela param.
   return (
     <WorkingMarkPaused.Provider value={!focused}>
-    <TabletShell active={tablet}>
+    <Screen edges={[]}>
       <SessionsDrawer ref={drawer} enabled={!tablet} openOnBack={mode === 'sessions'} onClose={closeDrawer} onOpenServers={() => setServersOpen(true)}>
         {!tablet ? <View style={styles.bar} {...swipe.panHandlers}>
           <EdgeButton onPress={mode === 'newConversation' ? showSessions : openDrawer} style={styles.sessions}
@@ -96,7 +96,7 @@ export default function Index() {
             sessions: tablet ? null : <SessionList variant="home" onClose={closeDrawer} onOpenServers={() => setServersOpen(true)} /> }} />
       </SessionsDrawer>
       <ServerSheet open={serversOpen} onFechar={() => setServersOpen(false)} />
-    </TabletShell>
+    </Screen>
     </WorkingMarkPaused.Provider>
   );
 }
