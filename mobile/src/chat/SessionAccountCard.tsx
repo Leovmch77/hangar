@@ -7,9 +7,9 @@ import { accountFolder } from './sessionAccountOptions';
 import * as m from '../paraglide/messages';
 
 type Props = { label: string; context?: string | null; credential?: Credencial; path?: string; pct?: number | null;
-  full?: boolean; unconfirmed?: boolean; current?: boolean; disabled?: boolean; onPress?: () => void };
+  full?: boolean; unconfirmed?: boolean; noLogin?: boolean; current?: boolean; disabled?: boolean; onPress?: () => void };
 
-export function SessionAccountCard({ label, context, credential, path, pct, full, unconfirmed, current, disabled, onPress }: Props) {
+export function SessionAccountCard({ label, context, credential, path, pct, full, unconfirmed, noLogin, current, disabled, onPress }: Props) {
   const { theme } = useUnistyles();
   const quota = credential?.cota;
   const windows = quota?.estado === 'lida' ? quota.janelas.filter(w => Number.isFinite(w.pct)) : [];
@@ -31,7 +31,7 @@ export function SessionAccountCard({ label, context, credential, path, pct, full
     const when = date ? [reset, date.toLocaleString(intlLocale(), { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })].filter(Boolean).join(' · ') : '';
     return { ...window, resetLabel: when ? m.mobile_accounts_quota_reset({ when }) : m.mobile_account_reset_unknown() };
   });
-  const spoken = [email, folder, plan, exhausted ? m.mobile_account_exhausted() : '', loginNote,
+  const spoken = [email, folder, plan, exhausted ? m.mobile_account_exhausted() : '', noLogin ? m.conta_sem_login_rotulo() : '', loginNote,
     ...windowDetails.map(w => `${w.rotulo} ${Math.round(w.pct)}%, ${w.resetLabel}`),
     !windows.length ? quotaNote : '', reason, loginReason].filter(Boolean).join(', ');
   const body = <>
@@ -49,9 +49,10 @@ export function SessionAccountCard({ label, context, credential, path, pct, full
       </View>
       {!current && onPress ? <Icon name="ChevronRight" size={18} color={theme.tokens.text.muted} /> : null}
     </View>
-    {plan || exhausted || unconfirmed ? <View style={styles.tags}>
+    {plan || exhausted || noLogin || unconfirmed ? <View style={styles.tags}>
       {plan ? <Text style={styles.plan}>{plan}</Text> : null}
       {exhausted ? <Text style={[styles.status, { color: theme.tokens.status.error }]}>{m.mobile_account_exhausted()}</Text> : null}
+      {noLogin ? <Text style={[styles.status, { color: theme.tokens.status.error }]}>{m.conta_sem_login_rotulo()}</Text> : null}
       {unconfirmed ? <Text style={[styles.status, { color: theme.tokens.status.warning }]}>{loginNote}</Text> : null}
     </View> : null}
     {windowDetails.map((window, index) => {
@@ -71,7 +72,7 @@ export function SessionAccountCard({ label, context, credential, path, pct, full
     {reason ? <Text style={styles.warning}>{reason}</Text> : null}
     {loginReason ? <Text style={styles.warning}>{loginReason}</Text> : null}
   </>;
-  const card = [styles.card, { backgroundColor: superficie(theme, 0.4) }, current && styles.active, exhausted && !current && styles.exhausted];
+  const card = [styles.card, { backgroundColor: superficie(theme, 0.4) }, current && styles.active, (exhausted || noLogin) && !current && styles.exhausted];
   return onPress ? <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityHint={[email, folder].filter(Boolean).join(', ')}
     accessibilityValue={{ text: spoken }} accessibilityState={{ disabled: !!disabled }} disabled={disabled} onPress={onPress}
     style={({ pressed }) => [...card, pressed && styles.pressed]}>{body}</Pressable> : <View style={card}>{body}</View>;

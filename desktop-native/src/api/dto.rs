@@ -116,6 +116,8 @@ pub struct SessionInfo {
     pub pair_gid: Option<String>,
     /// Tarefa do grupo (ex: ABC-1234 …), o rótulo do cabeçalho do bloco.
     pub pair_task: Option<String>,
+    /// Identificador da máquina dona do grupo entre máquinas; `None` = grupo de uma máquina só.
+    #[serde(default)] pub pair_owner: Option<String>,
     /// Sessão que abriu esta como filha ligada; o servidor só manda se ela está em `pair_peers`.
     #[serde(default)] pub linked_by: Option<String>,
     /// Há convite ativo desta sessão (pendente ou já usado): o 🔗 da linha.
@@ -203,10 +205,7 @@ pub struct PairResult { pub warning: Option<String> }
 
 impl PairResult {
     pub fn from_value(value: &Value) -> Self {
-        let warning = value.get("warning").filter(|w| !w.is_null()).map(|w| match w {
-            Value::String(text) => text.clone(),
-            _ => w.get("msg").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| w.to_string()),
-        });
+        let warning = value.get("warning").filter(|w| !w.is_null()).map(super::warning_text);
         Self { warning }
     }
 }

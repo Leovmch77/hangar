@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from app import list_bridge, pair, prune, registry, runtime_coordinator, sse, stall_watch
+from app import list_bridge, prune, registry, runtime_coordinator, sse, stall_watch
 from app.models import SessionInfo
 from app.registry import SessionRegistry
 
@@ -191,28 +191,3 @@ def test_guest_list_filters_bridge_snapshot(rust, guest_ana, monkeypatch):
     response = client.get("/api/sessions", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "erro_lista_indisponivel"
-
-
-def test_dead_pair_sweep_outside_discovery(tmp_path, monkeypatch):
-    monkeypatch.setattr(pair.settings, "projects_dir", tmp_path / "projects")
-    monkeypatch.setattr(SessionRegistry, "_pair_ausencias", {})
-    monkeypatch.setattr(SessionRegistry, "_varrer_pares_mortos", _no_python)
-    monkeypatch.setattr(registry.tmux, "list_panes_all", lambda: {})
-    monkeypatch.setattr(registry, "_proc_children_map", lambda: {})
-    monkeypatch.setattr(registry.codex_sessions, "list_all", lambda **_k: [])
-    monkeypatch.setattr(registry.headless_sessions, "list_all", lambda: [])
-    monkeypatch.setattr(registry.orq_runs, "active", lambda: [])
-    assert SessionRegistry().list() == []
-    monkeypatch.undo()
-    monkeypatch.setattr(pair.settings, "projects_dir", tmp_path / "projects")
-    monkeypatch.setattr(SessionRegistry, "_pair_ausencias", {})
-    pair.join("a", "b")
-    left = []
-    monkeypatch.setattr(registry, "pair_leave", lambda n: left.append(n) or [])
-    # Lista que falha não é "ninguém vivo": levanta antes de varrer.
-    with pytest.raises(list_bridge.ListBridgeError):
-        SessionRegistry().sweep_pairs(_down, agora=10_000.0)
-    with pytest.raises(list_bridge.ListBridgeError):
-        SessionRegistry().sweep_pairs(_down, agora=20_000.0)
-    assert left == []
-    assert pair.PairLink("a").get() is not None

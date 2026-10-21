@@ -1,71 +1,61 @@
 import { describe, expect, it } from 'vitest';
-import { groupRemotePairs } from './pairGroups';
+import { groupBadges, groupGlobal, pairTargets, ticketCode } from './pairGroups';
 import type { AggSession } from './types';
+import fixtures from './pairGroups.fixtures.json';
 
-const session = (serverId: string, name: string, peers: string[], extra: Partial<AggSession> = {}): AggSession => ({
-  serverId, name, serverLabel: serverId, serverColor: '#123', state: 'idle', pair_peers: peers, ...extra,
+type FixtureRow = { server: string; invite?: boolean; [field: string]: unknown };
+const fixtureRow = ({ server, invite, ...rest }: FixtureRow) =>
+  ({ serverId: server, serverLabel: server, serverColor: '#123', state: 'idle', serverInvite: invite, ...rest }) as unknown as AggSession;
+
+describe('groupGlobal (fixture compartilhada com o nativo)', () => {
+  it.each(fixtures.groups.map((c) => [c.name, c] as const))('%s', (_name, c) => {
+    const identities = new Map(Object.entries((c as { identities?: Record<string, string> }).identities ?? fixtures.defaultIdentities));
+    expect(groupGlobal(c.rows.map(fixtureRow), identities)).toEqual(c.groups);
+  });
+
+  it('a linha de fora (convite) não forma grupo próprio: o membro vem do par da sessão local', () => {
+    const local = fixtureRow({ server: 'srv-a', name: 'x', pair_gid: 'g1', pair_peers: ['ana::Y'],
+      pair_externals: [{ alias: 'ana', owner: 'Ana', session: 'Y', address: 'https://ana.ts.net:8443', level: 'view', pending: false }] });
+    const fora = { ...fixtureRow({ server: 'convite', name: 'Y', pair_gid: 'g1' }),
+      outside: { alias: 'ana', owner: 'Ana', localServerId: 'srv-a', localSession: 'x' } };
+    expect(groupGlobal([local, fora], new Map([['srv-a', 'casa']]))).toEqual([{ key: 'local:srv-a/g1', label: 'x', members: [
+      { kind: 'here', server: 'srv-a', name: 'x' }, { kind: 'outside', alias: 'ana', session: 'Y' }] }]);
+  });
 });
-const identities = new Map([['srv-a', 'notebook-jefferson'], ['srv-b', 'delphi-02']]);
-const local = session('srv-a', 'jefferson-2', ['delphi-02::setup-vm'], { pair_gid: 'b745f21b', pair_task: '  Ajustar VM  ' });
-const remote = session('srv-b', 'setup-vm', ['notebook-jefferson::jefferson-2'], { pair_gid: '3881e52a' });
 
-describe('groupRemotePairs', () => {
-  it('une pares recíprocos com gids diferentes sem alterar as sessões', () => {
-    const result = groupRemotePairs([local, remote], identities);
-    expect(result.groups).toEqual([{
-      id: 'remote:["srv-a::jefferson-2","srv-b::setup-vm"]', label: 'Ajustar VM', sessions: [local, remote],
-    }]);
-    expect(result.unpaired).toEqual([]);
-    expect(result.groups[0].sessions[0]).toBe(local);
-    expect(local.pair_gid).toBe('b745f21b');
-    expect(remote.pair_gid).toBe('3881e52a');
-    expect(groupRemotePairs([remote, local], identities).groups[0].id).toBe(result.groups[0].id);
+const row = (name: string, extra: Partial<AggSession> = {}) => ({ name, state: 'idle', serverId: 's1', serverLabel: 'casa', serverColor: '#000', ...extra }) as AggSession;
+const ids = new Map([['s1', 'casa'], ['s2', 'lab']]);
+
+describe('selo do grupo entre máquinas', () => {
+  it('código do ticket como o split_code do nativo', () => {
+    expect(ticketCode('ABC-1234 tela X')).toBe('ABC-1234');
+    expect(ticketCode('PM-12')).toBe('PM-12');
+    expect(ticketCode('PM-12x')).toBeNull();
+    expect(ticketCode('tela nova')).toBeNull();
   });
 
-  it('mantém a homônima de outro servidor fora do par', () => {
-    const other = session('srv-c', 'setup-vm', ['notebook-jefferson::jefferson-2']);
-    const result = groupRemotePairs([other, local, remote], new Map([...identities, ['srv-c', 'outro']]));
-    expect(result.groups[0].sessions).toEqual([local, remote]);
-    expect(result.unpaired).toEqual([other]);
+  it('grupo de uma máquina só não ganha selo, nem com dona definida', () => {
+    const a = row('a', { pair_gid: 'g', pair_owner: 'casa', pair_peers: ['b'] });
+    const b = row('b', { pair_gid: 'g', pair_owner: 'casa', pair_peers: ['a'] });
+    expect(groupBadges([a, b], ids).size).toBe(0);
   });
 
-  it.each([
-    new Map([['srv-a', 'notebook-jefferson']]),
-    new Map([['srv-b', 'delphi-02']]),
-    new Map([...identities, ['srv-c', 'delphi-02']]),
-    new Map([...identities, ['srv-c', 'notebook-jefferson']]),
-  ])('não adivinha identidade ausente ou ambígua', (known) => {
-    expect(groupRemotePairs([local, remote], known)).toEqual({ groups: [], unpaired: [local, remote] });
+  it('conta as máquinas pelo modelo global, sem o membro de fora, e prefere o ticket', () => {
+    const externals = [{ alias: 'ana', owner: 'Ana', session: 'web', address: 'https://x.ts.net:8443', level: 'view' as const, pending: false }];
+    const a = row('a', { pair_gid: 'g', pair_owner: 'casa', pair_peers: ['b', 'lab::c', 'vm::d', 'ana::web'], pair_externals: externals, pair_task: 'tela X' });
+    const c = row('c', { serverId: 's2', serverLabel: 'lab', pair_gid: 'g', pair_owner: 'casa', pair_peers: ['casa::a', 'casa::b', 'vm::d'] });
+    expect(groupBadges([a, c], ids)).toEqual(new Map([['s1::a', { text: null, machines: 3 }], ['s2::c', { text: null, machines: 3 }]]));
+    expect(groupBadges([{ ...a, pair_task: 'PM-7 tela' }, c], ids).get('s2::c')).toEqual({ text: 'PM-7', machines: 3 });
+  });
+});
+
+describe('pairTargets', () => {
+  it('qualifica só quem é de outra máquina', () => {
+    expect(pairTargets(['s1::b', 's2::z'], 's1', ids)).toEqual({ names: ['b', 'lab::z'], unresolved: [] });
   });
 
-  it('mantém membro remoto ausente na lista original', () => {
-    expect(groupRemotePairs([local], identities)).toEqual({ groups: [], unpaired: [local] });
-  });
-
-  it.each([[], ['notebook-jefferson::outra'], ['notebook-jefferson::jefferson-2', 'mais-um']].map(peers => ({ peers })))(
-    'recusa vínculo não recíproco ou que não seja 1:1', ({ peers }) => {
-      const other = { ...remote, pair_peers: peers };
-      expect(groupRemotePairs([local, other], identities)).toEqual({ groups: [], unpaired: [local, other] });
-    },
-  );
-
-  it('não agrupa pares locais nem usa gid igual para unir servidores', () => {
-    const rows = [
-      session('srv-a', 'front', ['back'], { pair_gid: 'same' }),
-      session('srv-a', 'back', ['front'], { pair_gid: 'same' }),
-      session('srv-b', 'front', ['back'], { pair_gid: 'same' }),
-    ];
-    expect(groupRemotePairs(rows, identities)).toEqual({ groups: [], unpaired: rows });
-  });
-
-  it('recusa sessões duplicadas no destino', () => {
-    const rows = [local, remote, { ...remote }];
-    expect(groupRemotePairs(rows, identities)).toEqual({ groups: [], unpaired: rows });
-  });
-
-  it('usa a primeira tarefa preenchida ou os nomes quando não há tarefa', () => {
-    const first = { ...local, pair_task: ' ' };
-    expect(groupRemotePairs([first, { ...remote, pair_task: '  VM  ' }], identities).groups[0].label).toBe('VM');
-    expect(groupRemotePairs([first, remote], identities).groups[0].label).toBe('jefferson-2, setup-vm');
+  it('máquina sem identificador válido não vai como undefined::nome: a escolha sai do pedido', () => {
+    expect(pairTargets(['s1::b', 's3::w'], 's1', ids)).toEqual({ names: ['b'], unresolved: ['s3::w'] });
+    expect(pairTargets(['s2::z'], 's1', new Map([['s1', 'casa'], ['s2', 'casa']]))).toEqual({ names: [], unresolved: ['s2::z'] });
   });
 });

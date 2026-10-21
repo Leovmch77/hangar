@@ -92,13 +92,21 @@ async fn routes_answer_like_python() {
         let before = input_hits(&srv.python, &names);
         let (status, body) = call(srv.addr, step["method"].as_str().unwrap(), step["path"].as_str().unwrap(), step.get("body"), OWNER).await;
         if step["python_only"] == true {
-            assert_eq!((status, body), (200, json!("from-python")), "{name}: o corpo que o FastAPI recusa vai a ele");
-            assert_eq!(serde_json::from_slice::<Value>(&srv.python.last_body()).unwrap(), step["body"], "{name}: corpo intacto");
+            // I-1A: o 422 é do Rust, com código; o Python nunca recebe o corpo.
+            assert_eq!((status, body["detail"]["code"].clone()), (422, json!("erro_corpo_invalido")), "{name}");
+            assert_eq!(srv.python.hits_to(&format!("/api/sessions/{}", step["path"].as_str().unwrap())), 0, "{name}");
             continue;
         }
         if gid.is_empty() && let Some(g) = body["gid"].as_str() {
             assert!(g.len() == 8 && g.bytes().all(|b| b.is_ascii_hexdigit()), "{name}: gid {g}");
             gid = g.to_owned();
+        }
+        // A leitura do contrato passou a trazer a dona e o `mtime` (gravar exige o lido); o golden do Python não os tem.
+        let mut body = body;
+        if step["path"].as_str().unwrap().ends_with("/pair/contract") && status == 200 {
+            let map = body.as_object_mut().unwrap();
+            assert_eq!(map.remove("owner"), Some(json!("casa")), "{name}");
+            assert!(map.remove("mtime").is_some_and(|m| m.is_string()), "{name}");
         }
         let actual = common::canon(&body).replace(&gid, golden_gid).replace(srv.pair.to_str().unwrap(), "<pair>");
         assert_eq!((status as u64, actual), (step["status"].as_u64().unwrap(), common::canon(&step["response"])), "{name}");
@@ -112,19 +120,17 @@ async fn routes_answer_like_python() {
 async fn pair_delivers_protocol_only_to_newcomers() {
     let dir = tempfile::tempdir().unwrap();
     let srv = server(dir.path(), 3).await;
-    srv.python.set_internal("pair/text", StatusCode::OK, json!({"text": "protocolo do grupo"}));
     let (status, body) = call(srv.addr, "POST", "s0/pair", Some(&json!({"peers": ["s1"], "task": "t"})), OWNER).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(input_hits(&srv.python, &["s0", "s1", "s2"]), [1, 1, 0]);
-    assert_eq!(serde_json::from_slice::<Value>(&srv.python.last_body()).unwrap(), json!({"text": "protocolo do grupo", "steer": false}));
+    // O texto sai do Rust: o Python não é perguntado.
     let gid = body["gid"].as_str().unwrap();
     let contract = srv.pair.join(format!("grupo-{gid}.md")).to_str().unwrap().to_owned();
-    assert_eq!(srv.python.internal_bodies("pair/text"), vec![
-        json!({"kind": "group", "me": "s0", "others": ["s1"], "task": "t", "contract": contract, "contract_remote": false,
-            "harness": {"s0": "claude", "s1": "claude"}, "peer": "", "owner": ""}),
-        json!({"kind": "group", "me": "s1", "others": ["s0"], "task": "t", "contract": contract, "contract_remote": false,
-            "harness": {"s0": "claude", "s1": "claude"}, "peer": "", "owner": ""}),
-    ]);
+    let sent: Value = serde_json::from_slice(&srv.python.last_body()).unwrap();
+    let text = sent["text"].as_str().unwrap();
+    assert!(text.starts_with("[painel: grupo de trabalho] Você, 's1', está num grupo de trabalho na tarefa: t."), "{text}");
+    assert!(text.contains(&format!("vão em {contract} ")) && text.contains("hangar-send s0 \"msg\""), "{text}");
+    assert!(srv.python.internal_bodies("pair/text").is_empty());
     let (status, _) = call(srv.addr, "POST", "s2/pair", Some(&json!({"peer": "s0"})), OWNER).await;
     assert_eq!(status, 200);
     assert_eq!(input_hits(&srv.python, &["s0", "s1", "s2"]), [1, 1, 1], "veterano não é acordado");
@@ -134,7 +140,6 @@ async fn pair_delivers_protocol_only_to_newcomers() {
 async fn linked_pair_marks_the_child_records_linked_at_and_sends_no_protocol() {
     let dir = tempfile::tempdir().unwrap();
     let srv = server(dir.path(), 3).await;
-    srv.python.set_internal("pair/text", StatusCode::OK, json!({"text": "protocolo do grupo"}));
     let (status, body) = call(srv.addr, "POST", "s0/pair", Some(&json!({"peer": "s1", "link": true})), OWNER).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(input_hits(&srv.python, &["s0", "s1", "s2"]), [0, 0, 0], "ninguém recebe o protocolo");
@@ -263,7 +268,7 @@ async fn guest_goes_to_python_and_cross_machine_stays_in_rust() {
     assert_eq!((status, body), (200, json!("from-python")));
     // Sem `peers.json`, a máquina `lab` é desconhecida: recusa limpa, nada gravado.
     let (status, body) = call(srv.addr, "POST", "s0/pair", Some(&json!({"peers": ["lab::x"]})), OWNER).await;
-    assert_eq!((status, body["detail"]["code"].clone()), (502, json!("erro_pareamento_rejeitado")));
+    assert_eq!((status, body["detail"]["code"].clone()), (409, json!("erro_grupo_peer_nao_registrado")));
     assert!(!srv.pair.join("s0.json").exists());
 }
 
@@ -306,7 +311,6 @@ async fn local_session_joins_a_group_with_an_outside_member() {
     use hangar_server::share::store::Kind;
     let dir = tempfile::tempdir().unwrap();
     let srv = server(dir.path(), 4).await;
-    srv.python.set_internal("pair/text", StatusCode::OK, json!({"text": "protocolo do grupo"}));
     let (s, _) = srv.share.store.create_redeemed("s0", Some("t:1".into()), Kind::Pair).unwrap();
     srv.share.pairs.add(ExternalPair { share_id: s.id, local_session: "s0".into(), alias: "pc-ana".into(), peer_owner: "pc-ana".into(),
         peer_session: "Y".into(), peer_address: "https://a.tail.ts.net:8443".into(), peer_token: "t".repeat(32), created_at: 1.0 }).unwrap();
@@ -324,10 +328,12 @@ async fn local_session_joins_a_group_with_an_outside_member() {
     let (status, body) = call(srv.addr, "POST", "s3/pair", Some(&json!({"peers": ["s0"], "orq": true})), OWNER).await;
     assert_eq!((status, body["detail"]["code"].clone()), (409, json!("erro_grupo_orq_par_externo")));
     assert!(srv.groups.link("s3").await.unwrap().is_none());
-    let (status, body) = call(srv.addr, "POST", "s3/pair", Some(&json!({"peers": ["lab::x", "s0"]})), OWNER).await;
-    assert_eq!((status, body["detail"]["code"].clone()), (400, json!("erro_pareamento_cross_1_1")));
-    let (status, body) = call(srv.addr, "POST", "s0/pair", Some(&json!({"peers": ["lab::x"]})), OWNER).await;
-    assert_eq!((status, body["detail"]["code"].clone()), (400, json!("erro_pareamento_mistura_cross")));
+    // Máquina própria agora entra pelo grupo entre máquinas; `lab` fora do peers.json recusa antes de gravar.
+    for (name, peers) in [("s3", json!(["lab::x", "s0"])), ("s0", json!(["lab::x"]))] {
+        let (status, body) = call(srv.addr, "POST", &format!("{name}/pair"), Some(&json!({"peers": peers})), OWNER).await;
+        assert_eq!((status, body["detail"]["code"].clone()), (409, json!("erro_grupo_peer_nao_registrado")), "{name}");
+    }
+    assert!(srv.groups.link("s3").await.unwrap().is_none());
 }
 
 fn seed_outside(srv: &Server, local: &str, alias: &str, peer: &str, address: &str) {
@@ -402,4 +408,110 @@ async fn group_notice_refuses_outside_header() {
     assert_eq!((status, body["detail"]["code"].clone()), (400, json!("erro_group_message_resposta")));
     assert!(ana.calls().is_empty());
     assert_eq!(input_hits(&srv.python, &["s0", "s1"]), [0, 0]);
+}
+
+/// BRG-10/PAIR-12: corpo que o Rust não aceita é 422 com código daqui, nunca repasse ao Python.
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_field_is_422_without_python() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    for (path, body) in [("s0/pair", json!({"peers": ["s1"], "bogus": 1})), ("s0/group-message", json!({"texto": "x"})),
+        ("s0/pair-remote", json!({"initiator": 1})), ("s0/unpair-remote", json!({}))] {
+        let (status, body) = call(srv.addr, "POST", path, Some(&body), OWNER).await;
+        assert_eq!((status, body["detail"]["code"].clone()), (422, json!("erro_corpo_invalido")), "{path}");
+        assert_eq!(srv.python.hits_to(&format!("/api/sessions/{path}")), 0, "{path}");
+    }
+    assert!(!srv.pair.join("s0.json").exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn surrogate_task_is_422() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    let resp = client().post(format!("http://{}/api/sessions/s0/pair", srv.addr)).bearer_auth(OWNER)
+        .header("content-type", "application/json").body(r#"{"peers": ["s1"], "task": "meio \ud83d emoji"}"#).send().await.unwrap();
+    let status = resp.status().as_u16();
+    let body: Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    assert_eq!((status, body["detail"]["code"].clone()), (422, json!("erro_corpo_invalido")));
+    assert_eq!(srv.python.hits_to("/api/sessions/s0/pair"), 0);
+    assert!(!srv.pair.join("s0.json").exists());
+}
+
+/// BRG-25: fechamento que o Rust só repassa (Pi/omp/Kimi, sessão sem entrada aqui) sai do grupo
+/// daqui, depois que o Python fechou; o Python não pede mais pela ponte.
+#[tokio::test(flavor = "multi_thread")]
+async fn repassed_close_leaves_the_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 3).await;
+    write_group(&srv, "s0", &["s1", "s2"]);
+    write_group(&srv, "s1", &["s0", "s2"]);
+    write_group(&srv, "s2", &["s0", "s1"]);
+    let (status, _) = call(srv.addr, "DELETE", "s0", None, OWNER).await;
+    assert_eq!(status, 200);
+    assert_eq!(srv.python.hits_to("/api/sessions/s0"), 1, "o Python fecha");
+    assert!(!srv.pair.join("s0.json").exists(), "quem fechou saiu");
+    assert_eq!(srv.groups.link("s1").await.unwrap().unwrap().peers, ["s2"]);
+    assert_eq!(srv.groups.link("s2").await.unwrap().unwrap().peers, ["s1"]);
+}
+
+/// PAIR-24/47: `orq` sem companheiro cria o grupo de um; quem entra depois herda a marca e o grupo
+/// `orq` não recebe protocolo.
+#[tokio::test(flavor = "multi_thread")]
+async fn orq_pair_without_peer_creates_a_group_of_one_without_protocol() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    let (status, body) = call(srv.addr, "POST", "s0/pair", Some(&json!({"orq": true})), OWNER).await;
+    assert_eq!(status, 200, "{body}");
+    let arb = srv.groups.link("s0").await.unwrap().unwrap();
+    assert!(arb.orq && arb.peers.is_empty());
+    let (status, body) = call(srv.addr, "POST", "s1/pair", Some(&json!({"peer": "s0"})), OWNER).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(srv.groups.link("s1").await.unwrap().unwrap().orq);
+    assert_eq!(input_hits(&srv.python, &["s0", "s1"]), [0, 0]);
+}
+
+/// Contrato ausente é vazio (como no Python); ilegível é 500 com código, nunca "vazio".
+#[tokio::test(flavor = "multi_thread")]
+async fn unreadable_contract_is_500_with_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    assert_eq!(call(srv.addr, "POST", "s0/pair", Some(&json!({"peers": ["s1"]})), OWNER).await.0, 200);
+    let (status, body) = call(srv.addr, "GET", "s0/pair/contract", None, OWNER).await;
+    assert_eq!((status, body["content"].clone()), (200, json!("")), "{body}");
+    let gid = srv.groups.link("s0").await.unwrap().unwrap().gid;
+    std::fs::create_dir_all(srv.groups.contract_path(&gid)).unwrap();
+    let (status, body) = call(srv.addr, "GET", "s0/pair/contract", None, OWNER).await;
+    assert_eq!((status, body["detail"]["code"].clone(), body["detail"]["params"]["detalhe"].clone()),
+        (500, json!("erro_grupo_indisponivel"), json!("groups_contract_unreadable")), "{body}");
+}
+
+/// O acesso de quem é de fora ao membro novo que não grava aparece na resposta, com código.
+#[tokio::test(flavor = "multi_thread")]
+async fn outside_grant_failure_is_a_coded_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    seed_outside(&srv, "s0", "pc-ana", "Y", "https://a.tail.ts.net:8443");
+    srv.groups.external_link("s0", "pc-ana::Y", Default::default(), ["pc-ana::Y".to_owned()].into()).await.unwrap();
+    // Convite revogado com o registro do par ainda no disco: dar o acesso falha.
+    let id = srv.share.pairs.all()[0].share_id.clone();
+    srv.share.store.revoke(&id).unwrap();
+    let (status, body) = call(srv.addr, "POST", "s1/pair", Some(&json!({"peers": ["s0"]})), OWNER).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["warning"]["code"], "erro_grupo_acesso_externo_falhou", "{body}");
+}
+
+/// Grupo de uma máquina: a leitura traz o `mtime` e a dona, e gravar com esse `mtime` passa.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_contract_read_then_write_with_mtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    assert_eq!(call(srv.addr, "POST", "s0/pair", Some(&json!({"peers": ["s1"]})), OWNER).await.0, 200);
+    let gid = srv.groups.link("s0").await.unwrap().unwrap().gid;
+    std::fs::write(srv.groups.contract_path(&gid), "antes\n").unwrap();
+    let (status, read) = call(srv.addr, "GET", "s0/pair/contract", None, OWNER).await;
+    assert_eq!((status, read["content"].clone(), read["owner"].clone()), (200, json!("antes\n"), json!("casa")), "{read}");
+    assert!(read["mtime"].is_string(), "{read}");
+    let (status, body) = call(srv.addr, "PUT", "s0/pair/contract", Some(&json!({"content": "depois\n", "mtime": read["mtime"]})), OWNER).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(std::fs::read_to_string(srv.groups.contract_path(&gid)).unwrap(), "depois\n");
 }

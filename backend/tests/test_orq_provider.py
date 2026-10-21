@@ -59,7 +59,6 @@ def test_list_has_one_row_per_live_auto_run(root, tmp_path, monkeypatch):
     _run(root, "2026-09-28-dead", "dead")
     (root / "jev-calibracao").mkdir()   # pasta sem orq.json fica fora, sem erro
     monkeypatch.setattr(pair.settings, "projects_dir", tmp_path / "projects")
-    monkeypatch.setattr(SessionRegistry, "_pair_ausencias", {})
     monkeypatch.setattr(codex_sessions, "_dir", lambda: tmp_path / "codex-sessions")
     with patch.object(registry.tmux, "list_panes_all", return_value={}), \
          patch.object(registry, "_proc_children_map", return_value={}):

@@ -500,7 +500,7 @@ describe('ContasSettings — criar e apagar reusam as rotas de sempre', () => {
     expect(t.el.querySelector('.ct-confirma')!.textContent).toContain(m.contas_apagar_pergunta({ nome: 'jefferson' }));
     t.el.querySelector<HTMLButtonElement>('.ct-confirma-btn.perigo')!.click();
     await tick(); await tick();
-    expect(apiMock.apagarConta).toHaveBeenCalledWith(ALVO, 'jefferson', true);
+    expect(apiMock.apagarConta).toHaveBeenCalledWith(ALVO, 'jefferson', true, false);
     expect(credMock.listarCredenciais).toHaveBeenCalledTimes(2);
     unmount(t.comp);
   });
@@ -514,7 +514,7 @@ describe('ContasSettings — criar e apagar reusam as rotas de sempre', () => {
     await tick();
     t.el.querySelector<HTMLButtonElement>('.ct-confirma-btn.perigo')!.click();
     await tick(); await tick();
-    expect(apiMock.apagarConta).toHaveBeenCalledWith(ALVO, 'claude-200-5', true);
+    expect(apiMock.apagarConta).toHaveBeenCalledWith(ALVO, 'claude-200-5', true, false);
     unmount(t.comp);
   });
 
@@ -535,7 +535,7 @@ describe('ContasSettings — criar e apagar reusam as rotas de sempre', () => {
     await tick();
     expect(t.el.querySelector('.ct-confirma')!.textContent).toContain(m.contas_apagar_conversas_aviso());
     t.el.querySelector<HTMLButtonElement>('.ct-confirma-btn.perigo')!.click();
-    await vi.waitFor(() => expect(apiMock.apagarConta).toHaveBeenLastCalledWith(ALVO, 'jefferson', false));
+    await vi.waitFor(() => expect(apiMock.apagarConta).toHaveBeenLastCalledWith(ALVO, 'jefferson', false, false));
     unmount(t.comp);
   });
 
@@ -602,6 +602,29 @@ describe('ContasSettings — criar e apagar reusam as rotas de sempre', () => {
     unmount(t.comp);
   });
 
+  it('conta presa por sessão e processo: a confirmação diz o que prende e Liberar reapaga com release', async () => {
+    apiMock.apagarConta.mockRejectedValueOnce(Object.assign(new Error('preso'), { status: 409,
+      envelope: { code: 'erro_processos_usam_conta', params: { sessoes: ['s1', 's2'],
+        processos: [{ pid: 1572, nome: 'claude', sessao: null }, { pid: 42180, nome: null, sessao: 'term-a' }] } } }));
+    const t = montar([LOGADA]);
+    await tick(); await tick();
+    botaoNomeado(t.el, m.lista_remover())!.click();
+    await tick();
+    t.el.querySelector<HTMLButtonElement>('.ct-confirma-btn.perigo')!.click();
+    await tick(); await tick();
+    const caixa = t.el.querySelector('.ct-confirma')!;
+    expect(caixa.textContent).toContain(m.contas_liberar_titulo({ nome: 'jefferson' }));
+    expect(caixa.textContent).toContain(m.contas_liberar_sessoes({ lista: 's1, s2' }));
+    expect(caixa.textContent).toContain(m.contas_liberar_processos({ lista: [
+      m.contas_liberar_processo({ nome: 'claude', pid: 1572 }),
+      m.contas_liberar_processo({ nome: m.contas_liberar_processo_terminal({ sessao: 'term-a' }), pid: 42180 }),
+    ].join(', ') }));
+    expect(t.el.querySelector('.ct-aviso.erro')).toBeNull();
+    caixa.querySelector<HTMLButtonElement>('.ct-confirma-btn.perigo')!.click();
+    await vi.waitFor(() => expect(apiMock.apagarConta).toHaveBeenLastCalledWith(ALVO, 'jefferson', true, true));
+    unmount(t.comp);
+  });
+
   it('apaga só o cadastro escolhido quando duas contas têm o mesmo login e apelido', async () => {
     const original = claude({ nome: 'Minha conta', nome_natural: 'original' });
     const duplicada = claude({ id: 'claude:/home/u/.claude-duplicada',
@@ -616,7 +639,7 @@ describe('ContasSettings — criar e apagar reusam as rotas de sempre', () => {
       credMock.listarCredenciais.mockResolvedValue([original]);
       card.querySelector<HTMLButtonElement>('.ct-confirma-btn.perigo')!.click();
       for (let i = 0; i < 12; i++) await tick();
-      expect(apiMock.apagarConta).toHaveBeenCalledExactlyOnceWith(ALVO, 'duplicada', true);
+      expect(apiMock.apagarConta).toHaveBeenCalledExactlyOnceWith(ALVO, 'duplicada', true, false);
       expect(t.el.querySelectorAll('.ct-card')).toHaveLength(1);
       expect(t.el.querySelector('.ct-nome')!.textContent).toBe('Minha conta');
     } finally { await unmount(t.comp); }

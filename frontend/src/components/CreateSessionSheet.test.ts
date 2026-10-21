@@ -539,6 +539,33 @@ describe('CreateSessionSheet — B4/B6 da revisão final da branch', () => {
     unmount(comp);
   });
 
+  it('conta presa: a confirmação lista o que prende e Liberar reapaga com release', async () => {
+    vi.mocked(api.listClaudeConfigs).mockResolvedValue([
+      { path: '/home/x/.claude', label: 'atual', active: true },
+      { path: '/home/x/.claude-nova', label: '.claude-nova', active: false },
+    ]);
+    mockModelosPorConta();
+    vi.mocked(api.apagarConta)
+      .mockRejectedValueOnce(Object.assign(new Error('preso'), { status: 409,
+        envelope: { code: 'erro_sessao_usa_conta', params: { sessoes: ['s1'], processos: [] } } }))
+      .mockResolvedValue({ ok: true });
+
+    const { comp } = montar();
+    await flush();
+    await escolherPasta();
+    await escolherNoCombo('#cfg-pick', '.claude-nova');
+    await confirmarApagar();
+
+    expect(document.body.textContent).toContain(m.contas_liberar_titulo({ nome: 'nova' }));
+    expect(document.body.textContent).toContain(m.contas_liberar_sessoes({ lista: 's1' }));
+    [...(document.querySelectorAll('.conta-add') as unknown as HTMLElement[])]
+      .find((b) => b.textContent === m.contas_liberar_confirmar())!.click();
+    await flush();
+    expect(api.apagarConta).toHaveBeenLastCalledWith(null, 'nova', true, true);
+    vi.mocked(api.modelOptions).mockRestore();
+    unmount(comp);
+  });
+
   it('B6: escolher Padrão apaga a preferência — a reabertura seguinte abre em Padrão', async () => {
     vi.mocked(api.listClaudeConfigs)
       .mockResolvedValue([{ path: '/home/x/.claude', label: 'atual', active: true }]);

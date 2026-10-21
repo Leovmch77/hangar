@@ -33,9 +33,8 @@ fn busy(code:&'static str) -> RuntimeError { RuntimeError::new(code,busy_message
 const EFFORTS:[&str;5] = ["low","medium","high","xhigh","max"];
 /// Quanto a árvore do processo antigo tem para sair antes de a conversa ganhar outro dono.
 const EXIT_WAIT:Duration = Duration::from_secs(15);
-/// `--resume` de conversa longa demora a mostrar o prompt.
-const TERMINAL_WAIT:Duration = Duration::from_secs(60);
-const HEADLESS_WAIT:Duration = Duration::from_secs(10);
+/// Quanto se espera o Claude reaberto subir. Máquina carregada leva minutos; passado isso, ele travou.
+pub(crate) const STARTUP_WAIT:Duration = Duration::from_secs(300);
 /// A vida nova que falhou e não saiu: nada volta por cima dela.
 const NEW_ALIVE:&str = "reopen_new_alive";
 
@@ -822,8 +821,8 @@ impl RuntimeRegistry {
                     self.drop_failed_terminal(name).await?;
                     return Err(refused("reopen_terminal_spawn",&format!("o terminal não abriu: {}",error.stderr)));
                 }
-                let deadline=tokio::time::Instant::now()+TERMINAL_WAIT;
                 let io=crate::terminal_input::ProcessIo::default();
+                let deadline=tokio::time::Instant::now()+STARTUP_WAIT;
                 loop {
                     if let Some(Ok(()))=watcher.adopt_claude(self,name).await
                         && let Some((target,_))=self.claude_terminal_entry(name).await
@@ -839,7 +838,7 @@ impl RuntimeRegistry {
                     }
                     if tokio::time::Instant::now()>=deadline {
                         self.drop_failed_terminal(name).await?;
-                        return Err(refused("relaunch_confirmation","o Claude não voltou no terminal na conversa e no modo pedidos"));
+                        return Err(refused("relaunch_confirmation","o Claude não voltou no terminal na conversa e no modo pedidos em 5 minutos"));
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
@@ -855,20 +854,20 @@ impl RuntimeRegistry {
                     self.drop_failed_headless(name,&next.key).await?;
                     return Err(error);
                 }
-                let deadline=tokio::time::Instant::now()+HEADLESS_WAIT;
-                loop {
+                let deadline=tokio::time::Instant::now()+STARTUP_WAIT;
+                let why=loop {
                     if let Some((_,view))=self.claude_headless_view(name).await {
-                        if view["alive"]==false {break;}
+                        if view["alive"]==false {break "o Claude sem terminal saiu antes de subir";}
                         if view["initialized"]==true && view["conversation"]==sid {
                             if view["permission_mode"]==mode {return Ok(());}
-                            break;
+                            break "o Claude sem terminal subiu num modo diferente do pedido";
                         }
                     }
-                    if tokio::time::Instant::now()>=deadline {break;}
+                    if tokio::time::Instant::now()>=deadline {break "o Claude sem terminal não subiu em 5 minutos; travou";}
                     tokio::time::sleep(Duration::from_millis(50)).await;
-                }
+                };
                 self.drop_failed_headless(name,&next.key).await?;
-                Err(refused("relaunch_initialize","o Claude sem terminal não subiu na conversa e no modo pedidos"))
+                Err(refused("relaunch_initialize",why))
             },
         }
     }

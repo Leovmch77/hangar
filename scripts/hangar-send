@@ -5,7 +5,9 @@
 #   hangar-send <sessao> <mensagem...> orienta o turno atual quando suportado; senão, mantém na fila
 #                                  (como o recado chega: ver "TRANSPORTE" abaixo).
 #   hangar-send <servidor>::<sessao> <mensagem...>  idem, pra sessão em OUTRO servidor (peers.json)
-#   hangar-send --pair <sessao> [tarefa...] [--substituir-tarefa]  pareia ESTA sessão com outra
+#   hangar-send --pair <sessao|servidor::sessao> [tarefa...] [--substituir-tarefa]  pareia ESTA
+#                                        sessão com outra; com servidor::sessao o grupo junta as
+#                                        máquinas (uma delas guarda o grupo e o contrato; ver abaixo)
 #                                        (registra no app: badge 🤝 na UI + protocolo só pra quem
 #                                        estava sem grupo; ninguém é avisado de entrada ou saída,
 #                                        o grupo se consulta no --list). tarefa = título do grupo na lista, chave +
@@ -27,7 +29,18 @@
 #   hangar-send --group <mensagem...>  AVISO pro grupo TODO de uma vez (marco: "terminei",
 #                                  "contrato atualizado"). Chega como [grupo: X]. UNIDIRECIONAL —
 #                                  nunca responda um [grupo:] com --group (evita loop); responda 1:1.
-#                                  O backend entrega a cada membro pelo mesmo caminho do 1:1.
+#                                  O backend entrega a cada membro pelo mesmo caminho do 1:1, em
+#                                  todas as máquinas do grupo (de outra máquina chega como
+#                                  [grupo: servidor::X]).
+#   hangar-send --contrato             imprime o contrato do grupo (decisões que o grupo consulta) no
+#                                  stdout; no stderr, a máquina que o guarda e o comando de gravar
+#                                  com o mtime desta leitura. Vale para grupo desta máquina e para
+#                                  grupo entre máquinas; o caminho do arquivo só aparece na
+#                                  máquina que o guarda.
+#   hangar-send --contrato --gravar <arquivo> [--mtime <valor>]  troca o contrato INTEIRO pelo
+#                                  arquivo. --mtime é o da sua leitura; sem ele, só cria contrato
+#                                  que ainda não existe. erro_contrato_mudou = alguém gravou depois
+#                                  da sua leitura: leia de novo, junte e grave.
 #   hangar-send --new <nome> [cwd]     cria sessão nova, com terminal gerenciado ou headless.
 #                                  cwd default = home. Modelo, esforço e permissão omitidos vêm do
 #                                  PADRÃO SALVO no servidor (a caixinha da tela de criar); sem padrão
@@ -108,9 +121,11 @@
 # Cross-server: backend/peers.json (ver peers.json.example; NUNCA commitar — tem token) mapeia
 # id -> {base_url, token} dos outros servidores, e CP_SERVER_ID no backend/.env é o id DESTA
 # máquina — vira o endereço de resposta ([de: <id>::<sessao>]) quando o recado cruza servidor.
-# --pair cross-server (servidor::sessao) FUNCIONA (1:1): o backend local resolve peers.json + chama
-# o /pair-remote do outro. --new servidor::nome cria lá pela API do outro. ponytail: --group
-# cross-server ainda não existe — só recado 1:1, --pair, --new e --list.
+# --pair servidor::sessao forma um grupo entre máquinas: uma delas (a dona) guarda o grupo e o
+# contrato, e entrada, saída, aviso de grupo e contrato passam por ela. Saída e troca de nome
+# esperam numa fila a máquina fora do ar voltar; aviso de grupo não espera: a resposta diz quem
+# ficou sem ele (pulados). Sessão de outra pessoa (par externo) entra no grupo, mas só alcança a máquina do par.
+# --new servidor::nome cria lá pela API do outro.
 #
 # TRANSPORTE É DO BACKEND, NUNCA DO MODELO. Pra sessão Claude desta máquina o backend escreve o
 # recado direto no socket nativo do Claude Code (`cc-socks/<pid>.sock`, o mesmo do SendMessage):
@@ -232,7 +247,8 @@ for s in sessions:
 # Entrada e saída não são avisadas: é aqui que a sessão vê com quem está.
 eu = next((s for s in sessions if s["name"] == sys.argv[1]), {})
 if eu.get("pair_peers"):
-    print("# seu grupo: " + ", ".join(eu["pair_peers"]))' "$(me 2>/dev/null)"
+    dona = " (guardado na máquina %s)" % eu["pair_owner"] if eu.get("pair_owner") else ""
+    print("# seu grupo: " + ", ".join(eu["pair_peers"]) + dona)' "$(me 2>/dev/null)"
     # Servidores do peers.json: mesmas colunas, nome prefixado servidor::sessao (é o endereço
     # que o hangar-send de envio aceita). Peer fora do ar não derruba a lista local — vira aviso.
     if [[ -f "$PEERS_FILE" ]]; then
@@ -393,8 +409,8 @@ if [[ "$1" == "--pair" ]]; then
         elif [[ "$arg" == "--orq" ]]; then orq=true
         else tarefa="$tarefa${tarefa:+ }$arg"; fi
     done
-    # peer local (nome cru) OU remoto (servidor::sessao) — o backend local resolve o remoto via
-    # peers.json + CP_SERVER_ID e registra o vínculo dos dois lados (/pair-remote). Cross-server é 1:1.
+    # peer local (nome cru) OU remoto (servidor::sessao): com remoto, o backend local monta o grupo
+    # entre máquinas pela dona (peers.json + CP_SERVER_ID).
     body=$(python3 -c 'import json,sys; print(json.dumps({"peer": sys.argv[1], "task": sys.argv[2], "replace_task": sys.argv[3] == "true", "orq": sys.argv[4] == "true"}))' "$peer" "$tarefa" "$substituir" "$orq")
     resp=$(api POST "/api/sessions/$(me)/pair" "$body")
     if [[ -z "$peer" ]]; then
@@ -403,7 +419,7 @@ if [[ "$1" == "--pair" ]]; then
     elif $orq; then
         echo "pareado: $(me) <-> $peer (grupo de orquestração: ninguém recebe aviso; o kick-off traz o protocolo)"
     else
-        echo "pareado: $(me) <-> $peer (registrado no app; os dois lados recebem o protocolo)"
+        echo "pareado: $(me) <-> $peer (registrado no app; quem estava sem grupo recebe o protocolo)"
     fi
     exit 0
 fi
@@ -800,6 +816,42 @@ if [[ "$1" == "--close" ]]; then
     exit 0
 fi
 
+if [[ "$1" == "--contrato" ]]; then
+    shift
+    gravar=""; mtime=""
+    uso_contrato="uso: hangar-send --contrato [--gravar <arquivo> [--mtime <valor da leitura>]]"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --gravar) gravar="${2:?$uso_contrato}"; shift 2 ;;
+            --mtime) mtime="${2:?$uso_contrato}"; shift 2 ;;
+            *) echo "erro: argumento inesperado '$1' — $uso_contrato" >&2; exit 2 ;;
+        esac
+    done
+    eu=$(me)
+    if [[ -z "$gravar" ]]; then
+        [[ -n "$mtime" ]] && { echo "erro: --mtime só vale com --gravar — $uso_contrato" >&2; exit 2; }
+        resp=$(api GET "/api/sessions/$eu/pair/contract") || exit 1
+        # Só o conteúdo no stdout: `hangar-send --contrato > c.md` sai pronto para editar e gravar.
+        python3 -c 'import json,sys
+r = json.loads(sys.argv[1])
+sys.stdout.write(r.get("content") or "")
+if r.get("owner"):
+    print("# contrato guardado na máquina %s" % r["owner"], file=sys.stderr)
+if r.get("path"):
+    print("# arquivo nesta máquina (pode editar direto): %s" % r["path"], file=sys.stderr)
+if "mtime" in r:
+    mtime = " --mtime %s" % r["mtime"] if r.get("mtime") else ""
+    print("# para gravar: hangar-send --contrato --gravar <arquivo>%s" % mtime, file=sys.stderr)' "$resp"
+        exit 0
+    fi
+    [[ -f "$gravar" ]] || { echo "erro: arquivo '$gravar' não existe" >&2; exit 2; }
+    body=$(python3 -c 'import json,sys; print(json.dumps({"content": open(sys.argv[1], encoding="utf-8").read(), "mtime": sys.argv[2] or None}))' "$gravar" "$mtime") \
+        || { echo "erro: '$gravar' não é texto UTF-8" >&2; exit 2; }
+    resp=$(api PUT "/api/sessions/$eu/pair/contract" "$body") || exit 1
+    python3 -c 'import json,sys; print("contrato gravado (mtime %s)" % json.loads(sys.argv[1]).get("mtime"))' "$resp"
+    exit 0
+fi
+
 if [[ "$1" == "--group" ]]; then
     shift
     forcar_tmux=false
@@ -809,12 +861,13 @@ if [[ "$1" == "--group" ]]; then
     nativo=false; [[ -n "${CLAUDE_CODE_MESSAGING_SOCKET:-}" ]] && nativo=true
     body=$(python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1], "remetente_nativo": sys.argv[2] == "true", "forcar_tmux": sys.argv[3] == "true"}))' "$*" "$nativo" "$forcar_tmux")
     resp=$(api POST "/api/sessions/$eu/group-message" "$body")
-    # `pulados` vem vazio: o backend entrega a todos. O filtro fica pra servidor antigo da malha.
+    # `pulados` = membros de máquina que não respondeu: o aviso não fica esperando por eles.
     python3 -c 'import json,sys
 d = json.loads(sys.argv[1])
 pul = d.get("pulados", [])
 entregues = [p for p in d["peers"] if p not in pul]
 if entregues: print("aviso enviado ao grupo:", ", ".join(entregues))
+if pul: print("  ⚠ sem o aviso (máquina fora do ar):", ", ".join(pul))
 w = d.get("warning")
 if w: print("  ⚠", w.get("msg", w))' "$resp"
     exit 0

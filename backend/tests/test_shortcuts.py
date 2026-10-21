@@ -302,7 +302,8 @@ def test_hangar_restart_reruns_the_same_multiline_command(client, monkeypatch, t
     command = "while [ ! -e release ]; do sleep 0.05; done\necho x >> runs.txt\necho y >> runs.txt"
 
     def stopped(ident):
-        return next((row for row in _hangar(client) if row["id"] == ident and not row["alive"]), None)
+        # O tmux marca o pane morto antes de gravar o código de saída: espera os dois.
+        return next((row for row in _hangar(client) if row["id"] == ident and not row["alive"] and row["exit_code"] is not None), None)
 
     first = _run_hangar(client, monkeypatch, tmp_path, command)
     assert first.status_code == 202

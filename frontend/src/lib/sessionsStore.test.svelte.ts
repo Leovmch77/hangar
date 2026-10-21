@@ -1,8 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { sessionsStore } from './sessionsStore.svelte';
-import { getIdentificador } from './peers';
-import { configureDiag, estaDesligado, registrarFalha, registrarSucesso, _limparEsfriamentoParaTestes } from '@hangar/core';
+import { readGroupIdentity, configureDiag, groupGlobal, estaDesligado, registrarFalha, registrarSucesso, _limparEsfriamentoParaTestes } from '@hangar/core';
 
 const streams = vi.hoisted(() => new Map<string, Map<string, (event: { data: string }) => void>>());
 const objetos = vi.hoisted(() => new Map<string, { onerror?: () => void; close: unknown; addEventListener: unknown }>());
@@ -16,7 +15,6 @@ vi.mock('./auth', () => ({
   getActiveId: () => 'lan',
 }));
 vi.mock('./navPelaLista', () => ({ navPelaLista: vi.fn() }));
-vi.mock('./peers', () => ({ getIdentificador: vi.fn(async (server: { id: string }) => ({ identificador: `backend-${server.id}` })) }));
 vi.mock('./navegadorPanel.svelte', () => ({
   podarNavMortos: vi.fn(),
   ouvirFechamentoNav: () => { navListener.start(); return navListener.stop; },
@@ -24,6 +22,7 @@ vi.mock('./navegadorPanel.svelte', () => ({
 vi.mock('@hangar/core', async original => ({
   ...await original<typeof import('@hangar/core')>(),
   rotaDecidida: () => true,   // a decisão de rota (sonda de rede) é assunto de rota.test
+  readGroupIdentity: vi.fn(async (server: { id: string }) => `backend-${server.id}`),
   listExternalPairs: pares.listExternalPairs,
   attachGuest: pares.attachGuest,
   openSessionsStream: (server: { id: string }, req?: string) => {
@@ -89,27 +88,41 @@ it('servidor desligado antes da montagem aguarda o prazo; reconexão explícita 
 });
 
 it('descobre a identidade apenas após quadro válido com pareamento remoto, uma vez por conexão', async () => {
-  vi.mocked(getIdentificador).mockClear();
+  vi.mocked(readGroupIdentity).mockClear();
   registrarFalha('vpn');
   sessionsStore.retain();
-  expect(getIdentificador).not.toHaveBeenCalled();
+  expect(readGroupIdentity).not.toHaveBeenCalled();
   const publish = streams.get('lan')!.get('sessions')!;
   publish({ data: '[]' });
-  expect(getIdentificador).not.toHaveBeenCalled();
+  expect(readGroupIdentity).not.toHaveBeenCalled();
   const data = JSON.stringify([{ name: 'a', jsonl: '/a', pair_peers: ['backend-vpn::b'] }]);
   publish({ data });
   publish({ data });
   await vi.waitFor(() => expect(sessionsStore.identities.get('lan')).toBe('backend-lan'));
-  expect(getIdentificador).toHaveBeenCalledTimes(1);
+  expect(readGroupIdentity).toHaveBeenCalledTimes(1);
   expect(estaDesligado('vpn')).toBe(true);
+});
+
+it('pedido de identidades lê cada máquina conectada mesmo sem pareamento remoto', async () => {
+  vi.mocked(readGroupIdentity).mockClear();
+  sessionsStore.retain();
+  streams.get('lan')!.get('sessions')!({ data: '[]' });
+  streams.get('vpn')!.get('sessions')!({ data: '[]' });
+  expect(readGroupIdentity).not.toHaveBeenCalled();
+  sessionsStore.requestIdentities();
+  await vi.waitFor(() => expect(sessionsStore.identities.get('vpn')).toBe('backend-vpn'));
+  expect(sessionsStore.identities.get('lan')).toBe('backend-lan');
+  sessionsStore.requestIdentities();
+  expect(readGroupIdentity).toHaveBeenCalledTimes(2);
 });
 
 it('repete a identidade após falha transitória, com intervalo e sem reabrir o stream', async () => {
   vi.useFakeTimers();
-  vi.mocked(getIdentificador).mockClear();
-  vi.mocked(getIdentificador).mockRejectedValueOnce(new Error('timeout'));
+  vi.mocked(readGroupIdentity).mockClear();
+  vi.mocked(readGroupIdentity).mockRejectedValueOnce(new Error('timeout'));
   const registrar = vi.fn();
   configureDiag({ registrar, novoReq: () => 'identity-retry' });
+  registrarFalha('vpn');   // só a lan conectada: a contagem é das leituras dela
   sessionsStore.retain();
   const original = objetos.get('lan');
   const publish = streams.get('lan')!.get('sessions')!;
@@ -118,13 +131,48 @@ it('repete a identidade após falha transitória, com intervalo e sem reabrir o 
   await vi.waitFor(() => expect(registrar).toHaveBeenCalledWith(
     expect.objectContaining({ evento: 'lista.identificador_falhou' }), 'http://lan'));
   publish({ data });
-  expect(getIdentificador).toHaveBeenCalledTimes(1);
+  expect(readGroupIdentity).toHaveBeenCalledTimes(1);
   vi.setSystemTime(Date.now() + 30000);
   streams.get('lan')!.get('ping')!({ data: '' });
   await vi.waitFor(() => expect(sessionsStore.identities.get('lan')).toBe('backend-lan'));
-  expect(getIdentificador).toHaveBeenCalledTimes(2);
+  expect(readGroupIdentity).toHaveBeenCalledTimes(2);
   expect(objetos.get('lan')).toBe(original);
   expect(original!.close).not.toHaveBeenCalled();
+});
+
+it('grupo entre máquinas numa lista lê o identificador de todas as conectadas e cria o membro da máquina sem conexão', async () => {
+  vi.mocked(readGroupIdentity).mockClear();
+  sessionsStore.retain();
+  // A (lan) é dona do grupo com D, que não está conectada aqui; B (vpn) não cita ninguém de fora.
+  streams.get('vpn')!.get('sessions')!({ data: JSON.stringify([{ name: 'b', jsonl: '/b', state: 'idle' }]) });
+  streams.get('lan')!.get('sessions')!({ data: JSON.stringify([{ name: 'a', jsonl: '/a', state: 'idle',
+    pair_gid: 'g', pair_owner: 'backend-lan', pair_peers: ['backend-zzz::d'] }]) });
+  await vi.waitFor(() => expect(sessionsStore.identities.get('vpn')).toBe('backend-vpn'));
+  const grupo = groupGlobal(sessionsStore.rows, sessionsStore.identities).find((g) => g.key === 'fed:backend-lan/g');
+  expect(grupo?.members).toContainEqual({ kind: 'missing', server_id: 'backend-zzz', name: 'd' });
+});
+
+it('identificador vazio é falha: aparece por máquina e é relido depois do intervalo; máquina fora do ar não fica em leitura', async () => {
+  vi.useFakeTimers();
+  vi.mocked(readGroupIdentity).mockClear();
+  let falha: (e: Error) => void = () => {};
+  vi.mocked(readGroupIdentity).mockImplementationOnce(() => new Promise((_, reject) => { falha = reject; }));
+  registrarFalha('vpn');
+  sessionsStore.retain();
+  const data = JSON.stringify([{ name: 'a', jsonl: '/a', pair_peers: ['backend-vpn::b'] }]);
+  streams.get('lan')!.get('sessions')!({ data });
+  expect(sessionsStore.identityStatus.get('lan')).toBe('reading');
+  expect(sessionsStore.identityStatus.has('vpn')).toBe(false);
+  // A regra do vazio é do core (`readGroupIdentity`): aqui chega como a falha `vazio`.
+  falha(Object.assign(new Error('machine_identity_empty'), { name: 'vazio' }));
+  await vi.waitFor(() => expect(sessionsStore.identityStatus.get('lan')).toBe('failed'));
+  expect(sessionsStore.identities.has('lan')).toBe(false);
+  streams.get('lan')!.get('ping')!({ data: '' });
+  expect(readGroupIdentity).toHaveBeenCalledTimes(1);
+  vi.setSystemTime(Date.now() + 30000);
+  streams.get('lan')!.get('ping')!({ data: '' });
+  await vi.waitFor(() => expect(sessionsStore.identities.get('lan')).toBe('backend-lan'));
+  expect(sessionsStore.identityStatus.has('lan')).toBe(false);
 });
 
 it('não reabre conexões quando a lista já foi desmontada', () => {

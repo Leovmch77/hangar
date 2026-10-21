@@ -4,8 +4,8 @@ import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { EnrichedMarkdownText } from 'react-native-enriched-markdown';
-import { fetchSessionsForServer, formataErro, fullPairsByAlias, getHistory, getPairContract, grantFull, pairExternals, pairHeaderLabel, pairSession, unpairSession } from '@hangar/core';
-import type { ChatEvent } from '@hangar/core';
+import { fetchSessionsForServer, formataErro, fullPairsByAlias, getHistory, getPairContract, grantFull, pairExternals, pairHeaderLabel, pairSession, pairTargets, unpairSession } from '@hangar/core';
+import type { AggSession, ChatEvent } from '@hangar/core';
 import { useServers } from '../../../../src/stores/servers';
 import { anchoredPairs, markLeavingPair, useSessions } from '../../../../src/stores/sessions';
 import { mkMarkdownStyle } from '../../../../src/chat/AssistantBubble';
@@ -13,8 +13,10 @@ import { PairMembers } from '../../../../src/features/pair/PairMembers';
 import { PairPicker } from '../../../../src/features/pair/PairPicker';
 import { PairFeed } from '../../../../src/features/pair/PairFeed';
 import { montarFeed } from '../../../../src/features/pair/pairFeed';
-import { outsideRow } from '../../../../src/features/pair/groupPairs';
+import { groupMembers, pairCandidates, type MemberView } from '../../../../src/features/pair/groupPairs';
+import { useIdentities } from '../../../../src/features/pair/identities';
 import * as m from '../../../../src/paraglide/messages';
+import { haptic } from '../../../../src/ui/haptics';
 import { superficie } from '../../../../src/theme/superficie';
 
 export default function PairSheet() {
@@ -29,6 +31,9 @@ export default function PairSheet() {
   const peers = current?.pair_peers ?? [];
   const peersKey = peers.join('\u0000');
   const allRows = useSessions((state) => state.rows);
+  const byServer = useSessions((state) => state.byServer);
+  const servers = useServers((state) => state.servers);
+  const { identities, loading: identitiesLoading } = useIdentities(servers);
   const groupRows = useMemo(
     () => allRows.filter((row) => row.serverId === serverId && (row.name === name || peers.includes(row.name))),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -141,21 +146,38 @@ export default function PairSheet() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, routeServer, name, peersKey]);
 
-  const candidates = sessions.filter((session) => !peers.includes(session.name));
+  // Candidatas: a lista lida desta máquina e as listas já abertas das outras, nunca uma leitura por máquina.
+  const machines = useMemo(() => {
+    const anchor = current ?? ({ serverId, name, state: 'idle' } as AggSession);
+    const label = routeServer?.label ?? serverId;
+    const own = sessions.map((session): AggSession => ({ ...session, serverId, serverLabel: label, serverColor: '' }));
+    const others = byServer.filter((b) => !b.server.invite && b.server.id !== serverId)
+      .map((b) => ({ serverId: b.server.id, label: b.server.label, rows: b.sessions }));
+    return pairCandidates(anchor, [{ serverId, label, rows: own }, ...others], identities, identitiesLoading);
+  }, [current, serverId, name, routeServer, sessions, byServer, identities, identitiesLoading]);
+  const members = useMemo(() => groupMembers(serverId, name, allRows, identities), [serverId, name, allRows, identities]);
+  const { names: pickedNames, unresolved } = pairTargets(picked, serverId, identities);
 
   function togglePick(peer: string) {
+    haptic.selection();
     setPicked((currentPicked) => currentPicked.includes(peer) ? currentPicked.filter((item) => item !== peer) : [...currentPicked, peer]);
   }
 
   // Grupo com par de acesso completo: quem entra fica aberto para o dono só se a pessoa disser.
   function confirmPair() {
+    // Escolhida numa máquina sem identificador válido não vai ao servidor: sai da seleção, com o motivo.
+    if (unresolved.length) {
+      setPicked((currentPicked) => currentPicked.filter((key) => !unresolved.includes(key)));
+      setActionError(m.grupo_recusa_sem_identificador());
+      return;
+    }
     const full = fullPairsByAlias(groupRows);
     if (!full.length) { void doPair(false); return; }
     const token = actionEpoch.current;
     const go = (release: boolean) => { if (token === actionEpoch.current) void doPair(release); };
     Alert.alert(
       m.pair_level_title(),
-      full.map((p) => m.pair_full_confirm({ sessao: picked.join(', '), dono: p.owner })).join('\n\n'),
+      full.map((p) => m.pair_full_confirm({ sessao: pickedNames.join(', '), dono: p.owner })).join('\n\n'),
       [
         { text: m.comum_cancelar(), style: 'cancel' },
         { text: m.pair_level_view(), onPress: () => go(false) },
@@ -166,7 +188,7 @@ export default function PairSheet() {
 
   async function doPair(release: boolean) {
     if (!picked.length || busy || loading || !routeServer) return;
-    const selected = picked;
+    const selected = pickedNames;
     const full = release ? fullPairsByAlias(groupRows) : [];
     const token = actionEpoch.current;
     const server = routeServer;
@@ -179,7 +201,9 @@ export default function PairSheet() {
         setActionError(formataErro(result.warning) ?? String(result.warning));
         return;
       }
-      const failures = await grantFull(selected.flatMap((peer) => full.map((p) => ({ name: peer, alias: p.alias }))), server);
+      // O acesso de quem é de fora só vale na máquina do par: libera para as escolhidas daqui.
+      const here = selected.filter((peer) => !peer.includes('::'));
+      const failures = await grantFull(here.flatMap((peer) => full.map((p) => ({ name: peer, alias: p.alias }))), server);
       if (token !== actionEpoch.current) return;
       if (failures.length) { setActionError(failures.join('\n')); return; }
       if (token === actionEpoch.current) router.back();
@@ -228,10 +252,8 @@ export default function PairSheet() {
     );
   }
 
-  function openPeer(peer: string) {
-    const fora = outsideRow(allRows, peer);
-    if (fora) { router.push(`/s/${fora.serverId}/${encodeURIComponent(fora.name)}` as never); return; }
-    router.push(`/s/${serverId}/${encodeURIComponent(peer)}` as never);
+  function openMember(member: MemberView) {
+    if (member.target) router.push(`/s/${member.target.server}/${encodeURIComponent(member.target.name)}` as never);
   }
 
   if (!ready) {
@@ -281,13 +303,13 @@ export default function PairSheet() {
           {peers.length ? (
             <>
               {loading ? <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.comum_carregando()}</Text> : <PairMembers
-                peers={peers}
-                sessions={sessions}
-                candidates={candidates}
+                members={members}
+                machines={machines}
                 picked={picked}
+                pickedNames={pickedNames}
                 adding={adding}
                 busy={busy}
-                onOpenPeer={openPeer}
+                onOpenMember={openMember}
                 onToggleAdding={() => { setAdding(true); setPicked([]); }}
                 onToggle={togglePick}
                 onAdd={confirmPair}
@@ -312,8 +334,9 @@ export default function PairSheet() {
             </>
           ) : (
             <PairPicker
-              sessions={candidates}
+              machines={machines}
               picked={picked}
+              pickedNames={pickedNames}
               task={task}
               busy={busy}
               error={actionError || loadError}

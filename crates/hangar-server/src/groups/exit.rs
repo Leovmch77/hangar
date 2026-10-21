@@ -4,7 +4,7 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 
 use super::local::is_remote;
-use super::service::{GroupError, GroupService};
+use super::service::{GroupError, GroupService, OrqFacts};
 use crate::routes::AppState;
 use crate::share::pair_routes::{Direct, end_pair};
 
@@ -20,15 +20,27 @@ fn failed(p: &str, code: &str, msg: String, params: Value) -> Value {
     json!({"sessao": p, "erro": {"code": code, "params": params, "msg": msg}})
 }
 
-/// `GroupService::leave` e o aviso a cada ex-companheiro de fora: (ex-companheiros, falhas).
+/// Sai do grupo: (ex-companheiros, quem o `notify_exit` avisa). Grupo entre máquinas sai pela dona,
+/// na fila (`fed_exit`); `orq` = fases vindas de outra fonte (a ponte do Python).
+pub async fn leave(st: &AppState, groups: &GroupService, name: &str, orq: Option<&dyn OrqFacts>) -> Result<(Vec<String>, Vec<String>), GroupError> {
+    if let Some(left) = super::fed_exit::leave(st, groups, name).await {
+        let ex = left?;
+        let tell = super::fed_exit::notified(st, &ex);
+        return Ok((ex, tell));
+    }
+    let ex = match orq { Some(orq) => groups.leave_with(name, orq).await?, None => groups.leave(name).await? };
+    Ok((ex.clone(), ex))
+}
+
+/// `leave` e o aviso a cada ex-companheiro de fora: (ex-companheiros, falhas).
 pub async fn leave_and_notify(st: &AppState, groups: &GroupService, name: &str) -> Result<(Vec<String>, Vec<Value>), GroupError> {
-    let ex = groups.leave(name).await?;
-    let warnings = notify_exit(st, groups, name, &ex).await;
+    let (ex, tell) = leave(st, groups, name, None).await?;
+    let warnings = notify_exit(st, groups, name, &tell).await;
     Ok((ex, warnings))
 }
 
-/// Par externo: avisa o outro lado e apaga registro e convite aqui mesmo. Máquina própria: o
-/// `/unpair-remote` dela. Locais não são avisados (recado para quem saiu volta "sessão não encontrada").
+/// Par externo: avisa o outro lado e apaga registro e convite aqui mesmo. Par 1:1 antigo com
+/// máquina própria: o `/unpair-remote` dela. Locais não são avisados (recado para quem saiu volta "sessão não encontrada").
 pub async fn notify_exit(st: &AppState, groups: &GroupService, name: &str, ex: &[String]) -> Vec<Value> {
     let mut errs = Vec::new();
     for p in ex.iter().filter(|p| is_remote(p)) {

@@ -7,8 +7,8 @@ import { getActiveId, selectServer, serverColor } from './auth';
 import { formataErro } from '@hangar/core';
 import { sessionsStore } from './sessionsStore.svelte';
 import {
-  clusterByPair, countAwaiting, effectiveGroupBy, groupRemotePairs, groupSelectedByServer, projectKey, projectLabel, providerName,
-  isOrq, sortSessions, type GroupBy, type PairRow, placeExternalRows, pairExternals, pairHeaderLabel,
+  countAwaiting, effectiveGroupBy, groupBadges, groupSelectedByServer, projectKey, projectLabel, providerName,
+  isOrq, sortSessions, type GroupBy, placeExternalRows, pairExternals, pairHeaderLabel, groupGlobal, clusterByPair,
 } from '@hangar/core';
 import type { AggSession, ResumeCandidate, State } from '@hangar/core';
 import * as m from '../paraglide/messages';
@@ -36,18 +36,6 @@ export interface Group {
   color: string | null;
   error: string | null;
   sessions: AggSession[];
-  pair?: { id: string; label: string };
-}
-
-export function groupItems(group: Group): PairRow<AggSession>[] {
-  if (!group.pair) return clusterByPair(group.sessions);
-  const { id: gid, label } = group.pair;
-  return [
-    { kind: 'header', gid, label, count: group.sessions.length },
-    ...group.sessions.map((session, i): PairRow<AggSession> => ({
-      kind: 'session', session, gid, label, ultimo: i === group.sessions.length - 1,
-    })),
-  ];
 }
 
 export interface SessionListModelOptions {
@@ -67,6 +55,8 @@ interface Rules {
   restoreServerAfterAction: boolean;
   // Sessão de fora (par externo) entra no grupo local; a vista desktop web não ganha recurso novo.
   outsideRows: 'place' | 'hide';
+  // Grupo de trabalho vira um bloco só, com os membros de todas as máquinas, onde o 1º apareceria.
+  gatherGroups: boolean;
 }
 
 // Onde as duas views divergem, uma regra por linha. Convergir é trocar um valor aqui, de
@@ -80,6 +70,7 @@ const RULES: Record<ListVariant, Rules> = {
     compareOrder: 'groups',
     restoreServerAfterAction: true,
     outsideRows: 'hide',
+    gatherGroups: false,
   },
   mobile: {
     // O toggle do celular só conhece Servidor|Projeto: 'none' gravado pelo desktop lê como
@@ -91,6 +82,7 @@ const RULES: Record<ListVariant, Rules> = {
     compareOrder: 'rows',
     restoreServerAfterAction: false,
     outsideRows: 'place',
+    gatherGroups: true,
   },
 };
 
@@ -127,37 +119,72 @@ export function createSessionListModel(opts: SessionListModelOptions) {
   const servers = $derived(sessionsStore.servers.filter((s) => !s.ephemeral));
   const groupMode = $derived(rules.groupMode(groupBy, servers.length));
 
+  // gid de cada grupo global: o par antigo entre máquinas tem um gid de cada lado, e os dois passam
+  // a responder pelo gid do primeiro membro.
+  const canonGid = $derived.by(() => {
+    const map = new Map<string, string>();
+    if (!rules.gatherGroups) return map;
+    const byKey = new Map(rows.map((r) => [`${r.serverId}::${r.name}`, r]));
+    for (const g of groupGlobal(rows, sessionsStore.identities ?? new Map())) {
+      const gids = g.members.flatMap((mb) => mb.kind === 'here' ? [byKey.get(`${mb.server}::${mb.name}`)?.pair_gid] : [])
+        .filter((x): x is string => !!x);
+      for (const gid of gids) if (!map.has(gid)) map.set(gid, gids[0]);
+    }
+    return map;
+  });
+  const blockOf = (s: AggSession): string | null => (s.pair_gid ? canonGid.get(s.pair_gid) ?? s.pair_gid : null);
+
+  // Os membros de cada grupo saem das outras seções e entram juntos onde o primeiro estava.
+  function gather(sections: Group[]): Group[] {
+    const members = new Map<string, AggSession[]>();
+    for (const g of sections) for (const s of g.sessions) {
+      const k = blockOf(s);
+      if (k) members.set(k, [...(members.get(k) ?? []), s]);
+    }
+    const placedGroups = new Set<string>();
+    return sections
+      .map((g) => ({ ...g, sessions: g.sessions.flatMap((s) => {
+        const k = blockOf(s);
+        if (!k) return [s];
+        if (placedGroups.has(k)) return [];
+        placedGroups.add(k);
+        return members.get(k)!;
+      }) }))
+      // Seção esvaziada pelo bloco sai, menos a que carrega erro do servidor: o erro tem que aparecer.
+      .filter((g, i) => g.sessions.length > 0 || sections[i].sessions.length === 0 || !!g.error);
+  }
+
   const allGroups = $derived.by<Group[]>(() => {
+    const sections = groupSections();
+    return rules.gatherGroups ? gather(sections) : sections;
+  });
+
+  function groupSections(): Group[] {
     if (servers.length === 0) return [];
-    const remote = groupRemotePairs(rows, sessionsStore.identities ?? new Map());
-    const paired: Group[] = remote.groups.map(({ id, label, sessions }) => ({
-      id, label: '', color: null, error: null, sessions: sortSessions(sessions), pair: { id, label },
-    }));
     if (groupMode === 'none') {
-      return [...paired, { id: '*', label: '', color: null, error: null, sessions: sortSessions(remote.unpaired) }];
+      return [{ id: '*', label: '', color: null, error: null, sessions: sortSessions(rows) }];
     }
     if (groupMode === 'project') {
       const byKey = new Map<string, AggSession[]>();
-      for (const s of remote.unpaired) {
+      for (const s of rows) {
         const k = projectKey(s.cwd);
         const arr = byKey.get(k);
         if (arr) arr.push(s); else byKey.set(k, [s]);
       }
-      return [...paired, ...[...byKey.entries()]
+      return [...byKey.entries()]
         .map(([id, list]) => ({ id, label: projectLabel(list[0]?.cwd), color: null, error: null, sessions: sortSessions(list) }))
-        .sort((a, b) => a.label.localeCompare(b.label))];
+        .sort((a, b) => a.label.localeCompare(b.label));
     }
-    const pairedKeys = new Set(paired.flatMap(g => g.sessions.map(selectionKey)));
     const byServer: Group[] = placed.byServer.map((b) => ({
       id: b.server.id,
       label: b.server.label,
       color: serverColor(b.server.id),
       error: b.error,
-      sessions: sortSessions(b.sessions.filter(s => !pairedKeys.has(selectionKey(s)))),
+      sessions: sortSessions(b.sessions),
     }));
-    if (rules.serverGroups === 'store-order') return [...paired, ...byServer];
-    return [...paired, ...byServer.filter((g) => g.sessions.length > 0).sort((a, b) => a.label.localeCompare(b.label))];
-  });
+    if (rules.serverGroups === 'store-order') return byServer;
+    return [...byServer.filter((g) => g.sessions.length > 0).sort((a, b) => a.label.localeCompare(b.label))];
+  }
 
   const groups = $derived.by<Group[]>(() => {
     const q = filterText.trim().toLowerCase();
@@ -166,10 +193,9 @@ export function createSessionListModel(opts: SessionListModelOptions) {
       .map((g) => {
         const matches = (s: AggSession) => s.name.toLowerCase().includes(q) ||
           (s.cwd ?? '').toLowerCase().includes(q) || rules.filterLabel(s, g).toLowerCase().includes(q);
-        const sessions = g.pair
-          ? (g.pair.label.toLowerCase().includes(q) || g.sessions.some(matches) ? g.sessions : [])
-          : g.sessions.filter(matches);
-        return { ...g, sessions };
+        // No celular o bloco do grupo não se parte: um membro que casa traz os outros.
+        const hit = new Set(rules.gatherGroups ? g.sessions.filter(matches).map(blockOf).filter(Boolean) : []);
+        return { ...g, sessions: g.sessions.filter((s) => matches(s) || hit.has(blockOf(s))) };
       })
       .filter((g) => g.sessions.length > 0);
   });
@@ -186,7 +212,26 @@ export function createSessionListModel(opts: SessionListModelOptions) {
   const awaitingTotal = $derived(countAwaiting(allSessions));
 
   function pairMembers(gid: string): AggSession[] {
-    return allGroups.find(g => g.pair?.id === gid)?.sessions ?? allSessions.filter(s => s.pair_gid === gid);
+    const k = canonGid.get(gid) ?? gid;
+    return allSessions.filter(s => blockOf(s) === k);
+  }
+  const cluster = (sessions: AggSession[]) => clusterByPair(sessions, blockOf);
+
+  // Selo do grupo que atravessa máquinas (I-9A): o código do ticket ou quantas máquinas o grupo
+  // tem. Grupo de uma máquina só já tem o cabeçalho.
+  const badges = $derived(groupBadges(rows, sessionsStore.identities ?? new Map()));
+  function groupBadge(s: AggSession): string | null {
+    const badge = badges.get(`${s.serverId}::${s.name}`);
+    return badge ? badge.text ?? m.grupo_selo_maquinas({ n: badge.machines }) : null;
+  }
+  // Cabeçalho do bloco: "N máquinas" quando o grupo atravessa máquinas.
+  function pairSeal(gid: string): string | null {
+    const n = pairMembers(gid).map((s) => badges.get(`${s.serverId}::${s.name}`)?.machines ?? 0).find((x) => x > 1);
+    return n ? m.grupo_selo_maquinas({ n }) : null;
+  }
+  // Dentro do bloco a seção já não diz a máquina: a linha de grupo entre máquinas diz.
+  function memberMachine(s: AggSession): string | null {
+    return badges.has(`${s.serverId}::${s.name}`) ? s.serverLabel : null;
   }
 
   // Cabeçalho do grupo com sessão de fora: "hangar ↔ casa::api (Ana)", só com os membros locais.
@@ -209,8 +254,7 @@ export function createSessionListModel(opts: SessionListModelOptions) {
     // lista: no celular a lista desmonta ao abrir um chat, e sem gravar o grupo voltava aberto a
     // cada volta. O gid renasce a cada pareamento, então o que não está mais na lista é podado
     // aqui mesmo, e o localStorage não acumula gid morto.
-    const vivos = new Set(rows.map((s) => `pair:${s.pair_gid ?? ''}`));
-    for (const group of allGroups) if (group.pair) vivos.add(`pair:${group.pair.id}`);
+    const vivos = new Set(rows.map((s) => `pair:${blockOf(s) ?? ''}`));
     try {
       localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...next].filter((k) => !k.startsWith('pair:') || vivos.has(k))));
     } catch { /* idem */ }
@@ -390,6 +434,10 @@ export function createSessionListModel(opts: SessionListModelOptions) {
     toggleGroup,
     pairMembers,
     pairLabel,
+    groupBadge,
+    pairSeal,
+    memberMachine,
+    cluster,
     get selectMode() { return selectMode; },
     get selected() { return selected; },
     get broadcastText() { return broadcastText; },

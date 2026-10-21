@@ -197,6 +197,38 @@ async fn lone_orq_group_dissolves_only_when_run_ended_or_grace_passed() {
     assert_eq!(archived, 2, "ended e old");
 }
 
+/// PAIR-43: o dono de um par com máquina própria é o único local do par e também é varrido.
+#[tokio::test(start_paused = true)]
+async fn dead_owner_of_a_cross_machine_pair_leaves() {
+    let mut r = rig();
+    std::fs::create_dir_all(&r.root).unwrap();
+    std::fs::write(r.root.join("a.json"), serde_json::json!({"peers": ["lab::x"], "task": "", "gid": "abababab", "harness": {}}).to_string()).unwrap();
+    live(&r.env, &["y"]);
+    r.sweeper.round().await;
+    tokio::time::advance(Duration::from_secs(5)).await;
+    r.sweeper.round().await;
+    assert_eq!(*r.env.left.lock().unwrap(), ["a"]);
+    assert!(!sidecar_exists(&r.root, "a"));
+}
+
+/// PAIR-41 (I-1A): sidecar `orq` que não sai não para a dissolução dos outros.
+#[tokio::test]
+async fn lone_orq_clear_failure_does_not_stop_the_others() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("pair");
+    let (python, upstream) = fake::spawn_fake().await;
+    let groups = GroupService::new(PairDir::new(root.clone(), tmp.path().join("arquivo")), Arc::new(Phase(Mutex::default())), "casa".into())
+        .with_diary(hangar_server::diag::DiagClient::new(upstream, fake::SECRET.into()));
+    for name in ["a1", "b2"] { join(&groups, name, &[], true).await; }
+    // O temporário de `a1` é uma pasta: apagar o sidecar dele falha.
+    std::fs::create_dir(root.join("a1.json.tmp")).unwrap();
+    let dissolved = groups.dissolve_lone_orq(Duration::ZERO).await.unwrap();
+    assert_eq!(dissolved, ["b2"]);
+    assert!(!sidecar_exists(&root, "b2"));
+    // A decisão (I-1A) manda a falha ao diário exportável, não só ao log.
+    fake::wait_until(move || python.diag().iter().any(|d| d["evento"] == "rust.groups_lone_orq_clear_failed" && d["sessao"] == "a1")).await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn no_sidecar_no_list_request() {
     let mut r = rig();

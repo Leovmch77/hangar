@@ -4,12 +4,13 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
-import type { AggSession } from '@hangar/core';
+import { groupGlobal, type AggSession } from '@hangar/core';
 import { Sheet } from '../ui/Sheet';
 import { superficie } from '../theme/superficie';
 import { useSessions } from '../stores/sessions';
+import { useIdentities } from '../features/pair/identities';
 import { SessionRow } from '../features/sessions/SessionRow';
-import { SessionSectionCard, SessionSectionHeader } from '../features/sessions/SessionSection';
+import { GroupBlockHeader, SessionSectionCard, SessionSectionHeader } from '../features/sessions/SessionSection';
 import { buildSessionSections, sessionGroupKey } from '../features/sessions/sessionSections';
 import * as m from '../paraglide/messages';
 
@@ -56,11 +57,16 @@ function PickerList({ onClose, atual, serverId }: { onClose: () => void; atual: 
   const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(() => new Set());
   const search = query.trim().toLowerCase();
   const liveRows = useMemo(() => rows.filter((s) => s.state !== 'dead'), [rows]);
+  // Como na lista: o identificador de cada máquina só é lido quando há grupo entre máquinas.
+  const crossMachine = useMemo(() => liveRows.some((r) => r.pair_owner || r.pair_peers?.some((p) => p.includes('::'))), [liveRows]);
+  const servers = useMemo(() => crossMachine ? byServer.map((b) => b.server) : [], [crossMachine, byServer]);
+  const { identities } = useIdentities(servers);
+  const pairGroups = useMemo(() => groupGlobal(liveRows, identities), [liveRows, identities]);
   const groups = useMemo(() => {
     const current = liveRows.find((s) => s.name === atual && s.serverId === serverId);
     const currentServer = current?.outside?.localServerId ?? serverId;
-    return buildSessionSections(liveRows, 'server', search, collapsedGroups, currentServer);
-  }, [liveRows, atual, serverId, search, collapsedGroups]);
+    return buildSessionSections(liveRows, 'server', search, collapsedGroups, currentServer, pairGroups);
+  }, [liveRows, atual, serverId, search, collapsedGroups, pairGroups]);
   const multipleServers = useMemo(() => new Set(liveRows.map((s) => s.serverId)).size > 1, [liveRows]);
   const toggleGroup = useCallback((id: string) => setCollapsedGroups((current) => {
     const next = new Set(current);
@@ -106,9 +112,10 @@ function PickerList({ onClose, atual, serverId }: { onClose: () => void; atual: 
       {groups.map((group) => <View key={group.id}>
         <SessionSectionHeader section={group} onToggle={toggleGroup} />
         {group.data.map((session, index) => <SessionSectionCard key={`${session.serverId}::${session.name}`} index={index} total={group.data.length}>
+          {group.heads.has(`${session.serverId}::${session.name}`) ? <GroupBlockHeader head={group.heads.get(`${session.serverId}::${session.name}`)!} /> : null}
           <SessionRow session={session} compact
             selected={session.name === atual && session.serverId === serverId}
-            mostrarServidor={!!session.outside || (multipleServers && group.id.startsWith('state:'))}
+            mostrarServidor={!!session.outside || (multipleServers && (group.id.startsWith('state:') || session.serverId !== group.id))}
             onPress={selectSession} />
         </SessionSectionCard>)}
       </View>)}

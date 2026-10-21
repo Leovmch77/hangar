@@ -1960,6 +1960,18 @@ fn the_account_guard_covers_the_preparation() {
     assert_eq!(raw["steps"][0]["status"], 200, "{}", raw["steps"][0]["body"]);
 }
 
+/// Conta do Hangar sem login: o Claude subiria mudo. A abertura recusa antes de qualquer pane.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_account_without_login_is_refused_before_the_pane() {
+    let (raw, _dir, _root) = run_contract_with("create_claude_terminal_hangar_account", |_| {}, |root| {
+        std::fs::remove_file(root.join("home/.claude-conta2/.credentials.json")).unwrap();
+    });
+    assert_eq!((raw["steps"][0]["status"].clone(), raw["steps"][0]["body"]["detail"]["code"].clone()),
+        (json!(409), json!("erro_conta_sem_login")), "{}", raw["steps"][0]["body"]);
+    assert!(!raw["subprocesses"].as_array().unwrap().iter().any(|p| p["argv"][0] == "new-session"), "nenhum pane");
+}
+
 /// Sem resposta do tmux a sessão pode ter nascido: a abertura responde incerta e não desfaz a
 /// worktree (desfazer apagaria a pasta e a branch debaixo de um pane vivo).
 #[cfg(target_os = "linux")]

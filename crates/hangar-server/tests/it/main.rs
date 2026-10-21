@@ -5,6 +5,7 @@
 //! parte. O do diário é por servidor (o Python falso de cada um), e ali os nomes de sessão podem repetir.
 
 mod common;
+mod groups_text;
 mod session_defaults;
 mod artifacts;
 mod session_media;
@@ -16,6 +17,8 @@ mod dictation_harness;
 mod dictation_process;
 mod dictation_provider;
 mod fake;
+#[cfg(unix)]
+mod groups_support;
 #[cfg(unix)]
 mod list_support;
 mod mods_support;
@@ -157,9 +160,16 @@ mod costs_routes;
 mod costs_session_unit;
 mod costs_uso_unit;
 mod groups_bridge;
+mod groups_close;
+mod groups_context_cmd;
+mod groups_convert;
 mod groups_deliver;
+mod groups_federation;
+mod groups_fed_exit;
+mod groups_fed_notice;
 mod groups_legacy;
 mod groups_local;
+mod groups_outbox;
 mod groups_peers;
 mod groups_routes;
 mod groups_store;

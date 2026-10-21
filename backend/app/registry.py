@@ -10,12 +10,11 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 from app import diag, shortcut_terminals, tmux
 from app import agentpane
 from app import permission_mode as modo_permissao
 from app.config import settings
-from app.mensagens import erro
 from app import claude_customizations as session_customizations
 from app import plugin_bridge
 from app import runtime_config
@@ -23,11 +22,11 @@ from app.names import sanitize_session_name
 from app.git_ops import git_summary, git_diffstat
 from app import worktrees
 from app.models import SessionInfo, session_key
-from app.pqueue import PromptQueue, _sanitize, merged_history
+from app.pqueue import PromptQueue, merged_history
 from app.archive import _texto_simples, conversation_files
 from app.chain import ThenLink
-from app import guest_users, pair
-from app.pair import PairLink, rename_pair, leave as pair_leave
+from app import guest_users
+from app.pair import PairLink
 from app.adapters.claude_headless import sessions as headless_sessions
 from app.adapters.codex import sessions as codex_sessions
 from app.adapters.orq import runs as orq_runs
@@ -165,13 +164,6 @@ def _pair_external(name: str, peers_: list[str] | None) -> dict | None:
                 and f"{r.get('alias')}::{r.get('peer_session')}" in peers_:
             return {"alias": r.get("alias"), "owner": r.get("peer_owner"), "session": r.get("peer_session")}
     return None
-
-
-def _encerrar_pares_externos(morta: str) -> None:
-    """Sessão morta fora do app: o par externo dela não tem quem o desfaça. O Rust, dono do registro
-    e do convite, apaga os dois e avisa o outro lado solto; falha da ponte vai ao diário."""
-    from app import share_bridge
-    share_bridge.session_died(morta)
 
 
 def _decorate_loop(info) -> None:
@@ -962,13 +954,6 @@ class KillFailed(Exception):
         self.name, self.detail = name, detail
 
 
-def _rename_pair_python(old: str, new: str) -> None:
-    """No modo Rust o grupo já foi renomeado pela rota antes do tmux e do sidecar (`group.rename`)."""
-    from app import groups_bridge
-    if not groups_bridge.rust_owns_groups():
-        rename_pair(old, new)
-
-
 class SessionOpenNeedsRust(Exception):
     """Abrir e subir sessão é do Rust (abertura única); sem ele, não tem quem faça."""
     code = "session_open_needs_rust_server"
@@ -984,10 +969,6 @@ class SessionRegistry:
     # spawna claude por turno) -> sem isto a resolucao oscilava pro mtime e o watcher do SSE limpava o
     # chat. Atualizado quando um sinal confiavel reaparece (ex: /clear -> session-id novo).
     _jsonl_cache: dict[str, str] = {}
-    # DE CLASSE, como os outros caches: api, sse (2) e prune têm instâncias próprias e todas
-    # chamam list(); contador por instância fecharia "2 polls" em milissegundos.
-    _pair_ausencias: dict[str, float] = {}
-    _PAIR_AUSENCIA_MIN_S = 5.0
     # nomes cujo cache veio do fd ABERTO (verdade do FS, nao chute). Mantido entre polls sem fd p/ nao
     # oscilar pro --session-id da cmdline (resume: o id da cmdline nunca vira arquivo). De classe.
     _fd_locked: set[str] = set()
@@ -2448,7 +2429,6 @@ class SessionRegistry:
             self._rename_rust(old, new)
             PromptQueue(old).rename(new)
             ThenLink(old).rename(new)
-            _rename_pair_python(old, new)
             shortcut_terminals.rename_owner(old, new)
             from app.conversation_transfer import rename_transfer
             rename_transfer(old, new)
@@ -2482,10 +2462,7 @@ class SessionRegistry:
         # Vinculo 'then' (feature #12): mesmo motivo — keyed por NOME, move junto pra sessao renomeada
         # nao perder o encadeamento armado.
         ThenLink(old).rename(new)
-        # Pareamento: move o próprio sidecar E re-aponta o do PAR (que referencia o nome velho) —
-        # senão o par ficaria pareado com um fantasma e o unpair simétrico quebrava. Sob o lock do
-        # módulo pair (rename_pair): sem ele, um unpair concorrente podia ser ressuscitado.
-        _rename_pair_python(old, new)
+        # O grupo já foi renomeado pelo Rust, antes do tmux (`group.rename` na rota).
         # L71 da revisao final: o shell escondido e keyed por NOME (`term-<nome>`) e NAO acompanha o
         # rename sozinho -- ele ficava orfa pra sempre, invisivel no app (marcado @cp_hidden) e fora
         # do alcance do `kill()`, que so procura `term-<nome NOVO>`. Pior: a aba Shell do nome novo
@@ -2528,9 +2505,9 @@ class SessionRegistry:
             _log.debug("kill: shell escondido de %r nao saiu (pode nao existir)", name)
 
     def kill(self, name: str, *, closed_by_rust: bool = False) -> list[dict]:
-        """Devolve os avisos de saída do grupo que o Rust não entregou (vazio no modo Python, onde a
-        rota avisa depois). `closed_by_rust`: o Rust já encerrou a sessão (pane, app-server, sidecar,
-        fila, grupo) e repassou; só as lojas daqui, sem nenhuma chamada de volta a ele."""
+        """Devolve avisos de saída (sempre vazio: a saída do grupo é do Rust, depois do fechamento).
+        `closed_by_rust`: o Rust já encerrou a sessão (pane, app-server, sidecar, fila, grupo) e
+        repassou; só as lojas daqui, sem nenhuma chamada de volta a ele."""
         from app.conversation_transfer import require_available
         require_available(name)
         if closed_by_rust:
@@ -2560,7 +2537,7 @@ class SessionRegistry:
             self._forget(name)
             PromptQueue(name).clear()
             ThenLink(name).clear()
-            return self._clear_pair(name)
+            return []
         if codex_sessions.exists(name):
             # Sessao Codex: fecha app-server e TUI tmux, apaga o sidecar e limpa estado duravel.
             from app.adapters import get_adapter
@@ -2581,8 +2558,7 @@ class SessionRegistry:
             self._forget(name)
             PromptQueue(name).clear()
             ThenLink(name).clear()
-            warnings = self._clear_pair(name)
-            return warnings
+            return []
         # Limpa o sidecar do AskUserQuestion ANTES de matar (precisa do processo vivo pra resolver o
         # jsonl), best-effort: cleanup nunca bloqueia/quebra o kill. Senao um stale reabriria o stepper
         # numa sessao futura de mesmo nome.
@@ -2601,76 +2577,7 @@ class SessionRegistry:
         # nome herdaria essas entradas como bubble-fantasma (mesmo motivo do clear no create()).
         PromptQueue(name).clear()
         ThenLink(name).clear()  # mesmo motivo, pro vinculo 'then' (feature #12)
-        return self._clear_pair(name)
-
-    @staticmethod
-    def _clear_pair(name: str) -> list[dict]:
-        # Sessão morta SAI do grupo (leave: sob lock, atualiza os demais membros): sem isto os
-        # companheiros apontariam pra um fantasma (badge preso). Best-effort, nunca bloqueia o
-        # kill nem a criação — mas LOGA: engolir calado deixava o badge-fantasma indiagnosticável.
-        from app import groups_bridge
-        if groups_bridge.rust_owns_groups():
-            # O Rust já avisa as outras máquinas e o par externo; falha aqui a varredura dele resolve.
-            try:
-                out = groups_bridge.call("group.leave", name=name)
-            except groups_bridge.GroupsBridgeError as e:
-                _log.warning("_clear_pair(%s): o Rust não tirou a sessão do grupo: %s", name, e.code)
-                # A varredura resolver depois não é ter saído agora: o aviso vai na resposta.
-                return [{"sessao": name, "erro": erro("erro_grupo_indisponivel",
-                                                      "os grupos estão indisponíveis agora", detalhe=e.code)}]
-            warnings = out.get("warnings")
-            return warnings if isinstance(warnings, list) else []
-        try:
-            pair_leave(name)
-        except Exception as e:
-            # Sem "kill(...)" no texto: o create() também chama isto (nome reusado de sessão morta
-            # fora do kill), e a falha aparecia no log como se fosse de um encerramento.
-            _log.warning("_clear_pair(%s): falha ao sair do grupo de pareamento: %r", name, e)
         return []
-
-    def sweep_pairs(self, list_fn: Callable[[], list[SessionInfo]], agora: float | None = None) -> None:
-        """Lista que falha levanta antes de varrer: vazia por erro dissolveria grupos vivos. Sem
-        nenhum pareado, nem pergunta a lista."""
-        vivos = {i.name for i in list_fn()} if pair.referenciados_locais() else set()
-        self._varrer_pares_mortos(vivos, agora)
-
-    def _varrer_pares_mortos(self, vivos: set[str], agora: float | None = None) -> None:
-        """Membro de grupo cuja sessão morreu FORA do app (Ctrl-C, crash, reboot): ninguém chamou
-        leave, o sidecar apontava pra um fantasma pra sempre. Morto = ausente da lista viva numa
-        varredura anterior E há pelo menos _PAIR_AUSENCIA_MIN_S — kill() e rename() deixam o nome
-        ausente de propósito por um instante, e só o tempo separa isso de morte. Roda no laço
-        `pair_sweep_loop`, fora da descoberta."""
-        try:
-            sozinhos = pair.dissolve_lone_orq()
-        except Exception as e:
-            _log.warning("varredura de pares: grupo orq de um membro não dissolvido: %r", e)
-        else:
-            if sozinhos:
-                _log.info("varredura de pares: grupo orq sem execução viva dissolvido (%s)", sozinhos)
-        if not vivos:
-            return   # tmux fora = lista vazia; varrer aqui dissolveria todos os grupos
-        agora = time.monotonic() if agora is None else agora
-        # referenciados_locais() devolve stem SANITIZADO (_sanitize do pqueue); vivos é nome CRU do
-        # tmux — sem subtrair a versão sanitizada de vivos, sessão com espaço/acento no nome nunca
-        # sai de candidatos e a varredura dissolve um grupo vivo (achado do review final).
-        candidatos = pair.referenciados_locais() - vivos - {_sanitize(v) for v in vivos}
-        cls = type(self)
-        for n in [x for x in dict(cls._pair_ausencias) if x not in candidatos]:
-            cls._pair_ausencias.pop(n, None)  # varredura concorrente (2 registries) pode já ter tirado
-        for n in candidatos:
-            primeira = cls._pair_ausencias.setdefault(n, agora)
-            if agora - primeira < cls._PAIR_AUSENCIA_MIN_S:
-                continue
-            cls._pair_ausencias.pop(n, None)  # idem: 2 threads podem passar o portão de tempo juntas
-            try:
-                ex = pair_leave(n)
-            except Exception as e:
-                _log.warning("varredura de pares: '%s' morto fora do app, leave falhou: %r", n, e)
-                continue
-            _log.info("varredura de pares: '%s' morreu fora do app; saiu do grupo (%s)", n, ex)
-            _encerrar_pares_externos(n)
-            if any("::" in p for p in ex):
-                _log.warning("varredura de pares: '%s' tinha par remoto; sidecar de lá fica órfão", n)
 
     # ── Resume de sessao "sem id" ────────────────────────────────────────────────
     # Uma sessao aberta com `claude` cru (sem --session-id) JA tem um transcript <uuid>.jsonl; so nao da

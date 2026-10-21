@@ -14,7 +14,18 @@ pub fn set_language(language: Language) {
     ENGLISH.store(english, Ordering::Relaxed);
 }
 
-pub fn english() -> bool { ENGLISH.load(Ordering::Relaxed) }
+pub fn english() -> bool {
+    #[cfg(test)]
+    if let Some(english) = TEST_ENGLISH.with(std::cell::Cell::get) { return english; }
+    ENGLISH.load(Ordering::Relaxed)
+}
+
+// O idioma é global e os testes rodam em paralelo: teste que precisa do inglês o liga só na própria thread.
+#[cfg(test)]
+thread_local! { static TEST_ENGLISH: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) }; }
+
+#[cfg(test)]
+pub fn english_in_this_thread(english: bool) { TEST_ENGLISH.with(|c| c.set(Some(english))); }
 
 fn messages() -> &'static HashMap<String, serde_json::Value> {
     static MESSAGES: OnceLock<[HashMap<String, serde_json::Value>; 2]> = OnceLock::new();

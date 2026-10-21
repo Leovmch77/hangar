@@ -27,23 +27,25 @@ pub const LOW_PCT:f64 = 95.0;
 pub const FULL_PCT:f64 = 99.0;
 
 /// `_account_targets`: as contas Claude, sem a atual, a de mais folga primeiro, sem leitura depois e as
-/// cheias no fim. `pct` é a janela mais cheia (`None` sem leitura).
-pub fn targets(catalog:&Value,quotas:&[Value],current:Option<&str>) -> Vec<Value> {
+/// cheias e sem login no fim. `pct` é a janela mais cheia (`None` sem leitura).
+pub fn targets(catalog:&Value,quotas:&[Value],current:Option<&str>,login:impl Fn(&str)->bool) -> Vec<Value> {
     let same=|a:&str,b:&str|a==b || real(a)==real(b);
     let mut out:Vec<Value>=catalog.as_array().into_iter().flatten().filter_map(|row| {
         let path=row["path"].as_str()?;
         if current.is_some_and(|current|same(current,path)) {return None;}
         let read=quotas.iter().find(|q|q["estado"]=="lida" && q["id"].as_str().and_then(|id|id.strip_prefix("claude:")).is_some_and(|p|same(p,path)));
         let pct=read.and_then(|q|q["janelas"].as_array()?.iter().filter_map(|w|w["pct"].as_f64()).reduce(f64::max));
-        Some(json!({"path":path,"label":row["label"],"pct":pct,"low":pct.is_some_and(|p|p>=LOW_PCT),"full":pct.is_some_and(|p|p>=FULL_PCT)}))
+        Some(json!({"path":path,"label":row["label"],"pct":pct,"low":pct.is_some_and(|p|p>=LOW_PCT),"full":pct.is_some_and(|p|p>=FULL_PCT),"login":login(path)}))
     }).collect();
     out.sort_by(|a,b|{
-        let key=|v:&Value|(v["full"]==true,v["pct"].is_null(),v["pct"].as_f64().unwrap_or(0.0));
+        let key=|v:&Value|(v["full"]==true || v["login"]==false,v["pct"].is_null(),v["pct"].as_f64().unwrap_or(0.0));
         let (ka,kb)=(key(a),key(b));
         (ka.0,ka.1).cmp(&(kb.0,kb.1)).then(ka.2.total_cmp(&kb.2))
     });
     out
 }
+
+fn logged_in(path:&str) -> bool { crate::accounts::claude_refresh::has_login(Path::new(path)) }
 
 /// O pedido de `POST /conta`: exatamente um destino; `config_dir` e `engine_account` são o corpo inteiro.
 #[derive(Debug,PartialEq)]
@@ -192,7 +194,7 @@ pub async fn targets_route(State(st):State<Arc<AppState>>,ConnectInfo(peer):Conn
     };
     let quotas=st.accounts.quotas(None,false,true).await.unwrap_or(Value::Null);
     let quotas:Vec<Value>=quotas.as_array().into_iter().flatten().filter(|row|row["provedor"]=="claude").cloned().collect();
-    reply(Some(req.headers()),StatusCode::OK,Value::Array(targets(&catalog,&quotas,current.as_deref())))
+    reply(Some(req.headers()),StatusCode::OK,Value::Array(targets(&catalog,&quotas,current.as_deref(),logged_in)))
 }
 
 pub async fn switch_route(State(st):State<Arc<AppState>>,ConnectInfo(peer):ConnectInfo<SocketAddr>,req:Request) -> Response {
@@ -213,9 +215,14 @@ pub async fn switch_route(State(st):State<Arc<AppState>>,ConnectInfo(peer):Conne
     };
     let quotas=st.accounts.quotas(None,false,true).await.unwrap_or(Value::Null);
     let quotas:Vec<Value>=quotas.as_array().into_iter().flatten().filter(|row|row["provedor"]=="claude").cloned().collect();
-    let Some(chosen)=targets(&catalog,&quotas,None).into_iter().find(|t|t["path"]==destination.as_str()) else {
+    let Some(chosen)=targets(&catalog,&quotas,None,logged_in).into_iter().find(|t|t["path"]==destination.as_str()) else {
         return reply(Some(&parts.headers),StatusCode::BAD_REQUEST,detail_body("erro_config_dir_invalido","config_dir invalido",json!({})));
     };
+    // Sem login o Claude morre ao subir: recusa antes de parar a sessão.
+    if chosen["login"]==false {
+        return reply(Some(&parts.headers),StatusCode::CONFLICT,detail_body("erro_conta_sem_login",&format!("a conta {} não está logada; faça login nela antes de trocar",chosen["label"].as_str().unwrap_or_default()),
+            json!({"conta":chosen["label"]})));
+    }
     if chosen["full"]==true {
         let pct=chosen["pct"].as_f64().unwrap_or(0.0);
         return reply(Some(&parts.headers),StatusCode::CONFLICT,detail_body("erro_conta_cheia",&format!("a conta {} está em {pct:.0}% da cota",chosen["label"].as_str().unwrap_or_default()),
@@ -294,11 +301,40 @@ mod tests {
         let catalog=json!([{"path":"/a","label":"a"},{"path":"/b","label":"b"},{"path":"/c","label":"c"},{"path":"/d","label":"d"},{"path":"/e","label":"e"}]);
         let quota=|path:&str,pct:f64|json!({"id":format!("claude:{path}"),"estado":"lida","janelas":[{"pct":pct},{"pct":pct/2.0}]});
         let quotas=vec![quota("/a",99.5),quota("/b",40.0),quota("/c",96.0),quota("/e",10.0)];
-        let out=targets(&catalog,&quotas,Some("/e"));
+        let out=targets(&catalog,&quotas,Some("/e"),|_|true);
         let order:Vec<&str>=out.iter().map(|t|t["path"].as_str().unwrap()).collect();
         assert_eq!(order,["/b","/c","/d","/a"]);
         assert_eq!((out[1]["low"].as_bool(),out[1]["full"].as_bool()),(Some(true),Some(false)));
         assert_eq!((out[3]["full"].as_bool(),out[2]["pct"].is_null()),(Some(true),true));
+    }
+
+    /// Conta sem login não serve de destino: vem marcada e vai para o fim, junto das cheias.
+    #[test]
+    fn an_account_without_login_is_marked_and_goes_last() {
+        let catalog=json!([{"path":"/a","label":"a"},{"path":"/b","label":"b"}]);
+        let out=targets(&catalog,&[],None,|path|path!="/a");
+        let order:Vec<(&str,bool)>=out.iter().map(|t|(t["path"].as_str().unwrap(),t["login"].as_bool().unwrap())).collect();
+        assert_eq!(order,[("/b",true),("/a",false)]);
+    }
+
+    /// Login vale com o token de acesso no prazo ou com o de renovação; sem arquivo, não.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn login_needs_a_live_credential() {
+        let dir=tempfile::tempdir().unwrap();
+        assert!(!crate::accounts::claude_refresh::has_login(dir.path()));
+        let write=|v:Value|std::fs::write(dir.path().join(".credentials.json"),json!({"claudeAiOauth":v}).to_string()).unwrap();
+        let future=(crate::accounts::quotas::now()+3600.0)*1000.0;
+        write(json!({"accessToken":"a","expiresAt":future}));
+        assert!(crate::accounts::claude_refresh::has_login(dir.path()));
+        write(json!({"accessToken":"a"}));
+        assert!(crate::accounts::claude_refresh::has_login(dir.path()), "sem prazo informado não é falta de login");
+        write(json!({"accessToken":"a","expiresAt":1000,"refreshToken":"r"}));
+        assert!(crate::accounts::claude_refresh::has_login(dir.path()));
+        write(json!({"accessToken":"a","expiresAt":1000,"refreshToken":"r","refreshTokenExpiresAt":1000}));
+        assert!(!crate::accounts::claude_refresh::has_login(dir.path()));
+        write(json!({"accessToken":"a","expiresAt":1000}));
+        assert!(!crate::accounts::claude_refresh::has_login(dir.path()));
     }
 
     #[test]

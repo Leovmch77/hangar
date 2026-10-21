@@ -2219,7 +2219,7 @@ impl RuntimeRegistry {
                 entry.settings_owner=Some(recipe.clone());entry.auto_respawn=auto_respawn;
             }
             let handle=self.entry(key,target.generation).await?;
-            let deadline=tokio::time::Instant::now()+Duration::from_secs(10);
+            let deadline=tokio::time::Instant::now()+super::claude_reopen::STARTUP_WAIT;
             loop {
                 let snapshot=handle.snapshot().await?;
                 if !snapshot["error"].is_null() || snapshot["view"]["alive"]==false {return Err(failure("relaunch_initialize"));}

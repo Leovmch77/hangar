@@ -3,7 +3,8 @@ import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Icon } from '../../ui/Icon';
 import { superficie } from '../../theme/superficie';
-import type { SessionSection } from './sessionSections';
+import { GroupGlyph } from '../pair/GroupGlyph';
+import type { GroupHead, SessionSection } from './sessionSections';
 import * as m from '../../paraglide/messages';
 
 export function SessionSectionHeader({ section, onToggle }: { section: SessionSection; onToggle: (id: string) => void }) {
@@ -29,6 +30,21 @@ export function SessionSectionHeader({ section, onToggle }: { section: SessionSe
   );
 }
 
+// Abre o bloco do grupo dentro da seção: rótulo (tarefa ou nomes) e, entre máquinas, quantas são.
+export function GroupBlockHeader({ head }: { head: GroupHead }) {
+  const { theme } = useUnistyles();
+  const muted = theme.tokens.text.muted;
+  const machines = head.machines > 1 ? m.grupo_selo_maquinas({ n: head.machines }) : null;
+  return (
+    <View style={styles.groupHead} accessible accessibilityRole="header"
+      accessibilityLabel={[m.par_grupo_titulo({ n: head.size }), head.label, machines].filter(Boolean).join(', ')}>
+      <GroupGlyph size={14} color={muted} />
+      <Text style={[styles.groupHeadLabel, { color: theme.tokens.text.secondary }]} numberOfLines={1}>{head.label}</Text>
+      {machines ? <Text style={[styles.count, { color: muted }]} numberOfLines={1}>{machines}</Text> : null}
+    </View>
+  );
+}
+
 export function SessionSectionCard({ index, total, children }: { index: number; total: number; children: ReactNode }) {
   const { theme } = useUnistyles();
   return (
@@ -47,6 +63,8 @@ const styles = StyleSheet.create((theme) => ({
   badge: { paddingHorizontal: theme.base.space[1.5], paddingVertical: theme.base.space[0.5], borderRadius: theme.base.radius.full },
   count: { fontSize: theme.base.text.xs, fontVariant: ['tabular-nums'] },
   arrow: { marginLeft: 'auto' },
+  groupHead: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5], paddingHorizontal: theme.base.space[3], paddingTop: theme.base.space[2], paddingBottom: theme.base.space[1] },
+  groupHeadLabel: { flexShrink: 1, fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold },
   card: { overflow: 'hidden' },
   first: { borderTopLeftRadius: theme.base.radius.lg, borderTopRightRadius: theme.base.radius.lg },
   last: { borderBottomLeftRadius: theme.base.radius.lg, borderBottomRightRadius: theme.base.radius.lg },

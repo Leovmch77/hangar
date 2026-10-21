@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from app import api, diag, list_bridge, registry, share_bridge
+from app import api, diag, list_bridge, share_bridge
 from app.config import settings
 
 H = {"Authorization": "Bearer secret"}
@@ -95,8 +95,8 @@ def test_call_refuses_to_block_the_event_loop():
 
 
 def _kill_stubs(monkeypatch):
-    from app import groups_bridge
-    monkeypatch.setattr(groups_bridge, "rust_owns_groups", lambda: True)
+    # Saída do grupo pela ponte tem teste próprio (`test_groups_bridge.py`); aqui só os convites.
+    monkeypatch.setattr(api, "_rust_leave", lambda name, phases: [])
     monkeypatch.setattr(api, "_recusa_orq", lambda n: None)
     monkeypatch.setattr(api.registry, "kill", lambda n, closed_by_rust=False: [])
     monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
@@ -275,20 +275,6 @@ def test_supervisor_sends_the_snapshot_when_bridges_come_up(monkeypatch):
         list_bridge.configure(None, None)
     assert sent[0][0] == "127.0.0.1:9", "a fotografia sai com as pontes já ligadas"
     assert len(sent) == 2, "a primeira falhou: repete até o Rust aceitar"
-
-
-def test_registry_dead_session_asks_rust_to_end_its_external_pairs(bridge):
-    registry._encerrar_pares_externos("morta")
-    assert bridge.calls == [("session_died", {"name": "morta"})]
-
-
-def test_end_external_pair_comes_from_rust(bridge):
-    erro = {"sessao": "ana::b", "erro": {"code": "erro_peer_nao_avisado", "params": {}, "msg": "x"}}
-    bridge.replies["end_pair"] = {"found": True, "errors": [erro]}
-    assert asyncio.run(api._end_external_pair("a", "ana::b")) == [erro]
-    bridge.replies["end_pair"] = {"found": False, "errors": []}
-    assert asyncio.run(api._end_external_pair("a", "srv::b")) is None
-    assert bridge.calls[0] == ("end_pair", {"local": "a", "address": "ana::b"})
 
 
 def test_connect_owner_invite_goes_to_the_explicit_private_route(monkeypatch, client):

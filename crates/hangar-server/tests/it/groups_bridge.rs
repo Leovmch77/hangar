@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::http::StatusCode;
 use fake::{OWNER, SECRET, client};
 use hangar_server::groups::orq::PythonOrq;
 use hangar_server::groups::service::{GroupService, JoinOwned};
@@ -51,7 +50,9 @@ async fn server(root: &Path, n: usize) -> Server {
     Server { public, private, python, groups, pair }
 }
 
-async fn bridge(addr: SocketAddr, op: &str, args: Value, secret: Option<&str>) -> (u16, Value) {
+/// Sem fatos dados, a rota leva os fatos vazios que o Python mandaria sem orquestração ativa.
+async fn bridge(addr: SocketAddr, op: &str, mut args: Value, secret: Option<&str>) -> (u16, Value) {
+    if op == "group.route" && args.get("facts").is_none() { args["facts"] = json!({"orchestrators": [], "phases": {}}); }
     let mut req = client().post(format!("http://{addr}/__hangar_server/groups")).header("content-type", "application/json")
         .body(json!({"op": op, "args": args}).to_string());
     if let Some(secret) = secret { req = req.header("x-hangar-internal", secret); }
@@ -65,6 +66,12 @@ async fn result(srv: &Server, op: &str, args: Value) -> Value {
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["ok"], true, "{op}: {body}");
     body["result"].clone()
+}
+
+/// `{status, body}` da rota, sem o que a ponte devolve ao Python para ele fazer depois.
+fn answered(mut out: Value) -> Value {
+    if let Some(map) = out.as_object_mut() { map.remove("deliveries"); map.remove("post"); }
+    out
 }
 
 async fn public(srv: &Server, method: &str, path: &str, body: Option<&Value>) -> Value {
@@ -86,23 +93,13 @@ async fn group(srv: &Server, name: &str, others: &[&str]) {
 async fn bridge_needs_the_secret_and_the_private_port() {
     let dir = tempfile::tempdir().unwrap();
     let srv = server(dir.path(), 1).await;
-    assert_eq!(bridge(srv.private, "group.leave", json!({"name": "s0"}), None).await.0, 404);
-    assert_eq!(bridge(srv.private, "group.leave", json!({"name": "s0"}), Some("outro")).await.0, 404);
-    assert_eq!(bridge(srv.public, "group.leave", json!({"name": "s0"}), Some(SECRET)).await.0, 404, "a porta pública não tem a ponte");
+    assert_eq!(bridge(srv.private, "group.rename", json!({"old": "s0", "new": "s1"}), None).await.0, 404);
+    assert_eq!(bridge(srv.private, "group.rename", json!({"old": "s0", "new": "s1"}), Some("outro")).await.0, 404);
+    assert_eq!(bridge(srv.public, "group.rename", json!({"old": "s0", "new": "s1"}), Some(SECRET)).await.0, 404, "a porta pública não tem a ponte");
     assert_eq!(bridge(srv.private, "group.nada", json!({}), Some(SECRET)).await.0, 400);
     let health: Value = serde_json::from_str(&client().get(format!("http://{}/__hangar_server/health", srv.public)).send().await.unwrap()
         .text().await.unwrap()).unwrap();
     assert_eq!(health["groups"], true);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn leave_returns_ex_peers() {
-    let dir = tempfile::tempdir().unwrap();
-    let srv = server(dir.path(), 2).await;
-    group(&srv, "s0", &["s1"]).await;
-    assert_eq!(result(&srv, "group.leave", json!({"name": "s0"})).await, json!({"ex_peers": ["s1"], "warnings": []}));
-    assert!(!srv.pair.join("s0.json").exists() && !srv.pair.join("s1.json").exists(), "grupo de 1 não existe");
-    assert_eq!(result(&srv, "group.leave", json!({"name": "s0"})).await, json!({"ex_peers": [], "warnings": []}), "idempotente");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -111,34 +108,80 @@ async fn route_answers_like_the_public_route() {
     let srv = server(dir.path(), 3).await;
     let refused = json!({"peer": "s0"});
     let via_bridge = result(&srv, "group.route", json!({"method": "POST", "name": "s0", "route": "pair", "body": refused})).await;
-    assert_eq!(via_bridge, public(&srv, "POST", "s0/pair", Some(&refused)).await);
+    assert_eq!(answered(via_bridge.clone()), public(&srv, "POST", "s0/pair", Some(&refused)).await);
     assert_eq!(via_bridge["status"], 400);
     let paired = result(&srv, "group.route", json!({"method": "POST", "name": "s0", "route": "pair",
         "body": {"peer": "s1", "peers": [], "task": "t", "replace_task": false, "notify_members": true, "orq": false}})).await;
     assert_eq!(paired["status"], 200, "{paired}");
     assert_eq!(paired["body"]["members"], json!(["s0", "s1"]));
     let contract = result(&srv, "group.route", json!({"method": "GET", "name": "s1", "route": "contract", "body": null})).await;
-    assert_eq!(contract, public(&srv, "GET", "s1/pair/contract", None).await);
+    assert_eq!(answered(contract), public(&srv, "GET", "s1/pair/contract", None).await);
     let left = result(&srv, "group.route", json!({"method": "DELETE", "name": "s1", "route": "pair", "body": null})).await;
     assert_eq!(left["status"], 200, "{left}");
     assert!(!srv.pair.join("s0.json").exists());
 }
 
-/// O que a rota repassaria ao Python volta como erro: o Python, ao receber, pediria à ponte de novo.
+/// Corpo que a rota recusa é 422 daqui: o Python, ao receber, pediria à ponte de novo.
 #[tokio::test(flavor = "multi_thread")]
 async fn bridged_request_never_goes_back_to_python() {
     let dir = tempfile::tempdir().unwrap();
     let srv = server(dir.path(), 2).await;
     for (route, body) in [("pair", json!({"peer": 1})), ("group-message", json!({"texto": "x"})), ("pair-remote", json!({})), ("unpair-remote", json!(null))] {
         let out = result(&srv, "group.route", json!({"method": "POST", "name": "s0", "route": route, "body": body})).await;
-        assert_eq!(out["status"], 500, "{route}: {out}");
-        assert_eq!(out["body"]["detail"]["code"], "erro_grupo_indisponivel", "{route}");
-        assert_eq!(out["body"]["detail"]["params"]["detalhe"], "groups_bridge_relay", "{route}");
+        assert_eq!(out["status"], 422, "{route}: {out}");
+        assert_eq!(out["body"]["detail"]["code"], "erro_corpo_invalido", "{route}");
     }
     assert_eq!(srv.python.hits_to("/api/sessions/s0/pair") + srv.python.hits_to("/api/sessions/s0/group-message")
         + srv.python.hits_to("/api/sessions/s0/pair-remote") + srv.python.hits_to("/api/sessions/s0/unpair-remote"), 0);
     let (status, body) = bridge(srv.private, "group.route", json!({"method": "PUT", "name": "s0", "route": "pair", "body": null}), Some(SECRET)).await;
     assert_eq!((status, body["ok"].clone(), body["error"]["code"].clone()), (200, json!(false), json!("groups_bridge_invalid_request")));
+}
+
+/// Fechamento que não passou pelo `delete` do Rust (Connect, convidado): a fase do `orq` vem no
+/// pedido e a saída não pergunta nada de volta ao Python.
+#[tokio::test(flavor = "multi_thread")]
+async fn bridged_leave_never_calls_python() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    std::fs::create_dir_all(&srv.pair).unwrap();
+    for (me, other) in [("s0", "s1"), ("s1", "s0")] {
+        std::fs::write(srv.pair.join(format!("{me}.json")), json!({"peers": [other], "task": "t", "gid": "g1", "harness": {}, "orq": true}).to_string()).unwrap();
+    }
+    let out = result(&srv, "group.leave", json!({"name": "s0", "phases": {"g1": "live"}})).await;
+    assert_eq!(out, json!({"ex_peers": ["s1"], "warnings": [], "deliveries": []}));
+    assert!(!srv.pair.join("s0.json").exists());
+    assert!(srv.pair.join("s1.json").exists(), "execução viva mantém o grupo orq de um");
+    assert!(srv.python.internal_bodies("orq/group-phase").is_empty(), "a fase veio no pedido");
+
+    // Grupo entre máquinas desta dona que se dissolve: o aviso de saída ao membro Pi, que só o
+    // Python atende, volta na resposta em vez de o Rust chamar o `/input` dele.
+    let fed = json!({"owner": "casa", "local": true, "version": 1});
+    for (me, other) in [("s0", "s1"), ("s1", "s0")] {
+        std::fs::write(srv.pair.join(format!("{me}.json")), json!({"peers": [other], "task": "t", "gid": "g2",
+            "harness": {"s1": "pi"}, "fed": fed}).to_string()).unwrap();
+    }
+    std::fs::create_dir_all(srv.pair.join("groups")).unwrap();
+    std::fs::write(srv.pair.join("groups/g2.json"), json!({"protocol": 1, "gid": "g2", "owner": "casa", "version": 1, "task": "t",
+        "members": [{"server": "casa", "name": "s0", "provider": "claude"}, {"server": "casa", "name": "s1", "provider": "pi"}], "outside": []}).to_string()).unwrap();
+    let out = result(&srv, "group.leave", json!({"name": "s0", "phases": {}})).await;
+    let deliveries = out["deliveries"].as_array().unwrap();
+    assert_eq!(deliveries.len(), 1, "{out}");
+    assert_eq!(deliveries[0]["name"], "s1");
+    assert!(deliveries[0]["text"].as_str().unwrap().contains("Você saiu do grupo de trabalho entre máquinas"), "{out}");
+    assert_eq!(srv.python.hits_to("/api/sessions/s1/input"), 0, "o Rust não chamou o Python dentro da ponte");
+    assert!(!srv.pair.join("s1.json").exists(), "ficou sozinho: o grupo acabou");
+}
+
+/// O `PUT /pair/contract` que chega pela porta do Connect segue pela ponte como as outras rotas.
+#[tokio::test(flavor = "multi_thread")]
+async fn contract_write_goes_through_the_bridge() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    group(&srv, "s0", &["s1"]).await;
+    let written = result(&srv, "group.route", json!({"method": "PUT", "name": "s0", "route": "contract", "body": {"content": "x\n", "mtime": null}})).await;
+    assert_eq!(written["status"], 200, "{written}");
+    let read = result(&srv, "group.route", json!({"method": "GET", "name": "s1", "route": "contract", "body": null})).await;
+    assert_eq!((read["body"]["content"].clone(), read["body"]["mtime"].clone()), (json!("x\n"), written["body"]["mtime"].clone()), "{read}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -151,26 +194,86 @@ async fn rename_op() {
     assert_eq!(s1["peers"], json!(["s9"]));
 }
 
+fn mtime(path: &Path) -> f64 {
+    std::fs::metadata(path).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()
+}
+
+/// BRG-20 (I-5A): o Python manda os fatos do `orq` no corpo e o Rust associa o time sob o lock de
+/// grupo, sem chamar o Python de volta.
 #[tokio::test(flavor = "multi_thread")]
-async fn orq_associate_holds_the_group_lock() {
+async fn orq_associate_never_calls_python() {
     let dir = tempfile::tempdir().unwrap();
-    let srv = server(dir.path(), 2).await;
-    group(&srv, "s0", &["s1"]).await;
-    srv.python.set_internal("orq/associate", StatusCode::OK, json!({"ok": true, "gid": "g1", "grouped": true}));
-    *srv.python.internal_delay.lock().unwrap() = Duration::from_millis(600);
+    let srv = server(dir.path(), 1).await;
+    std::fs::create_dir_all(&srv.pair).unwrap();
+    std::fs::write(srv.pair.join("arbiter.json"), json!({"peers": [], "task": "obra", "gid": "real", "harness": {}, "orq": true}).to_string()).unwrap();
+    let (draft, real) = (srv.pair.join("regras-draft-p.md"), srv.pair.join("regras-real.md"));
+    std::fs::write(&draft, "| papel | conta |\n").unwrap();
+    let facts = |gid: &str| json!({"active_gid": null, "draft_gid": "draft-p", "groups": {gid: {"phase": null, "archived": false}}});
+    let args = |gid: &str, mtime: f64| json!({"name": "planner", "gid": gid, "mtime": mtime, "facts": facts(gid)});
+
+    let missing = result(&srv, "group.orq_associate", args("missing", mtime(&draft))).await;
+    assert_eq!((missing["status"].clone(), missing["body"]["detail"]["code"].clone()), (json!(409), json!("erro_orq_celula_invalida")));
+    let stale = result(&srv, "group.orq_associate", args("real", 1.5)).await;
+    assert_eq!((stale["status"].clone(), stale["body"]["detail"]["code"].clone()), (json!(409), json!("erro_orq_arquivo_mudou")));
+    assert!(!real.exists(), "a recusa não move o time");
+
+    // O lock de grupo segura a associação: uma saída ou um join concorrente não a vê pela metade.
+    let (release, held) = tokio::sync::oneshot::channel::<()>();
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
+    let groups = srv.groups.clone();
+    let holder = tokio::spawn(async move { groups.locked(async { let _ = locked_tx.send(()); held.await.ok() }).await });
+    locked_rx.await.unwrap();
     let private = srv.private;
-    let associating = tokio::spawn(async move {
-        bridge(private, "group.orq_associate", json!({"name": "arb", "gid": "g1", "mtime": 1.5}), Some(SECRET)).await
-    });
-    let python = srv.python.clone();
-    fake::wait_until(move || !python.internal_bodies("orq/associate").is_empty()).await;
-    assert!(tokio::time::timeout(Duration::from_millis(200), srv.groups.leave("s0")).await.is_err(), "a saída espera a associação");
+    let ask = args("real", mtime(&draft));
+    let mut associating = tokio::spawn(async move { bridge(private, "group.orq_associate", ask, Some(SECRET)).await });
+    assert!(tokio::time::timeout(Duration::from_millis(200), &mut associating).await.is_err(), "a associação espera o lock");
+    release.send(()).unwrap();
+    holder.await.unwrap();
     let (status, body) = associating.await.unwrap();
-    assert_eq!((status, body), (200, json!({"ok": true, "result": {"status": 200, "body": {"ok": true, "gid": "g1", "grouped": true}}})));
-    assert_eq!(srv.python.internal_bodies("orq/associate"), vec![json!({"name": "arb", "gid": "g1", "mtime": 1.5})]);
-    *srv.python.internal_delay.lock().unwrap() = Duration::ZERO;
-    srv.python.set_internal("orq/associate", StatusCode::CONFLICT, json!({"detail": {"code": "erro_orq_celula_invalida", "params": {}, "msg": "x"}}));
-    let refused = result(&srv, "group.orq_associate", json!({"name": "arb", "gid": "g1", "mtime": 1.5})).await;
-    assert_eq!(refused, json!({"status": 409, "body": {"detail": {"code": "erro_orq_celula_invalida", "params": {}, "msg": "x"}}}));
-    srv.groups.leave("s0").await.ok().unwrap();
+    assert_eq!(status, 200, "{body}");
+    let done = &body["result"];
+    assert_eq!(done["status"], 200, "{done}");
+    assert_eq!((done["body"]["ok"].clone(), done["body"]["gid"].clone(), done["body"]["grouped"].clone(), done["body"]["session_prefix"].clone()),
+        (json!(true), json!("real"), json!(true), json!("planner")));
+    assert_eq!(done["body"]["arquivo"], json!(real.to_str().unwrap()));
+    assert!(done["body"]["mtime"].as_f64().unwrap() > 0.0);
+    assert_eq!(std::fs::read_to_string(&real).unwrap(), "| papel | conta |\n");
+    assert_eq!(std::fs::read_to_string(&draft).unwrap(), "<!-- hangar-orq-group: real -->\n");
+    assert!(srv.python.internal_bodies("orq/associate").is_empty() && srv.python.internal_bodies("orq/group-phase").is_empty(),
+        "nenhuma pergunta de volta ao Python");
+}
+
+/// Rota que chega pela ponte do Python (8768): os fatos do `orq` vêm no pedido, e o que só o Python
+/// faz (entregar a sessão que ele atende, promover o time) volta na resposta. Nenhuma chamada ao
+/// Python durante a rota.
+#[tokio::test(flavor = "multi_thread")]
+async fn bridged_route_never_calls_python() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 4).await;
+    let calls = |p: &fake::Fake| ["orq/is-orchestrator", "orq/group-phase", "orq/promote"].iter().map(|r| p.internal_bodies(r).len()).sum::<usize>()
+        + p.list_facts_calls.load(std::sync::atomic::Ordering::SeqCst) + p.input_calls();
+    let before = calls(&srv.python);
+    let facts = json!({"orchestrators": ["s3"], "phases": {}});
+    let refused = result(&srv, "group.route", json!({"method": "POST", "name": "s3", "route": "pair", "body": {"peers": ["s0"]}, "facts": facts})).await;
+    assert_eq!((refused["status"].clone(), refused["body"]["detail"]["code"].clone()), (json!(409), json!("erro_sessao_orq")), "o fato do Python decide");
+    let paired = result(&srv, "group.route", json!({"method": "POST", "name": "s0", "route": "pair", "body": {"peers": ["s1"]}, "facts": facts})).await;
+    assert_eq!(paired["status"], 200, "{paired}");
+    let mut told: Vec<&str> = paired["deliveries"].as_array().unwrap().iter().map(|d| d["name"].as_str().unwrap()).collect();
+    told.sort();
+    assert_eq!(told, ["s0", "s1"], "o protocolo volta ao Python para entregar");
+    let gid = paired["body"]["gid"].as_str().unwrap().to_owned();
+    let left = result(&srv, "group.route", json!({"method": "DELETE", "name": "s1", "route": "pair", "body": null,
+        "facts": {"orchestrators": [], "phases": {gid: "ended"}}})).await;
+    assert_eq!(left["status"], 200, "{left}");
+    assert_eq!(left["deliveries"][0]["name"], "s1", "o aviso de saída também");
+    let orq = result(&srv, "group.route", json!({"method": "POST", "name": "s2", "route": "pair", "body": {"orq": true}, "facts": facts})).await;
+    assert_eq!(orq["status"], 200, "{orq}");
+    assert_eq!((orq["post"][0]["op"].clone(), orq["post"][0]["name"].clone()), (json!("promote"), json!("s2")), "a promoção fica com o Python");
+    // A saída de um grupo `orq` usa a fase que o Python mandou.
+    let orq_gid = orq["body"]["gid"].as_str().unwrap().to_owned();
+    let gone = result(&srv, "group.route", json!({"method": "DELETE", "name": "s2", "route": "pair", "body": null,
+        "facts": {"orchestrators": [], "phases": {orq_gid: "ended"}}})).await;
+    assert_eq!(gone["status"], 200, "{gone}");
+    assert!(!srv.pair.join("s2.json").exists(), "execução acabada: o grupo orq sozinho sai");
+    assert_eq!(calls(&srv.python), before, "nenhuma chamada ao Python dentro da rota da ponte");
 }

@@ -12,7 +12,7 @@
   // que é o nome no disco. Trocar os dois faz o Entrar e o Apagar mirarem uma conta que não
   // existe assim que a pessoa renomear a primeira.
   import { onDestroy, tick, untrack } from 'svelte';
-import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, deleteCodexAccountForServer, isAbortError, isTimeoutError, accountDeletedNotice, type AccountDeleteResult, type Motor, type EnginesResponse } from '@hangar/core';
+import { apagarConta, accountHolders, type AccountHolders, claudeAccountFolder, sairConta, apagarProvedorKimi, deleteEngine, deleteEngineForServer, deleteCodexAccountForServer, isAbortError, isTimeoutError, accountDeletedNotice, type AccountDeleteResult, type Motor, type EnginesResponse } from '@hangar/core';
   import { formatarIntervalo } from '../../lib/contaEstado';
   import { listarCredenciais, definirApelido, definirCookie, consumirRedefinicaoCodex,
     novaChaveIdempotente, type Credencial } from '../../lib/credenciais';
@@ -32,6 +32,7 @@ import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, delete
   import MotorForm from './MotorForm.svelte';
   import EscopoChip from './EscopoChip.svelte';
   import * as m from '../../paraglide/messages';
+  import { releaseLines } from '../../lib/accountRelease';
 
   // Contrato do apiTarget (o mesmo de ServidoresSettings): null = servidor ATIVO (API global com
   // self-heal de 401); Server explícito = a máquina que o ?srv= escolheu. Quem resolve é o App
@@ -145,10 +146,13 @@ import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, delete
   let apagando = $state(false);
   // Guardar as conversas vem marcado; só a conta em que a pessoa desmarcou apaga tudo.
   let apagarConversasDe = $state<string | null>(null);
+  // O que prende a conta, quando a exclusão foi recusada: a confirmação passa a oferecer liberar.
+  let prendendo = $state<AccountHolders | null>(null);
   // Abrir, trocar ou fechar a confirmação volta a guardar: a escolha vale só para aquela abertura.
   $effect.pre(() => {
     void confirmando;
     apagarConversasDe = null;
+    prendendo = null;
   });
   let saindoDe = $state<string | null>(null);  // id da conta Claude com a confirmação de Sair aberta
   let saindo = $state(false);
@@ -406,7 +410,7 @@ import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, delete
     }
   }
 
-  async function apagar() {
+  async function apagar(liberar = false) {
     const alvo = confirmando;
     if (!alvo || apagando) return;
     // `confirmando` guarda o ID (chave única da lista); a rota espera o nome NO DISCO. Derivar
@@ -437,7 +441,7 @@ import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, delete
         if (!codexServer || !conta.codex_account) throw new Error(m.falha_conexao());
         resultado = await deleteCodexAccountForServer(codexServer, conta.codex_account, manter);
       } else {
-        resultado = await apagarConta(apiTarget, idDisco, manter);
+        resultado = await apagarConta(apiTarget, idDisco, manter, liberar);
       }
       if (g !== geracao) return;
       confirmando = null;
@@ -447,6 +451,8 @@ import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, delete
       await carregar(geracao);
     } catch (e) {
       if (g !== geracao) return;
+      const presa = !liberar && conta.tipo === 'claude' ? accountHolders(e) : null;
+      if (presa) { prendendo = presa; return; }
       aviso = e instanceof Error && e.message ? e.message : m.criar_apagar_conta_erro();
       avisoErro = true;
     } finally {
@@ -1295,7 +1301,18 @@ import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, delete
               onSalvo={motorSalvo} onFechar={() => (motorAberto = null)} />
           {/if}
 
-          {#if confirmando === conta.id}
+          {#if confirmando === conta.id && prendendo}
+            <div class="ct-confirma" role="alertdialog" aria-label={m.contas_liberar_titulo({ nome: conta.nome })}>
+              <span class="ct-confirma-txt"><strong>{m.contas_liberar_titulo({ nome: conta.nome })}</strong></span>
+              {#each releaseLines(prendendo) as linha (linha)}
+                <span class="ct-confirma-aviso">{linha}</span>
+              {/each}
+              <button type="button" class="ct-confirma-btn perigo" onclick={() => apagar(true)}
+                disabled={apagando}>{apagando ? '…' : m.contas_liberar_confirmar()}</button>
+              <button type="button" class="ct-confirma-btn"
+                onclick={() => (confirmando = null)} disabled={apagando}>{m.comum_cancelar()}</button>
+            </div>
+          {:else if confirmando === conta.id}
             {@const guardaConversas = conta.tipo !== 'chave' && !conta.id.startsWith('kimi:')}
             <div class="ct-confirma">
               {#if guardaConversas}
@@ -1315,7 +1332,7 @@ import { apagarConta, claudeAccountFolder, sairConta, apagarProvedorKimi, delete
                 </span>
               {/if}
               {#if conta.tipo === 'chave'}<span class="ct-confirma-aviso">{m.config_motores_sessoes_abertas()}</span>{/if}
-              <button type="button" class="ct-confirma-btn perigo" onclick={apagar}
+              <button type="button" class="ct-confirma-btn perigo" onclick={() => apagar()}
                 disabled={apagando}>{apagando ? '…' : m.comum_apagar()}</button>
               <button type="button" class="ct-confirma-btn"
                 onclick={() => (confirmando = null)} disabled={apagando}>{m.comum_cancelar()}</button>

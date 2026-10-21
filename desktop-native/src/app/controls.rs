@@ -1178,14 +1178,14 @@ impl Hangar {
         self.action_feedback.remove(&key);
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
-            let outcome = match api.act(&key.name, &["permission-mode"], Some(json!({"mode": target})), false, 60).await {
+            let outcome = match api.act(&key.name, &["permission-mode"], Some(json!({"mode": target})), false, crate::api::REOPEN_SECONDS).await {
                 Err(error) => PlanOutcome::ModeFailed(Self::failure(&error)),
                 Ok(_) => match api.send(&key.name, &request).await {
                     Ok(delivery) => PlanOutcome::Sent(delivery.delivered),
                     // Incerto pode ter chegado: voltar ao plano derrubaria a implementação em curso.
                     Err(error) if error.uncertain => PlanOutcome::SendFailed { reason: Self::failure(&error), uncertain: true, reverted: false },
                     Err(error) => {
-                        let reverted = api.act(&key.name, &["permission-mode"], Some(json!({"mode": "plan"})), false, 60).await.is_ok();
+                        let reverted = api.act(&key.name, &["permission-mode"], Some(json!({"mode": "plan"})), false, crate::api::REOPEN_SECONDS).await.is_ok();
                         PlanOutcome::SendFailed { reason: Self::failure(&error), uncertain: error.uncertain, reverted }
                     }
                 },

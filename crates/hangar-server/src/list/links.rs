@@ -199,9 +199,10 @@ pub fn fill_links(row: &mut SessionRow, dirs: &Dirs, problems: &mut Problems) {
             row.linked_by = pair.linked_parent().map(str::to_owned);
             row.pair_peers = Some(pair.peers);
             row.pair_gid = Some(pair.gid);
+            row.pair_owner = pair.fed.map(|f| f.owner);
             row.pair_task = pair.task;
         }
-        None => (row.pair_external, row.pair_externals, row.pair_peers, row.pair_gid, row.pair_task, row.linked_by) = (None, None, None, None, None, None),
+        None => (row.pair_external, row.pair_externals, row.pair_peers, row.pair_gid, row.pair_task, row.linked_by, row.pair_owner) = (None, None, None, None, None, None, None),
     }
 }
 

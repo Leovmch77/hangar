@@ -10,7 +10,6 @@ import uuid
 import pytest
 import app.api as api_mod
 from app import agentpane, pair, registry, tmux
-from app.registry import SessionRegistry
 
 from tmux_teste import matar_servidor, matar_sessao, novo_socket
 
@@ -24,7 +23,6 @@ def _pair_dir_isolado(tmp_path, monkeypatch):
     # `vivos` so tem as 2 sessoes sinteticas e QUALQUER par real da maquina vira candidato a fantasma
     # (achado do review de Task 8).
     monkeypatch.setattr(pair.settings, "projects_dir", tmp_path / "projects")
-    monkeypatch.setattr(SessionRegistry, "_pair_ausencias", {})
 
 
 @pytest.fixture

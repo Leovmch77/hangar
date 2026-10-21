@@ -108,6 +108,23 @@ def test_hooks_do_claude_faltando_apontam_o_conserto(tmp_path):
     assert h._hooks_claude(tmp_path)["ok"] is None
 
 
+def test_hook_do_grupo_com_binario_sumido_conta_como_falta(tmp_path):
+    """O texto `pair-context` no settings.json não basta: o executável do comando tem que existir."""
+    exe = tmp_path / "bin dir" / "hangar-server"
+
+    def grava():
+        outros = [{"command": f"x {n}"} for n in h._HOOKS_CLAUDE if n != "pair-context"]
+        hooks = {"Stop": [{"hooks": outros}],
+                 "SessionStart": [{"hooks": [{"command": f'"{exe}" pair-context "/p" || exit 0'}]}]}
+        (tmp_path / "settings.json").write_text(json.dumps({"hooks": hooks}))
+    grava()
+    item = h._hooks_claude(tmp_path)
+    assert item["ok"] is False and item["params"]["lista"] == "pair-context"
+    exe.parent.mkdir()
+    exe.write_text("")
+    assert h._hooks_claude(tmp_path)["ok"] is True
+
+
 def test_codex_nao_oferece_a_ponte_antiga_no_painel(tmp_path, monkeypatch):
     (tmp_path / ".codex").mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))

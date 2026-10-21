@@ -1,4 +1,4 @@
-import { getSessions, probeServerResponse } from './api';
+import { comTeto, getSessions, probeServerResponse } from './api';
 import { SERVIDOR_CANDIDATO } from './esfriamento';
 import type { LanInfo, Server } from './servers';
 
@@ -95,6 +95,17 @@ export async function readMachineIdentity(server: Server, init?: RequestInit): P
     || /[\u0000-\u001f\u007f]/.test(identity.identificador)
     || (identity.lan_url !== undefined && typeof identity.lan_url !== 'string')) throw invalid();
   return { id: identity.identificador.trim(), url: identity.lan_url ? normalizeMachineUrl(identity.lan_url as string) : '' };
+}
+
+/** Intervalo para reler o identificador de agrupamento depois de uma falha. */
+export const GROUP_IDENTITY_RETRY_MS = 30_000;
+
+/** Identificador da máquina para agrupar entre máquinas. Vazio (máquina sem CP_SERVER_ID) é falha, com `name`
+ * `vazio`: quem chama relê no mesmo intervalo de qualquer falha, para o conserto aparecer sem reconectar. */
+export async function readGroupIdentity(server: Server, signal?: AbortSignal): Promise<string> {
+  const { id } = await readMachineIdentity(server, signal ? { signal: comTeto(signal, 8000) } : undefined);
+  if (!id) throw Object.assign(new Error('machine_identity_empty'), { name: 'vazio' });
+  return id;
 }
 
 export async function confirmImportedMachine(server: Server): Promise<Server> {

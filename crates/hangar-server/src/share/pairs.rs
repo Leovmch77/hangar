@@ -19,7 +19,7 @@ const OPENERS: [char; 3] = ['[', '\u{ff3b}', '\u{3010}'];
 static HOST_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+ts\.net$").unwrap());
 static SLUG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-z0-9._-]+").unwrap());
 
-/// Os 8 campos são exigidos pelo leitor da lista (`list/links.rs`) e pelo `pair_hook.py`.
+/// Os 8 campos são exigidos pelo leitor da lista (`list/links.rs`) e pelo `groups/context_cmd.rs`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalPair {
