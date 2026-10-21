@@ -431,13 +431,23 @@ async def _codex_rust_port(name: str, request: Request):
         # O painel da fila (`queue/...`) é do Rust também: o Python só repassa.
         rota = route.split("?")[0]
         # A pergunta lateral vai sempre: a rota do Rust decide provedor e sessão.
-        if reply is None and (rota == "btw" or (rota in {"input", "answer", "select", "select/submit", "permission-mode", "permission-modes", "model-effort"} or rota.startswith("queue/"))
+        if reply is None and (rota == "btw" or (rota in {"input", "answer", "select", "select/submit", "permission-mode", "permission-modes", "model-effort", "recarregar"} or rota.startswith("queue/"))
                 and getattr(await _cached_info(name), "provider", "claude") == "claude"):
-            # O fork sem terminal tem 180 s; o prazo padrão da ponte cortaria a resposta.
-            prazo = (200,) if rota == "btw" else ()
-            reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body, *prazo)
+            # O fork sem terminal tem 180 s e a reabertura espera o Claude subir por até 5 min; o prazo padrão da
+            # ponte cortaria a resposta. Quem pediu a recarga vai ao diário do Rust.
+            reload = rota == "recarregar"
+            prazo = (200,) if rota == "btw" else (360,) if reload else ()
+            who = {"headers": _who_asked(request)} if reload else {}
+            reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body, *prazo, **who)
         if reply:
             raise _RustReply(*reply)
+
+
+def _who_asked(request: Request) -> dict:
+    """Cliente, pedido e origem de quem chegou pelo Connect, para o diário do Rust."""
+    origin = request.headers.get("x-forwarded-for") or (request.client.host if request.client else "")
+    return {key: value for key, value in (("user-agent", request.headers.get("user-agent")),
+            ("x-hangar-req", request.headers.get("x-hangar-req")), ("x-forwarded-for", origin)) if value}
 
 
 def _transfer_send_error(name: str) -> dict | None:
@@ -2262,9 +2272,29 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
     # Marca do Rust: ele já encerrou o Codex com terminal dele (e o grupo); aqui só as lojas daqui.
     marked = lambda h: bool(request and internal_api._secret) and secrets.compare_digest(request.headers.get(h, "").encode(), internal_api._secret.encode())
     closed = marked("x-hangar-rust-closed")
-    # Fechamento que não passou pelo Rust (Connect, convidado): a saída do grupo vai pela ponte, com
-    # a fase do `orq` lida aqui antes, para o Rust não perguntar de volta.
-    skip_leave = closed or marked("x-hangar-rust-leaves")
+    bridged = None
+    # Entrou pelo Connect: o Claude aberto no Rust fecha lá, como o da 8765; 421 (`None`) segue aqui.
+    # Só Claude: com o Rust em `pending`, a ponte responderia 503 ao Pi/omp/Kimi, que fecham aqui.
+    port = (request.scope.get("server") or (None, None))[1] if request is not None else None
+    provider = None
+    if not closed and port == CONNECT_PORT and port != settings.port:
+        # Sem a lista o provedor fica desconhecido e fecha-se aqui: falhar o DELETE não fecharia nada.
+        try:
+            provider = getattr(await _cached_info(name), "provider", None)
+        except (list_bridge.ListBridgeError, tmux.MuxIndisponivel) as e:
+            _log.warning("kill(%s): provedor desconhecido sem a lista, fecha pelo Python: %s", name, e)
+            diag.registrar("sessao.fechar_sem_provedor", "erro", sessao=name, codigo=type(e).__name__)
+    if provider == "claude":
+        from app import runtime_coordinator
+        reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, "close", "POST", b"", headers=_who_asked(request))
+        if reply is not None:
+            if reply[0] >= 300:
+                raise _RustReply(*reply)
+            closed, bridged = True, json.loads(reply[1]).get("transcript") or ""
+    # Fechamento que não passou pelo Rust (Connect, convidado) e o do Claude pelo Connect, que o Rust
+    # encerrou sem sair do grupo: a saída vai pela ponte, com a fase do `orq` lida aqui antes, para o
+    # Rust não perguntar de volta.
+    skip_leave = (closed and bridged is None) or marked("x-hangar-rust-leaves")
     # Sem sidecar não há grupo a deixar: a ponte nem é chamada. Ilegível não é ausente: sai pela ponte.
     sidecar = "absent" if skip_leave else await asyncio.to_thread(_sidecar_state, name)
     if sidecar == "unreadable":
@@ -2274,9 +2304,9 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
         if grouped and groups_bridge.rust_owns_groups() else None
     # Sem o Rust a saída do grupo não acontece: fechar segue, e a falta vai no aviso e no diário.
     orphan = grouped and phases is None
-    # Fechada pelo Rust a sessão já saiu da lista: o transcript vem no cabeçalho dele.
+    # Fechada pelo Rust a sessão já saiu da lista: o transcript vem no cabeçalho ou na resposta dele.
     if closed:
-        jsonl = urllib.parse.unquote(request.headers.get("x-hangar-closed-transcript", "")) or None
+        jsonl = bridged or urllib.parse.unquote(request.headers.get("x-hangar-closed-transcript", "")) or None
     else:
         jsonl = await asyncio.to_thread(_jsonl_of_session, name)
     try:

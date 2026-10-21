@@ -82,6 +82,37 @@ describe('QueuePanel', () => {
     expect(target.querySelector('.qp-row button:not(.qp-text)')).toBeNull();
     unmount(comp);
   });
+  it('entrega parada: o aviso é anunciado no painel e o Reabrir chama quem reabre', () => {
+    const onReopen = vi.fn();
+    const { target, comp } = montar({ stalled: true, onReopen });
+    const botao = [...target.querySelectorAll<HTMLButtonElement>('button')]
+      .find((b) => b.textContent?.trim() === m.reabrir_sessao_presa())!;
+    expect(target.querySelector('[role="alert"]')?.textContent).toBe(m.problema_headless_delivery_stalled());
+    expect(botao.disabled).toBe(false);
+    botao.click();
+    expect(onReopen).toHaveBeenCalledOnce();
+    unmount(comp);
+  });
+  it('reinício já em andamento fora do painel (Reiniciar da faixa) deixa o Reabrir travado', () => {
+    const onReopen = vi.fn();
+    const { target, comp } = montar({ stalled: true, onReopen, reopening: true });
+    const botao = [...target.querySelectorAll<HTMLButtonElement>('button')]
+      .find((b) => b.textContent?.trim() === m.reabrir_sessao_presa())!;
+    expect(botao.disabled).toBe(true);
+    botao.click();
+    expect(onReopen).not.toHaveBeenCalled();
+    unmount(comp);
+  });
+  it('sem o aviso não há Reabrir; quem só lê vê o aviso sem o botão', () => {
+    const semAviso = montar({ stalled: false, onReopen: vi.fn() });
+    expect(semAviso.target.textContent).not.toContain(m.problema_headless_delivery_stalled());
+    expect(semAviso.target.textContent).not.toContain(m.reabrir_sessao_presa());
+    unmount(semAviso.comp);
+    const leitura = montar({ stalled: true });
+    expect(leitura.target.textContent).toContain(m.problema_headless_delivery_stalled());
+    expect(leitura.target.textContent).not.toContain(m.reabrir_sessao_presa());
+    unmount(leitura.comp);
+  });
   it('sem entradas o painel não existe', () => {
     const { target, comp } = montar({ panel: { actions: true, entries: [] } });
     expect(target.querySelector('.qp')).toBeNull();

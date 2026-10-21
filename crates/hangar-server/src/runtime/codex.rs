@@ -922,10 +922,27 @@ impl Engine {
     }
     /// Problema que o ator conhece e o motor não (a religação desistiu, o processo não subiu).
     pub fn set_problem(&mut self,code:&str,detail:Option<String>) -> Vec<Effect> {
-        self.state.problema = Some(code.into());
-        self.state.problema_detalhe = detail.map(|detail|detail.chars().take(300).collect());
+        self.put_problem(code,detail.map(|detail|detail.chars().take(300).collect()));
         let mut effects = Vec::new();
         self.changed(&mut effects,false);
+        effects
+    }
+
+    /// Diagnóstico do motor (controle caído, sem conexão, versão) não tapa código de tela (limite de uso, sem
+    /// login), que o portão da saída mostraria; o de tela sempre entra.
+    fn put_problem(&mut self,code:&str,detail:Option<String>) {
+        if crate::problem_gate::keeps(self.state.problema.as_deref(),code) { return; }
+        self.state.problema = Some(code.into());
+        self.state.problema_detalhe = detail;
+    }
+
+    /// Apaga só o problema `code`: o de outra origem que entrou depois fica.
+    pub fn clear_problem(&mut self,code:&str) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        if self.state.problema.as_deref() == Some(code) {
+            self.state.problema = None; self.state.problema_detalhe = None;
+            self.changed(&mut effects,false);
+        }
         effects
     }
 
@@ -934,9 +951,10 @@ impl Engine {
     /// reenviado) e pedido que o servidor não reapresentar não ganha token respondível.
     /// `handed`: operações cujo quadro já foi entregue ao socket que caiu. As outras nunca saíram: viram
     /// `NotWritten` (o mesmo desfecho de uma escrita recusada), não incertas.
+    /// Sem terminal (só o socket com o cano caiu, o app-server segue): a entrega para e a vista fica como
+    /// estava; perguntas e prévia voltam no retrato do cano quando o ator religa.
     pub fn transport_lost(&mut self,detail:&str,handed:&BTreeSet<String>) -> Vec<Effect> {
         let mut effects = Vec::new();
-        if self.headless { return effects; }
         let unsent:Vec<String> = self.rpc.values().filter(|rpc|!rpc.timed_out && !handed.contains(&rpc.operation_id)).map(|rpc|rpc.operation_id.clone()).collect();
         for operation_id in unsent {
             match self.apply_input(EngineInput::WriteAck { operation_id,outcome:WriteOutcome::NotWritten },self.clock) {
@@ -944,10 +962,24 @@ impl Engine {
                 Err(failure) => tracing::warn!(session=%self.state.session,code=%failure.code,"escrita não enviada sem desfecho na queda"),
             }
         }
-        self.connected = false; self.subscribed = false; self.ready = false; self.subscribe_due = None; self.turn_known = false;
-        self.clear_preview(&mut effects);
-        self.lost_requests.extend(self.server_requests.iter().map(|(id,_)|id.clone()));
-        self.server_requests.clear(); self.answering.clear(); self.request_epochs.clear();
+        // Sem terminal, resposta a pedido do app-server ainda sem confirmação termina na queda, como no Claude:
+        // a que nunca saiu volta não escrita e a entregue ao socket que caiu fica incerta.
+        let answers:Vec<(String,bool)> = if self.headless { self.wires.iter().filter(|(_,wire)|wire.server_request.is_some() && !wire.final_result)
+            .map(|(id,_)|(id.clone(),handed.contains(id))).collect() } else { Vec::new() };
+        for (operation_id,sent) in answers {
+            let outcome = if sent { WriteOutcome::Unknown } else { WriteOutcome::NotWritten };
+            match self.apply_input(EngineInput::WriteAck { operation_id,outcome },self.clock) {
+                Ok(next) => effects.extend(next),
+                Err(failure) => tracing::warn!(session=%self.state.session,code=%failure.code,"resposta sem desfecho na queda"),
+            }
+        }
+        self.ready = false;
+        if !self.headless {
+            self.connected = false; self.subscribed = false; self.subscribe_due = None; self.turn_known = false;
+            self.clear_preview(&mut effects);
+            self.lost_requests.extend(self.server_requests.iter().map(|(id,_)|id.clone()));
+            self.server_requests.clear(); self.answering.clear(); self.request_epochs.clear();
+        }
         self.finish_service_tier(Disposition::Unknown,json!({"error":"O Codex desconectou antes de confirmar Fast"}),&mut effects);
         let mut uncertain = Vec::new();
         for (_,rpc) in std::mem::take(&mut self.rpc) {
@@ -961,10 +993,29 @@ impl Engine {
             }
         }
         for entry in uncertain { self.set_reservation(&entry,ReservationState::Uncertain); }
-        self.state.problema = Some(super::codex_terminal::DISCONNECTED.into());
-        self.state.problema_detalhe = Some(detail.chars().take(300).collect());
+        if !self.headless {
+            self.put_problem(super::codex_terminal::CONTROL_LOST,Some(detail.chars().take(300).collect()));
+        }
         self.changed(&mut effects,false);
         effects
+    }
+
+    /// Sem terminal, socket novo ao MESMO cano: o motor segue (uso, limites, avisos e a identidade dos cartões).
+    /// Sai o pedido que o cano não reapresenta (resolvido durante a queda); o reapresentado igual mantém a época,
+    /// e com ela o ID do cartão. Resposta em curso que se perdeu volta a ser respondível.
+    pub fn reattach(&mut self,snapshot:CanoSnapshot) -> Result<Vec<Effect>,RuntimeError> {
+        let mut effects = Vec::new();
+        let presented:Vec<Value> = snapshot.pendentes.iter().filter_map(|raw|serde_json::from_str(raw).ok()).collect();
+        let resolved:Vec<RequestId> = self.server_requests.iter().filter(|(_,request)|!presented.contains(request)).map(|(id,_)|id.clone()).collect();
+        for id in &resolved { self.request_epochs.remove(id); }
+        self.server_requests.retain(|(id,_)|!resolved.contains(id));
+        self.answering.clear();
+        // O processo é o mesmo: a abertura não reaplica modo e esforço, e o turno que rodava é conferido.
+        self.fresh_process = false;
+        self.was_working = self.in_progress;
+        self.clear_preview(&mut effects);
+        effects.extend(self.hydrate(snapshot)?);
+        Ok(effects)
     }
 
     pub fn bootstrap(&mut self,reconnect:bool,operation_id:String) -> Result<Vec<Effect>,RuntimeError> {
@@ -1831,8 +1882,7 @@ impl Engine {
                 match hangar_codex::version::from_user_agent(&response.user_agent) {
                     Some(installed) if hangar_codex::version::differs(installed) => {
                         effects.push(Effect::Diag { event:DiagEvent::CodexVersion,code:hangar_codex::version::diag_code(installed) });
-                        self.state.problema = Some("codex_versao_nao_conferida".into());
-                        self.state.problema_detalhe = Some(format!("instalado {installed}, conferido {}",hangar_codex::version::CHECKED));
+                        self.put_problem("codex_versao_nao_conferida",Some(format!("instalado {installed}, conferido {}",hangar_codex::version::CHECKED)));
                     }
                     Some(installed) if hangar_codex::version::readable(installed) => {}
                     // Sem versão legível o aviso não tem com o que comparar, mas a falta fica no diário.
@@ -1965,7 +2015,7 @@ impl Engine {
                         frame:json!({"jsonrpc":"2.0","method":"initialized","params":{}}) });
                     // Conectado já envia: a assinatura corre ao lado e não segura o primeiro turno.
                     self.connected = true;
-                    if self.state.problema.as_deref() == Some(super::codex_terminal::DISCONNECTED) { self.state.problema = None; self.state.problema_detalhe = None; }
+                    if matches!(self.state.problema.as_deref(),Some(super::codex_terminal::DISCONNECTED | super::codex_terminal::CONTROL_LOST)) { self.state.problema = None; self.state.problema_detalhe = None; }
                     effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Accepted,payload:json!({"connected":true,"subscribed":false}) });
                     effects.push(Effect::WakeQueue);
                     self.subscribe(effects);
@@ -2285,9 +2335,9 @@ impl Engine {
             }
             N::Error(n) => {
                 if !n.will_retry && n.error.codex_error_info.as_ref().and_then(error_info) == Some("usageLimitExceeded") { self.usage_limited = true; }
-                self.state.problema = Some(n.error.codex_error_info.as_ref().and_then(error_class)
-                    .unwrap_or(if n.will_retry { "codex_sem_conexao" } else { "headless_turno_erro" }).into());
-                self.state.problema_detalhe = error_detail(&n.error);
+                let code = n.error.codex_error_info.as_ref().and_then(error_class)
+                    .unwrap_or(if n.will_retry { "codex_sem_conexao" } else { "headless_turno_erro" });
+                self.put_problem(code,error_detail(&n.error));
             }
             N::HookCompleted(n) if n.run.event_name == "userPromptSubmit" && ["blocked","stopped"].contains(&n.run.status.as_str()) => {
                 let source = n.run.source_path.as_deref().unwrap_or("hook");

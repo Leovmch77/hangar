@@ -25,7 +25,7 @@ import { MoreSheet } from '../../../../src/chat/MoreSheet';
 import { PluginUi } from '../../../../src/chat/PluginUi';
 import { OptionButtons } from '../../../../src/chat/OptionButtons';
 import { PendingPlan } from '../../../../src/chat/PendingPlan';
-import { SessionProblem } from '../../../../src/chat/SessionProblem';
+import { SessionProblem, showsSessionProblem } from '../../../../src/chat/SessionProblem';
 import { SessionPickerSheet } from '../../../../src/chat/SessionPickerSheet';
 import { SessionsDrawer } from '../../../../src/features/sessions/SessionsDrawer';
 import { ServerSheet } from '../../../../src/features/sessions/ServerSheet';
@@ -472,6 +472,8 @@ export default function ChatScreen() {
   // Antes da thread o SSE da conversa ainda não publica o problema; a lista (repetida a cada 2 s) sim.
   const problem = codexPreThread ? currentSession.problema : stateEvent?.problema;
   const problemDetail = codexPreThread ? null : stateEvent?.problema_detalhe;
+  // Mesma condição que monta o Composer (e o painel "Na fila" dentro dele), com mensagem esperando.
+  const queuePanelShown = !codexPreThread && fetchedSession != null && !dead && !orq && !soLeitura && queuePanel.entries.length > 0;
 
   const onBack = useCallback(() => {
     if (router.canGoBack()) router.back();
@@ -523,7 +525,7 @@ export default function ChatScreen() {
           ) : firstInput?.phase === 'send_unknown' ? (
             <Text style={styles.aviso} accessibilityRole="alert">{m.nova_conversa_envio_incerto()}</Text>
           ) : null}
-          {!servidorSumiu && problem ? (
+          {!servidorSumiu && showsSessionProblem(problem, queuePanelShown) ? (
             <View style={styles.problem}><SessionProblem problem={problem} detail={problemDetail} /></View>
           ) : null}
           <View testID="chat-viewport" style={[styles.inner, { marginBottom: -Math.max(0, overlayH - BORDA_DOCK) }]}>

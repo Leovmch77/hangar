@@ -11,6 +11,9 @@ export interface QueueEdit { entryId: string; original: string; savedDraft: stri
 
 const PREFIX = 'queued-';
 
+/** `problema` da sessão sem terminal viva e surda: a fila não anda e o painel oferece Reabrir. */
+export const DELIVERY_STALLED = 'headless_delivery_stalled';
+
 /** Lê o corpo do evento `queue`; linha torta sai da lista, forma torta devolve `null` (sem painel do servidor). */
 export function parseQueuePanel(data: unknown): QueuePanel | null {
   if (!data || typeof data !== 'object') return null;

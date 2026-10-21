@@ -55,6 +55,10 @@ enum Life {
 /// e a base fora do plano.
 struct Current { spec:SessionSpec, sid:String, generation:u64, life:Life, previous_non_plan:Option<String>, settings:Option<Value> }
 
+/// Sessão ocupada (subindo, esperando resposta, trabalhando, fila pendente) diante do `claude_current`.
+#[derive(Clone,Copy,PartialEq,Eq)]
+enum BusyCheck { Skip, Refuse, RefuseUnlessStalled }
+
 /// O que a vida nova precisa, montado antes de encerrar a antiga.
 enum Start { Terminal(Box<PaneSpec>,TerminalEnv), Headless(Value) }
 
@@ -412,13 +416,13 @@ impl RuntimeRegistry {
             Ok(Some(_))=>{},
             Ok(None)=>if let Err(error)=self.watcher_ref()?.adopt_claude(self,name).await? {return Some(Err(error));},
         }
-        Some(self.claude_current(name,false,false).await.map(|current|current.spec))
+        Some(self.claude_current(name,BusyCheck::Skip,false).await.map(|current|current.spec))
     }
 
     /// O que o fork do `/btw` precisa da sessão Claude com terminal `name`, nas chaves do sidecar sem
     /// terminal: a conversa de agora do pane, a pasta, a conta, o modelo e o motor.
     pub async fn claude_fork_meta(&self,name:&str) -> Result<Value,RuntimeError> {
-        let current=self.claude_current(name,false,false).await?;
+        let current=self.claude_current(name,BusyCheck::Skip,false).await?;
         let Life::Terminal { target }=&current.life else { return Err(refused("runtime_provider","a sessão não tem terminal")) };
         let spec=&current.spec;
         // A pasta do processo vivo, não a do spec: é nela que a CLI gravou a conversa.
@@ -494,12 +498,12 @@ impl RuntimeRegistry {
     pub async fn claude_resume_spec(&self,name:&str) -> Option<Result<SessionSpec,RuntimeError>> {
         match self.claude_sidecar(name).await {
             Err(error)=>return Some(Err(error)),
-            Ok(Some(_))=>return Some(self.claude_current(name,false,false).await.map(|current|current.spec)),
+            Ok(Some(_))=>return Some(self.claude_current(name,BusyCheck::Skip,false).await.map(|current|current.spec)),
             Ok(None)=>{},
         }
         let watcher=self.watcher_ref()?;
         match watcher.adopt_claude(self,name).await {
-            Some(Ok(()))=>Some(self.claude_current(name,false,false).await.map(|current|current.spec)),
+            Some(Ok(()))=>Some(self.claude_current(name,BusyCheck::Skip,false).await.map(|current|current.spec)),
             // Sem conversa provada é o caso do `/resume`: a sessão aberta sem id.
             Some(Err(error)) if error.code!="claude_terminal_conversation_unproved"=>Some(Err(error)),
             _=>match watcher.bare_claude(name).await {
@@ -524,7 +528,8 @@ impl RuntimeRegistry {
         if change.reason==crate::session_open::ChangeReason::ModeSwitch && change.surface==Some(now) {
             return Ok(Reopened { spec:None,changed:false,warnings:Vec::new() });
         }
-        let mut current=self.claude_current(name,true,resume.is_some()).await.map_err(ReopenFailure::refused)?;
+        let check=if change.reason==crate::session_open::ChangeReason::Reload {BusyCheck::RefuseUnlessStalled} else {BusyCheck::Refuse};
+        let mut current=self.claude_current(name,check,resume.is_some()).await.map_err(ReopenFailure::refused)?;
         // Outra conversa leva as escolhas de plugins e skills guardadas dela, não as do processo de agora.
         if let Some(sid)=resume.filter(|sid|*sid!=current.sid) {
             let (home,sid)=(self.codex_environment().home,sid.to_owned());
@@ -598,8 +603,8 @@ impl RuntimeRegistry {
     }
 
     /// A sessão, o spec dela e se ela está parada. Ocupada recusa com o motivo, antes de qualquer efeito.
-    async fn claude_current(&self,name:&str,checks:bool,bare:bool) -> Result<Current,RuntimeError> {
-        let env=self.codex_environment();
+    async fn claude_current(&self,name:&str,check:BusyCheck,bare:bool) -> Result<Current,RuntimeError> {
+        let (env,checks)=(self.codex_environment(),check!=BusyCheck::Skip);
         if let Some(meta)=self.claude_sidecar(name).await? {
             let mut spec=crate::session_open::record::claude_live(&env.home,&meta,name).map_err(|e|refused("launch_meta",&format!("registro da sessão ilegível: {e}")))?;
             let sid=meta["session_id"].as_str().filter(|s|!s.is_empty()).ok_or_else(||refused("lifecycle_conversation","sessão sem conversa"))?.to_owned();
@@ -608,10 +613,15 @@ impl RuntimeRegistry {
                 Some((generation,view))=>(generation,Some(view)),
                 None=>(self.queue_generation(&spec.key).await?,None),
             };
+            // Reabrir com a entrega parada (aviso do próprio ator) é a saída da mensagem presa: o turno, a
+            // subida e o cartão congelados na queda (inalcançáveis com o cano surdo) saem com a vida velha, e a
+            // fila vai para a nova, que entrega o que estiver esperando.
+            let stalled=check==BusyCheck::RefuseUnlessStalled && view.as_ref().is_some_and(|view|view["public_state"]["problema"]==super::actor::DELIVERY_STALLED);
+            let checks_busy=checks && !stalled;
             if let Some(view)=&view {
-                if checks && view["alive"]==true && view["initialized"]!=true {return Err(busy("erro_sessao_iniciando"));}
-                if checks && (!view["question"].is_null() || view["pending"].as_array().is_some_and(|p|!p.is_empty())) {return Err(busy("erro_sessao_esperando_resposta"));}
-                if checks && view["in_progress"]==true {return Err(busy("erro_sessao_trabalhando"));}
+                if checks_busy && view["alive"]==true && view["initialized"]!=true {return Err(busy("erro_sessao_iniciando"));}
+                if checks_busy && (!view["question"].is_null() || view["pending"].as_array().is_some_and(|p|!p.is_empty())) {return Err(busy("erro_sessao_esperando_resposta"));}
+                if checks_busy && view["in_progress"]==true {return Err(busy("erro_sessao_trabalhando"));}
                 // O modo e as escolhas que a CLI mudou sozinha valem; com motor, o do sidecar.
                 if let Some(mode)=view["permission_mode"].as_str().and_then(PermissionMode::claude) {spec.permission_mode=Some(mode);}
                 if !matches!(spec.account,Account::Engine{..}) {
@@ -620,7 +630,7 @@ impl RuntimeRegistry {
                 }
             }
             // Na troca por limite a fila foi segurada para ir com a conversa à conta nova.
-            if checks && !self.limit_held(name) && self.queue_pending(&spec.key).await {return Err(busy("erro_fila_pendente"));}
+            if checks_busy && !self.limit_held(name) && self.queue_pending(&spec.key).await {return Err(busy("erro_fila_pendente"));}
             if spec.permission_mode.is_none() {
                 spec.permission_mode=Some(super::claude_launch::account_mode(&env,spec.account.config_dir())?);
             }

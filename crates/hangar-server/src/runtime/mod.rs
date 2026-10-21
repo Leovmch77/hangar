@@ -1,6 +1,7 @@
 //! Runtime exclusivo do Claude terminal/sem terminal, do Codex sem terminal e do Codex com terminal adotado.
 pub mod protocol;
 pub mod cano;
+pub mod cano_reconnect;
 pub mod websocket;
 pub mod codex_terminal;
 pub mod codex_sidecar;

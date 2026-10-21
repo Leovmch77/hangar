@@ -41,7 +41,8 @@ fn as_owner(req: &mut Request, name: &str, rest: &str) -> bool {
 /// `/__hangar_server/claude/<nome>/<rota>`: `POST` em `input`, `answer`, `select`, `select/submit`,
 /// `permission-mode` e `model-effort`, `GET` em `permission-modes`, e as rotas do painel da fila (`DELETE`/`PATCH
 /// queue/<id>`, `POST queue/reorder` e `queue/<id>/steer`), de sessão Claude com entrada no Rust, pela
-/// mesma rota do dono; `POST`/`GET btw` de qualquer sessão (a rota decide). Outra rota, método ou sessão: 421.
+/// mesma rota do dono; `POST`/`GET btw` e `POST recarregar` de qualquer sessão (a rota decide); `POST close`, o
+/// `DELETE` do Claude aberto aqui que entrou pelo Connect. Outra rota, método ou sessão: 421.
 pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, mut req: Request) -> Response {
     use super::{answer, control, input, permissions};
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
@@ -49,6 +50,14 @@ pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     // Abrir Claude com terminal pelo que entrou direto no Python (Connect, MCP): o nome vem no corpo.
     if rest == "open" && req.method() == Method::POST {
         return crate::session_open::server::bridge(State(st), ConnectInfo(peer), req).await;
+    }
+    if rest == "close" && req.method() == Method::POST { return close_bridged(st, peer, &name, req.headers()).await; }
+    // Reabrir que entrou pelo Connect: a rota da 8765 decide Codex, Claude e o que segue ao Python (421).
+    if rest == "recarregar" && req.method() == Method::POST {
+        let line = asked_line("sessao.recarga_pedida", "session_reload_requested_by_owner", &name, req.headers(), peer);
+        crate::diag::record(crate::diag::diary_dir(), vec![line], "sessão recarregada");
+        if !as_owner(&mut req, &name, &rest) { return not_ours(); }
+        return super::relaunch::reload(State(st), ConnectInfo(peer), req).await;
     }
     // Pergunta lateral (`POST`/`GET btw`): a própria rota decide sessão, provedor e modo, inclusive o
     // Claude sem terminal parado, que ainda não tem entrada.
@@ -162,10 +171,7 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
             return leave_after_forward(&st, &name, response).await;
         }
         Some(Err(error)) => {
-            let mut response = match super::busy_refusal(&error) {
-                Some((status, body)) => super::json_response(status, body),
-                None => super::detail(StatusCode::INTERNAL_SERVER_ERROR, &error.code, &error.message, json!({})),
-            };
+            let mut response = close_refusal(&error);
             crate::routes::cors(req.headers(), response.headers_mut());
             return response;
         }
@@ -178,16 +184,7 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         }
     }
     let leave = match st.groups.clone() { Some(groups) => leave_warnings(&st, &groups, &name).await, None => Vec::new() };
-    // Convites e par da sessão são do Rust: o Python marcado não volta a pedir a revogação.
-    if let Some(share) = st.share.clone() {
-        match share.store.revoke_session(&name, None) {
-            Ok(0) => {}
-            Ok(_) => crate::share::owner_routes::sync_tunnel(&share).await,
-            Err(error) => tracing::error!(session = %name, code = "share_store_failed", "convites da sessão encerrada não revogados: {error}"),
-        }
-    }
-    st.list.forget(&name);
-    st.list.invalidate();
+    after_close(&st, &name).await;
     match axum::http::HeaderValue::from_str(&st.cfg.internal_secret) {
         Ok(mark) => { req.headers_mut().insert(RUST_CLOSED, mark); }
         // Sem a marca o Python tentaria encerrar de novo pela ponte: não repassa, e a limpeza dele que
@@ -250,6 +247,48 @@ fn with_leave_warning(current: Option<Value>, name: &str, mut errs: Vec<Value>) 
     json!({"code": "erro_pareamento_saida_falhou", "params": {"avisos": errs}, "msg": format!("aviso de saída falhou: {text}")})
 }
 
+fn close_refusal(error: &crate::runtime::protocol::RuntimeError) -> Response {
+    match super::busy_refusal(error) {
+        Some((status, body)) => super::json_response(status, body),
+        None => super::detail(StatusCode::INTERNAL_SERVER_ERROR, &error.code, &error.message, json!({})),
+    }
+}
+
+/// Depois de o Rust encerrar a sessão: revoga os convites e some da lista. A saída do grupo é de quem chamou.
+async fn after_close(st: &Arc<AppState>, name: &str) {
+    // Convites e par da sessão são do Rust: o Python marcado não volta a pedir a revogação.
+    if let Some(share) = st.share.clone() {
+        match share.store.revoke_session(name, None) {
+            Ok(0) => {}
+            Ok(_) => crate::share::owner_routes::sync_tunnel(&share).await,
+            Err(error) => tracing::error!(session = %name, code = "share_store_failed", "convites da sessão encerrada não revogados: {error}"),
+        }
+    }
+    st.list.forget(name);
+    st.list.invalidate();
+}
+
+/// O `DELETE` do Claude que entrou pelo Connect (8768): o encerramento da 8765, sem repasse e sem a saída
+/// do grupo, que o Python faz depois com a fase do `orq` já lida (o Rust não pergunta de volta numa chamada
+/// dele). 421 = não é Claude aberto aqui, e o Python segue.
+async fn close_bridged(st: Arc<AppState>, peer: SocketAddr, name: &str, headers: &axum::http::HeaderMap) -> Response {
+    let Some(runtime) = st.state.runtime.get().cloned() else { return not_ours() };
+    crate::diag::record(crate::diag::diary_dir(), vec![close_line(name, headers, peer)], "sessão fechada");
+    let closed = runtime.kill_claude(name).await;
+    // Recusado, a sessão segue viva e volta no reboot; no 421 o Python a fecha pelo nome, então ela sai.
+    if !matches!(closed, Some(Err(_))) && let Some(dirs) = st.list.env().dirs.as_ref() {
+        crate::session_open::restore::forget(&dirs.home, name);
+    }
+    match closed {
+        None => not_ours(),
+        Some(Err(error)) => close_refusal(&error),
+        Some(Ok(closed)) => {
+            after_close(&st, name).await;
+            super::json_response(StatusCode::OK, closed)
+        }
+    }
+}
+
 /// As rotas que o Rust atende para o Codex dele; outra cai no Python (421).
 async fn dispatch(st: Arc<AppState>, peer: SocketAddr, method: &str, rest: &str, req: Request) -> Response {
     use super::{answer, codex, control, input, relaunch};
@@ -283,8 +322,12 @@ async fn dispatch(st: Arc<AppState>, peer: SocketAddr, method: &str, rest: &str,
 /// Quem pediu o fechamento: o cliente e a origem que a requisição traz (o dono não manda identidade própria). O
 /// pedido, não o resultado: o encerramento pode falhar depois, e a sessão que some sem ele vai como `sessao.sumiu`.
 fn close_line(name: &str, headers: &axum::http::HeaderMap, peer: SocketAddr) -> serde_json::Value {
+    asked_line("sessao.fechamento_pedido", "session_close_requested_by_owner", name, headers, peer)
+}
+
+fn asked_line(evento: &str, codigo: &str, name: &str, headers: &axum::http::HeaderMap, peer: SocketAddr) -> serde_json::Value {
     let header = |key: &str| headers.get(key).and_then(|v| v.to_str().ok()).map(|v| v.chars().take(80).collect::<String>());
-    json!({"evento": "sessao.fechamento_pedido", "nivel": "ok", "sessao": name, "codigo": "session_close_requested_by_owner",
+    json!({"evento": evento, "nivel": "ok", "sessao": name, "codigo": codigo,
         "cliente": header("user-agent"), "req": header("x-hangar-req"), "origem": header("x-forwarded-for").unwrap_or_else(|| peer.ip().to_string())})
 }
 

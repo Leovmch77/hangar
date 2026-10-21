@@ -358,7 +358,7 @@ impl ListBridge {
             let Some(reading) = plugins.get(&row.name) else { previous.remove(&row.name); continue };
             let reading = match reading {
                 Ok(reading) => reading,
-                Err(code) => { previous.remove(&row.name); row.problema = Some(code.clone()); continue },
+                Err(code) => { previous.remove(&row.name); set_unless_screen(row, code.clone()); continue },
             };
             if previous.get(&row.name).is_some_and(|(binding, _)| binding != &reading.binding) { previous.remove(&row.name); }
             let mut state = hangar_api::state::StateEvent { state: row.state.clone(), label: row.label.clone(), question: row.question.clone(),
@@ -375,7 +375,7 @@ impl ListBridge {
                     let _ = binding;
                     crate::state::facts::preserve_cards(&mut state, trusted);
                 }
-                row.problema = Some(code);
+                set_unless_screen(row, code);
             }
             if reading.facts.is_ok() { previous.insert(row.name.clone(), (reading.binding.clone(), state.clone())); }
             row.state = state.state;
@@ -885,6 +885,11 @@ impl ListBridge {
             self.shown.retain(|name| rows.iter().any(|row| row.name == name));
         }
         for row in rows.iter_mut() {
+            // Diagnóstico sai já, sem prazo: o código fica no diário da lista, nunca na tela nem no `Shown`.
+            if let Some(code) = row.problema.as_deref().filter(|code| crate::problem_gate::diagnostic(code, &row.state)) {
+                list_facts::note("rust.problem_hidden", &row.name, code.to_owned(), "aviso de diagnóstico fora da tela");
+                row.problema = None;
+            }
             let gate = gates.entry(row.name.clone()).or_default();
             if matches!(gate.admit(row.problema.as_deref(), now, hold), Gate::Hold(_)) { row.problema = None; }
             self.shown.set(&row.name, row.problema.as_deref());
@@ -898,12 +903,23 @@ impl ListBridge {
     pub fn set_problem_hold(&self, hold: Duration) { self.problem_hold_ms.store(hold.as_millis() as u64, std::sync::atomic::Ordering::Relaxed); }
 }
 
+/// O erro do plugin entra na linha só no lugar de nada ou de diagnóstico: a mensagem presa (código de tela)
+/// não pode ser tapada por um código que o portão depois esconde.
+fn set_unless_screen(row: &mut SessionRow, code: String) {
+    if row.problema.as_deref().is_none_or(crate::problem_gate::is_diagnostic) { row.problema = Some(code); }
+    else { list_facts::note("rust.problem_hidden", &row.name, code, "erro do plugin atrás do aviso de tela"); }
+}
+
+/// Causa interna de não identificar a pergunta aberta: a tela recebe `interacao_indisponivel` (lista e conversa).
+pub(crate) fn interaction_unidentified(code: &str) -> bool {
+    code.starts_with("askq_") || code.starts_with("erro_interacao_") || (code.starts_with("plugin_") && code.ends_with("_invalid"))
+        || matches!(code, "runtime_binding" | "list_plugin_source_absent" | "terminal_target_missing" | "terminal_capture_target_changed" | "plugin_store_unavailable")
+}
+
 fn public_problems(rows: &mut [SessionRow]) {
     for row in rows.iter_mut().filter(|row| row.provider == "claude") {
         let Some(code) = row.problema.as_deref() else { continue };
-        let internal = code.starts_with("askq_") || code.starts_with("erro_interacao_") || (code.starts_with("plugin_") && code.ends_with("_invalid"))
-            || matches!(code, "runtime_binding" | "list_plugin_source_absent" | "terminal_target_missing" | "terminal_capture_target_changed" | "plugin_store_unavailable");
-        if internal {
+        if interaction_unidentified(code) {
             list_facts::note("rust.list_interaction_unavailable", &row.name, code.to_owned(), "lista: pergunta da sessão sem identidade");
             row.problema = Some(INTERACTION_UNAVAILABLE.into());
         }
@@ -1304,12 +1320,53 @@ mod tests {
             bridge.gate_problems(&mut rows, true);
             (rows[0].state.clone(), rows[0].problema.clone())
         };
-        assert_eq!(round(Some("list_capture_failed")), ("dead".into(), None), "o estado sai já, o problema espera");
+        assert_eq!(round(Some("headless_processo_caiu")), ("dead".into(), None), "o estado sai já, o problema espera");
         tokio::time::advance(std::time::Duration::from_millis(1500)).await;
-        assert_eq!(round(Some("list_capture_failed")).1, None);
+        assert_eq!(round(Some("headless_processo_caiu")).1, None);
         tokio::time::advance(std::time::Duration::from_millis(1500)).await;
-        assert_eq!(round(Some("list_capture_failed")).1.as_deref(), Some("list_capture_failed"), "duas rodadas e o prazo: sai");
+        assert_eq!(round(Some("headless_processo_caiu")).1.as_deref(), Some("headless_processo_caiu"), "duas rodadas e o prazo: sai");
         assert_eq!(round(None).1, None, "resolvido some na hora");
+    }
+
+    /// Diagnóstico sai da linha na hora e não passa à conversa (`Shown`); a pergunta sem identidade só fica na
+    /// tela com a sessão esperando a pessoa (P1). O código vai ao diário da lista.
+    #[tokio::test]
+    async fn a_diagnostic_row_problem_never_shows() {
+        let bridge = ListBridge::new(ListEnv { mux: Mux::default(), capture_program: "missing-test-mux".into(),
+            procs: Arc::new(procs::SystemProcs::default()), dirs: None }, FactsClient::new("127.0.0.1:9".parse().unwrap(), "s".into()));
+        bridge.set_problem_hold(std::time::Duration::ZERO);
+        let round = |state: &str, problema: &str| {
+            let mut rows = vec![serde_json::from_value::<SessionRow>(json!({"name":"diag-row","provider":"claude","state":state,"problema":problema})).unwrap()];
+            bridge.gate_problems(&mut rows, true);
+            (rows[0].state.clone(), rows[0].problema.clone())
+        };
+        assert_eq!(round("idle", "list_facts_unavailable"), ("idle".into(), None), "fatos velhos: fora da tela");
+        assert_eq!(bridge.shown.get("diag-row"), None, "a conversa não herda diagnóstico");
+        assert!(list_facts::notes_for("diag-row").iter().any(|code| code == "list_facts_unavailable"), "o diário recebe o código");
+        assert_eq!(round("working", INTERACTION_UNAVAILABLE).1, None, "P1: fora da espera, diário");
+        assert_eq!(round("awaiting_input", INTERACTION_UNAVAILABLE).1.as_deref(), Some(INTERACTION_UNAVAILABLE), "P1: esperando a pessoa, tela");
+        assert_eq!(round("idle", "headless_processo_caiu").1.as_deref(), Some("headless_processo_caiu"), "de tela segue saindo");
+    }
+
+    /// Mensagem presa e fatos do plugin indisponíveis juntos: a linha leva a mensagem presa, que o portão mostra;
+    /// o erro do plugin, que é diagnóstico ou pergunta sem identidade, não a tapa.
+    #[test]
+    fn a_stuck_message_wins_over_unavailable_plugin_facts() {
+        use crate::interactions::InteractionBinding;
+        use crate::state::facts::PluginReading;
+        let bridge = ListBridge::new(ListEnv { mux: Mux::default(), capture_program: "missing-test-mux".into(),
+            procs: Arc::new(procs::SystemProcs::default()), dirs: None }, FactsClient::new("127.0.0.1:9".parse().unwrap(), "s".into()));
+        let stuck = || vec![serde_json::from_value::<SessionRow>(json!({"name":"stuck-wins","provider":"claude","state":"working","problema":"terminal_input_stalled"})).unwrap()];
+        let mut rows = stuck();
+        bridge.project_plugins(&mut rows, &BTreeMap::from([("stuck-wins".into(), Err("plugin_store_unavailable".into()))]));
+        assert_eq!(rows[0].problema.as_deref(), Some("terminal_input_stalled"), "leitura do plugin que falhou");
+        let mut rows = stuck();
+        let binding = InteractionBinding { key: "k".into(), conversation: "sid".into(), generation: 1 };
+        bridge.project_plugins(&mut rows, &BTreeMap::from([("stuck-wins".into(), Ok(PluginReading { binding, facts: Err("runtime_binding".into()) }))]));
+        assert_eq!(rows[0].problema.as_deref(), Some("terminal_input_stalled"), "fatos do plugin que não vieram");
+        // O erro que ficou fora da linha vai ao diário.
+        let notes = list_facts::notes_for("stuck-wins");
+        for code in ["plugin_store_unavailable", "runtime_binding"] { assert!(notes.iter().any(|noted| noted == code), "{code} no diário: {notes:?}"); }
     }
 
     /// Decisão M11: a pergunta que o plugin segura chega ao card com o formulário e o ID dele, para o `/answer`.

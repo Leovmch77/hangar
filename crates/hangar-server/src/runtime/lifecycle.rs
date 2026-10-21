@@ -223,6 +223,18 @@ pub(crate) fn claude_sidecar_dir()->Result<std::path::PathBuf,RuntimeError> {
     home.map(|home|home.join(".hangar/claude-headless")).ok_or_else(||failure("lifecycle_sidecar_path"))
 }
 
+/// O sidecar da sessão não existe (só a ausência; ilegível não conta): o fechamento pelo nome o apaga
+/// antes de matar o cano.
+pub(super) async fn claude_sidecar_absent(name:&str)->bool {
+    let Ok(path)=claude_sidecar_dir().map(|dir|super::codex_sidecar::path(&dir,name)) else {return false};
+    tokio::task::spawn_blocking(move||sidecar_absent_by(&path,super::queue::read_replaced)).await.unwrap_or(false)
+}
+/// Uma leitura que tolera a troca (`read_replaced`): no Windows quem lê no instante da troca recebe
+/// NotFound, e soltar a sessão por isso a deixaria órfã.
+fn sidecar_absent_by(path:&std::path::Path,read:impl FnOnce(&std::path::Path)->std::io::Result<Vec<u8>>)->bool {
+    matches!(read(path),Err(error) if error.kind()==std::io::ErrorKind::NotFound)
+}
+
 /// O arquivo já existe: esta operação nunca cadastra nem prepara uma conta.
 /// O chamador segura a lease do Store e o portão de revisão do ator.
 pub fn delete_sidecar(target:&super::protocol::RuntimeTarget,conversation:&str)->Result<(),RuntimeError> {
@@ -375,6 +387,18 @@ mod tests {
         assert_eq!(store.state().operations["spawn1"].status,Status::Unknown);
         assert_eq!(store.state().rows.len(),1);
         assert_eq!(store.state().runtime_state["terminal_write_barrier"]["operation_id"],"input");
+    }
+    /// Ausente é só o NotFound da leitura que já tolera a troca (`read_replaced`): uma leitura, sem repetir.
+    #[test]
+    fn only_a_missing_sidecar_is_absent_after_one_read() {
+        let calls=std::cell::Cell::new(0);
+        let read=|answer:Option<std::io::ErrorKind>| { let calls=&calls; move |_:&std::path::Path| { calls.set(calls.get()+1); answer.map_or_else(||Ok(b"{}".to_vec()),|kind|Err(kind.into())) } };
+        let path=std::path::Path::new("cl.json");
+        use std::io::ErrorKind::{NotFound,PermissionDenied};
+        assert!(sidecar_absent_by(path,read(Some(NotFound))),"ausente: fechada pelo nome");
+        assert!(!sidecar_absent_by(path,read(Some(PermissionDenied))),"recusado não é ausente");
+        assert!(!sidecar_absent_by(path,read(None)),"presente");
+        assert_eq!(calls.get(),3,"uma leitura por consulta");
     }
     #[test]
     fn replacement_b_or_explicit_close_prevents_second_spawn_admission() {

@@ -185,15 +185,30 @@ fn in_column(el: impl IntoElement) -> Div {
 }
 
 /// Faixa de problema da sessão: a frase do web pelo código, como no web; código sem frase mostra o detalhe cru.
-fn problem_banner(state: &SessionState) -> Option<String> {
+fn problem_banner(state: &SessionState, panel_stalled: bool) -> Option<String> {
+    // O painel "Na fila" já mostra a entrega parada, com o Reabrir.
+    if panel_stalled && state.problema.as_deref() == Some(STALLED) { return None; }
     let code = state.problema.as_deref().filter(|code| !code.trim().is_empty());
-    match code.and_then(|code| crate::i18n::tr_web(&format!("problema_{code}"), &HashMap::new())) {
+    match code.and_then(problem_text) {
         Some(text) => Some(match state.problema_detalhe.as_deref().and_then(|d| d.lines().next()).filter(|d| !d.trim().is_empty()) {
             Some(detail) => format!("{text} — {detail}"),
             None => text,
         }),
         None => state.problema_detalhe.clone().or_else(|| code.map(str::to_owned)),
     }
+}
+
+/// A frase do web para o código de problema, se houver.
+fn problem_text(code: &str) -> Option<String> { crate::i18n::tr_web(&format!("problema_{code}"), &HashMap::new()) }
+
+/// O `list_error` da lista sobre o erro mostrado: aviso só sem linha nenhuma na tela. Com a lista anterior de pé,
+/// uma rodada que falhou é diagnóstico (a próxima costuma voltar) e vai ao log (o `native.log`: lançado pelo
+/// `.desktop`, o stderr vai pro nada), sem aviso que aparece e some. Devolve se a tela muda.
+fn apply_list_error(rows_on_screen: bool, shown: &mut Option<String>, data: &serde_json::Value, log: impl FnOnce(&str)) -> bool {
+    if !rows_on_screen { *shown = Some(tr("list_stale")); return true; }
+    log(&format!("lista: rodada sem lista nova ({}); a anterior continua na tela", data.get("code").and_then(|c| c.as_str()).unwrap_or("?")));
+    // A lista na tela é boa: o erro anterior do servidor (um "Sem resposta" velho) sai junto.
+    shown.take().is_some()
 }
 
 fn conversation_metrics(user: bool) -> (f32, f32) { if user { (16., 1.55) } else { (17., 1.7) } }
@@ -1765,7 +1780,10 @@ impl Hangar {
                         }
                         Err(_) => { self.list_error = Some(tr("invalid_response")); false }
                     }
-                } else if frame.event == "list_error" { self.list_error = Some(tr("list_stale")); true }
+                } else if frame.event == "list_error" {
+                    visible = apply_list_error(!self.sessions.is_empty(), &mut self.list_error, &frame.data, crate::log_line);
+                    true
+                }
                 else if frame.event == "nav" { self.receive_nav(frame.data, window, cx); true }
                 else if frame.event == "shortcut_terminals" {
                     let list = terminal::parse_live_terms(&frame.data);
@@ -6184,6 +6202,9 @@ fn holds_queue(event: &ChatEvent, problem: Option<&str>) -> bool {
     problem == Some("terminal_input_delivery_unproved") && event.queued() && event.queued_delivered == Some(true) && event.desistiu != Some(true)
 }
 
+/// Mensagem sem entrega com o processo vivo e surdo: só a pessoa reabre, pelo painel "Na fila", onde ela espera.
+const STALLED: &str = "headless_delivery_stalled";
+
 /// A bolha ainda na fila, parada pelo problema da sessão: o motivo vai nela, não só na faixa do fim.
 fn stuck_note(event: &ChatEvent, problem: Option<&str>) -> Option<&'static str> {
     if !event.queued() || event.queued_delivered == Some(true) || event.desistiu == Some(true) { return None; }
@@ -6769,6 +6790,9 @@ impl Hangar {
         let orq = self.selected.as_ref().filter(|s| s.orq()).map(|s| s.name.clone());
         // A sessão da outra pessoa não recebe resposta nem plano daqui: o servidor dela recusa.
         let read_only = self.selected.as_ref().is_some_and(|s| s.read_only());
+        // O compositor (e com ele o painel "Na fila") só aparece fora da orquestração e com a conversa legível.
+        let panel_stalled = orq.is_none() && readable
+            && queue::stalled_notice(&self.chat.queue_panel(), self.chat.state.problema.as_deref(), read_only);
         let card = if readable && !read_only { self.render_ask(busy, window, cx).or_else(|| self.render_options(busy, window, cx)) } else { None };
         let plan_bar = if readable && !read_only && card.is_none() {
             self.render_plan_bar(busy, cx).or_else(|| self.render_headless_plan(cx)).or_else(|| self.render_plan_preview(cx))
@@ -6794,7 +6818,7 @@ impl Hangar {
                 .child(div().text_xs().text_color(theme::muted()).child(tr("sending"))))))
             .when_some(plan_bar, |el, bar| el.child(in_column(bar)))
             .when_some(action_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
-            .when_some(problem_banner(&self.chat.state), |el, problem| el.child(in_column(div().text_sm().text_color(theme::warning()).child(problem))))
+            .when_some(problem_banner(&self.chat.state, panel_stalled), |el, problem| el.child(in_column(div().text_sm().text_color(theme::warning()).child(problem))))
             .when_some(self.error.clone(), |el, error| el.child(in_column(div().py_2().text_sm().text_color(theme::warning()).child(error)
                 .child(Button::new("retry").small().ghost().label(tr("retry")).on_click(cx.listener(|this, _, window, cx| {
                     this.reselect(window, cx);
@@ -7508,13 +7532,38 @@ mod tests {
         use super::{problem_banner, SessionState};
         crate::i18n::set_language(crate::appearance::Language::Pt);
         let mut state = SessionState { problema: Some("terminal_input_composer_busy".into()), problema_detalhe: Some("composer_busy".into()), ..Default::default() };
-        assert_eq!(problem_banner(&state).unwrap(), "A mensagem está esperando: o campo de digitação do terminal tem texto — composer_busy");
+        assert_eq!(problem_banner(&state, false).unwrap(), "A mensagem está esperando: o campo de digitação do terminal tem texto — composer_busy");
         state.problema = Some("codigo_sem_frase".into());
-        assert_eq!(problem_banner(&state).unwrap(), "composer_busy");
+        assert_eq!(problem_banner(&state, false).unwrap(), "composer_busy");
         state.problema_detalhe = None;
-        assert_eq!(problem_banner(&state).unwrap(), "codigo_sem_frase");
+        assert_eq!(problem_banner(&state, false).unwrap(), "codigo_sem_frase");
         state.problema = None;
-        assert!(problem_banner(&state).is_none());
+        assert!(problem_banner(&state, false).is_none());
+    }
+
+    #[test]
+    fn problem_banner_leaves_the_stalled_delivery_to_the_queue_panel() {
+        use super::{problem_banner, SessionState, STALLED};
+        crate::i18n::set_language(crate::appearance::Language::Pt);
+        let state = SessionState { problema: Some(STALLED.into()), ..Default::default() };
+        assert!(problem_banner(&state, true).is_none(), "o painel \"Na fila\" já mostra o aviso, com o Reabrir");
+        assert!(problem_banner(&state, false).is_some(), "sem o painel, a faixa mostra");
+    }
+
+    #[test]
+    fn list_stale_never_shows_over_rows_on_screen() {
+        use super::apply_list_error;
+        crate::i18n::set_language(crate::appearance::Language::Pt);
+        let data = serde_json::json!({"code": "list_facts_unavailable"});
+        let mut logged = Vec::new();
+        let mut shown = Some("Sem resposta".to_owned());
+        assert!(apply_list_error(true, &mut shown, &data, |line| logged.push(line.to_owned())), "o aviso velho sai da tela");
+        assert_eq!(shown, None, "a lista boa continua sem o erro anterior do servidor");
+        assert!(logged.iter().any(|line| line.contains("list_facts_unavailable")), "a falha vai ao log: {logged:?}");
+        assert!(!apply_list_error(true, &mut shown, &data, |_| {}), "sem aviso na tela, nada a redesenhar");
+        // Sem linha nenhuma, a lista vazia seria lida como "nenhuma sessão": o aviso fica.
+        assert!(apply_list_error(false, &mut shown, &data, |_| {}));
+        assert_eq!(shown, Some(tr("list_stale")));
     }
 
     #[test]
