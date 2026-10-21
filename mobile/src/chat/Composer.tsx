@@ -189,6 +189,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
   const events = chat.use((s) => s.events);
   const draftUpdate = chat.use((s) => s.draftUpdate);
   const state = chat.use((s) => s.stateEvent?.state ?? 'idle');
+  const deliveryStalled = chat.use((s) => s.stateEvent?.problema === 'headless_delivery_stalled');
   const detectedProvider = useSessions((s) => {
     const byServer = s.byServerRecord?.[serverId];
     if (byServer) {
@@ -1540,7 +1541,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
         <QueuePanel panel={queueList} editingId={queueEdit?.entryId ?? null} busy={queueBusy}
           onEdit={handleQueueEdit} onCancelEdit={chat.cancelQueueEdit}
           delivery={supportsDelivery ? delivery : undefined} onModeChange={useDeliveryMode.getState().setMode}
-          onSteer={chat.steerQueued} onRemove={chat.removeQueued} onMove={chat.moveQueued} />
+          onSteer={chat.steerQueued} onRemove={chat.removeQueued} onMove={chat.moveQueued}
+          reopen={deliveryStalled ? { serverId, name } : undefined} />
         {/* Fila da TUI do Kimi esperando o turno: diz quantas e dá a saída de mandar agora. */}
         {showSteer ? (
           <Pressable

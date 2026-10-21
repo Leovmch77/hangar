@@ -9,7 +9,6 @@ import { overwriteGetLocale } from '../paraglide/runtime';
 import { MessageList } from './MessageList';
 import { chatStore, _resetChatsForTests } from '../stores/chat';
 import * as m from '../paraglide/messages';
-import { toast } from '../ui/Toast';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -19,7 +18,7 @@ vi.mock('../paraglide/messages', async (original) => ({
   ...await original<typeof import('../paraglide/messages')>(),
   ...Object.fromEntries(
     ('native_delivery_failed native_delivery_unproved native_queue_held native_no_safe_delivery native_delivering native_queued '
-      + 'native_queue_discard msg_nao_chegou_reenvie msg_aria_mensagens chat_servidor_removido problema_headless_delivery_stalled reabrir_sessao_presa')
+      + 'native_queue_discard msg_nao_chegou_reenvie msg_aria_mensagens chat_servidor_removido')
       .split(' ').map((key) => [key, () => key]),
   ),
   native_queue_discard_message: ({ text }: { text: string }) => `native_queue_discard_message:${text}`,
@@ -39,8 +38,6 @@ vi.mock('./AssistantBubble', () => ({ AssistantBubble: () => null, mkMarkdownSty
 vi.mock('react-native-enriched-markdown', () => ({ EnrichedMarkdownText: ({ markdown }: { markdown: string }) => createElement('article', null, markdown) }));
 vi.mock('../ui/Sheet', () => ({ Sheet: ({ children }: { children: ReactNode }) => createElement('section', null, children) }));
 vi.mock('../ui/Toast', () => ({ toast: { erro: vi.fn() } }));
-const haptic = vi.hoisted(() => ({ selection: vi.fn(), success: vi.fn(), error: vi.fn() }));
-vi.mock('../ui/haptics', () => ({ haptic }));
 vi.mock('./PreviewBubble', () => ({ PreviewBubble: () => null }));
 vi.mock('./LiveWork', () => ({ AgentesRodando: () => null, PensamentoVivo: () => null, WorkingLine: () => null }));
 vi.mock('./TaskList', () => ({ TaskList: () => null }));
@@ -95,7 +92,6 @@ function mount(node: ReactNode) {
   act(() => root.render(node));
   return { container, root };
 }
-const reopenButtons = (container: HTMLElement) => [...container.querySelectorAll<HTMLButtonElement>('[aria-label="reabrir_sessao_presa"]')];
 const discardButtons = (container: HTMLElement) => [...container.querySelectorAll<HTMLButtonElement>('[aria-label^="native_queue_discard_message:"]')];
 
 beforeEach(() => {
@@ -352,8 +348,6 @@ describe('notas da entrega na conversa', () => {
     [{ queued_delivered: true }, 'terminal_input_delivery_unproved', ['native_delivery_unproved']],
     [{ queued_delivered: false }, 'terminal_input_delivery_unproved', ['native_queue_held']],
     [{}, 'terminal_input_no_safe_delivery', ['native_no_safe_delivery']],
-    [{ queued_delivered: false }, 'headless_delivery_stalled', ['problema_headless_delivery_stalled']],
-    [{ queued_delivered: true }, 'headless_delivery_stalled', ['native_delivering']],
     [{ queued_delivered: true }, undefined, ['native_delivering']],
     [{ queued_delivered: false }, undefined, ['native_queued']],
     [{ queued_delivered: true, queued_consumed: true }, undefined, []],
@@ -422,45 +416,6 @@ describe('notas da entrega na conversa', () => {
     })));
     expect(discardButtons(container)).toHaveLength(count);
     expect(fetch).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ['headless_delivery_stalled', { queued_delivered: false }, 1],
-    ['headless_delivery_stalled', { queued_delivered: true }, 0],
-    ['terminal_input_delivery_unproved', { queued_delivered: false }, 0],
-    [undefined, { queued_delivered: false }, 0],
-  ] as [string | undefined, Partial<ChatEvent>, number][])('Reabrir só com o aviso de entrega parada: %s %j', (problem, patch, count) => {
-    const { container } = mount(createElement(MessageList, props([event(patch)], {
-      sessionName: 'sess', serverId: 'a', stateEvent: { session: 'sess', state: 'working', problema: problem },
-    })));
-    expect(reopenButtons(container)).toHaveLength(count);
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
-  it('Reabrir chama o recarregar no servidor da sessão, fica desabilitado no pedido e mostra o erro da ação', async () => {
-    vi.mocked(toast.erro).mockClear();
-    haptic.success.mockClear();
-    const { container } = mount(createElement(MessageList, props([event({ queued_delivered: false })], {
-      sessionName: 'sess', serverId: 'a', stateEvent: { session: 'sess', state: 'working', problema: 'headless_delivery_stalled' },
-    })));
-    let resolve!: (response: Response) => void;
-    const fetchMock = vi.fn((_url: string, _init?: RequestInit) => new Promise<Response>((done) => { resolve = done; }));
-    vi.stubGlobal('fetch', fetchMock);
-    act(() => reopenButtons(container)[0].click());
-    expect(reopenButtons(container)[0].disabled).toBe(true);
-    act(() => reopenButtons(container)[0].click());
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe('http://10.0.0.1:8765/api/sessions/sess/recarregar');
-    expect(fetchMock.mock.calls[0][1]?.method).toBe('POST');
-    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('Authorization')).toBe('Bearer token-a');
-    await act(async () => { resolve(new Response('{"detail":"reabrir recusado"}', { status: 409 })); });
-    expect(toast.erro).toHaveBeenCalledExactlyOnceWith('reabrir recusado');
-    expect(reopenButtons(container)[0].disabled).toBe(false);
-    expect(container.textContent).toContain('problema_headless_delivery_stalled');
-    act(() => reopenButtons(container)[0].click());
-    await act(async () => { resolve(new Response('{"ok":true}', { status: 200 })); });
-    expect(haptic.success).toHaveBeenCalledTimes(1);
-    expect(toast.erro).toHaveBeenCalledTimes(1);
   });
 
   it.each([{ sessionName: 'sess' }, { serverId: 'a' }, {}])('leitura sem identidade completa não oferece descarte: %j', (identity) => {

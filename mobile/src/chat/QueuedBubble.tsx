@@ -1,47 +1,10 @@
 import { memo, useEffect, useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { formataErro, recarregarSessao, waitsInQueue, type ChatEvent, type QuoteRef, type SessionInfo } from '@hangar/core';
+import { waitsInQueue, type ChatEvent, type QuoteRef, type SessionInfo } from '@hangar/core';
 import { chatStore } from '../stores/chat';
-import { useServers } from '../stores/servers';
-import { useSessions } from '../stores/sessions';
-import { toast } from '../ui/Toast';
-import { haptic } from '../ui/haptics';
 import { UserBubble } from './UserBubble';
 import * as m from '../paraglide/messages';
-
-const STALLED = 'headless_delivery_stalled';
-
-// O servidor nunca reabre sozinho a sessão surda: só este botão, e ele só existe com o aviso ativo.
-function ReopenStalled({ sessionName, serverId }: { sessionName: string; serverId: string }) {
-  const readOnly = useSessions((s) => s.rows.some((r) => r.serverId === serverId && r.name === sessionName && r.guest_kind === 'pair'));
-  const [busy, setBusy] = useState(false);
-  const { theme } = useUnistyles();
-  if (readOnly) return null;
-  const reopen = async () => {
-    const server = useServers.getState().servers.find((s) => s.id === serverId);
-    if (!server) { toast.erro(m.chat_servidor_removido()); return; }
-    setBusy(true);
-    try {
-      await recarregarSessao(sessionName, server);
-      haptic.success();
-    } catch (e) {
-      toast.erro((e instanceof Error ? e.message : formataErro(e)) || m.native_invalid_response());
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <View style={styles.action}>
-      <Pressable accessibilityRole="button" accessibilityLabel={m.reabrir_sessao_presa()}
-        accessibilityState={{ disabled: busy, busy }} disabled={busy}
-        onPress={() => void reopen()} style={[styles.button, busy && styles.dim]}>
-        {busy ? <ActivityIndicator size="small" color={theme.tokens.text.secondary} /> : null}
-        <Text style={styles.label}>{m.reabrir_sessao_presa()}</Text>
-      </Pressable>
-    </View>
-  );
-}
 
 // A ação vive separada: listas só de leitura não criam um store sem identidade de conversa.
 function DiscardQueued({ id, text, sessionName, serverId }: { id: string; text: string; sessionName: string; serverId: string }) {
@@ -87,7 +50,6 @@ export const QueuedBubble = memo(function QueuedBubble({ event, working, problem
   const queued = event.id.startsWith('queued-');
   const failed = event.desistiu === true;
   const holdsQueue = queued && !event.queued_consumed && problem === 'terminal_input_delivery_unproved' && event.queued_delivered === true && !failed;
-  const stalled = queued && !event.queued_consumed && problem === STALLED && event.queued_delivered !== true && !failed;
   const notes: string[] = [];
   if (!event.queued_consumed) {
     if (failed || event.id.startsWith('held:') || event.hook_error != null) {
@@ -97,7 +59,6 @@ export const QueuedBubble = memo(function QueuedBubble({ event, working, problem
     else if (holdsQueue) notes.push(m.native_delivery_unproved());
     else if (queued && event.queued_delivered !== true && problem === 'terminal_input_delivery_unproved') notes.push(m.native_queue_held());
     else if (queued && event.queued_delivered !== true && problem === 'terminal_input_no_safe_delivery') notes.push(m.native_no_safe_delivery());
-    else if (stalled) notes.push(m.problema_headless_delivery_stalled());
     else if (queued) notes.push(event.queued_delivered === true ? m.native_delivering() : m.native_queued());
   }
 
@@ -110,7 +71,6 @@ export const QueuedBubble = memo(function QueuedBubble({ event, working, problem
       {notes.length ? <Text style={styles.note}>{notes.join(' · ')}</Text> : null}
       {queued && !event.queued_consumed && (failed || holdsQueue) && sessionName && serverId
         ? <DiscardQueued id={event.id.slice('queued-'.length)} text={event.text ?? ''} sessionName={sessionName} serverId={serverId} /> : null}
-      {stalled && sessionName && serverId ? <ReopenStalled sessionName={sessionName} serverId={serverId} /> : null}
     </View>
   );
 });
