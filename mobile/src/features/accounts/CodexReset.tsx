@@ -1,8 +1,9 @@
 import { useEffect, useSyncExternalStore } from 'react';
 import { Text, View } from 'react-native';
-import { StyleSheet } from 'react-native-unistyles';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { consumeCodexRateLimitResetForServer, resetsIn, type CodexResetOutcome, type Credencial, type Server } from '@hangar/core';
 import { Pill } from '../config/PageHeader';
+import { Icon } from '../../ui/Icon';
 import * as m from '../../paraglide/messages';
 
 type Attempt = { credentialId: string; account: string; credit: string | null; uuid: string; busy: boolean; pending: boolean; error: string };
@@ -70,6 +71,7 @@ function PendingAttempt({ server, attempt }: { server: Server; attempt: Attempt 
 }
 
 export function AccountReset({ server, credential }: { server: Server; credential: Credencial }) {
+  const { theme } = useUnistyles();
   const { key, state } = useReset(server);
   const attempt = state.attempt?.credentialId === credential.id ? state.attempt : null;
   const quota = credential.cota;
@@ -78,23 +80,32 @@ export function AccountReset({ server, credential }: { server: Server; credentia
   const offered = !!credits && credits.available_count > 0 && (credits.credits == null || !!credit);
   const weekly = quota?.janelas.find(w => w.rotulo === '7d' && !w.por_modelo);
   const allowed = quota?.estado === 'lida' && weekly && Number.isFinite(weekly.pct) && weekly.pct >= 100;
-  const expires = resetsIn(credit?.expires_at);
+  // "A próxima" é a que vence primeiro entre as disponíveis.
+  const soonest = credits?.credits?.filter(c => c.status === 'available' && c.expires_at != null)
+    .reduce<number | null>((min, c) => (min == null || c.expires_at! < min ? c.expires_at! : min), null);
+  const expires = resetsIn(soonest ?? credit?.expires_at);
   if (!offered && !attempt) return null;
+  const count = credits && credits.available_count === 1 ? m.codex_reset_one() : m.codex_reset_many({ n: credits?.available_count ?? 0 });
   return (
     <View style={styles.block}>
-      {offered ? <>
-        <Text style={styles.text}>{m.mobile_accounts_reset_count({ count: credits!.available_count })}</Text>
-        {credit?.title ? <Text style={styles.text}>{credit.title}</Text> : null}
-        {credit?.description ? <Text style={styles.text}>{credit.description}</Text> : null}
-        {expires ? <Text style={styles.text}>{m.mobile_accounts_reset_expires({ when: expires })}</Text> : null}
-        {!allowed ? <Text style={styles.text}>{m.mobile_accounts_reset_blocked()}</Text> : null}
-        <View style={styles.actions}><Pill label={m.mobile_accounts_reset_use()} disabled={!allowed || !!state.attempt}
-          onPress={() => {
-            if (!allowed || read(key).attempt) return;
-            write(key, { attempt: { credentialId: credential.id, account: credential.codex_account!, credit: credit?.id ?? null,
-              uuid: uuidV4(), busy: false, pending: false, error: '' }, outcome: null, needsRefresh: false });
-          }} /></View>
-      </> : null}
+      {offered ? (
+        <View style={styles.line}>
+          <Icon name="RotateCcw" size={13} color={theme.tokens.text.secondary} />
+          <Text style={styles.lineText}>{expires ? `${count} · ${m.accounts_list_reset_next({ n: expires })}` : count}</Text>
+        </View>
+      ) : null}
+      {offered && allowed ? (
+        <View style={[styles.box, { borderColor: theme.tokens.border.default }]}>
+          {credit?.title ? <Text style={styles.text}>{credit.title}</Text> : null}
+          {credit?.description ? <Text style={styles.text}>{credit.description}</Text> : null}
+          <View style={styles.actions}><Pill label={m.mobile_accounts_reset_use()} disabled={!!state.attempt}
+            onPress={() => {
+              if (read(key).attempt) return;
+              write(key, { attempt: { credentialId: credential.id, account: credential.codex_account!, credit: credit?.id ?? null,
+                uuid: uuidV4(), busy: false, pending: false, error: '' }, outcome: null, needsRefresh: false });
+            }} /></View>
+        </View>
+      ) : null}
       {attempt ? <PendingAttempt server={server} attempt={attempt} /> : null}
     </View>
   );
@@ -125,5 +136,8 @@ const styles = StyleSheet.create(theme => ({
   block: { gap: theme.base.space[2], marginTop: theme.base.space[2] },
   text: { fontSize: theme.base.text.xs, color: theme.tokens.text.secondary },
   error: { fontSize: theme.base.text.xs, color: theme.tokens.status.error },
+  line: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5] },
+  lineText: { flexShrink: 1, fontSize: theme.base.text.xs, color: theme.tokens.text.secondary },
+  box: { gap: theme.base.space[2], padding: theme.base.space[3], borderWidth: 1, borderRadius: theme.base.radius.sm },
   actions: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[2] },
 }));

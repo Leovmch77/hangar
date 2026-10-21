@@ -1894,9 +1894,10 @@ export async function cancelQueuedMessage(name: string, entryId: string, server?
   await sessionFetch<{ ok: boolean }>(server, `${queuePath(name, entryId)}?only_waiting=true`, { method: 'DELETE' });
 }
 
-/** "Orientar": manda esta mensagem agora, no turno em curso; sem turno, entrega na hora (`steered: false`). */
-export async function steerQueuedMessage(name: string, entryId: string, server?: Server | null): Promise<{ ok: boolean; steered: boolean }> {
-  return sessionFetch<{ ok: boolean; steered: boolean }>(server, `${queuePath(name, entryId)}/steer`, { method: 'POST' });
+/** "Orientar": manda esta mensagem agora, no turno em curso; sem turno, entrega na hora (`steered: false`).
+ *  `code: 'queue_steer_hint_missing'`: o Claude não mostrou a dica a tempo e ela espera a próxima pausa. */
+export async function steerQueuedMessage(name: string, entryId: string, server?: Server | null): Promise<{ ok: boolean; steered: boolean; code?: string }> {
+  return sessionFetch<{ ok: boolean; steered: boolean; code?: string }>(server, `${queuePath(name, entryId)}/steer`, { method: 'POST' });
 }
 
 /** Põe `entryId` antes de `beforeId` (`null`: no fim da fila). */

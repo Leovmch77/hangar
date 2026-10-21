@@ -33,15 +33,22 @@ import { apagarConta, accountHolders, type AccountHolders, claudeAccountFolder, 
   import EscopoChip from './EscopoChip.svelte';
   import * as m from '../../paraglide/messages';
   import { releaseLines } from '../../lib/accountRelease';
+  import { ACCOUNT_FILTERS, accountInFilter, accountMatches, accountMatchRange, sortAccounts, nextAccountSort, parseAccountSort,
+    type AccountFilter, type AccountSort } from '@hangar/core';
+  import { flip } from 'svelte/animate';
+  import { cubicOut } from 'svelte/easing';
 
   // Contrato do apiTarget (o mesmo de ServidoresSettings): null = servidor ATIVO (API global com
   // self-heal de 401); Server explícito = a máquina que o ?srv= escolheu. Quem resolve é o App
   // (targetConfig): com ?srv=B a aba tem de falar com B, não com o ativo — o bloqueador da
   // revisão final (apagar/Entrar agiam na máquina errada, com o cabeçalho nomeando outra).
+  // `desktop`: a vista desktop web é legada e fica com as três seções; a lista única com filtro,
+  // busca e ordem é só do celular.
   interface Props {
     apiTarget: Server | null;
+    desktop?: boolean;
   }
-  let { apiTarget }: Props = $props();
+  let { apiTarget, desktop = false }: Props = $props();
   const codexServer = $derived(apiTarget ?? listServers().find((s) => s.id === getActiveId()) ?? null);
   let codexLogin = $state<string | null>(null);
   let codexHerdar = $state<string | null>(null);
@@ -79,13 +86,108 @@ import { apagarConta, accountHolders, type AccountHolders, claudeAccountFolder, 
   const ehCopiaSync = (c: Credencial) => c.id.startsWith('kimi:') && c.id.slice('kimi:'.length) in motoresMapa;
   const secaoClaude = $derived(contas.filter((c) => credentialGroup(c) === 'subscription'
     || (c.tipo === 'codex' && credentialAuth(c) === 'none')));
-  const secaoModelos = $derived(contas.filter((c) => {
+  const ehModelo = (c: Credencial) => {
     const n = nomeMotorDe(c);
     return !!n && n in motoresMapa;
-  }));
+  };
+  const secaoModelos = $derived(contas.filter(ehModelo));
   const secaoOutros = $derived(contas.filter(
     (c) => !secaoClaude.includes(c) && !secaoModelos.includes(c) && !ehCopiaSync(c),
   ));
+
+  // Lista única do celular: a ordem das três seções, sem os títulos — o ícone já diz o tipo.
+  const listaUnica = $derived([...secaoClaude, ...secaoModelos, ...secaoOutros]);
+  let filtro = $state<AccountFilter>('all');
+  let busca = $state('');
+  let ordem = $state<AccountSort>(null);
+  try { ordem = parseAccountSort(localStorage.getItem('cp_accounts_sort')); } catch { /* storage bloqueado */ }
+  function definirOrdem(o: AccountSort) {
+    ordem = o;
+    try {
+      if (o) localStorage.setItem('cp_accounts_sort', JSON.stringify(o));
+      else localStorage.removeItem('cp_accounts_sort');
+    } catch { /* idem */ }
+  }
+  function inverterSentido() {
+    const o = ordem;
+    if (o) definirOrdem({ key: o.key, dir: o.dir > 0 ? -1 : 1 });
+  }
+  const visiveis = $derived(sortAccounts(
+    listaUnica.filter((c) => accountInFilter(c, filtro) && accountMatches(c, busca)), ordem));
+  const contagem = (f: AccountFilter) => listaUnica.filter((c) => accountInFilter(c, f)).length;
+  const rotuloFiltro = (f: AccountFilter) => f === 'all' ? m.accounts_list_filter_all()
+    : f === 'claude' ? m.accounts_list_filter_claude()
+    : f === 'codex' ? m.accounts_list_filter_codex() : m.accounts_list_filter_other();
+  // Uma opção por janela de cota que alguma conta tem; a ordem salva continua escolhível mesmo
+  // quando a janela dela sumiu da lista.
+  const chavesOrdem = $derived.by(() => {
+    const ks = rotulosDaLista(listaUnica).flatMap((r) => (r === '7d' ? ['7d', 'reset'] : [r]));
+    if (ordem && ordem.key !== 'name' && !ks.includes(ordem.key)) ks.push(ordem.key);
+    return ks;
+  });
+  const rotuloOrdem = (k: string) => k === 'name' ? m.accounts_list_sort_name()
+    : k === '5h' ? m.rate_5h()
+    : k === '7d' ? m.accounts_window_week()
+    : k === 'reset' ? m.accounts_list_sort_reset() : k;
+  const rotuloSentido = (o: NonNullable<AccountSort>) =>
+    o.dir > 0 ? m.accounts_list_sort_asc() : m.accounts_list_sort_desc();
+
+
+  // Pílula do filtro: desliza para o botão marcado.
+  let filtrosEl = $state<HTMLElement | null>(null);
+  let pilula = $state({ x: 0, w: 0 });
+  $effect(() => {
+    void filtro; void listaUnica.length;
+    const on = filtrosEl?.querySelector<HTMLElement>('button[aria-pressed="true"]');
+    if (on) pilula = { x: on.offsetLeft, w: on.offsetWidth };
+  });
+
+  const semMovimento = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // Entrada escalonada só na primeira pintura da lista; linha que volta pelo filtro só aparece.
+  let primeiraPintura = true;
+  let ordemEntrada = 0;
+  function entrada(node: HTMLElement) {
+    if (semMovimento || typeof node.animate !== 'function') return;
+    if (primeiraPintura && ordemEntrada === 0) requestAnimationFrame(() => { primeiraPintura = false; });
+    const i = primeiraPintura ? ordemEntrada++ : 0;
+    node.animate([{ opacity: 0, transform: 'translateY(4px)' }, { opacity: 1, transform: 'none' }], {
+      duration: primeiraPintura ? 500 : 320, delay: 35 * Math.min(i, 12),
+      easing: 'cubic-bezier(.16,1,.3,1)', fill: 'backwards',
+    });
+  }
+  // Barra nasce vazia e cresce até o valor; a transição de largura (CSS) cobre as releituras.
+  function cresce(node: HTMLElement, anima: boolean) {
+    if (!anima || semMovimento) return;
+    const w = node.style.width;
+    node.style.width = '0%';
+    requestAnimationFrame(() => requestAnimationFrame(() => { node.style.width = w; }));
+  }
+  // O número conta do valor anterior ao novo. A ação é dona do texto: o Svelte não escreve nele.
+  function contaAte(node: HTMLElement, p: { pct: number; anima: boolean }) {
+    let destino = Math.round(p.pct);
+    let mostrado = destino;
+    let raf = 0;
+    node.textContent = `${destino}%`;
+    return {
+      update(n: { pct: number; anima: boolean }) {
+        const alvo = Math.round(n.pct);
+        if (alvo === destino) return;
+        destino = alvo;
+        cancelAnimationFrame(raf);
+        if (!n.anima || semMovimento) { mostrado = alvo; node.textContent = `${alvo}%`; return; }
+        const de = mostrado, t0 = performance.now();
+        const passo = (t: number) => {
+          const k = Math.min(1, (t - t0) / 700);
+          mostrado = Math.round(de + (alvo - de) * (1 - (1 - k) ** 4));
+          node.textContent = `${mostrado}%`;
+          if (k < 1) raf = requestAnimationFrame(passo);
+        };
+        raf = requestAnimationFrame(passo);
+      },
+      destroy() { cancelAnimationFrame(raf); },
+    };
+  }
   const copiaKimiDe = (c: Credencial) => {
     const n = nomeMotorDe(c);
     return n ? contas.some((x) => x.id === `kimi:${n}`) : false;
@@ -891,13 +993,67 @@ import { apagarConta, accountHolders, type AccountHolders, claudeAccountFolder, 
     </div>
   {:else if erro}
     <p class="ct-aviso erro" role="alert">{erro}</p>
-  {:else}
+  {:else if desktop}
     <!-- As três seções aparecem SEMPRE depois da carga, mesmo vazias: uma seção que some deixa
          a pessoa sem saber que aquele lugar existe (é onde a coisa nova vai aparecer). -->
     {@render secao(m.contas_secao_claude(), m.contas_secao_claude_leg(), secaoClaude, m.comum_nada_encontrado())}
     {@render secao(m.contas_secao_modelos(), m.contas_secao_modelos_leg(), secaoModelos, m.contas_secao_modelos_vazio())}
     {@render secao(m.contas_secao_outros(), m.contas_secao_outros_leg(), secaoOutros, m.contas_secao_outros_vazio())}
+  {:else}
+    <div class="ct-ferramentas">
+      <div class="ct-filtros" role="group" aria-label={m.accounts_list_filter_label()} bind:this={filtrosEl}>
+        <span class="ct-pilula" aria-hidden="true" class:pronta={pilula.w > 0}
+          style:transform="translateX({pilula.x}px)" style:width="{pilula.w}px"></span>
+        {#each ACCOUNT_FILTERS as f (f)}
+          <button type="button" aria-pressed={filtro === f} onclick={() => (filtro = f)}
+            >{rotuloFiltro(f)}<span class="ct-filtro-n">{contagem(f)}</span></button>
+        {/each}
+      </div>
+      <input class="ct-busca" type="search" bind:value={busca} autocomplete="off"
+        placeholder={m.accounts_list_search()} aria-label={m.accounts_list_search()} />
+      <div class="ct-ordem">
+        <label class="ct-ordem-l">
+          <span>{m.accounts_list_sort()}</span>
+          <select value={ordem?.key ?? ''}
+            onchange={(e) => { const k = e.currentTarget.value; definirOrdem(k ? nextAccountSort(null, k) : null); }}>
+            <option value="">{m.accounts_list_sort_default()}</option>
+            <option value="name">{m.accounts_list_sort_name()}</option>
+            {#each chavesOrdem as k (k)}<option value={k}>{rotuloOrdem(k)}</option>{/each}
+          </select>
+        </label>
+        {#if ordem}
+          <button type="button" class="ct-sentido" onclick={inverterSentido}
+            aria-label={m.accounts_list_sort_state({ column: rotuloOrdem(ordem.key), direction: rotuloSentido(ordem) })}>
+            <span class="ct-seta" class:desc={ordem.dir < 0} aria-hidden="true">↑</span>{rotuloSentido(ordem)}
+          </button>
+        {/if}
+      </div>
+    </div>
+    {#if visiveis.length}
+      {@const rotulos = rotulosDaLista(visiveis)}
+      <div class="ct-lista ct-unica" class:compacta style:--slots={Math.max(1, rotulos.length)}>
+        {#each visiveis as conta (conta.id)}
+          <div class="ct-linha" animate:flip={{ duration: semMovimento ? 0 : 420, easing: cubicOut }}
+            use:entrada>{@render cartao(conta, rotulos)}</div>
+        {/each}
+      </div>
+    {:else}
+      <p class="ct-vazio ct-vazio-lista">{busca.trim()
+        ? m.accounts_list_search_empty({ term: busca.trim() }) : m.accounts_list_empty()}</p>
+    {/if}
   {/if}
+
+  {#snippet realce(texto: string)}{@const r = accountMatchRange(texto, busca)}{#if r}{texto.slice(0, r[0])}<mark class="ct-achado">{texto.slice(r[0], r[1])}</mark>{texto.slice(r[1])}{:else}{texto}{/if}{/snippet}
+
+  {#snippet identidadeCodex(conta: Credencial)}
+    {#if conta.login?.loggedIn && conta.login.email}
+      <span class="ct-sub ct-codex-meta" class:ct-email={!desktop}>{@render realce(conta.login.email)}</span>
+    {:else if conta.login?.estado === 'ok' && !conta.login.loggedIn}
+      <span class="ct-sub fraco ct-codex-meta">{m.contas_nao_conectada()}</span>
+    {:else if motivoLoginIndisponivel(conta)}
+      <span class="ct-sub ct-vence ct-codex-meta">{motivoLoginIndisponivel(conta)}</span>
+    {/if}
+  {/snippet}
 
   {#snippet secao(titulo: string, legenda: string, itens: Credencial[], vazio: string)}
     <section class="ct-grupo">
@@ -923,7 +1079,8 @@ import { apagarConta, accountHolders, type AccountHolders, claudeAccountFolder, 
              com quatro pílulas na mesma linha, o nome — que é o que distingue uma linha da outra —
              sumia no meio do enfeite. Mesmas chaves de sempre, nenhum texto novo. -->
         {@const marcas = [
-          ...(conta.usos.includes('claude_code') ? [m.contas_usa_claude_code()] : []),
+          ...(!desktop && ehModelo(conta) ? [m.accounts_list_runs_in_claude_code()]
+            : conta.usos.includes('claude_code') ? [m.contas_usa_claude_code()] : []),
           ...(conta.cookie_definido ? [m.contas_cookie_definido()] : []),
           ...(conta.gerenciada === false ? [m.contas_chave_do_agente()] : []),
         ]}
@@ -967,7 +1124,7 @@ import { apagarConta, accountHolders, type AccountHolders, claudeAccountFolder, 
                 <button type="button" class="ct-mini" onclick={() => { renomeando = null; apelidoTexto = ''; }}
                   disabled={salvandoApelido}>{m.comum_cancelar()}</button>
               {:else}
-                <span class="ct-nome">{conta.nome}</span>
+                <span class="ct-nome">{@render realce(conta.nome)}</span>
                 <!-- Lápis em SVG traçado 2, como o resto do app (components/icons,
                      DesktopSessionContext): glifo de texto (✎) no meio de uma UI de ícone
                      desenhado muda de peso e de linha de base conforme a fonte do sistema.
@@ -993,6 +1150,8 @@ import { apagarConta, accountHolders, type AccountHolders, claudeAccountFolder, 
               {/if}
             </span>
             {#if conta.tipo === 'codex'}
+              <!-- No celular o email vem logo abaixo do nome, como nas contas do Claude. -->
+              {#if !desktop}{@render identidadeCodex(conta)}{/if}
               {#if credentialAuth(conta) !== 'none' || (conta.login?.loggedIn && conta.login.plano)}
                 <span class="ct-sub-l ct-codex-meta">
                   {#if credentialAuth(conta) !== 'none'}
@@ -1006,13 +1165,7 @@ import { apagarConta, accountHolders, type AccountHolders, claudeAccountFolder, 
                   {/if}
                 </span>
               {/if}
-              {#if conta.login?.loggedIn && conta.login.email}
-                <span class="ct-sub ct-codex-meta">{conta.login.email}</span>
-              {:else if conta.login?.estado === 'ok' && !conta.login.loggedIn}
-                <span class="ct-sub fraco ct-codex-meta">{m.contas_nao_conectada()}</span>
-              {:else if motivoLoginIndisponivel(conta)}
-                <span class="ct-sub ct-vence ct-codex-meta">{motivoLoginIndisponivel(conta)}</span>
-              {/if}
+              {#if desktop}{@render identidadeCodex(conta)}{/if}
               {#if conta.ativa || conta.codex_account || dir}
                 <span class="ct-sub-l ct-codex-meta">
                   {#if conta.ativa}<span class="ct-sub fraco">{m.criar_padrao()}</span>
@@ -1048,9 +1201,11 @@ import { apagarConta, accountHolders, type AccountHolders, claudeAccountFolder, 
               {/if}
             {:else if conta.tipo !== 'codex' && conta.login?.estado === 'ok' && conta.login.loggedIn && conta.login.email}
               {@const dias = diasLoginDe(conta)}
-              {#if dias == null}
-                <span class="ct-sub">{conta.login.email}</span>
-              {:else}
+              <!-- Celular: email em linha própria, inteiro até a borda; o prazo desce pro subtítulo. -->
+              {#if dias == null || !desktop}
+                <span class="ct-sub" class:ct-email={!desktop}>{@render realce(conta.login.email)}</span>
+              {/if}
+              {#if dias != null}
                 <!-- O prazo mora na linha do e-mail, não em linha própria: é um detalhe da
                      conexão, não outra identidade. O "?" abre a explicação — o vencimento é
                      regra do Claude Code, não algo que o app pudesse renovar sozinho. -->
@@ -1058,7 +1213,7 @@ import { apagarConta, accountHolders, type AccountHolders, claudeAccountFolder, 
                   <summary class="ct-sub-l" aria-label={m.contas_login_vence_ajuda_aria()}>
                     <!-- O separador mora com o e-mail: no compacto os dois somem juntos e o prazo
                          não fica com um "·" pendurado na frente. -->
-                    <span class="ct-sub">{conta.login.email} ·</span>
+                    {#if desktop}<span class="ct-sub">{conta.login.email} ·</span>{/if}
                     <span class="ct-sub ct-vence-txt" class:fraco={dias > 3} class:ct-vence={dias <= 3}>
                       {dias > 0 ? m.contas_login_vence({ n: dias }) : m.contas_login_vencido()}
                     </span>
@@ -1184,9 +1339,10 @@ import { apagarConta, accountHolders, type AccountHolders, claudeAccountFolder, 
                   <span class="ct-jan-rot">{j.rotulo}</span>
                   {#if resetDaJanela(j.reset_ts)}<span class="ct-jan-reset">{resetDaJanela(j.reset_ts)}</span>{/if}
                   <span class="ct-barra" aria-hidden="true">
-                    <i class={nivelDePct(j.pct)} style="width:{Math.min(100, Math.max(0, j.pct))}%"></i>
+                    <i class={nivelDePct(j.pct)} style="width:{Math.min(100, Math.max(0, j.pct))}%"
+                      use:cresce={!desktop}></i>
                   </span>
-                  <b class={nivelDePct(j.pct)}>{Math.round(j.pct)}%</b>
+                  <b class={nivelDePct(j.pct)} use:contaAte={{ pct: j.pct, anima: !desktop }}></b>
                 </span>
               {/each}
               {#if !leituraFresca(conta)}
@@ -1216,6 +1372,12 @@ import { apagarConta, accountHolders, type AccountHolders, claudeAccountFolder, 
             {@const quantidade = conta.cota?.reset_credits?.available_count ?? 0}
             {@const semanal = semanalDe(conta)}
             {@const expira = expiracaoDosCreditos(conta)}
+            <!-- Celular: com a semana abaixo de 100% o botão só poderia ficar desligado; vira uma
+                 linha. A caixa volta com a semana cheia ou com a confirmação aberta. -->
+            {#if !desktop && !(semanal && semanal.pct >= 100) && resetConfirmando !== conta.id}
+              <p class="ct-reset-linha"><span aria-hidden="true">{'↺ '}</span>{quantidade === 1
+                ? m.codex_reset_one() : m.codex_reset_many({ n: quantidade })}{#if expira}{` · ${m.accounts_list_reset_next({ n: expira })}`}{/if}</p>
+            {:else}
             <div class="ct-reset">
               <span class="ct-reset-info">
                 {quantidade === 1 ? m.codex_reset_one() : m.codex_reset_many({ n: quantidade })}
@@ -1230,6 +1392,7 @@ import { apagarConta, accountHolders, type AccountHolders, claudeAccountFolder, 
                 <span class="ct-reset-reason">{m.codex_reset_weekly_remaining({ pct: Math.round(semanal.pct) })}</span>
               {/if}
             </div>
+            {/if}
             {#if resetConfirmando === conta.id}
               <div class="ct-reset-confirm">
                 <p>{m.codex_reset_confirm()}</p>
@@ -1821,5 +1984,63 @@ import { apagarConta, accountHolders, type AccountHolders, claudeAccountFolder, 
     margin-top: var(--space-2); padding: var(--space-3);
     border: 1px solid var(--border-subtle); border-radius: 10px;
     background: var(--surface-inset);
+  }
+
+  /* Lista única do celular: filtro, busca e ordem acima das linhas. */
+  .ct-ferramentas { display: flex; flex-direction: column; gap: var(--space-2); margin-bottom: var(--space-3); }
+  .ct-filtros { position: relative; display: flex; gap: 2px; padding: 3px; align-self: flex-start;
+                max-width: 100%; box-sizing: border-box; overflow-x: auto;
+                border: 1px solid var(--border-subtle); border-radius: 10px; }
+  .ct-filtros button { position: relative; z-index: 1; display: inline-flex; align-items: center;
+                       gap: 6px; min-height: 40px; padding: 0 11px; border: none; border-radius: 7px;
+                       background: transparent; color: var(--text-muted); font: inherit;
+                       font-size: var(--text-xs); white-space: nowrap; cursor: pointer;
+                       transition: color .2s; }
+  .ct-filtros button[aria-pressed="true"] { color: var(--text-primary); }
+  .ct-filtros button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .ct-filtro-n { font-size: var(--text-3xs); padding: 0 6px; border-radius: 5px;
+                 background: var(--surface-raised); font-variant-numeric: tabular-nums; }
+  .ct-pilula { position: absolute; top: 3px; bottom: 3px; left: 0; border-radius: 7px;
+               background: var(--accent-dim); opacity: 0;
+               transition: transform .32s cubic-bezier(.22,1,.36,1), width .32s cubic-bezier(.22,1,.36,1); }
+  .ct-pilula.pronta { opacity: 1; }
+  .ct-busca { height: 40px; width: 100%; box-sizing: border-box; padding: 0 var(--space-3);
+              background: var(--surface-inset); border: 1px solid var(--border-default);
+              border-radius: var(--radius-sm); color: var(--text-primary); font: inherit;
+              font-size: var(--text-sm); }
+  .ct-busca:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .ct-ordem { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+  .ct-ordem-l { display: flex; align-items: center; gap: var(--space-2); min-width: 0;
+                font-size: var(--text-xs); color: var(--text-muted); }
+  .ct-ordem-l select { height: 40px; min-width: 0; padding: 0 var(--space-2);
+                       background: var(--surface-inset); border: 1px solid var(--border-default);
+                       border-radius: var(--radius-sm); color: var(--text-primary); font: inherit;
+                       font-size: var(--text-xs); }
+  .ct-sentido { display: inline-flex; align-items: center; gap: 5px; height: 40px; min-height: 0;
+                padding: 0 var(--space-3); border: 1px solid var(--border-subtle);
+                border-radius: var(--radius-sm); background: var(--surface-raised);
+                color: var(--text-secondary); font: inherit; font-size: var(--text-xs); cursor: pointer; }
+  .ct-sentido:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .ct-seta { display: inline-block; color: var(--accent); transition: transform .28s cubic-bezier(.22,1,.36,1); }
+  .ct-seta.desc { transform: rotate(180deg); }
+  .ct-achado { background: color-mix(in srgb, var(--accent) 28%, transparent); color: inherit;
+               border-radius: 3px; padding: 0 1px; }
+  .ct-email { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ct-reset-linha { margin: var(--space-2) 0 0; font-size: var(--text-2xs); color: var(--text-muted);
+                    line-height: 1.4; }
+  .ct-vazio-lista { margin: var(--space-4) var(--space-2); text-align: center; }
+  .ct-unica .ct-barra i { transition: width .7s cubic-bezier(.16,1,.3,1), background-color .3s; }
+  /* Estreito: as ações descem para baixo do texto, senão o nome e o email ficavam numa coluna
+     de poucos caracteres ao lado de Sair/Remover e o email era cortado. */
+  @container (max-width: 620px) {
+    .ct-unica:not(.compacta) .ct-acoes { order: 5; flex-basis: 100%; justify-content: flex-end; flex-wrap: wrap; }
+    .ct-unica .ct-modelo-btn { flex-shrink: 1; min-width: 0; height: auto; white-space: normal;
+                               padding-block: var(--space-1); }
+  }
+  @container (min-width: 621px) {
+    .ct-lista.compacta .ct-linha { grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ct-pilula, .ct-seta, .ct-filtros button, .ct-unica .ct-barra i { transition: none; }
   }
 </style>

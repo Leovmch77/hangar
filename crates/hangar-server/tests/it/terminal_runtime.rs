@@ -737,6 +737,26 @@ async fn terminal_runtime_steer_entry_types_and_promotes_mid_turn() {
     h.stop().await.unwrap();
 }
 #[tokio::test]
+async fn terminal_runtime_steer_entry_waits_for_the_late_send_now_hint() {
+    // O Claude Code só mostra a dica depois dos hooks de UserPromptSubmit da conta, mais de 1 s depois do Enter.
+    let f=Fixture::new().await; f.idle.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
+    h.command(f.command("one","Um")).await.unwrap(); h.command(f.command("two","Dois")).await.unwrap();
+    let io=f.io.clone();
+    tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(900)).await; io.send_now_hint.store(true,std::sync::atomic::Ordering::Release); });
+    let reply=h.control("steer-late".into(),"steer_entry".into(),json!({"entry_id":"two"})).await.unwrap();
+    assert_eq!((reply.disposition,reply.payload["steered"].clone()),(hangar_server::runtime::protocol::Disposition::Accepted,json!(true)),"{}",reply.payload);
+    assert!(f.io.calls.lock().unwrap().iter().any(|c|c.args.last().is_some_and(|k|k=="C-s")),"ctrl+x ctrl+s saiu depois da dica");
+    h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_steer_entry_without_hint_says_so() {
+    let f=Fixture::new().await; f.idle.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
+    h.command(f.command("one","Um")).await.unwrap(); h.command(f.command("two","Dois")).await.unwrap();
+    let reply=h.control("steer-none".into(),"steer_entry".into(),json!({"entry_id":"two"})).await.unwrap();
+    assert_eq!((reply.payload["steered"].clone(),reply.payload["code"].clone()),(json!(false),json!("queue_steer_hint_missing")),"{}",reply.payload);
+    h.stop().await.unwrap();
+}
+#[tokio::test]
 async fn terminal_runtime_steer_entry_when_idle_is_a_plain_delivery() {
     let f=Fixture::new().await; f.idle.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
     h.command(f.command("one","Um")).await.unwrap();

@@ -1,9 +1,26 @@
+import { useEffect, useRef } from 'react';
 import { Text, View } from 'react-native';
+import Animated, { Easing, useAnimatedStyle, useSharedValue, withDelay, withTiming } from 'react-native-reanimated';
 import { StyleSheet } from 'react-native-unistyles';
 import { formatElapsed, motivoCotaAntiga, quotaFailureReason, resetsIn, type Credencial } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
-export function AccountUsage({ credential }: { credential: Credencial }) {
+const EASE_OUT = Easing.bezier(0.16, 1, 0.3, 1);
+
+// `grow`: nasce vazia e cresce até o valor (primeira pintura); leitura nova anima de onde estava.
+function Fill({ pct, animate, grow, delay }: { pct: number; animate: boolean; grow: boolean; delay: number }) {
+  const width = useSharedValue(animate && grow ? 0 : pct);
+  const first = useRef(true);
+  useEffect(() => {
+    const wait = first.current ? delay : 0;
+    first.current = false;
+    width.value = animate ? withDelay(wait, withTiming(pct, { duration: 700, easing: EASE_OUT })) : pct;
+  }, [pct, animate]);
+  const style = useAnimatedStyle(() => ({ width: `${width.value}%` as `${number}%` }));
+  return <Animated.View style={[styles.fill, style]} />;
+}
+
+export function AccountUsage({ credential, animate = false, grow = false }: { credential: Credencial; animate?: boolean; grow?: boolean }) {
   const q = credential.cota;
   const windows = q?.estado === 'lida' ? q.janelas.filter(w => Number.isFinite(w.pct)) : [];
   const note = !q ? m.mobile_accounts_quota_absent()
@@ -25,7 +42,7 @@ export function AccountUsage({ credential }: { credential: Credencial }) {
             <Text style={styles.label}>{w.rotulo} · {Math.round(w.pct)}%</Text>
             <View style={styles.track} accessibilityRole="progressbar"
               accessibilityLabel={w.rotulo} accessibilityValue={{ min: 0, max: 100, now: Math.max(0, Math.min(100, w.pct)) }}>
-              <View style={[styles.fill, { width: `${Math.max(0, Math.min(100, w.pct))}%` }]} />
+              <Fill pct={Math.max(0, Math.min(100, w.pct))} animate={animate} grow={grow} delay={120 + 18 * index} />
             </View>
             {reset ? <Text style={styles.muted}>{m.mobile_accounts_quota_reset({ when: reset })}</Text> : null}
           </View>

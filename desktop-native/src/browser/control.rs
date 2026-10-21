@@ -400,7 +400,7 @@ impl<P: Page> Controller<P> {
             "layout" => self.layout(args).await.map(Reply::Text),
             "console" => Ok(Reply::Text(self.console(arg(0) == "--limpar"))),
             "network" => self.network().await.map(Reply::Text),
-            "shot" => self.shot().await,
+            "shot" => self.shot(args).await,
             "goto" => self.goto(arg(0)).await.map(Reply::Text),
             "back" => self.back().await.map(Reply::Text),
             "reload" => self.reload().await.map(Reply::Text),
@@ -810,7 +810,8 @@ impl<P: Page> Controller<P> {
         Ok(self.state.borrow().network.iter().cloned().collect::<Vec<_>>().join("\n"))
     }
 
-    async fn shot(&self) -> Result<Reply, String> {
+    async fn shot(&self, args: &[String]) -> Result<Reply, String> {
+        let max = match shot_max(args) { Ok(m) => m, Err(e) => return Ok(Reply::Text(e)) };
         self.frame().await;
         let mut params = json!({"format": "png"});
         if let Layout::Custom(w, h) = self.state.borrow().layout {
@@ -822,8 +823,29 @@ impl<P: Page> Controller<P> {
         let data = r.map_err(|e| format!("captureScreenshot falhou: {e}"))?;
         let png = screenshot_bytes(&data)?;
         if png.is_empty() { return Ok(Reply::Text("erro: o navegador desta sessao nao produziu quadro — text/snapshot/click funcionam".into())); }
+        let Some(max) = max else { return Ok(Reply::Png(png)) };
+        let png = self.page.background(move || reduzir_png(&png, max)).await.map_err(|e| format!("shot --max {max}: {e}"))?;
         Ok(Reply::Png(png))
     }
+}
+
+/// Tira `--max <px>` dos argumentos do `shot` (o caminho é o primeiro, lido pelo servidor).
+fn shot_max(args: &[String]) -> Result<Option<u32>, String> {
+    let Some(i) = args.iter().position(|a| a == "--max") else { return Ok(None) };
+    args.get(i + 1).and_then(|v| v.parse::<u32>().ok()).filter(|px| *px > 0).map(Some)
+        .ok_or_else(|| "erro: shot: --max precisa de um numero de pixels maior que zero".into())
+}
+
+/// O PNG com o maior lado em até `max`, na mesma proporção; já dentro do limite, os mesmos bytes.
+pub fn reduzir_png(png: &[u8], max: u32) -> Result<Vec<u8>, String> {
+    let reader = || image::ImageReader::with_format(std::io::Cursor::new(png), image::ImageFormat::Png);
+    // Só o cabeçalho decide: quadro já pequeno nem é decodificado.
+    let (w, h) = reader().into_dimensions().map_err(|e| e.to_string())?;
+    if w.max(h) <= max { return Ok(png.to_vec()); }
+    let image = reader().decode().map_err(|e| e.to_string())?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    image.resize(max, max, image::imageops::FilterType::CatmullRom).write_to(&mut out, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+    Ok(out.into_inner())
 }
 
 /// Argumento do console como o DevTools mostra: texto cru, número, e objeto pela prévia (`{a: 1, b: "x"}`).
@@ -926,6 +948,36 @@ mod tests {
     fn tree() -> Value { json!({"nodes": [
         {"nodeId": "1", "role": {"value": "RootWebArea"}, "name": {"value": "x"}, "childIds": ["2"]},
         {"nodeId": "2", "role": {"value": "button"}, "name": {"value": "Ok"}, "backendDOMNodeId": 7, "childIds": []}]}) }
+
+    fn png_of(w: u32, h: u32) -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(w, h, image::Rgba([30, 60, 90, 255])).write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+    fn size_of(png: &[u8]) -> (u32, u32) {
+        let i = image::load_from_memory_with_format(png, image::ImageFormat::Png).unwrap();
+        (i.width(), i.height())
+    }
+
+    #[test]
+    fn reduzir_png_fits_the_largest_side_and_keeps_small_bytes() {
+        assert_eq!(size_of(&reduzir_png(&png_of(2560, 1600), 1568).unwrap()), (1568, 980));
+        let small = png_of(1280, 800);
+        assert_eq!(reduzir_png(&small, 1568).unwrap(), small);
+    }
+
+    #[test]
+    fn reduzir_png_via_shot_verb_and_rejects_bad_max() {
+        use base64::Engine as _;
+        let data = base64::engine::general_purpose::STANDARD.encode(png_of(2560, 1600));
+        let c = ctl(move |m, _| Ok(if m == "Page.captureScreenshot" { json!({"data": data}) } else { json!({}) }));
+        match block_on(c.run("shot", &s(&["/tmp/x.png", "--max", "1568"]))) {
+            Reply::Png(png) => assert_eq!(size_of(&png), (1568, 980)),
+            Reply::Text(t) => panic!("{t}"),
+        }
+        assert!(text(block_on(c.run("shot", &s(&["/tmp/x.png", "--max", "0"])))).starts_with("erro: shot: --max"));
+        assert!(text(block_on(c.run("shot", &s(&["/tmp/x.png", "--max", "abc"])))).starts_with("erro: shot: --max"));
+    }
 
     #[test]
     fn snapshot_lists_refs() {

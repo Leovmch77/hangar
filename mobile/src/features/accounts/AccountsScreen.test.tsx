@@ -23,6 +23,7 @@ vi.mock('expo-router/react-navigation', () => ({ useHeaderHeight: () => 0 }));
 vi.mock('expo-secure-store', () => ({ getItemAsync: async () => null, setItemAsync: async () => {}, deleteItemAsync: async () => {} }));
 vi.mock('expo-linking', () => ({ openURL: vi.fn() }));
 vi.mock('expo-clipboard', () => ({ setStringAsync: vi.fn() }));
+vi.mock('../../stores/prefs', () => ({ prefs: { getString: () => undefined, set: () => {}, remove: () => {} } }));
 vi.mock('../../ui/Sheet', () => ({ Sheet: ({ children, open }: { children: ReactNode; open?: boolean }) => open === false ? null : createElement('div', { role: 'dialog' }, children) }));
 vi.mock('react-native', async original => ({ ...await original<typeof import('react-native')>(),
   TextInput: (props: { accessibilityLabel: string; value: string; editable?: boolean; onChangeText: (value: string) => void }) => createElement('textarea', {
@@ -90,9 +91,11 @@ describe('metadados do plano da conta', () => {
       auth: { method: 'oauth', status: 'connected', email, plan }, sync: { status: 'ready', trust_pending: false, issues: [] },
     }]);
     const view = await show();
-    const meta = [...view.container.querySelectorAll('span')].find(node => node.textContent?.startsWith(`${email} ·`));
-    expect(meta?.textContent).toBe(`${email} · ${label}`);
-    expect(meta?.textContent).not.toMatch(/×|maxx|prox/);
+    // Email numa linha própria, plano no selo ao lado do nome.
+    const spans = [...view.container.querySelectorAll('span')].map(node => node.textContent);
+    expect(spans).toContain(email);
+    expect(spans).toContain(label);
+    expect(spans.join('|')).not.toMatch(/×|maxx|prox/);
   });
 });
 

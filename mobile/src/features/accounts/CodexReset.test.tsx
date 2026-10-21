@@ -48,11 +48,12 @@ describe('redefinição da cota Codex', () => {
     const c = credential();
     c.cota!.janelas = [{ rotulo: '5h', pct: 100 }, { rotulo: 'sonnet', pct: 100, por_modelo: true }];
     const view = await show([c]);
-    expect(button(view.container, 'Usar redefinição guardada')?.disabled).toBe(true);
-    expect(view.container.textContent).toContain('janela de 7 dias');
+    // Fora dos 100% fica só a linha curta, sem a caixa de usar.
+    expect(button(view.container, 'Usar redefinição guardada')).toBeUndefined();
+    expect(view.container.textContent).toContain('1 redefinição guardada · a próxima expira');
     c.cota!.janelas.push({ rotulo: '7d', pct: 99 });
     await view.render([c]);
-    expect(button(view.container, 'Usar redefinição guardada')?.disabled).toBe(true);
+    expect(button(view.container, 'Usar redefinição guardada')).toBeUndefined();
     c.cota!.janelas[2].pct = 100;
     await view.render([c]);
     expect(button(view.container, 'Usar redefinição guardada')?.disabled).toBe(false);

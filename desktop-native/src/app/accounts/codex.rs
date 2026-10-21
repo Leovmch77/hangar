@@ -73,6 +73,8 @@ impl ResetTry {
 
 /// O que a linha de uma conta Codex com redefinição guardada mostra.
 pub(super) struct ResetOffer { pub(super) account: String, pub(super) credit: Option<String>, pub(super) count: String, pub(super) expires: Option<String>,
+    /// Só a data da próxima a expirar, para a linha curta.
+    pub(super) expires_at: Option<String>,
     /// Por que não dá para usar agora (semanal desconhecida ou abaixo de 100%); `None` = liberada.
     pub(super) blocked: Option<String> }
 
@@ -153,10 +155,10 @@ pub(super) fn reset_offer(c: &Credential, now: f64) -> Option<ResetOffer> {
     let credits = c.quota.as_ref()?.reset_credits.as_ref().filter(|r| r.available_count > 0)?;
     let available = || credits.credits.iter().flatten().filter(|credit| credit.status == "available");
     let weekly = c.quota.as_ref().and_then(|q| q.windows.iter().find(|w| w.label == "7d")).map(|w| w.pct);
-    let expires = available().filter_map(|credit| credit.expires_at).reduce(f64::min).map(|at| reset_text(Some(at), now)).filter(|t| !t.is_empty())
-        .map(|text| tr("accounts_reset_expires").replace("{n}", &text));
+    let expires_at = available().filter_map(|credit| credit.expires_at).reduce(f64::min).map(|at| reset_text(Some(at), now)).filter(|t| !t.is_empty());
+    let expires = expires_at.as_ref().map(|text| tr("accounts_reset_expires").replace("{n}", text));
     Some(ResetOffer {
-        account, credit: available().next().map(|credit| credit.id.clone()), expires,
+        account, credit: available().next().map(|credit| credit.id.clone()), expires, expires_at,
         count: if credits.available_count == 1 { tr("accounts_reset_one") } else { tr("accounts_reset_many").replace("{n}", &credits.available_count.to_string()) },
         blocked: match weekly {
             None => Some(tr("accounts_reset_weekly_unavailable")),

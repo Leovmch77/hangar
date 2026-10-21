@@ -250,12 +250,7 @@ impl Hangar {
             Background::Image | Background::Desktop => true,
             Background::Texture | Background::Light => false,
         };
-        let viewport = window.viewport_size();
-        let (cols, rows) = ((f32::from(viewport.width) / GRAIN_SIDE).ceil() as usize, (f32::from(viewport.height) / GRAIN_SIDE).ceil() as usize);
-        // Linhas fixas cortadas na borda: com quebra automática o último ladrilho descia e a borda direita ficava sem grão.
-        let grain = div().absolute().inset_0().overflow_hidden().flex().flex_col().opacity(theme::grain_opacity())
-            .children((0..rows).map(|_| div().flex().flex_shrink_0()
-                .children((0..cols).map(|_| img(self.grain.clone()).flex_shrink_0().size(px(GRAIN_SIDE))))));
+        let grain = self.grain_layer(window.viewport_size());
         let layer = div().absolute().inset_0().overflow_hidden()
             .when(busy, |el| el
                 .when_some(image, |el, image| el.child(img(image).absolute().inset_0().size_full().object_fit(ObjectFit::Cover)))
@@ -266,5 +261,13 @@ impl Hangar {
                 .shadow(vec![BoxShadow { color: theme::glow(), offset: point(px(0.), px(0.)), blur_radius: px(180.), spread_radius: px(0.), inset: false }])))
             .child(grain);
         Some(layer.into_any_element())
+    }
+
+    pub(super) fn grain_layer(&self, size: gpui::Size<Pixels>) -> Div {
+        let (cols, rows) = ((f32::from(size.width) / GRAIN_SIDE).ceil() as usize, (f32::from(size.height) / GRAIN_SIDE).ceil() as usize);
+        // Linhas fixas cortadas na borda: com quebra automática o último ladrilho descia e a borda direita ficava sem grão.
+        div().absolute().inset_0().overflow_hidden().flex().flex_col().opacity(theme::grain_opacity())
+            .children((0..rows).map(|_| div().flex().flex_shrink_0()
+                .children((0..cols).map(|_| img(self.grain.clone()).flex_shrink_0().size(px(GRAIN_SIDE))))))
     }
 }

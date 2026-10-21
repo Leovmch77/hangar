@@ -20,6 +20,11 @@ export const interpolate = (_v: number, _i: number[], out: number[]) => out[0];
 export const interpolateColor = (_v: number, _i: number[], out: string[]) => out[0];
 export const Easing: any = new Proxy({}, { get: (_target, key) => key === 'bezierFn' ? () => passa : (...a: any[]) => a[0] ?? passa });
 export const FadeIn: any = { duration: () => FadeIn, delay: () => FadeIn };
+// Construtor de animação de layout: toda chamada encadeada devolve o mesmo objeto.
+const layoutBuilder = (): any => new Proxy({}, { get: (target, key) => key === 'then' ? undefined : () => target });
+export const FadeInDown: any = layoutBuilder();
+export const FadeOut: any = layoutBuilder();
+export const LinearTransition: any = layoutBuilder();
 export type SharedValue<T = any> = { value: T };
 
 const Animated = { View, createAnimatedComponent: passa };

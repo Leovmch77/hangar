@@ -10,11 +10,11 @@ mod usage;
 
 use super::*;
 use super::device::Remote;
-use actions::{ActionReply, AddAccount, AddStep, Change, ChangeKind, SignIn};
+use actions::{ActionReply, AddAccount, Change, ChangeKind, SignIn};
 use codex::{CodexFlow, CodexReply, ResetOffer, ResetTry};
 use keys::{CookieForm, EngineForm, KeysReply};
 pub(super) use keys::ModelChoice;
-use super::settings::{Page, section_head, segments, settings_box};
+use super::settings::{Page, segments, settings_box};
 use chrono::{Datelike, Local, TimeZone, Timelike};
 use gpui_kit::component::menu::DropdownMenu;
 use serde::Deserialize;
@@ -110,6 +110,22 @@ pub(super) struct Engines { map: HashMap<String, Engine>, broken_file: Option<St
 #[derive(Clone, Copy, PartialEq)]
 enum Group { Subscriptions, Models, Others }
 
+/// Filtro da lista única: o tipo da credencial, como o `accountFilterOf` do `packages/core`.
+#[derive(Clone, Copy, PartialEq, Default)]
+enum Filter { #[default] All, Claude, Codex, Other }
+
+impl Filter {
+    const ALL: [Filter; 4] = [Filter::All, Filter::Claude, Filter::Codex, Filter::Other];
+    fn of(kind: &str) -> Self { match kind { "claude" => Filter::Claude, "codex" => Filter::Codex, _ => Filter::Other } }
+    fn key(self) -> &'static str {
+        match self {
+            Filter::All => "accounts_list_filter_all", Filter::Claude => "accounts_list_filter_claude",
+            Filter::Codex => "accounts_list_filter_codex", Filter::Other => "accounts_list_filter_other",
+        }
+    }
+    fn holds(self, row: &Row) -> bool { self == Filter::All || self == row.filter }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Tone { Muted, Warn, Danger }
 
@@ -127,6 +143,9 @@ struct Row {
     natural: String,
     alias: String,
     active: bool,
+    filter: Filter,
+    /// Email do login, numa linha própria abaixo do nome.
+    email: Option<String>,
     /// Provider do selo (cor da marca) e a letra dele.
     glyph: (&'static str, String),
     /// Tipo, login e o resto, separados por " · "; os trechos de aviso levam a cor deles.
@@ -156,7 +175,8 @@ struct Row {
     remove: Option<(Vec<String>, u64, &'static str)>,
 }
 
-struct Section { group: Group, rows: Vec<Row>, labels: Vec<String> }
+/// Linhas de um grupo, na ordem em que a lista única as mostra sem ordem escolhida.
+struct Section { rows: Vec<Row> }
 
 struct Rename { id: String, input: Entity<InputState>, saving: bool, error: Option<String>, seq: u64, _subscription: Subscription }
 
@@ -200,6 +220,14 @@ pub(super) struct Accounts {
     pub(super) card: bool,
     /// O cartão aberto veio da pílula da barra do topo: preso a ela, com a conta padrão do Claude em vez da da sessão.
     pub(super) card_top: bool,
+    filter: Filter,
+    /// Coluna e sentido escolhidos (`name`, `reset` ou o rótulo da janela); `None` = em uso primeiro. Lida do disco uma vez.
+    sort: Option<(String, i8)>,
+    sort_loaded: bool,
+    search: Option<(Entity<InputState>, Subscription)>,
+    flip: std::rc::Rc<std::cell::RefCell<motion::FlipBook>>,
+    /// Barra cujo valor mudou na releitura (conta, janela): de onde ela anda até o novo e desde quando.
+    bar_moves: HashMap<(String, String), (f64, Instant)>,
 }
 
 pub(super) enum AccountsReply {
@@ -380,7 +408,9 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
     let mut codex = None;
     let mut edit = None;
     let mut sign_in = None;
-    let initial = c.name.chars().find(|ch| ch.is_alphanumeric()).map(|ch| ch.to_uppercase().to_string()).unwrap_or_else(|| "?".into());
+    let email = c.login.as_ref().filter(|_| logged == Some(true) && matches!(c.kind.as_str(), "claude" | "codex"))
+        .and_then(|l| l.email.clone()).filter(|e| !e.is_empty());
+    let initial =c.name.chars().find(|ch| ch.is_alphanumeric()).map(|ch| ch.to_uppercase().to_string()).unwrap_or_else(|| "?".into());
     let glyph = match c.kind.as_str() {
         "claude" => ("claude", "C".into()),
         "codex" => ("codex", "X".into()),
@@ -389,7 +419,6 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
     };
     match c.kind.as_str() {
         "claude" => {
-            subtitle.push(muted("Claude".into()));
             match (logged, c.login_days(now)) {
                 (Some(false), _) => subtitle.push(muted(tr("accounts_not_connected"))),
                 (Some(true), Some(days)) if days <= 0 => subtitle.push((tr("accounts_login_expired"), Tone::Danger)),
@@ -397,12 +426,10 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
                     if days <= RENEW_DAYS { Tone::Warn } else { Tone::Muted })),
                 _ => login_note = login_unchecked(c.login.as_ref()),
             }
-            if let Some(email) = c.login.as_ref().filter(|_| logged == Some(true)).and_then(|l| l.email.clone()) { subtitle.push(muted(email)); }
             if logged == Some(false) || c.expired() { sign_in = Some(tr("accounts_sign_in")); }
             else if logged == Some(true) && c.login_days(now).is_some_and(|d| d <= RENEW_DAYS) { sign_in = Some(tr("accounts_renew")); }
         }
         "codex" => {
-            subtitle.push(muted("Codex".into()));
             let cli_missing = c.login.as_ref().and_then(|l| l.reason.as_deref()) == Some("cli-ausente");
             let auth = match c.auth() {
                 "oauth" => tr("accounts_codex_oauth"),
@@ -411,12 +438,10 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
                 _ => String::new(),
             };
             if !auth.is_empty() { subtitle.push(muted(auth)); }
-            if let Some(login) = c.login.as_ref().filter(|_| logged == Some(true)) {
-                subtitle.extend(login.email.clone().map(muted));
-            } else if logged == Some(false) {
-                subtitle.push(muted(tr("accounts_not_connected")));
-            } else {
-                login_note = login_unchecked(c.login.as_ref());
+            match logged {
+                Some(true) => {}
+                Some(false) => subtitle.push(muted(tr("accounts_not_connected"))),
+                None => login_note = login_unchecked(c.login.as_ref()),
             }
             if !c.active && let Some(sync) = c.codex_sync.as_deref() {
                 subtitle.push(muted(tr(match sync { "ready" => "accounts_codex_inherited", "running" => "accounts_codex_preparing",
@@ -432,6 +457,7 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
         _ => match engine {
             // Como no mock: só o que foge do padrão vira ficha; o endereço e o resto ficam no Editar.
             Some(engine) => {
+                subtitle.push(muted(tr("accounts_list_runs_in_claude_code")));
                 if has_kimi_copy { subtitle.push(muted(tr("accounts_kimi_copy"))); }
                 if !engine.model.is_empty() { chips.push(engine.model.clone()); }
                 chips.extend(engine.context_window.map(|n| format!("{}k", (n as f64 / 1000.).round())));
@@ -498,7 +524,7 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
     };
     Row {
         id: c.id.clone(), name: c.name.clone(), label: c.natural.clone(), natural: c.natural.clone(), alias: c.alias.clone().unwrap_or_default(),
-        active: c.active, glyph, subtitle, login_note, chips, plan, login_days: if c.kind == "claude" { c.login_days(now) } else { None }, resets, quota, codex, reset: codex::reset_offer(c, now), edit, cookie: c.accepts_cookie.then_some(c.cookie_set), sign_in,
+        active: c.active, filter: Filter::of(&c.kind), email, glyph, subtitle, login_note, chips, plan, login_days: if c.kind == "claude" { c.login_days(now) } else { None }, resets, quota, codex, reset: codex::reset_offer(c, now), edit, cookie: c.accepts_cookie.then_some(c.cookie_set), sign_in,
         sign_out: match c.kind.as_str() {
             "claude" if c.managed != Some(false) && logged == Some(true) && !c.expired() =>
                 Some(vec!["claude-configs".into(), c.natural.clone(), "logout".into()]),
@@ -509,7 +535,7 @@ fn build_row(c: &Credential, engines: &HashMap<String, Engine>, has_kimi_copy: b
     }
 }
 
-/// Os três grupos, sempre presentes depois da leitura: um grupo que some esconde onde a coisa nova vai aparecer.
+/// Assinaturas, modelos do Claude Code e outros agentes, nessa ordem; a cópia do Kimi que o sync grava fica de fora.
 fn build_sections(list: &[Credential], engines: &HashMap<String, Engine>, now: f64) -> Vec<Section> {
     let models = model_names(list, engines);
     [Group::Subscriptions, Group::Models, Group::Others].into_iter().map(|group| {
@@ -517,15 +543,7 @@ fn build_sections(list: &[Credential], engines: &HashMap<String, Engine>, now: f
             let copy = c.engine_name().is_some_and(|name| list.iter().any(|x| x.id == format!("kimi:{name}")));
             build_row(c, engines, copy, now)
         }).collect();
-        // Uma coluna por janela na lista compacta, a mesma em toda linha: 5h e semana primeiro.
-        let mut labels: Vec<String> = Vec::new();
-        for row in &rows {
-            if let QuotaView::Bars { bars, .. } = &row.quota {
-                for bar in bars { if !labels.contains(&bar.label) { labels.push(bar.label.clone()); } }
-            }
-        }
-        labels.sort_by_key(|l| window_order(l));
-        Section { group, rows, labels }
+        Section { rows }
     }).collect()
 }
 
@@ -597,6 +615,57 @@ pub(super) fn session_proxy_targets(session: &SessionInfo, credentials: Value, e
     if let Some(error) = &engine.cliproxy_error { return Err(tr("create_proxy_error").replace("{reason}", error)); }
     if engine.cliproxy_accounts.is_none() { return Ok(None); }
     Ok(Some(proxy_account_targets(session, &list, engine)))
+}
+
+// Ordenar, filtrar e buscar seguem o `packages/core/src/accountsList.ts`; mudou lá, muda aqui.
+
+/// Sem acento e sem caixa, para a busca e a ordem por nome.
+fn fold(text: &str) -> String {
+    text.to_lowercase().chars().map(|ch| match ch {
+        'á' | 'à' | 'â' | 'ã' | 'ä' => 'a', 'é' | 'è' | 'ê' | 'ë' => 'e', 'í' | 'ì' | 'î' | 'ï' => 'i',
+        'ó' | 'ò' | 'ô' | 'õ' | 'ö' => 'o', 'ú' | 'ù' | 'û' | 'ü' => 'u', 'ç' => 'c', 'ñ' => 'n', other => other,
+    }).collect()
+}
+
+fn row_matches(row: &Row, term: &str) -> bool {
+    let term = fold(term.trim());
+    term.is_empty() || [row.name.as_str(), row.natural.as_str(), row.email.as_deref().unwrap_or_default()].iter().any(|s| fold(s).contains(&term))
+}
+
+/// Valor da linha na coluna de cota (`reset` = instante do reset da semana); `None` = sem leitura, sempre no fim.
+fn row_number(row: &Row, key: &str) -> Option<f64> {
+    let QuotaView::Bars { bars, .. } = &row.quota else { return None };
+    let bar = bars.iter().find(|b| b.label == if key == "reset" { "7d" } else { key })?;
+    if key == "reset" { bar.reset_at } else { Some(bar.pct) }.filter(|v| v.is_finite())
+}
+
+/// Sem ordem escolhida, as contas em uso sobem e o resto fica como veio; empate também fica como veio.
+fn sort_rows<'a>(rows: Vec<&'a Row>, sort: Option<&(String, i8)>) -> Vec<&'a Row> {
+    use std::cmp::Ordering;
+    // Ordem guardada por uma coluna que nenhuma linha tem agora (janela de outra conta, filtro): vale a padrão.
+    let sort = sort.filter(|(key, _)| key == "name" || rows.iter().any(|row| row_number(row, key).is_some()));
+    let mut indexed: Vec<(usize, &Row)> = rows.into_iter().enumerate().collect();
+    indexed.sort_by(|(i, a), (j, b)| {
+        let Some((key, dir)) = sort else { return b.active.cmp(&a.active).then(i.cmp(j)) };
+        let toward = |o: Ordering| if *dir < 0 { o.reverse() } else { o };
+        if key == "name" { return toward(fold(&a.name).cmp(&fold(&b.name))).then(i.cmp(j)) }
+        match (row_number(a, key), row_number(b, key)) {
+            (Some(x), Some(y)) => toward(x.total_cmp(&y)).then(i.cmp(j)),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => i.cmp(j),
+        }
+    });
+    indexed.into_iter().map(|(_, row)| row).collect()
+}
+
+/// Nome e reset começam crescente; percentual começa por quem gastou mais; o terceiro clique volta à ordem padrão.
+fn next_sort(current: Option<&(String, i8)>, key: &str) -> Option<(String, i8)> {
+    let first = if key == "name" || key == "reset" { 1 } else { -1 };
+    match current {
+        Some((k, dir)) if k == key => (*dir == first).then(|| (key.to_owned(), -first)),
+        _ => Some((key.to_owned(), first)),
+    }
 }
 
 /// Cor da barra pelo quanto já foi usado.
@@ -715,7 +784,17 @@ impl Hangar {
         let accounts = &mut self.accounts;
         let empty = HashMap::new();
         let engines = accounts.engines.ok().map_or(&empty, |e| &e.map);
+        let bars = |sections: &[Section]| -> HashMap<(String, String), f64> { sections.iter().flat_map(|s| &s.rows).flat_map(|r| match &r.quota {
+            QuotaView::Bars { bars, .. } => bars.iter().map(|b| ((r.id.clone(), b.label.clone()), b.pct)).collect(),
+            _ => Vec::new(),
+        }).collect() };
+        let before = bars(&accounts.sections);
         accounts.sections = accounts.list.ok().map(|list| build_sections(list, engines, now())).unwrap_or_default();
+        let at = Instant::now();
+        accounts.bar_moves.retain(|_, (_, start)| *start + motion::FADE_IN.total() > at);
+        for (key, pct) in bars(&accounts.sections) {
+            if let Some(old) = before.get(&key).filter(|old| (**old - pct).abs() >= 0.5) { accounts.bar_moves.insert(key, (*old, at)); }
+        }
     }
 
     fn start_rename(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -827,6 +906,15 @@ impl Hangar {
             .child(chrome::small_icon(IconName::Server, 13., theme::muted())).child(tr("accounts_this_server").replace("{server}", &server)));
         let intro = div().flex_1().min_w(px(280.)).flex().flex_col().child(self.page_top("settings_page_accounts", tr("accounts_lead"))).child(chip);
         let top = |tools: Option<Div>| div().flex().flex_wrap().items_end().gap(px(16.)).child(intro).children(tools);
+        if !self.accounts.sort_loaded {
+            self.accounts.sort_loaded = true;
+            self.accounts.sort = appearance::accounts_sort();
+        }
+        if self.accounts.search.is_none() {
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(tr("accounts_list_search")));
+            let changed = cx.subscribe(&input, |_: &mut Hangar, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { cx.notify(); });
+            self.accounts.search = Some((input, changed));
+        }
         let accounts = &self.accounts;
         if self.api.is_none() {
             return div().flex().flex_col().child(top(None)).child(self.heading("accounts_subscriptions"))
@@ -866,17 +954,13 @@ impl Hangar {
             // Releitura que falhou com os modelos anteriores na tela.
             _ => accounts.engines_notice.as_ref().map(|error| tr("accounts_refresh_failed").replace("{reason}", error)),
         };
-        page = page.child(self.accounts_summary(&build_summary(&accounts.sections))).child(self.accounts_tabs(cx));
-        let mut order = 0;
-        for section in &accounts.sections {
-            let problem = match section.group {
-                Group::Subscriptions => accounts.notice.as_ref().map(|notice| tr("accounts_refresh_failed").replace("{reason}", notice)),
-                Group::Models => engines_problem.clone(),
-                Group::Others => None,
-            };
-            page = page.child(self.render_accounts_section(section, problem, wide, compact, &mut order, window, cx));
-        }
-        page.child(div().mt(px(14.)).flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme::muted())
+        let problems = [accounts.notice.as_ref().map(|notice| tr("accounts_refresh_failed").replace("{reason}", notice)), engines_problem];
+        page.child(self.accounts_summary(&build_summary(&accounts.sections))).child(self.accounts_bar(wide, cx))
+            .children(problems.into_iter().flatten().map(|text| banner(theme::danger(), IconName::TriangleAlert, text).mt(px(12.))))
+            .child(self.render_accounts_list(wide, compact, window, cx))
+            .when(accounts.sections.iter().flat_map(|s| &s.rows).any(|r| matches!(r.quota, QuotaView::Bars { .. })),
+                |el| el.child(div().mt(px(10.)).flex().items_center().child(legend())))
+            .child(div().mt(px(14.)).flex().items_center().gap(px(8.)).text_size(px(12.5)).text_color(theme::muted())
             .child(chrome::small_icon(IconName::Ellipsis, 14., theme::faint())).child(tr("accounts_menu_note")))
             .into_any_element()
     }
@@ -951,64 +1035,125 @@ impl Hangar {
         div().mt(px(20.)).flex().gap(px(12.)).child(in_use).child(week).child(login).child(resets)
     }
 
-    /// Atalhos para as três seções, com quantas linhas cada uma tem: com muitas assinaturas, os modelos ficam lá embaixo.
-    fn accounts_tabs(&self, cx: &mut Context<Self>) -> Div {
-        let current = self.jumped();
-        div().mt(px(16.)).flex().child(div().flex().gap(px(4.)).p(px(3.)).rounded(px(10.)).border_1().border_color(theme::border()).bg(theme::inset())
-            .children(self.accounts.sections.iter().map(|section| {
-                let key = section.group.text().0;
-                let on = current == Some(key);
-                Button::new(SharedString::from(format!("accounts-jump-{key}")))
+    /// Filtro por agente com quantas contas cada um tem, a busca e, na página estreita (sem cabeças de coluna), o Ordenar.
+    fn accounts_bar(&self, wide: bool, cx: &mut Context<Self>) -> Div {
+        let rows: Vec<&Row> = self.accounts.sections.iter().flat_map(|s| &s.rows).collect();
+        let current = self.accounts.filter;
+        let filters = div().flex().gap(px(4.)).p(px(3.)).rounded(px(10.)).border_1().border_color(theme::border()).bg(theme::inset())
+            .children(Filter::ALL.into_iter().map(|filter| {
+                let on = current == filter;
+                let count = rows.iter().filter(|r| filter.holds(r)).count();
+                Button::new(SharedString::from(format!("accounts-filter-{}", filter.key())))
                     .custom(ButtonCustomVariant::new(cx).color(if on { theme::accent_dim() } else { transparent_black() })
                         .foreground(if on { theme::accent_text() } else { theme::muted() }).hover(theme::hover()).active(theme::hover()))
                     .small().h(px(28.)).px(px(11.)).rounded(px(7.)).when(on, |el| el.bg(theme::accent_dim()))
-                    .child(div().flex().items_center().gap(px(7.)).child(tr(key))
+                    .child(div().flex().items_center().gap(px(7.)).child(tr(filter.key()))
                         .child(div().px(px(6.)).rounded(px(5.)).bg(theme::hover()).text_size(px(11.5))
-                            .text_color(if on { theme::accent_text() } else { theme::faint() }).child(section.rows.len().to_string())))
-                    .on_click(cx.listener(move |this, _, _, cx| { this.jump_to(key); cx.notify(); }))
-            })))
+                            .text_color(if on { theme::accent_text() } else { theme::faint() }).child(count.to_string())))
+                    .on_click(cx.listener(move |this, _, _, cx| { this.accounts.filter = filter; cx.notify(); }))
+            }));
+        let search = self.accounts.search.as_ref().map(|(input, _)| div().w(px(240.)).child(Input::new(input).small().cleanable(true)
+            .aria_label(tr("accounts_list_search")).prefix(chrome::small_icon(IconName::Search, 14., theme::faint()))));
+        div().mt(px(16.)).flex().flex_wrap().items_center().gap(px(10.)).child(self.mark(filters, "accounts_subscriptions")).children(search)
+            .when(!wide, |el| el.child(self.accounts_sort_menu(&rows, cx)))
     }
 
-    /// Cartão de uma seção: cabeça com ícone e o que ela guarda, avisos dela, e as linhas. As assinaturas se separam por
-    /// provider; na página larga, cada bloco nomeia as colunas de cota.
-    #[allow(clippy::too_many_arguments)]
-    fn render_accounts_section(&self, section: &Section, problem: Option<String>, wide: bool, compact: bool, order: &mut usize,
-        window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let (title, empty, lead, icon) = section.group.text();
-        let extra = match section.group {
-            Group::Subscriptions if !section.labels.is_empty() => Some(legend()),
-            Group::Models => Some(div().child(Button::new("accounts-add-model").outline().small().icon(IconName::Plus).label(tr("accounts_add_model"))
-                .disabled(self.accounts_busy())
-                .on_click(cx.listener(|this, _, window, cx| this.open_add_account_at(AddStep::Catalog(true), window, cx))))),
-            _ => None,
+    /// Ordenar da página estreita: as mesmas colunas das cabeças, com o sentido; escolher de novo a mesma inverte.
+    fn accounts_sort_menu(&self, rows: &[&Row], cx: &mut Context<Self>) -> impl IntoElement {
+        let labels = window_labels(rows);
+        let sort = self.accounts.sort.clone();
+        let text = match &sort {
+            None => tr("accounts_list_sort_default"),
+            Some((key, dir)) => format!("{} · {}", sort_label(key), tr(if *dir > 0 { "accounts_list_sort_asc" } else { "accounts_list_sort_desc" })),
         };
-        let head = section_head(icon, tr(title), Some(tr(lead)), extra.map(|el| el.flex_shrink_0().into_any_element()), px(16.));
-        let mut card = settings_box().mt(px(16.)).child(self.mark(head, title))
-            .children(problem.map(|text| div().px_4().pb(px(12.)).child(banner(theme::danger(), IconName::TriangleAlert, text))));
-        if section.rows.is_empty() {
-            return card.child(div().mx_4().mb(px(16.)).py(px(24.)).px(px(20.)).rounded(px(12.)).border_1().border_dashed().border_color(theme::border_strong())
+        let this = cx.entity().downgrade();
+        Button::new("accounts-sort").ghost().small().icon(IconName::ChevronsUpDown).label(format!("{}: {text}", tr("accounts_list_sort")))
+            .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+                let item = |label: String, key: Option<String>, checked: bool| {
+                    let this = this.clone();
+                    PopupMenuItem::new(label).checked(checked).on_click(move |_, _, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            let next = match &key { None => None, Some(key) => next_sort(this.accounts.sort.as_ref(), key).or_else(|| next_sort(None, key)) };
+                            this.set_accounts_sort(next, cx);
+                        });
+                    })
+                };
+                let mut menu = sidebar::menu_style(menu).min_w(px(220.)).item(item(tr("accounts_list_sort_default"), None, sort.is_none()));
+                for key in std::iter::once("name".to_owned()).chain(labels.iter().cloned()).chain(labels.iter().any(|l| l == "7d").then(|| "reset".to_owned())) {
+                    let on = sort.as_ref().is_some_and(|(k, _)| *k == key);
+                    menu = menu.item(item(sort_label(&key), Some(key), on));
+                }
+                menu
+            })
+    }
+
+    fn set_accounts_sort(&mut self, sort: Option<(String, i8)>, cx: &mut Context<Self>) {
+        appearance::remember_accounts_sort(sort.as_ref());
+        self.accounts.sort = sort;
+        cx.notify();
+    }
+
+    /// A lista única: filtrada, buscada e ordenada; a linha que troca de lugar desliza até o novo.
+    fn render_accounts_list(&self, wide: bool, compact: bool, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let accounts = &self.accounts;
+        let term = accounts.search.as_ref().map(|(input, _)| input.read(cx).value().to_string()).unwrap_or_default();
+        let all: Vec<&Row> = accounts.sections.iter().flat_map(|s| &s.rows).collect();
+        let shown = sort_rows(all.iter().copied().filter(|r| accounts.filter.holds(r) && row_matches(r, &term)).collect(), accounts.sort.as_ref());
+        let card = self.mark(self.mark(settings_box().mt(px(12.)), "accounts_models"), "accounts_others");
+        if shown.is_empty() {
+            let (icon, text) = if !term.trim().is_empty() { (IconName::Search, tr("accounts_list_search_empty").replace("{term}", term.trim())) }
+                else if accounts.filter == Filter::Other { (IconName::Key, tr("accounts_others_empty")) }
+                else { (IconName::Users, tr("accounts_subscriptions_empty")) };
+            return card.child(div().m_4().py(px(24.)).px(px(20.)).rounded(px(12.)).border_1().border_dashed().border_color(theme::border_strong())
                 .flex().flex_col().items_center().gap(px(10.))
                 .child(div().size(px(36.)).rounded(px(10.)).bg(theme::inset()).flex().items_center().justify_center()
                     .child(chrome::small_icon(icon, 18., theme::faint())))
-                .child(div().max_w(px(460.)).text_center().text_size(px(13.)).text_color(theme::muted()).whitespace_normal().child(tr(empty))));
+                .child(div().max_w(px(460.)).text_center().text_size(px(13.)).text_color(theme::muted()).whitespace_normal().child(text)));
         }
-        let mut blocks: Vec<(&str, Vec<&Row>)> = Vec::new();
-        for row in &section.rows {
-            let provider = if section.group == Group::Subscriptions { row.glyph.0 } else { "" };
-            match blocks.iter_mut().find(|(p, _)| *p == provider) {
-                Some((_, rows)) => rows.push(row),
-                None => blocks.push((provider, vec![row])),
-            }
+        let labels = window_labels(&shown);
+        let keys: Vec<String> = shown.iter().map(|r| r.id.clone()).collect();
+        {
+            let mut book = accounts.flip.borrow_mut();
+            book.sections(&keys.iter().map(|k| (k.clone(), String::new())).collect::<Vec<_>>(), Instant::now(), cx.reduce_motion());
+            book.order(&keys);
         }
-        for (provider, rows) in blocks {
-            let title = match provider { "claude" => Some("Claude"), "codex" => Some("Codex"), _ => None };
-            if wide && (title.is_some() || !section.labels.is_empty()) { card = card.child(column_head(title, &rows, &section.labels)); }
-            for row in rows {
-                card = card.child(self.render_account_row(row, &section.labels, wide, compact, *order, window, cx));
-                *order += 1;
-            }
-        }
-        card
+        let head = wide.then(|| self.accounts_head(&labels, compact, cx));
+        card.children(head).children(shown.into_iter().enumerate().map(|(order, row)| {
+            let el = self.render_account_row(row, &labels, wide, compact, order, window, cx).into_any_element();
+            motion::Flip::new(row.id.clone(), el, accounts.flip.clone())
+        }))
+    }
+
+    /// Cabeças da página larga: Conta e cada coluna de cota, clicáveis; a seta fica na coluna que ordena.
+    fn accounts_head(&self, labels: &[String], compact: bool, cx: &mut Context<Self>) -> Div {
+        let sort = self.accounts.sort.clone();
+        let cell = |key: String, text: String| {
+            let dir = sort.as_ref().filter(|(k, _)| *k == key).map(|(_, d)| *d);
+            let icon = match dir { Some(d) if d > 0 => IconName::ArrowUp, Some(_) => IconName::ArrowDown, None => IconName::ChevronsUpDown };
+            let state = match dir { Some(d) if d > 0 => tr("accounts_list_sort_asc"), Some(_) => tr("accounts_list_sort_desc"), None => String::new() };
+            let group = SharedString::from(format!("accounts-head-{key}"));
+            // Fora de um flex o botão estica e centraliza o texto, longe do número da coluna.
+            div().group(group.clone()).flex().child(Button::new(SharedString::from(format!("accounts-sort-{key}")))
+                .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(if dir.is_some() { theme::text() } else { theme::faint() })
+                    .hover(transparent_black()).active(transparent_black()))
+                .xsmall().h(px(24.)).px(px(0.))
+                .accessibility_label(tr("accounts_list_sort_by").replace("{column}", &text) + if state.is_empty() { "" } else { ", " } + &state)
+                .child(div().flex().items_center().gap(px(5.)).text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD)
+                    .child(text.clone())
+                    .child(div().when(dir.is_none(), |el| el.opacity(0.).group_hover(group, |el| el.opacity(0.7)))
+                        .child(chrome::small_icon(icon, 11., if dir.is_some() { theme::accent() } else { theme::faint() }))))
+                .on_click(cx.listener(move |this, _, _, cx| { let next = next_sort(this.accounts.sort.as_ref(), &key); this.set_accounts_sort(next, cx); })))
+        };
+        let account = cell("name".into(), tr("accounts_list_col_account"));
+        let columns: Vec<_> = labels.iter().flat_map(|label| {
+            let mut cells = vec![div().w(px(COLUMN)).flex_shrink_0().child(cell(label.clone(), window_label(label)))];
+            if label == "7d" { cells.push(div().w(px(COLUMN)).flex_shrink_0().child(cell("reset".into(), tr("accounts_weekly_reset")))); }
+            cells
+        }).collect();
+        div().border_b_1().border_color(theme::border()).bg(theme::inset()).flex().items_center().gap(px(12.)).px_4().py(px(5.))
+            .child(div().flex_1().min_w_0().pl(px(if compact { 28. } else { 36. } + 12.)).child(account))
+            .child(div().w(px(columns_width(labels))).flex_shrink_0().flex().gap(px(COLUMN_GAP)).children(columns))
+            .child(div().w(px(ACTIONS)).flex_shrink_0())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1042,8 +1187,21 @@ impl Hangar {
         let chips = div().flex().min_w_0().overflow_hidden().gap(px(5.)).children(row.chips.iter().enumerate().map(|(n, chip)| div()
             .map(|el| if n + 1 == row.chips.len() { el.min_w_0().truncate() } else { el.flex_shrink_0() }).px(px(5.)).rounded(px(4.)).border_1()
             .border_color(theme::border_strong()).font_family(theme::MONO).text_size(px(11.5)).text_color(theme::muted()).child(chip.clone())));
+        // A caixa de usar a redefinição só abre quando dá para usar (semana em 100%) ou com uma tentativa em andamento;
+        // fora disso a oferta é uma linha.
+        let reset_open = self.accounts.reset.as_ref().is_some_and(|r| r.id == row.id) || row.reset.as_ref().is_some_and(|o| o.blocked.is_none());
+        let reset_line = row.reset.as_ref().filter(|_| !reset_open).map(|offer| div().flex().items_center().gap(px(6.)).min_w_0()
+            .text_size(px(12.)).text_color(theme::muted())
+            .child(chrome::small_icon(IconName::RotateCcw, 12., theme::faint()))
+            .child(div().min_w_0().whitespace_normal().child(match &offer.expires_at {
+                Some(at) => format!("{} · {}", offer.count, tr("accounts_list_reset_next").replace("{n}", at)),
+                None => offer.count.clone(),
+            })));
         let identity = div().flex_1().min_w_0().flex().flex_col().gap(px(3.)).child(name_line)
+            .when(renaming.is_none(), |el| el.children(row.email.clone().map(|email| div().min_w_0().truncate()
+                .text_size(px(if compact { 12. } else { 12.5 })).text_color(theme::muted()).child(email))))
             .when(renaming.is_none() && !compact, |el| el.when(!row.subtitle.0.is_empty(),|el| el.child(subtitle))
+                .children(reset_line)
                 .children(row.login_note.clone().map(|text| div().min_w_0().text_size(px(12.5)).text_color(theme::warning())
                     .whitespace_normal().child(text)))
                 .when(!row.chips.is_empty(), |el| el.child(chips)));
@@ -1056,7 +1214,17 @@ impl Hangar {
                             let key = SharedString::from(format!("accounts-bar-{}-{label}", row.id));
                             let grow = motion::enter(key, motion::FADE_IN.after(120 + 35 * (order.min(12) + n) as u64), window, cx);
                             let bar = bars.iter().find(|b| &b.label == label);
-                            let mut cells = vec![quota_column(bar, compact, grow)];
+                            // Releitura com outro valor: o número e a barra andam do antigo até o novo.
+                            let moving = bar.and_then(|b| self.accounts.bar_moves.get(&(row.id.clone(), b.label.clone())).copied())
+                                .filter(|(_, start)| !cx.reduce_motion() && motion::FADE_IN.raw(*start) < 1.);
+                            let shown = bar.map(|b| match moving {
+                                Some((from, start)) => {
+                                    motion::request_frame(window, cx);
+                                    from + (b.pct - from) * f64::from(motion::FADE_IN.ease(motion::FADE_IN.raw(start)))
+                                }
+                                None => b.pct,
+                            });
+                            let mut cells = vec![quota_column(bar, shown, compact, grow)];
                             if label == "7d" { cells.push(weekly_reset_column(bar)); }
                             cells
                         })))
@@ -1137,10 +1305,7 @@ impl Hangar {
                 .child(div().text_color(theme::danger()).child(error))),
             None => line,
         };
-        let line = match (&row.reset, self.accounts.reset.as_ref().is_some_and(|r| r.id == row.id)) {
-            (None, false) => line,
-            (offer, _) => div().child(line).child(self.render_reset(row, offer.as_ref(), size, cx)),
-        };
+        let line = if reset_open { div().child(line).child(self.render_reset(row, row.reset.as_ref(), size, cx)) } else { line };
         let block = match self.accounts.cookie.as_ref().filter(|c| c.id == row.id) {
             Some(form) => div().child(line).child(self.render_cookie(form, size, cx)),
             None => line,
@@ -1176,16 +1341,6 @@ fn columns_width(labels: &[String]) -> f32 {
     count * COLUMN + (count - 1.) * COLUMN_GAP
 }
 
-impl Group {
-    /// Título, texto de vazio, o que a seção guarda e o ícone dela.
-    fn text(self) -> (&'static str, &'static str, &'static str, IconName) {
-        match self {
-            Group::Subscriptions => ("accounts_subscriptions", "accounts_subscriptions_empty", "accounts_subscriptions_desc", IconName::Users),
-            Group::Models => ("accounts_models", "accounts_models_empty", "accounts_models_desc", IconName::Cpu),
-            Group::Others => ("accounts_others", "accounts_others_empty", "accounts_others_desc", IconName::Key),
-        }
-    }
-}
 
 /// Aviso numa faixa tingida pela cor do tipo (falha, feito).
 fn banner(color: Hsla, icon: IconName, text: String) -> Div {
@@ -1204,25 +1359,20 @@ fn legend() -> Div {
         .child(item(theme::danger(), "accounts_legend_danger"))
 }
 
-/// Cabeça de um bloco na página larga: provider e quantas contas, e o nome de cada coluna que alguma linha do bloco usa.
-fn column_head(title: Option<&str>, rows: &[&Row], labels: &[String]) -> Div {
-    let used = |label: &String| rows.iter().any(|r| matches!(&r.quota, QuotaView::Bars { bars, .. } if bars.iter().any(|b| &b.label == label)));
-    div().mt(px(-1.)).border_t_1().border_color(theme::border()).bg(theme::inset()).flex().items_center().gap(px(12.)).px_4().py(px(8.))
-        .text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(theme::faint())
-        .child(div().flex_1().min_w_0().flex().items_center().gap(px(8.))
-            .children(title.map(|t| div().child(t.to_owned())))
-            .when(title.is_some(), |el| el.child(div().font_weight(FontWeight::NORMAL).child(rows.len().to_string()))))
-        .child(div().w(px(columns_width(labels))).flex_shrink_0().flex().gap(px(COLUMN_GAP))
-            .children(labels.iter().flat_map(|label| {
-                let mut cells = vec![div().w(px(COLUMN)).flex_shrink_0().truncate()
-                    .child(if used(label) { window_label(label) } else { String::new() })];
-                if label == "7d" {
-                    cells.push(div().w(px(COLUMN)).flex_shrink_0().truncate()
-                        .child(if used(label) { tr("accounts_weekly_reset") } else { String::new() }));
-                }
-                cells
-            })))
-        .child(div().w(px(ACTIONS)).flex_shrink_0())
+/// Uma coluna por janela que alguma linha mostrada tem, 5h e semana primeiro: a mesma em toda linha.
+fn window_labels(rows: &[&Row]) -> Vec<String> {
+    let mut labels: Vec<String> = Vec::new();
+    for row in rows {
+        if let QuotaView::Bars { bars, .. } = &row.quota {
+            for bar in bars { if !labels.contains(&bar.label) { labels.push(bar.label.clone()); } }
+        }
+    }
+    labels.sort_by_key(|l| window_order(l));
+    labels
+}
+
+fn sort_label(key: &str) -> String {
+    match key { "name" => tr("accounts_list_sort_name"), "reset" => tr("accounts_weekly_reset"), label => window_label(label) }
 }
 
 fn weekly_reset_column(bar: Option<&Bar>) -> Div {
@@ -1230,15 +1380,17 @@ fn weekly_reset_column(bar: Option<&Bar>) -> Div {
         .child(bar.map_or_else(|| "—".into(), |b| b.reset_days.clone()))
 }
 
-/// Uma janela na coluna dela: o %, a barra que cresce ao abrir (`grow` de 0 a 1) e quando reinicia. Na Compacta, só o %.
-fn quota_column(bar: Option<&Bar>, compact: bool, grow: f32) -> Div {
+/// Uma janela na coluna dela: o % (`shown`, que anda na releitura), a barra que cresce ao abrir (`grow` de 0 a 1) e
+/// quando reinicia. Na Compacta, só o %.
+fn quota_column(bar: Option<&Bar>, shown: Option<f64>, compact: bool, grow: f32) -> Div {
     let cell = div().w(px(COLUMN)).flex_shrink_0().flex().flex_col().gap(px(5.));
     let Some(bar) = bar else { return cell.child(div().text_size(px(13.)).text_color(theme::faint()).child("—")) };
+    let pct = shown.unwrap_or(bar.pct);
     cell.child(div().text_size(px(if compact { 13. } else { 15. })).font_weight(FontWeight::SEMIBOLD)
-            .text_color(if bar.pct > 80. { level(bar.pct) } else { theme::text() }).child(format!("{}%", bar.pct.round())))
+            .text_color(if pct > 80. { level(pct) } else { theme::text() }).child(format!("{}%", pct.round())))
         .when(!compact, |el| el
             .child(div().h(px(5.)).w_full().rounded_full().bg(theme::raised())
-                .child(div().h_full().rounded_full().bg(level(bar.pct)).w(relative(grow * (bar.pct.clamp(0., 100.) / 100.) as f32))))
+                .child(div().h_full().rounded_full().bg(level(pct)).w(relative(grow * (pct.clamp(0., 100.) / 100.) as f32))))
             .child(div().min_w_0().truncate().text_size(px(11.5)).text_color(theme::faint())
                 .child(if bar.reset.is_empty() { String::new() } else { tr("accounts_resets").replace("{n}", &bar.reset) })))
 }
@@ -1268,7 +1420,8 @@ fn mini_quota(bars: &[Bar], labels: &[String]) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{Credential, Engine, Group, QuotaView, Tone, age, build_row, build_sections, build_summary, group_of, model_names, reset_text};
+    use super::{Credential, Engine, Filter, Group, QuotaView, Tone, age, build_row, build_sections, build_summary, group_of, model_names,
+        next_sort, reset_text, row_matches, sort_rows};
     use crate::i18n::tr;
     use serde_json::{Value, json};
     use std::collections::HashMap;
@@ -1337,6 +1490,34 @@ mod tests {
         let unread = credential(json!({"id": "codex:/d", "tipo": "codex", "nome": "d", "codex_account": "d", "auth_method": "oauth"}));
         assert_eq!(build_row(&unread, &HashMap::new(), false, now).resets, None);
         assert_eq!(build_row(&list[0], &HashMap::new(), false, now).plan.as_deref(), Some("Max"));
+    }
+
+    #[test]
+    fn single_list_sorts_filters_and_searches_like_the_core() {
+        let now = 1_000_000.;
+        let claude = |name: &str, h5: Option<f64>, week: f64, reset: f64, active: bool| {
+            let mut windows = vec![json!({"rotulo": "7d", "pct": week, "reset_ts": now + reset})];
+            if let Some(pct) = h5 { windows.push(json!({"rotulo": "5h", "pct": pct})); }
+            credential(json!({"id": format!("claude:/{name}"), "tipo": "claude", "nome": name, "ativa": active,
+                "login": {"estado": "ok", "loggedIn": true, "email": format!("{name}@exemplo.com")},
+                "cota": {"estado": "lida", "janelas": windows}}))
+        };
+        let key = credential(json!({"id": "kimi:k", "tipo": "chave", "nome": "Kimi", "auth_method": "api_key"}));
+        let list = [claude("Rafael", Some(13.), 6., 900., false), claude("Felizardo", Some(0.), 100., 300., true),
+            claude("João", None, 39., 200., false), key];
+        let rows: Vec<_> = list.iter().map(|c| build_row(c, &HashMap::new(), false, now)).collect();
+        let names = |sort: Option<(String, i8)>| sort_rows(rows.iter().collect(), sort.as_ref()).iter().map(|r| r.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(None), ["Felizardo", "Rafael", "João", "Kimi"]);
+        assert_eq!(names(next_sort(None, "7d")), ["Felizardo", "João", "Rafael", "Kimi"]);
+        assert_eq!(names(Some(("7d".into(), 1))), ["Rafael", "João", "Felizardo", "Kimi"]);
+        assert_eq!(names(Some(("5h".into(), 1))), ["Felizardo", "Rafael", "João", "Kimi"]);
+        assert_eq!(names(next_sort(None, "reset")), ["João", "Felizardo", "Rafael", "Kimi"]);
+        let name = next_sort(None, "name");
+        assert_eq!(next_sort(next_sort(name.as_ref(), "name").as_ref(), "name"), None);
+        assert!(row_matches(&rows[2], "JOAO") && row_matches(&rows[0], "rafael@") && !row_matches(&rows[0], "kimi"));
+        assert!(Filter::Other.holds(&rows[3]) && !Filter::Claude.holds(&rows[3]) && Filter::All.holds(&rows[3]));
+        assert_eq!(rows[0].email.as_deref(), Some("Rafael@exemplo.com"));
+        assert!(!rows[0].subtitle.0.contains("Rafael@exemplo.com") && !rows[0].subtitle.0.starts_with("Claude"));
     }
 
     #[test]

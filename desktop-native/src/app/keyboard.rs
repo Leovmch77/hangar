@@ -6,14 +6,14 @@ use std::collections::{BTreeMap, BTreeSet};
 #[serde(rename_all = "snake_case")]
 enum Command {
     FocusComposer, OpenSettings, CopyLastReply, Find, NextSession, PreviousSession, NewChat, NewSession, CloseSession, RenameSession, Costs,
-    Search, ProjectFile, ProjectText, Sidebar, Worktrees, Dictation, Permission,
+    Search, ProjectFile, ProjectText, Sidebar, Worktrees, Dictation, Permission, ToolLook, Navigation,
     CloseFile, PreviousFile, NextFile, SaveFile, FindFile, FileLine, CopyTerminal, PasteTerminal,
 }
 
 impl Command {
-    const ALL: [Self; 26] = [Self::FocusComposer, Self::OpenSettings, Self::CopyLastReply, Self::Find,
+    const ALL: [Self; 28] = [Self::FocusComposer, Self::OpenSettings, Self::CopyLastReply, Self::Find,
         Self::NextSession, Self::PreviousSession, Self::NewChat, Self::NewSession, Self::CloseSession, Self::RenameSession, Self::Costs, Self::Search, Self::ProjectFile,
-        Self::ProjectText, Self::Sidebar, Self::Worktrees, Self::Dictation, Self::Permission,
+        Self::ProjectText, Self::Sidebar, Self::Worktrees, Self::Dictation, Self::Permission, Self::ToolLook, Self::Navigation,
         Self::CloseFile, Self::PreviousFile, Self::NextFile, Self::SaveFile, Self::FindFile, Self::FileLine,
         Self::CopyTerminal, Self::PasteTerminal];
 
@@ -25,7 +25,8 @@ impl Command {
             Self::RenameSession => "keyboard_rename_session", Self::Costs => "keyboard_costs",
             Self::Search => "keyboard_search", Self::ProjectFile => "keyboard_project_file", Self::ProjectText => "keyboard_project_text",
             Self::Sidebar => "keyboard_sidebar", Self::Worktrees => "keyboard_worktrees", Self::Dictation => "keyboard_dictation",
-            Self::Permission => "keyboard_permission", Self::CloseFile => "keyboard_close_file", Self::PreviousFile => "keyboard_previous_file",
+            Self::Permission => "keyboard_permission", Self::ToolLook => "keyboard_tool_look", Self::Navigation => "keyboard_navigation",
+            Self::CloseFile => "keyboard_close_file", Self::PreviousFile => "keyboard_previous_file",
             Self::NextFile => "keyboard_next_file", Self::SaveFile => "keyboard_save_file", Self::FindFile => "keyboard_find_file",
             Self::FileLine => "keyboard_file_line", Self::CopyTerminal => "keyboard_copy_terminal", Self::PasteTerminal => "keyboard_paste_terminal",
         }
@@ -61,6 +62,7 @@ impl Command {
             Self::NewChat => "secondary-n", Self::NewSession => "secondary-shift-t", Self::CloseSession => "secondary-w", Self::RenameSession => "f2", Self::Costs => "secondary-alt-c", Self::Search => "secondary-k",
             Self::ProjectFile => "secondary-p", Self::ProjectText => "secondary-shift-f", Self::Sidebar => "secondary-b",
             Self::Worktrees => "secondary-alt-w", Self::Dictation => "ctrl-space", Self::Permission => "alt-shift-p",
+            Self::ToolLook => "secondary-alt-v", Self::Navigation => "secondary-alt-b",
             Self::CloseFile => "alt-w", Self::PreviousFile => "ctrl-pageup", Self::NextFile => "ctrl-pagedown",
             Self::SaveFile => "secondary-s", Self::FindFile => "secondary-f", Self::FileLine => "secondary-g",
             Self::CopyTerminal => "ctrl-shift-c", Self::PasteTerminal => "ctrl-shift-v",
@@ -76,6 +78,7 @@ impl Command {
             Self::Costs => Box::new(OpenCosts), Self::Search => Box::new(OpenSearch), Self::ProjectFile => Box::new(FindProjectFile),
             Self::ProjectText => Box::new(FindProjectText), Self::Sidebar => Box::new(ToggleSidebar), Self::Worktrees => Box::new(OpenWorktrees),
             Self::Dictation => Box::new(ToggleDictation), Self::Permission => Box::new(CyclePermission),
+            Self::ToolLook => Box::new(CycleToolLook), Self::Navigation => Box::new(CycleNavigation),
             Self::CloseFile => Box::new(files::CloseFile), Self::PreviousFile => Box::new(files::PreviousFile),
             Self::NextFile => Box::new(files::NextFile), Self::SaveFile => Box::new(files::SaveFile), Self::FindFile => Box::new(files::FindFile),
             Self::FileLine => Box::new(files::GoToFileLine), Self::CopyTerminal => Box::new(terminal::CopyTerminal),

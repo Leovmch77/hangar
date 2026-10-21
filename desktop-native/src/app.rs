@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 
 mod activity;
 mod session_tabs;
+mod tab_preview;
 mod backdrop;
 mod baton;
 mod links;
@@ -100,7 +101,7 @@ pub(crate) mod setup;
 pub(crate) const ASKPASS_CODE_ENV: &str = "HANGAR_ASKPASS_CODE";
 
 actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, OpenNewSession, CloseSession, RenameSession, OpenCosts, OpenSearch,
-    ToggleSidebar, CyclePermission, OpenWorktrees]);
+    ToggleSidebar, CyclePermission, OpenWorktrees, CycleToolLook, CycleNavigation]);
 
 const LIVE_THINKING: &str = "__thinking__";
 const LIVE_TOOL: &str = "__tool__";
@@ -309,6 +310,7 @@ enum Payload {
     Dictation(u64, Option<String>, Result<Value, Failure>),
     // Aba Atividade: a conta de subagentes no disco e a lista da aba.
     Activity(activity::ActivityReply),
+    TabPreview(tab_preview::TabPreviewReply),
     FileView(files::FileReply),
     Artifacts(artifacts::ArtifactRequest, Result<Vec<artifacts::ArtifactItem>, Failure>),
     Mentions(u64, Result<Vec<String>, Failure>),
@@ -669,6 +671,20 @@ pub struct Hangar {
     /// Aba-mãe com a janela das filhas aberta.
     tab_group_open: Option<sidebar::Target>,
     tab_reveal_scheduled: bool,
+    tab_preview: Option<tab_preview::TabPreview>,
+    /// Aba sob o mouse; a época descarta o abrir e o fechar adiados que o mouse já desfez.
+    tab_hover: Option<sidebar::Target>,
+    tab_hover_epoch: u64,
+    /// Último movimento do mouse sobre a aba: a prévia só abre com ele parado.
+    tab_hover_moved: Instant,
+    tab_preview_seq: u64,
+    /// A conversa principal guardada enquanto um clique ou tecla da prévia roda com a conversa dela no lugar.
+    tab_preview_parked: Option<tab_preview::ConversationSlot>,
+    /// A conversa no lugar é a da prévia (desenho ou evento dela).
+    in_tab_preview: bool,
+    /// Foto do papel de parede para o fundo da prévia no modo Janela, lida na primeira prévia.
+    tab_preview_wallpaper: Option<Arc<RenderImage>>,
+    tab_preview_wallpaper_loading: bool,
     appearance_note: Option<String>,
     // Por que o tema Desktop não está pintando com o papel de parede; `None` quando pinta ou não foi escolhido.
     desktop_note: Option<String>,
@@ -898,26 +914,7 @@ impl Hangar {
         // Com conexão salva o diálogo não abre; o `connect` que falhar põe o foco aqui.
         if saved.is_none() && !probe { address.update(cx, |input, cx| input.focus(window, cx)); }
         let composer = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10).submit_on_enter(true));
-        let input_subscription = cx.subscribe_in(&composer, window, |this, _, event, window, cx| {
-            match event {
-                InputEvent::PressEnter { secondary: false, shift: false } if !this.connection_dialog => {
-                    if !this.accept_mention(window, cx) { this.submit(false, false, window, cx); }
-                }
-                // A lista de comandos acompanha o que se digita.
-                // Texto e sugestões só aparecem na faixa de baixo.
-                InputEvent::Change => {
-                    this.suggest_pick = 0;
-                    // Abrir as sugestões revalida a lista: plugins e skills mudam com a sessão aberta.
-                    // Abertas = há `/nome` sob o cursor e o Esc não as fechou neste texto.
-                    let open = this.composer_cursor(cx).is_some_and(|(text, cursor)| composer::slash_token(&text, cursor).is_some()
-                        && this.suggest_dismissed.as_deref() != Some(text.as_str()));
-                    if open && !this.slash_open { this.ensure_commands(true); }
-                    this.slash_open = open;
-                    this.redraw(panes::Area::Bottom, cx);
-                }
-                _ => {}
-            }
-        });
+        let input_subscription = cx.subscribe_in(&composer, window, |this, _, event, window, cx| this.composer_event(event, window, cx));
         cx.observe(&composer, |this, _, cx| this.refresh_mention(cx)).detach();
         cx.bind_keys([KeyBinding::new("tab", NoAction, Some("Terminal")),
             KeyBinding::new("shift-tab", NoAction, Some("Terminal")),
@@ -1017,6 +1014,8 @@ impl Hangar {
             terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_caps: Vec::new(), plugin_local_tab: None, plugin_presentations: HashMap::new(), linked_children_open: HashSet::new(), plugin_body_scrolls: HashMap::new(), plugin_question_focus: cx.focus_handle(), plugin_tabs_scroll: ScrollHandle::new(), plugin_tabs_seen: None, plugin_tabs_waits: 0, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), pages: page_card::Pages::new(window.window_handle()), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(), pending_tab_reveal: None, tab_group_open: None, tab_reveal_scheduled: false,
+            tab_preview: None, tab_hover: None, tab_hover_epoch: 0, tab_hover_moved: Instant::now(), tab_preview_seq: 0, tab_preview_parked: None, in_tab_preview: false,
+            tab_preview_wallpaper: None, tab_preview_wallpaper_loading: false,
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
             desktop_note: None,
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
@@ -1349,6 +1348,9 @@ impl Hangar {
     /// O que é da conexão atual sai da tela e os pedidos em voo passam a ser descartados. Serve à troca de servidor e ao Sair.
     fn drop_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_terminal(false, window, cx);
+        // As respostas da conexão velha são descartadas: a prévia ficaria esperando para sempre.
+        self.close_tab_preview(cx);
+        self.tab_preview_wallpaper_loading = false;
         self.mention.close();
         self.active_token.clear();
         self.connection += 1;
@@ -1606,6 +1608,8 @@ impl Hangar {
     }
 
     fn receive(&mut self, envelope: Envelope, window: &mut Window, cx: &mut Context<Self>) {
+        // Resposta nunca cai na conversa da prévia: a principal volta ao lugar antes.
+        self.leave_tab_preview_event();
         // Resultados amarrados à identidade da sessão valem mesmo depois de trocar a seleção.
         let payload = match envelope.payload {
             Payload::QueueJev(server, seq, result) => { self.receive_queue_jev(server, seq, result); cx.notify(); return; }
@@ -1954,7 +1958,14 @@ impl Hangar {
                 self.receive_sidebar(reply, window, cx); return;
             }
             Payload::Activity(reply) => { self.receive_activity(reply, cx); return; }
-            Payload::Dictation(seq, path, result) => { self.receive_dictation(seq, path, result, window, cx); return; }
+            Payload::TabPreview(reply) => { self.receive_tab_preview(reply, cx); return; }
+            Payload::Dictation(seq, path, result) => {
+                // Ditado da prévia da aba: a transcrição entra no compositor dela, com a conversa dela no lugar.
+                if self.dictation_in_tab_preview(cx) {
+                    self.with_tab_preview_slot(cx, |this, cx| this.receive_dictation(seq, path, result, window, cx));
+                } else { self.receive_dictation(seq, path, result, window, cx); }
+                return;
+            }
             Payload::FileView(reply) => { self.receive_file_view(reply, window, cx); return; }
             Payload::Artifacts(request, result) => { self.receive_artifacts(request, result, cx); return; }
             Payload::Dossier(key, seq, result) => { self.receive_dossier(key, seq, result, cx); return; }
@@ -2216,6 +2227,8 @@ impl Hangar {
                 self.chat.set_queue_panel(Some(panel));
                 for id in crate::queue_panel::removed(&data) { self.chat.retire(&id); }
                 self.queue_panel_changed(window, cx);
+                // O painel "Na fila" mora na faixa de baixo, que é uma cópia guardada: sem isto só aparecia no próximo envio.
+                self.redraw(panes::Area::Bottom, cx);
                 return (true, Changed::Rows);
             }
             "plugin_toast" => {
@@ -2422,7 +2435,36 @@ impl Hangar {
         }).detach();
     }
 
+    /// Enter e mudança do texto no compositor; o da prévia da aba chega aqui com a conversa dela no lugar.
+    fn composer_event(&mut self, event: &InputEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            InputEvent::PressEnter { secondary: false, shift: false } if !self.connection_dialog => {
+                if !self.accept_mention(window, cx) { self.submit(false, false, window, cx); }
+            }
+            // A lista de comandos acompanha o que se digita.
+            // Texto e sugestões só aparecem na faixa de baixo.
+            InputEvent::Change => {
+                self.suggest_pick = 0;
+                // Abrir as sugestões revalida a lista: plugins e skills mudam com a sessão aberta.
+                // Abertas = há `/nome` sob o cursor e o Esc não as fechou neste texto.
+                let open = self.composer_cursor(cx).is_some_and(|(text, cursor)| composer::slash_token(&text, cursor).is_some()
+                    && self.suggest_dismissed.as_deref() != Some(text.as_str()));
+                if open && !self.slash_open { self.ensure_commands(true); }
+                self.slash_open = open;
+                // A prévia é desenhada na raiz, fora da área de baixo.
+                if self.in_tab_preview { cx.notify(); } else { self.redraw(panes::Area::Bottom, cx); }
+            }
+            _ => {}
+        }
+    }
+
     fn toggle(&mut self, key: String, cx: &mut Context<Self>) {
+        // Linha da prévia da aba: o clique chega aqui com a conversa principal no lugar.
+        if self.toggle_in_tab_preview(key.clone(), cx) { return; }
+        self.toggle_here(key, cx);
+    }
+
+    fn toggle_here(&mut self, key: String, cx: &mut Context<Self>) {
         toggle_detail(&mut self.expanded, &mut self.prepared, &key);
         self.prepare_tools();
         let row = self.row_ids.iter().position(|id| id == &key || id.strip_prefix(PINNED) == Some(key.as_str())).or_else(|| {
@@ -3279,6 +3321,8 @@ impl Hangar {
                 }
                 // Sem turno em curso a mensagem foi entregue como envio comum: a conversa já mostra.
                 Action::QueueSteer(_) if value["steered"] == true => (tr("queue_panel_steered"), false),
+                // Entregue, mas o Claude não a puxou para o turno: ela espera a próxima pausa dele, e isso aparece.
+                Action::QueueSteer(_) if value["code"] == "queue_steer_hint_missing" => (tr("queue_steer_hint_missing"), true),
                 // Apagada não vira bolha ao sair do painel; a lista nova chega pelo evento `queue`.
                 Action::QueueCancel(id) => {
                     if current { self.chat.retire(&format!("queued-{id}")); }
@@ -3693,10 +3737,14 @@ impl Hangar {
         let since = if sending { None } else { self.turn_start() };
         let tokens = if sending { None } else { working_tokens(self.chat.state.label.as_deref()).map(SharedString::from) };
         // Sem recuo: a marca começa na borda da coluna, alinhada com o texto das mensagens.
+        // As marcas animadas são pintadas pela área da conversa, por baixo da prévia da aba: lá a marca fica parada.
+        let preview = self.in_tab_preview;
         let row = line()
-            .child(self.working_mark_slot(panes::Area::Conversation, "working-line", 14., theme::accent()))
+            .child(if preview { div().size(px(14.)).flex_shrink_0().flex().items_center().justify_center()
+                    .child(div().size(px(7.)).rounded_full().bg(theme::accent())).into_any_element() }
+                else { self.working_mark_slot(panes::Area::Conversation, "working-line", 14., theme::accent()) })
             .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(verb))
-            .map(|el| match since {
+            .map(|el| match since.filter(|_| !preview) {
                 Some(since) => el.child(self.elapsed_slot(panes::Area::Conversation, "working-elapsed", since, tokens)),
                 // Sem começo conhecido não há segundos, mas os tokens do terminal valem sozinhos.
                 None => el.when_some(tokens, |el, tokens| el.child(div().min_w_0().truncate().pt(px(1.)).text_size(px(11.)).text_color(theme::faint()).child(tokens))),
@@ -4042,6 +4090,14 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Texto que entrou no campo sem digitação (ditado): conta como resposta escrita, como `edit_ask_input`.
+    fn mark_ask_input_written(&mut self, field: &AnyInputState, cx: &mut Context<Self>) {
+        let Some(index) = self.ask_form.inputs.iter().position(|input| input == field) else { return; };
+        if let Some(typing) = self.ask_form.typing.get_mut(index) { *typing = true; }
+        self.save_ask_draft(cx);
+        cx.notify();
+    }
+
     fn set_pick(&mut self, fingerprint: &str, index: usize, pick: Option<Pick>, typing: bool, cx: &mut Context<Self>) {
         if self.ask_form.fingerprint != fingerprint || index >= self.ask_form.picks.len() { return; }
         if let Some(pick) = pick { self.ask_form.picks[index] = pick; }
@@ -4112,7 +4168,16 @@ impl Hangar {
                 .when_some(input, |el, input| el.child(div().flex().flex_col().flex_shrink_0().gap_2().mt_1()
                     .child(div().text_xs().text_color(if typing { theme::accent() } else { theme::muted() })
                         .child(tr(if typing { "ask_written" } else { "ask_write" })))
-                    .child(questions::field(&input, busy))
+                    // Microfone ao lado do campo: o ditado do compositor, com o texto caindo aqui.
+                    .child(div().flex().items_start().gap_2()
+                        .child(div().flex_1().min_w_0().child(questions::field(&input, busy)))
+                        .when(!item.is_secret, |el| {
+                            let (field, recording) = (input.clone(), self.dictating_into(&input));
+                            el.child(Button::new(SharedString::from(format!("ask-mic-{qi}"))).small().ghost().disabled(busy)
+                                .icon(if recording { IconName::Square } else { IconName::Mic }).toggled(recording)
+                                .tooltip(tr(if recording { "ask_dictate_stop" } else { "ask_dictate" }))
+                                .on_click(cx.listener(move |this, _, window, cx| this.toggle_field_dictation(field.clone(), window, cx))))
+                        }))
                     .child(div().text_xs().text_color(theme::muted()).child(tr("ask_draft_kept")))))
                 .when(item.is_secret, |el| el.child(div().text_xs().text_color(theme::muted()).child(tr("ask_secret"))))
                 .child(escapes));
@@ -4617,15 +4682,29 @@ impl Hangar {
         let can_stop = self.can_interrupt();
         let focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
         let paste_target = cx.entity().downgrade();
-        let textarea = Textarea::new(&self.composer).accessibility_id("composer-input").appearance(false).disabled((!readable && !new_chat && !reopen) || creating || resuming).on_paste(move |item, _, cx| {
-            paste_target.update(cx, |this, cx| this.paste(item, cx)).unwrap_or(false)
+        // Desenhado na prévia da aba, o campo é o dela: ações e colar chegam antes dos ouvintes de tecla da prévia, que
+        // trocam a conversa, e trocam aqui mesmo para não agirem na sessão principal.
+        let preview = self.in_tab_preview;
+        let textarea = Textarea::new(&self.composer).accessibility_id("composer-input").appearance(false).disabled((!readable && !new_chat && !reopen) || creating || resuming).on_paste(move |item, window, cx| {
+            paste_target.update(cx, |this, cx| { if preview { this.enter_tab_preview_event(window, cx); } this.paste(item, cx) }).unwrap_or(false)
         });
         let field = div().id("composer-field").text_base()
             // Teclas do campo que o compositor intercepta; sem uso aqui, seguem para o editor.
-            .capture_action(cx.listener(|this, _: &MoveUp, _, cx| this.move_suggestion(-1, cx)))
-            .capture_action(cx.listener(|this, _: &MoveDown, _, cx| this.move_suggestion(1, cx)))
-            .capture_action(cx.listener(|this, _: &IndentInline, window, cx| this.tab(window, cx)))
-                .capture_action(cx.listener(|this, _: &Escape, window, cx| this.escape(window, cx)))
+            .capture_action(cx.listener(move |this, _: &MoveUp, window, cx| { if preview { this.enter_tab_preview_event(window, cx); } this.move_suggestion(-1, cx) }))
+            .capture_action(cx.listener(move |this, _: &MoveDown, window, cx| { if preview { this.enter_tab_preview_event(window, cx); } this.move_suggestion(1, cx) }))
+            .capture_action(cx.listener(move |this, _: &IndentInline, window, cx| { if preview { this.enter_tab_preview_event(window, cx); } this.tab(window, cx) }))
+                .capture_action(cx.listener(move |this, _: &Escape, window, cx| {
+                    if !preview { return this.escape(window, cx); }
+                    this.enter_tab_preview_event(window, cx);
+                    // Na prévia o Esc fecha o que é do campo dela (confirmação, menção, sugestões, edição da fila) e, sem
+                    // nada disso, a própria prévia: nunca interrompe sessão nem fecha painel da principal.
+                    if this.confirm.is_some() || this.mention_is_open(cx) || !this.visible_suggestions(cx).is_empty() || this.queue_edit_active() {
+                        this.escape(window, cx);
+                    } else {
+                        this.close_tab_preview(cx);
+                        cx.stop_propagation();
+                    }
+                }))
             .child(textarea);
 
         // Aviso e sugestões seguem o que se digita: ficam presos à borda de cima, sem cortina. Os painéis abertos por
@@ -4654,6 +4733,8 @@ impl Hangar {
             let branch = status.as_ref().and_then(|s| s.branch.clone()).or_else(|| session.as_ref().and_then(|s| s.branch.clone())).unwrap_or_default();
             let dirty = status.as_ref().and_then(|s| s.dirty) == Some(true);
             let (added, removed) = session.as_ref().map(|s| (s.git_added.filter(|n| *n > 0), s.git_removed.filter(|n| *n > 0))).unwrap_or((None, None));
+            // Commits para enviar e para puxar, os mesmos ↑↓ da linha da barra lateral.
+            let (ahead, behind) = session.as_ref().map(|s| (s.git_ahead.filter(|n| *n > 0), s.git_behind.filter(|n| *n > 0))).unwrap_or((None, None));
             let folder = repo.clone().or_else(|| session.as_ref().and_then(folder_name));
             let cost = status.as_ref().and_then(|s| s.cost_usd).map(|usd| self.money(usd));
             // Anéis de contexto e de uso da conta; sem dado dizem isso, nunca 0%.
@@ -4683,7 +4764,9 @@ impl Hangar {
                     .child(div().max_w(px(160.)).truncate().child(branch))
                     .when(dirty, |el| el.child(div().text_color(theme::warning()).child("*")))))
                 .when_some(added, |el, a| el.child(div().text_color(theme::success()).child(format!("+{a}"))))
-                .when_some(removed, |el, r| el.child(div().text_color(theme::removed()).child(format!("−{r}"))));
+                .when_some(removed, |el, r| el.child(div().text_color(theme::removed()).child(format!("−{r}"))))
+                .when_some(ahead, |el, n| el.child(div().text_color(theme::accent()).child(format!("↑{n}"))))
+                .when_some(behind, |el, n| el.child(div().text_color(theme::warning()).child(format!("↓{n}"))));
             // Com repositório, a faixa abre o git da sessão (o `repo-chip` do web); o recuo negativo mantém o texto no lugar.
             let place = if has_git {
                 Button::new("composer-git").custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::faint())
@@ -4828,6 +4911,7 @@ impl Hangar {
     /// Texto que "Copiar" leva de uma linha de mensagem: o corpo gravado, ou a prévia como está na tela.
     fn copy_text(&self, id: &str) -> Option<String> {
         if id == PREVIEW { return Some(self.visible_preview.text.clone()); }
+        if let Some(text) = self.tab_preview_copy_text(id) { return Some(text); }
         self.chat.events.iter().find(|event| event.id == id).map(ChatEvent::body)
     }
 
@@ -5606,12 +5690,13 @@ impl Hangar {
     fn render_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.schedule_tab_reveal(window, cx);
         let floating = theme::is_floating();
-        let host = self.server_label(cx);
         let tabs = self.render_tab_groups(window, cx);
+        // Medidas do quadro anterior: a faixa sabe o que ficou de fora depois de se desenhar.
+        let (hidden_left, hidden_right) = self.tabs_hidden();
         let empty = tabs.is_empty();
         // A folga lateral deixa o anel de foco da primeira e da última aba fora do recorte da rolagem. A faixa mede o que
         // as abas medem e só encolhe (rolando) quando falta espaço, para os botões de criar ficarem logo depois da última.
-        let strip = div().id("tabs-strip").tab_group().flex_shrink_1().min_w_0().h_full().px(px(3.)).flex().items_center().gap(px(2.)).overflow_x_scroll().track_scroll(&self.tabs_scroll)
+        let strip = div().id("tabs-strip").tab_group().flex_shrink_1().min_w_0().h_full().px(px(3.)).flex().items_center().gap(px(4.)).overflow_x_scroll().track_scroll(&self.tabs_scroll)
             .role(Role::TabList).aria_label(tr("sessions"))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let step = match event.keystroke.key.as_str() { "left" => -1, "right" => 1, _ => return };
@@ -5626,27 +5711,57 @@ impl Hangar {
             .children(tabs)
             .when(empty && self.list_error.is_none(), |el| el.child(div().px_2().text_xs().text_color(theme::faint())
                 .child(tr(if self.list_online { "empty_sessions" } else { "connecting" }))));
-        chrome::glass_panel(div().id("session-tabs-bar").h(px(session_tabs::BAR_HEIGHT)).w_full().flex_shrink_0().px(px(8.)).flex().items_center().gap(px(6.))
+        chrome::glass_panel(div().id("session-tabs-bar").h(px(session_tabs::bar_height())).w_full().flex_shrink_0().px(px(8.)).flex().items_center().gap(px(6.))
             .bg(theme::chrome()).border_color(theme::border())
             .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().shadow(theme::panel_shadow()) }
                 else if appearance::get().navigation == appearance::Navigation::BottomTabs { el.border_t_1() } else { el.border_b_1() })
-            .child(div().px(px(6.)).child(chrome::hangar_mark(16., theme::accent())))
+            // A prévia da aba segue a aba sob o mouse, pela posição. Ouvinte da janela, fora da faixa (lá ele contaria
+            // como aba na rolagem): as abas da faixa de grupo bloqueiam o mouse para trás, e um ouvinte da faixa não as veria.
+            .child({
+                let view = cx.entity().downgrade();
+                canvas(|_, _, _| (), move |_, _, window, _| {
+                    let (moved, wheeled, clicked) = (view.clone(), view.clone(), view.clone());
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                        if phase != DispatchPhase::Bubble { return; }
+                        let _ = moved.update(cx, |this, cx| {
+                            let inside = this.tabs_scroll.bounds().contains(&event.position);
+                            let target = inside.then(|| this.tab_at(event.position.x)).flatten();
+                            this.tab_pointer(target, window, cx);
+                        });
+                    });
+                    window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+                        if phase != DispatchPhase::Bubble { return; }
+                        let _ = wheeled.update(cx, |this, cx| {
+                            if this.tabs_scroll.bounds().contains(&event.position) { this.cancel_tab_hover(window, cx); }
+                        });
+                    });
+                    // Clique numa aba é para abrir a sessão, não para ver a prévia dela.
+                    window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                        if phase != DispatchPhase::Capture { return; }
+                        let _ = clicked.update(cx, |this, cx| {
+                            if this.tabs_scroll.bounds().contains(&event.position) { this.cancel_tab_hover(window, cx); }
+                        });
+                    });
+                }).absolute().size(px(0.))
+            })
+            .child(div().w(px(4.)))
             .child(self.render_machines_tray_button(cx))
-            .children(self.render_hangar_chip(hangar_live::Chip::Label, cx))
+            .children(self.render_hangar_chip(hangar_live::Chip::Count, cx))
             .child(div().flex_1().min_w_0().h_full().flex().items_center().gap(px(6.))
+                // Abas fora da faixa não somem caladas: o canto diz quantas e rola até elas.
+                .when(hidden_left > 0, |el| el.child(Button::new("tabs-more-left").ghost().small().flex_shrink_0()
+                    .icon(IconName::ChevronLeft).label(format!("+{hidden_left}")).tooltip(tr("tabs_more_left"))
+                    .on_click(cx.listener(|this, _, _, cx| this.scroll_tabs(-1., cx)))))
                 .child(strip)
+                .when(hidden_right > 0, |el| el.child(Button::new("tabs-more-right").ghost().small().flex_shrink_0()
+                    .label(format!("+{hidden_right}")).icon(IconName::ChevronRight).tooltip(tr("tabs_more_right"))
+                    .on_click(cx.listener(|this, _, _, cx| this.scroll_tabs(1., cx)))))
                 .child(chrome::icon_button("tabs-new-chat", IconName::SquarePen, tr("new_chat_title"), cx).flex_shrink_0().selected(self.new_chat_screen() && self.reopen.is_none())
                     .disabled(self.api.is_none()).on_click(cx.listener(|this, _, window, cx| this.go_home(window, cx))))
                 .child(self.new_session_button(true, cx)))
             .when_some(self.list_error.clone(), |el, text| el.child(div().flex_shrink_0().max_w(px(260.)).flex().items_center().gap_1()
                 .child(div().min_w_0().truncate().text_xs().text_color(theme::warning()).child(text))
-                .child(Button::new("reconnect").xsmall().ghost().label(tr("retry")).on_click(cx.listener(|this, _, window, cx| this.connect(window, cx))))))
-            .child(Button::new("connection").ghost().flex_shrink_0().max_w(px(220.)).h(px(32.)).px(px(8.))
-                .tooltip(tr("connection_tip")).accessibility_label(tr("connection"))
-                .child(div().min_w_0().flex().items_center().gap_2()
-                    .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(if self.list_online { theme::success() } else { theme::warning() }))
-                    .child(div().min_w_0().truncate().text_size(px(13.)).text_color(theme::muted()).child(host)))
-                .on_click(cx.listener(|this, _, window, cx| this.open_connection(window, cx)))),
+                .child(Button::new("reconnect").xsmall().ghost().label(tr("retry")).on_click(cx.listener(|this, _, window, cx| this.connect(window, cx)))))),
             px(if floating { theme::PANEL_RADIUS } else { 0. }))
     }
 
@@ -6769,6 +6884,12 @@ impl Hangar {
         if self.new_chat_screen() { self.plugin_question_seen = None; }
         if self.new_chat_screen() && self.reopen.is_some() { return self.render_reopen(window, cx); }
         if self.new_chat_screen() { return self.render_new_chat(window, cx); }
+        let content = self.render_bottom_content(window, cx);
+        self.measured_bottom(content)
+    }
+
+    /// A faixa de baixo da sessão aberta sem a medida da área: a prévia da aba desenha a dela com isto.
+    pub(super) fn render_bottom_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.sync_plugin_fields(window, cx);
         let selected_key = self.selected_key();
         let sending = selected_key.as_ref().is_some_and(|key| self.delivery.pending(key));
@@ -6838,7 +6959,7 @@ impl Hangar {
                 None => el.when(self.selected.is_some() || self.api.is_some(),
                     |el| el.child(self.render_composer(readable, busy, steer, queued, sending, stopping, window, cx))),
             });
-        self.measured_bottom(content.into_any_element())
+        content.into_any_element()
     }
 
     /// Uma área só: pergunta e mod nunca são empilhados, e a troca mantém a altura do painel aberto.
@@ -6909,6 +7030,7 @@ impl Hangar {
 
 impl Render for Hangar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.leave_tab_preview_event();
         self.sync_a11y_retain(window, cx);
         // O assistente ocupa a janela: nada da conversa por baixo recebe tecla nem clique.
         if let Some(setup) = self.setup.clone() {
@@ -6994,6 +7116,8 @@ impl Render for Hangar {
             .when(page.is_none() && !self.new_chat_screen(), |el| el.child(self.working_mark_float(panes::Area::Conversation, WORKING_FADE, cx.reduce_motion())))
             .child(self.pane_element(panes::Area::Bottom, if self.new_chat_screen() { StyleRefinement::default().w_full().flex_1().min_h_0() }
                 else { StyleRefinement::default().w_full().flex_shrink_0().h(px(self.panes.bottom_height.get())).top(px(-drop)) }))
+            // Os avatares animados da faixa de baixo (subagentes e pai da filha), pintados fora da cópia guardada dela.
+            .when(page.is_none() && !self.new_chat_screen(), |el| el.child(self.working_mark_float(panes::Area::Bottom, WORKING_FADE, cx.reduce_motion())))
             .children(self.render_terminal(window, cx))
             .children(self.render_file_view(window, cx));
         // Visor de arquivos expandido: sem a lista de sessões e sem o painel direito.
@@ -7003,7 +7127,7 @@ impl Render for Hangar {
         // deslizaria do lugar antigo. Esquecidas, ela volta parada.
         if list_hidden || tabs || !Self::by_machine() || (self.rail() && self.rail_progress().is_none()) { self.sidebar.flip.borrow_mut().clear(); }
         let nav = if list_hidden { None }
-            else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(session_tabs::BAR_HEIGHT)).flex_shrink_0()
+            else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(session_tabs::bar_height())).flex_shrink_0()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }))) }
             else { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w(px(self.nav_width())).h_full().flex_shrink_0()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }))) };
@@ -7088,6 +7212,7 @@ impl Render for Hangar {
         let ticker = motion::ticker(window, cx);
         let dialog_in = self.connection_dialog.then(|| motion::enter("connection-dialog-in", motion::DIALOG_IN, window, cx)).unwrap_or(1.);
         let live = self.settings_live().then(|| self.render_live(window, cx));
+        let preview_popup = self.tab_preview_owns_popup(cx);
         div().id("hangar-root").track_focus(&self.root_focus).relative().size_full().flex()
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
                 for browser in this.side.browsers.values() { browser.read(cx).release_focus() }
@@ -7145,6 +7270,19 @@ impl Render for Hangar {
             .on_action(cx.listener(|this, _: &CloseSession, window, cx| this.close_selected(window, cx)))
             .on_action(cx.listener(|this, _: &RenameSession, window, cx| this.rename_selected(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| if !this.connection_dialog { this.toggle_rail(cx) }))
+            .on_action(cx.listener(|this, _: &CycleToolLook, _, cx| {
+                use appearance::ToolLook::*;
+                let mut next = appearance::get();
+                next.tool_look = match next.tool_look { Classic => Chips, Chips => Tree, Tree => Terminal, Terminal => Classic };
+                this.apply_appearance(next, true, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CycleNavigation, _, cx| {
+                use appearance::Navigation::*;
+                let mut next = appearance::get();
+                next.navigation = match next.navigation { Sidebar => Tabs, Tabs => BottomTabs, BottomTabs => Conversations, Conversations => Sidebar };
+                this.apply_appearance(next, true, cx);
+                this.recents_sessions_changed(false, cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleDictation, window, cx| this.toggle_dictation(window, cx)))
             .on_action(cx.listener(|this, _: &CopyLastReply, _, cx| {
                 let page_open = this.settings.is_some() && !this.settings_live();
@@ -7272,7 +7410,11 @@ impl Render for Hangar {
             }))
             .children(live)
             .children(self.render_landing_ghost(cx))
-            .children(self.render_popup(window, cx))
+            // O painel aberto pelo compositor da prévia (modelo, histórico, comandos) é desenhado com a conversa dela.
+            .children(if preview_popup { None } else { self.render_popup(window, cx) })
+            // Na raiz, fora da área guardada da barra: dentro dela, fechar a prévia derrubava o reaproveitamento do GPUI.
+            .children(self.render_tab_preview(window, cx))
+            .children(if preview_popup { self.render_tab_preview_popup(window, cx) } else { None })
             .children(self.render_search(window, cx))
             .children(self.render_plan_review_overlay(window, cx))
             .child(ticker)

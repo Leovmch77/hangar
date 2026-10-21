@@ -329,6 +329,8 @@ pub(super) struct Dictation {
     countdown: Option<Instant>,
     /// Com a voz ligada o ditado silencia o microfone dela; aqui fica como ele estava, para voltar ao fim do ditado.
     voice_hold: Option<bool>,
+    /// Campo de resposta de uma pergunta que recebe o texto no lugar do compositor, sem envio automático.
+    field: Option<AnyInputState>,
 }
 
 struct SendIntent { owner: Option<SessionOwner>, draft: String, attachments: Vec<String>, steer: bool, recipients: Option<(bool, Vec<String>)> }
@@ -457,6 +459,7 @@ impl Dictation {
     }
 
     fn cancel(&mut self) {
+        self.field = None;
         self.snapshot = None;
         self.snapshot_style = None;
         self.pending_send = None;
@@ -532,8 +535,18 @@ impl Hangar {
         })
     }
 
+    /// O ditado em curso é o da prévia da aba aberta.
+    pub(super) fn dictation_in_tab_preview(&mut self, cx: &mut Context<Self>) -> bool {
+        let owner = self.tab_preview_dictation_owner(cx);
+        owner.is_some() && self.dictation.owner == owner
+    }
+
     pub(super) fn check_dictation_owner(&mut self, cx: &mut Context<Self>) -> u64 {
-        let owner = self.dictation_owner(cx);
+        // Ditado começado na prévia da aba segue dela enquanto ela estiver aberta: a sessão aberta não o corta.
+        let owner = match self.tab_preview_dictation_owner(cx) {
+            Some(preview) if self.dictation.owner.as_ref() == Some(&preview) => Some(preview),
+            _ => self.dictation_owner(cx),
+        };
         let generation = self.dictation.observe_file_owner(owner.clone());
         self.dictation.observe_send_recipients(&self.dictation_recipients());
         // O player do ditado só tem controles na barra da sessão dele: fora dela, tocaria sem como parar.
@@ -749,7 +762,10 @@ impl Hangar {
         if self.dictation.request.is_some() { return; }
         if self.dictation.recorder.is_some() {
             self.stop_dictation(false, false, cx);
-            self.composer.update(cx, |input, cx| input.focus(window, cx));
+            match self.dictation.field.clone() {
+                Some(field) => field.focus_handle(cx).focus(window, cx),
+                None => self.composer.update(cx, |input, cx| input.focus(window, cx)),
+            }
             return;
         }
         if self.connection_dialog || self.settings.is_some() || window.has_active_dialog(cx) { return; }
@@ -1036,8 +1052,47 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Microfone do campo de resposta de uma pergunta: o mesmo ditado, com o texto indo para `field`.
+    pub(super) fn toggle_field_dictation(&mut self, field: AnyInputState, window: &mut Window, cx: &mut Context<Self>) {
+        let recording = self.dictation.recorder.is_some();
+        self.toggle_dictation(window, cx);
+        if !recording && self.dictation.recorder.is_some() { self.dictation.field = Some(field); }
+        cx.notify();
+    }
+
+    /// O ditado em curso grava para este campo de pergunta.
+    pub(super) fn dictating_into(&self, field: &AnyInputState) -> bool {
+        self.dictation.recorder.is_some() && self.dictation.field.as_ref() == Some(field)
+    }
+
+    /// Texto do ditado no fim do campo da pergunta. `set_value` não avisa mudança: quem marca a pergunta como escrita é
+    /// quem chama.
+    fn insert_into_field(field: &AnyInputState, text: &str, window: &mut Window, cx: &mut App) {
+        let join = |current: String| if current.trim().is_empty() { text.to_owned() } else { format!("{} {text}", current.trim_end()) };
+        match field {
+            AnyInputState::Input(input) => input.update(cx, |input, cx| { let next = join(input.value().to_string()); input.set_value(next, window, cx); }),
+            AnyInputState::Textarea(input) => input.update(cx, |input, cx| { let next = join(input.value().to_string()); input.set_value(next, window, cx); }),
+            _ => {}
+        }
+    }
+
     /// A sessão do ditado está aberta: o texto entra no cursor (ou no lugar da versão anterior), como sempre foi.
     fn receive_dictation_here(&mut self, result: Result<Value, Failure>, auto_send: bool, timed_out: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(field) = self.dictation.field.take() {
+            match result {
+                Ok(value) => {
+                    let text = value.get("text").and_then(Value::as_str).unwrap_or("").trim().to_owned();
+                    if text.is_empty() { self.dictation.result_error = Some(self.dictation.empty_text_error()); return; }
+                    Self::insert_into_field(&field, &text, window, cx);
+                    self.mark_ask_input_written(&field, cx);
+                    field.focus_handle(cx).focus(window, cx);
+                    // Organização que falhou deixa o texto cru: a causa aparece, como no compositor.
+                    if let Some(warning) = organization_warning(&value) { window.push_notification(Notification::warning(warning), cx); }
+                }
+                Err(error) => self.dictation.result_error = Some(Self::dictation_failure(&error)),
+            }
+            return;
+        }
         match result {
             Ok(value) => {
                 let text = value.get("text").and_then(Value::as_str).unwrap_or("").trim();
