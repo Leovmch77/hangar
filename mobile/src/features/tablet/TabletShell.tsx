@@ -19,10 +19,12 @@ export function TabletShell({ selected, children, active = true }: Props) {
   const router = useRouter();
   const { theme } = useUnistyles();
   const placement = useTabletPrefs(s => s.placement);
+  const collapsed = useTabletPrefs(s => s.collapsed);
+  const toggleCollapsed = useTabletPrefs(s => s.toggleCollapsed);
   const panelOpen = useTabletPrefs(s => s.panelOpen);
   const activeId = useServers(s => s.activeId);
   const voiceServer = selected?.serverId ?? activeId;
-  const bar = (position: typeof placement) => active && placement === position ? (
+  const bar = (position: typeof placement) => active && placement === position && (position === 'left' || !collapsed) ? (
     <SessionsBar placement={placement} selected={selected}
       onPick={s => {
         const path = `/s/${encodeURIComponent(s.serverId)}/${encodeURIComponent(s.name)}` as never;
@@ -35,6 +37,10 @@ export function TabletShell({ selected, children, active = true }: Props) {
   return (
     <Screen edges={active ? undefined : []}>
       {active ? <View style={styles.top}>
+        {collapsed && placement !== 'left' ? <Pressable onPress={toggleCollapsed} accessibilityRole="button"
+          accessibilityLabel={m.tablet_bar_expand()} accessibilityState={{ expanded: false }} style={styles.button}>
+          <Icon name="PanelLeft" size={20} color={theme.tokens.text.secondary} />
+        </Pressable> : null}
         <Pressable onPress={() => router.dismissTo('/')} accessibilityRole="button" accessibilityLabel={m.chat_ir_inicio()} style={styles.brand}>
           <HangarMark size={24} color={theme.tokens.accent.base} />
           <Text style={styles.brandName}>{m.native_brand()}</Text>
@@ -56,7 +62,6 @@ export function TabletShell({ selected, children, active = true }: Props) {
       <View style={active && placement === 'top' ? styles.horizontal : undefined}>{bar('top')}</View>
       <View style={[styles.row, active && styles.tabletRow]}>
         {bar('left')}
-        {bar('rail')}
         <View key="conversation" style={styles.center}>{children}</View>
         {active && selected && panelOpen ? <ContextPanel serverId={selected.serverId} name={selected.name} /> : null}
       </View>

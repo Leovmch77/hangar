@@ -38,13 +38,14 @@ import {
 import * as m from '../../src/paraglide/messages';
 import { opacidadeDe, transparenciaDe } from '../../src/theme/superficie';
 import { ACENTO_PALETA, SEM_TINTA, TINTAS, type Paleta } from '../../src/theme/paleta';
+import { useTabletPrefs, type SessionsBarPlacement } from '../../src/stores/tabletPrefs';
 
 // Destaques do desktop Rust (theme.rs ACCENTS / ACCENTS_LIGHT). O primeiro é o de fábrica: escolhê-lo
 // grava "sem acento" e o tema volta à cor própria de cada modo.
 const ACCENTS_DARK = ['#7c87e8', '#9b7cf0', '#f08a4b', '#e9b93f', '#3fbf6f', '#3cc4d6', '#e070b0'];
 const ACCENTS_LIGHT = ['#5b6ad0', '#7a55d6', '#c8622a', '#a87a12', '#238a4f', '#1a8a9a', '#b8457f'];
 
-type SectionKey = 'theme' | 'color' | 'background' | 'reading' | 'text' | 'conversation';
+type SectionKey = 'theme' | 'color' | 'background' | 'reading' | 'text' | 'conversation' | 'tablet';
 // Altura do trilho de abas preso no topo: a seção rolada para no pé dele, não embaixo.
 const TABS_HEIGHT = 56;
 
@@ -73,6 +74,8 @@ export default function Aparencia() {
   const destaquePergunta = useAparencia((s) => s.destaquePergunta);
   const organizar = useAparencia((s) => s.organizar);
   const homeScreen = useAparencia((s) => s.homeScreen);
+  const placement = useTabletPrefs((s) => s.placement);
+  const setPlacement = useTabletPrefs((s) => s.setPlacement);
   const ap = useAparencia.getState;
 
   const scroll = useRef<ScrollView>(null);
@@ -144,6 +147,11 @@ export default function Aparencia() {
   const HOME_SCREENS: ReadonlyArray<Option<HomeScreen>> = [
     { v: 'sessions', label: m.home_open_app_sessions() },
     { v: 'newConversation', label: m.home_open_app_conversation() },
+  ];
+  const TABLET_PLACEMENTS: ReadonlyArray<Option<SessionsBarPlacement>> = [
+    { v: 'left', label: m.tablet_bar_left() },
+    { v: 'bottom', label: m.tablet_bar_bottom() },
+    { v: 'top', label: m.tablet_bar_top() },
   ];
   const ORGANIZAR: ReadonlyArray<Option<Organizar>> = [
     { v: 'sessions', label: m.aparencia_organizar_sessoes_opcao() },
@@ -238,6 +246,7 @@ export default function Aparencia() {
           { key: 'reading', label: m.native_settings_reading_group() },
           { key: 'text', label: m.native_settings_text_group() },
           { key: 'conversation', label: m.native_settings_conversation_group() },
+          { key: 'tablet', label: m.tablet_landscape() },
         ]}
         current={current}
         onPick={jump}
@@ -467,6 +476,11 @@ export default function Aparencia() {
             onChange={(v) => ap().setOrganizar(v)}
             label={m.aparencia_organizar_sessoes()}
           />
+        </SettingsRow>
+      </SectionCard>
+      <SectionCard icon="PanelLeft" title={m.tablet_landscape()} onLayout={at('tablet')}>
+        <SettingsRow title={m.tablet_bar_position()}>
+          <Segmented options={TABLET_PLACEMENTS} value={placement} onChange={setPlacement} label={m.tablet_bar_position()} />
         </SettingsRow>
       </SectionCard>
     </Pagina>

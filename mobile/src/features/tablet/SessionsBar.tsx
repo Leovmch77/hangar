@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import { ActivityIndicator, FlatList, Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useKeyboardState } from 'react-native-keyboard-controller';
@@ -10,8 +10,7 @@ import { useIdentities } from '../pair/identities';
 import { SessionRow } from '../sessions/SessionRow';
 import { SessionAvatar } from '../sessions/SessionAvatar';
 import { Glass } from '../../ui/Glass';
-import { Sheet } from '../../ui/Sheet';
-import { Icon, type IconName } from '../../ui/Icon';
+import { Icon } from '../../ui/Icon';
 import { StateDot } from '../../ui/StateDot';
 import { superficie } from '../../theme/superficie';
 import { SessionChip } from './SessionChip';
@@ -20,12 +19,6 @@ import * as m from '../../paraglide/messages';
 
 type Props = { placement: SessionsBarPlacement; selected?: { serverId: string; name: string }; onPick(s: AggSession): void; onNew(): void };
 
-const placements: { value: SessionsBarPlacement; label: () => string; icon: IconName }[] = [
-  { value: 'left', label: () => m.tablet_bar_left(), icon: 'PanelLeft' },
-  { value: 'rail', label: () => m.tablet_bar_rail(), icon: 'PanelLeftClose' },
-  { value: 'bottom', label: () => m.tablet_bar_bottom(), icon: 'PanelBottom' },
-  { value: 'top', label: () => m.tablet_bar_top(), icon: 'PanelTop' },
-];
 const keyOf = (s: AggSession) => `${s.serverId}::${s.name}`;
 
 export function SessionsBar({ placement, selected, onPick, onNew }: Props) {
@@ -38,17 +31,18 @@ export function SessionsBar({ placement, selected, onPick, onNew }: Props) {
   const identityServers = useMemo(() => crossMachine ? servers : [], [crossMachine, servers]);
   const { identities } = useIdentities(identityServers);
   const items = useMemo(() => barRows(rows, identities), [rows, identities]);
-  const setPlacement = useTabletPrefs(s => s.setPlacement);
+  const collapsed = useTabletPrefs(s => s.collapsed);
+  const toggleCollapsed = useTabletPrefs(s => s.toggleCollapsed);
   const keyboardVisible = useKeyboardState(s => s.isVisible);
-  const [positionOpen, setPositionOpen] = useState(false);
   useEffect(() => useSessions.getState().retain(), []);
 
-  if (placement === 'bottom' && keyboardVisible) return null;
   const horizontal = placement === 'bottom' || placement === 'top';
+  if ((horizontal && collapsed) || (placement === 'bottom' && keyboardVisible)) return null;
+  const rail = placement === 'left' && collapsed;
   const isSelected = (s: AggSession) => s.serverId === selected?.serverId && s.name === selected?.name;
   const sessionItem = (s: AggSession) => {
-    if (placement === 'left') return <SessionRow key={keyOf(s)} session={s} mostrarServidor compact selected={isSelected(s)} onPress={onPick} />;
-    if (placement === 'rail') return (
+    if (placement === 'left' && !rail) return <SessionRow key={keyOf(s)} session={s} mostrarServidor compact selected={isSelected(s)} onPress={onPick} />;
+    if (rail) return (
       <Pressable key={keyOf(s)} onPress={() => onPick(s)} accessibilityRole="button"
         accessibilityLabel={`${s.name}, ${s.serverLabel}, ${rotuloEstado(s.state)}`} accessibilityState={{ selected: isSelected(s) }}
         style={({ pressed }) => [styles.railItem, { backgroundColor: isSelected(s) || pressed ? superficie(theme, 0.8) : 'transparent' }]}>
@@ -60,7 +54,7 @@ export function SessionsBar({ placement, selected, onPick, onNew }: Props) {
   };
   const renderItem = ({ item }: { item: BarItem }) => item.kind === 'single' ? sessionItem(item.session) : (
     <View style={[styles.group, horizontal && styles.horizontalGroup]}>
-      {!horizontal && placement !== 'rail' && item.label ? <Text numberOfLines={1}
+      {!horizontal && !rail && item.label ? <Text numberOfLines={1}
         style={[styles.groupLabel, { color: theme.tokens.text.muted }]}>{item.label}</Text> : null}
       {horizontal && item.label ? <>
         <View key={keyOf(item.members[0])} style={styles.mother}>
@@ -73,41 +67,29 @@ export function SessionsBar({ placement, selected, onPick, onNew }: Props) {
   );
 
   return (
-    <>
-      <Glass variant="panel" style={[styles.bar, horizontal ? styles.horizontal : placement === 'rail' ? styles.rail : styles.left]}>
-        <FlatList key={horizontal ? 'horizontal' : 'vertical'} data={items} horizontal={horizontal}
-          style={styles.list} contentContainerStyle={[styles.items, horizontal && styles.horizontalItems]}
-          keyExtractor={item => item.kind === 'single' ? keyOf(item.session) : item.key}
-          renderItem={renderItem} showsHorizontalScrollIndicator={false} showsVerticalScrollIndicator={false}
-          ListEmptyComponent={<View style={styles.emptyState}>
-            {loading ? <ActivityIndicator accessibilityLabel={m.lista_carregando()} /> :
-              <Text style={[styles.empty, { color: theme.tokens.text.muted }]}>{m.tablet_sessions_empty()}</Text>}
-            {byServer.filter(b => b.error).map(b => <Text key={b.server.id} accessibilityRole="alert"
-              style={[styles.empty, { color: theme.tokens.status.error }]}>
-              {b.error === 'offline' ? m.lista_servidor_offline({ label: b.server.label }) : `${b.server.label}: ${b.error}`}
-            </Text>)}
-          </View>} />
-        <View style={[styles.controls, horizontal && styles.horizontalControls]}>
-          <Pressable onPress={() => setPositionOpen(true)} style={styles.control} accessibilityRole="button" accessibilityLabel={m.tablet_bar_position()}>
-            <Icon name={placements.find(p => p.value === placement)!.icon} size={20} />
-          </Pressable>
-          <Pressable onPress={onNew} style={styles.control} accessibilityRole="button" accessibilityLabel={m.tablet_new_session()}>
-            <Icon name="Plus" size={22} color={theme.tokens.accent.base} />
-          </Pressable>
-        </View>
-      </Glass>
-      {positionOpen ? <Sheet open onDismiss={() => setPositionOpen(false)}>
-        <View style={styles.sheet}>
-          <Text style={[styles.title, { color: theme.tokens.text.primary }]}>{m.tablet_bar_position()}</Text>
-          {placements.map(p => <Pressable key={p.value} accessibilityRole="button" accessibilityState={{ selected: placement === p.value }}
-            onPress={() => { setPlacement(p.value); setPositionOpen(false); }} style={styles.option}>
-            <Icon name={p.icon} size={20} />
-            <Text style={[styles.optionLabel, { color: theme.tokens.text.primary }]}>{p.label()}</Text>
-            {placement === p.value ? <Icon name="Check" color={theme.tokens.accent.base} /> : null}
-          </Pressable>)}
-        </View>
-      </Sheet> : null}
-    </>
+    <Glass variant="panel" style={[styles.bar, horizontal ? styles.horizontal : rail ? styles.rail : styles.left]}>
+      <FlatList key={horizontal ? 'horizontal' : 'vertical'} data={items} horizontal={horizontal}
+        style={styles.list} contentContainerStyle={[styles.items, horizontal && styles.horizontalItems]}
+        keyExtractor={item => item.kind === 'single' ? keyOf(item.session) : item.key}
+        renderItem={renderItem} showsHorizontalScrollIndicator={false} showsVerticalScrollIndicator={false}
+        ListEmptyComponent={<View style={styles.emptyState}>
+          {loading ? <ActivityIndicator accessibilityLabel={m.lista_carregando()} /> :
+            <Text style={[styles.empty, { color: theme.tokens.text.muted }]}>{m.tablet_sessions_empty()}</Text>}
+          {byServer.filter(b => b.error).map(b => <Text key={b.server.id} accessibilityRole="alert"
+            style={[styles.empty, { color: theme.tokens.status.error }]}>
+            {b.error === 'offline' ? m.lista_servidor_offline({ label: b.server.label }) : `${b.server.label}: ${b.error}`}
+          </Text>)}
+        </View>} />
+      <View style={[styles.controls, horizontal && styles.horizontalControls]}>
+        <Pressable onPress={toggleCollapsed} style={styles.control} accessibilityRole="button"
+          accessibilityLabel={collapsed ? m.tablet_bar_expand() : m.tablet_bar_collapse()} accessibilityState={{ expanded: !collapsed }}>
+          <Icon name="PanelLeft" size={20} />
+        </Pressable>
+        <Pressable onPress={onNew} style={styles.control} accessibilityRole="button" accessibilityLabel={m.tablet_new_session()}>
+          <Icon name="Plus" size={22} color={theme.tokens.accent.base} />
+        </Pressable>
+      </View>
+    </Glass>
   );
 }
 
@@ -131,8 +113,4 @@ const styles = StyleSheet.create((theme) => ({
   controls: { alignItems: 'center', padding: theme.base.space[1] },
   horizontalControls: { flexDirection: 'row' },
   control: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
-  sheet: { padding: theme.base.space[4], gap: theme.base.space[2] },
-  title: { fontSize: theme.base.text.lg, fontWeight: theme.base.weight.semibold },
-  option: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[3], minHeight: 44 },
-  optionLabel: { fontSize: theme.base.text.base, flex: 1 },
 }));

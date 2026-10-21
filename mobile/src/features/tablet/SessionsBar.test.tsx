@@ -7,7 +7,7 @@ import type { SessionsBarPlacement } from '../../stores/tabletPrefs';
 
 const state = vi.hoisted(() => ({
   rows: [] as AggSession[], byServer: [] as ServerBucket[], loading: false, keyboardVisible: false,
-  retain: vi.fn(), release: vi.fn(), setPlacement: vi.fn(),
+  retain: vi.fn(), release: vi.fn(), collapsed: false, toggleCollapsed: vi.fn(),
 }));
 vi.mock('../../stores/sessions', () => ({ useSessions: Object.assign(
   (selector: (s: typeof state) => unknown) => selector(state), { getState: () => state },
@@ -18,8 +18,8 @@ vi.mock('../pair/identities', () => ({ useIdentities: () => ({ identities: new M
 vi.mock('react-native-keyboard-controller', () => ({
   useKeyboardState: (selector: (s: { isVisible: boolean }) => unknown) => selector({ isVisible: state.keyboardVisible }),
 }));
-vi.mock('../../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
-vi.mock('../../ui/Sheet', () => ({ Sheet: ({ open, children }: { open: boolean; children: ReactNode }) => open ? createElement('div', { role: 'dialog' }, children) : null }));
+vi.mock('../../ui/Glass', () => ({ Glass: ({ children, style }: { children: ReactNode; style: unknown }) =>
+  createElement('div', { 'data-glass': true, style: Object.assign({}, ...[style].flat(Infinity).filter(Boolean)) }, children) }));
 vi.mock('../../ui/Icon', () => ({ Icon: ({ name }: { name: string }) => createElement('i', { 'data-icon': name }) }));
 vi.mock('../sessions/SessionAvatar', () => ({ SessionAvatar: () => null }));
 vi.mock('../sessions/SessionRow', () => ({ SessionRow: ({ session, onPress, mostrarServidor }: {
@@ -46,7 +46,7 @@ let root: Root;
 let container: HTMLDivElement;
 beforeEach(() => {
   vi.clearAllMocks();
-  state.rows = [session]; state.byServer = []; state.loading = false; state.keyboardVisible = false;
+  state.rows = [session]; state.byServer = []; state.loading = false; state.keyboardVisible = false; state.collapsed = false;
   state.retain.mockReturnValue(state.release);
   container = document.createElement('div'); root = createRoot(container);
 });
@@ -92,7 +92,7 @@ describe('SessionsBar', () => {
     expect(container.textContent).toContain(m.tablet_sessions_empty());
     expect(container.querySelector(`[aria-label="${m.tablet_new_session()}"]`)).not.toBeNull();
   });
-  it.each(['left', 'rail', 'bottom', 'top'] as const)('%s troca a sessão pela identidade completa', placement => {
+  it.each(['left', 'bottom', 'top'] as const)('%s troca a sessão pela identidade completa', placement => {
     state.rows = [session, { ...session, serverId: 'casa', serverLabel: 'Casa' }];
     const { onPick } = render(placement);
     const buttons = [...container.querySelectorAll('button')];
@@ -101,14 +101,28 @@ describe('SessionsBar', () => {
     act(() => other.click());
     expect(onPick).toHaveBeenCalledWith(state.rows[1]);
   });
-  it('abre as quatro opções e grava a posição escolhida', () => {
-    render('bottom'); click(m.tablet_bar_position());
-    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
-    for (const label of [m.tablet_bar_left(), m.tablet_bar_rail(), m.tablet_bar_bottom(), m.tablet_bar_top()])
-      expect(container.textContent).toContain(label);
-    click(m.tablet_bar_rail());
-    expect(state.setPlacement).toHaveBeenCalledExactlyOnceWith('rail');
+  it.each(['left', 'bottom', 'top'] as const)('%s recolhe pelo botão sem escolher posição', placement => {
+    render(placement); click(m.tablet_bar_collapse());
+    expect(state.toggleCollapsed).toHaveBeenCalledOnce();
     expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.textContent).not.toContain(m.tablet_bar_position());
+  });
+  it.each(['top', 'bottom'] as const)('%s recolhida não monta vidro nem cartões', placement => {
+    state.collapsed = true; render(placement);
+    expect(container.innerHTML).toBe('');
+  });
+  it('esquerda recolhida mantém um trilho de 64 pt com sessões por ícone e botão para expandir', () => {
+    state.collapsed = true;
+    state.rows = [session, { ...session, serverId: 'casa', serverLabel: 'Casa' }];
+    const { onPick } = render('left');
+    expect((container.querySelector('[data-glass]') as HTMLElement).style.width).toBe('64px');
+    expect(container.textContent).not.toContain(session.name);
+    act(() => container.querySelector<HTMLButtonElement>('button[aria-label*="Casa"]')!.click());
+    expect(onPick).toHaveBeenCalledWith(state.rows[1]);
+    click(m.tablet_bar_expand()); expect(state.toggleCollapsed).toHaveBeenCalledOnce();
+    state.collapsed = false; render('left');
+    expect((container.querySelector('[data-glass]') as HTMLElement).style.width).toBe('250px');
+    expect(container.textContent).toContain(session.name);
   });
   it('retém a lista compartilhada uma vez e libera ao desmontar', () => {
     render('bottom'); render('left');

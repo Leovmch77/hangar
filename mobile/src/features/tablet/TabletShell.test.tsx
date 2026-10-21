@@ -6,7 +6,7 @@ import type { SessionsBarPlacement } from '../../stores/tabletPrefs';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const h = vi.hoisted(() => ({
-  placement: 'bottom' as SessionsBarPlacement, panelOpen: true,
+  placement: 'bottom' as SessionsBarPlacement, panelOpen: true, collapsed: false, toggleCollapsed: vi.fn(),
   size: { width: 1180, height: 820, scale: 1, fontScale: 1 },
   router: { replace: vi.fn(), push: vi.fn(), dismissTo: vi.fn() },
 }));
@@ -45,7 +45,7 @@ import * as m from '../../paraglide/messages';
 let root: Root;
 let host: HTMLDivElement;
 beforeEach(() => {
-  vi.clearAllMocks(); h.placement = 'bottom'; h.panelOpen = true;
+  vi.clearAllMocks(); h.placement = 'bottom'; h.panelOpen = true; h.collapsed = false;
   h.size = { width: 1180, height: 820, scale: 1, fontScale: 1 };
   host = document.createElement('div'); root = createRoot(host);
 });
@@ -57,7 +57,7 @@ function click(label: string) {
   const button = [...host.querySelectorAll('button')].find(b => b.textContent === label || b.getAttribute('aria-label') === label)!;
   expect(button).toBeDefined(); act(() => button.click());
 }
-it.each(['left', 'rail', 'bottom', 'top'] as const)('%s ordena as áreas como no mock e mantém o centro transparente', placement => {
+it.each(['left', 'bottom', 'top'] as const)('%s ordena as áreas como no mock e mantém o centro transparente', placement => {
   h.placement = placement; render();
   const center = host.querySelector('main')!;
   const bar = host.querySelector('nav')!;
@@ -73,6 +73,34 @@ it.each(['left', 'rail', 'bottom', 'top'] as const)('%s ordena as áreas como no
 it('fechar o painel desmonta o contexto', () => {
   render(); expect(host.querySelector('aside')).not.toBeNull();
   h.panelOpen = false; render(); expect(host.querySelector('aside')).toBeNull();
+});
+
+it.each(['top', 'bottom'] as const)('%s recolhida desmonta a faixa e oferece expansão no topo com 44 pt', placement => {
+  h.placement = placement; render();
+  const center = host.querySelector('main');
+  expect(host.querySelector(`[aria-label="${m.tablet_bar_expand()}"]`)).toBeNull();
+  h.collapsed = true; render();
+  expect(host.querySelector('nav')).toBeNull();
+  const button = host.querySelector<HTMLButtonElement>(`[aria-label="${m.tablet_bar_expand()}"]`)!;
+  expect(button.style.minWidth).toBe('44px');
+  expect(button.style.minHeight).toBe('44px');
+  click(m.tablet_bar_expand()); expect(h.toggleCollapsed).toHaveBeenCalledOnce();
+  h.collapsed = false; render();
+  expect(host.querySelector('nav')).not.toBeNull();
+  expect(host.querySelector('main')).toBe(center);
+});
+
+it('esquerda recolhida conserva a barra sem duplicar o botão de expansão no topo', () => {
+  h.placement = 'left'; h.collapsed = true; render();
+  expect(host.querySelector('nav')).not.toBeNull();
+  expect(host.querySelector(`[aria-label="${m.tablet_bar_expand()}"]`)).toBeNull();
+});
+
+it('em pé não monta a barra nem o botão de expansão', () => {
+  h.collapsed = true;
+  act(() => root.render(createElement(TabletShell, { active: false, children: createElement('main') })));
+  expect(host.querySelector('nav')).toBeNull();
+  expect(host.querySelector(`[aria-label="${m.tablet_bar_expand()}"]`)).toBeNull();
 });
 it('nova conversa no Início não monta o painel', () => {
   act(() => root.render(createElement(TabletShell, { children: createElement('main', null, 'new-conversation') })));
