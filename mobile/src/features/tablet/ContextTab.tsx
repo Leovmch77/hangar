@@ -1,10 +1,9 @@
 import { useMemo } from 'react';
-import { ScrollView, Text, View } from 'react-native';
+import { ActivityIndicator, ScrollView, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { parseStatusLine } from '@hangar/core';
 import { chatStore } from '../../stores/chat';
 import { useSessions } from '../../stores/sessions';
-import { ContextRing } from '../../chat/ContextRing';
 import { composerStatus, usageWindows } from '../../chat/usage';
 import { ActionsGrid } from './ActionsGrid';
 import * as m from '../../paraglide/messages';
@@ -34,12 +33,10 @@ export function ContextTab({ serverId, name }: { serverId: string; name: string 
       <View style={styles.section}>
         <Text style={styles.label} accessibilityRole="header">{m.ctx_contexto()}</Text>
         {pct != null ? <>
-          <View style={styles.row}>
-            <Text style={[styles.percent, { color: tone(pct) }]}>{Math.round(clamp(pct))}%</Text>
-            <ContextRing pct={pct} size={44} showValue={false} />
-          </View>
+          <Text style={[styles.percent, { color: tone(pct) }]}>{Math.round(clamp(pct))}%</Text>
           {bar(m.ctx_uso_contexto(), pct)}
-        </> : <Text style={styles.muted}>{m.tablet_context_empty()}</Text>}
+        </> : statusLine === null ? <ActivityIndicator color={theme.tokens.text.muted} accessibilityLabel={m.comum_carregando()} />
+          : <Text style={styles.muted}>{m.tablet_context_empty()}</Text>}
       </View>
 
       {status.cost ? <View style={styles.row}>
@@ -65,7 +62,7 @@ export function ContextTab({ serverId, name }: { serverId: string; name: string 
         {status.branch ? <Text style={styles.muted} selectable>{status.branch}</Text> : null}
       </View> : null}
 
-      <View style={styles.section} accessibilityLabel={m.tablet_actions()}>
+      <View style={styles.section}>
         <Text style={styles.label} accessibilityRole="header">{m.tablet_actions()}</Text>
         <ActionsGrid serverId={serverId} name={name} />
       </View>

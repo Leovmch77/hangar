@@ -87,7 +87,7 @@ describe('ContextPanel', () => {
     expect(container.querySelector('[role="alert"]')?.textContent).toContain(m.chat_servidor_removido());
     expect(container.textContent).not.toContain('git-srv-sess');
     selectTab(m.tablet_tab_context());
-    expect(container.textContent).toContain(m.tablet_context_empty());
+    expect(container.textContent).toContain('loading');
   });
 });
 describe('ContextTab', () => {
@@ -101,9 +101,19 @@ describe('ContextTab', () => {
     expect(container.textContent).toContain('23%');
     expect(container.textContent).toContain('74%');
     expect(container.textContent).toContain(m.uso_reset({ quando: '1h55m' }));
+    expect(container.querySelector('svg')).toBeNull();
+    expect(container.querySelector(`[aria-label="${m.tablet_actions()}"]`)).toBeNull();
   });
 
-  it('sem statusline mostra o vazio e conserva a seção de ações', () => {
+  it('antes da primeira statusline mostra carregamento e conserva as ações', () => {
+    render();
+    expect(container.textContent).toContain('loading');
+    expect(container.textContent).not.toContain(m.tablet_context_empty());
+    expect(container.textContent).toContain('action-srv-sess');
+  });
+
+  it.each(['', '💵 $0.00'])('com statusline %j sem contexto mostra o vazio e conserva as ações', (statusLine) => {
+    state.statusLine = statusLine;
     render();
     expect(container.textContent).toContain(m.tablet_context_empty());
     expect(container.textContent).toContain(m.tablet_actions());
