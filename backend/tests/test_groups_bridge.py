@@ -145,6 +145,44 @@ def test_call_after_pending_falls_to_python_never_touches_the_bridge(monkeypatch
         owner.loop.call_soon_threadsafe(owner.loop.stop)
 
 
+def test_call_waits_while_the_mode_is_settling(monkeypatch):
+    """Entrando no modo `rust` (`_settling`) as pontes ainda podem estar limpas: espera como o `await_mode`."""
+    seen = []
+    owner = _pending_owner("rust", lambda: groups_bridge.configure("127.0.0.1:9", "s"))
+    owner.mode, owner._settling = "rust", True
+    monkeypatch.setattr(groups_bridge, "_opener", SimpleNamespace(open=lambda req, timeout: seen.append(req) or (_ for _ in ()).throw(OSError())))
+    groups_bridge.configure(None, None)
+    monkeypatch.setattr(runtime_coordinator, "_current", owner)
+    try:
+        with pytest.raises(groups_bridge.GroupsBridgeError) as e:
+            groups_bridge.call("group.leave", name="a")
+        # Chegou à ponte nova (o transporte falso falha), em vez de `groups_bridge_off` na hora.
+        assert (e.value.code, len(seen)) == ("groups_bridge_unavailable", 1)
+    finally:
+        groups_bridge.configure(None, None)
+        owner.loop.call_soon_threadsafe(owner.loop.stop)
+
+
+def _close_stubs(monkeypatch):
+    monkeypatch.setattr(api, "_recusa_orq", lambda n: None)
+    monkeypatch.setattr(api.registry, "kill", lambda n, closed_by_rust=False: [])
+    monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
+    monkeypatch.setattr(api.share_bridge, "revoke_session", lambda n: None)
+
+
+def test_close_with_an_unreadable_sidecar_still_leaves_and_journals(monkeypatch, client):
+    """Sidecar que existe e não se lê não é "sem grupo": a saída vai pela ponte e a falha vai ao diário."""
+    (pair._pair_dir() / "a.json").write_text("{torto", encoding="utf-8")
+    calls = _rust(monkeypatch, reply={"ex_peers": [], "warnings": []})
+    _close_stubs(monkeypatch)
+    journal = []
+    monkeypatch.setattr(api.diag, "registrar", lambda evento, nivel="ok", **c: journal.append((evento, nivel, c)))
+    r = client.delete("/api/sessions/a", headers=H)
+    assert r.status_code == 200, r.text
+    assert calls == [("group.leave", {"name": "a", "phases": {}})]
+    assert ("grupos.sidecar_ilegivel", "erro", {"sessao": "a"}) in journal
+
+
 def test_close_of_a_session_without_group_never_asks_the_bridge(monkeypatch, client):
     """Sem sidecar não há grupo a deixar: ponte fora do ar não vira aviso falso no fechamento."""
     calls = _rust(monkeypatch, error="groups_bridge_off")

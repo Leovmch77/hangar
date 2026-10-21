@@ -2227,6 +2227,20 @@ def _report_failed(body, failed: list[dict], event: str, lists: tuple[str, ...] 
         diag.registrar("grupos.falha_sem_corpo", "erro", falhas=len(failed), sessoes=",".join(names))
 
 
+def _sidecar_state(name: str) -> str:
+    """`grouped`, `absent` (sem arquivo, ou válido sem grupo) ou `unreadable` (existe e não se lê)."""
+    link = PairLink(name)
+    if link.get() is not None:
+        return "grouped"
+    try:
+        data = json.loads(link.path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return "absent"
+    except (OSError, ValueError):
+        return "unreadable"
+    return "absent" if isinstance(data, dict) else "unreadable"
+
+
 async def _rust_leave(name: str, phases: dict) -> list[dict]:
     try:
         out = await asyncio.to_thread(groups_bridge.call, "group.leave", name=name, phases=phases)
@@ -2249,8 +2263,11 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
     # Fechamento que não passou pelo Rust (Connect, convidado): a saída do grupo vai pela ponte, com
     # a fase do `orq` lida aqui antes, para o Rust não perguntar de volta.
     skip_leave = closed or marked("x-hangar-rust-leaves")
-    # Sem sidecar não há grupo a deixar: a ponte nem é chamada.
-    grouped = not skip_leave and await asyncio.to_thread(lambda: PairLink(name).get() is not None)
+    # Sem sidecar não há grupo a deixar: a ponte nem é chamada. Ilegível não é ausente: sai pela ponte.
+    sidecar = "absent" if skip_leave else await asyncio.to_thread(_sidecar_state, name)
+    if sidecar == "unreadable":
+        diag.registrar("grupos.sidecar_ilegivel", "erro", sessao=name)
+    grouped = sidecar != "absent"
     phases = (await asyncio.to_thread(_route_facts, name, None))["phases"] \
         if grouped and groups_bridge.rust_owns_groups() else None
     # Sem o Rust a saída do grupo não acontece: fechar segue, e a falta vai no aviso e no diário.

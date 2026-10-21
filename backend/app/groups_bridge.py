@@ -39,7 +39,8 @@ def _await_rust() -> None:
     `PENDING_WAIT_S`; desfecho `python` não chama a ponte."""
     from app import runtime_coordinator
     owner = runtime_coordinator.current()
-    if owner is not None and owner.mode == "pending" and not runtime_coordinator._mode_bypass.get():
+    if owner is not None and (owner.mode == "pending" or getattr(owner, "_settling", False)) \
+            and not runtime_coordinator._mode_bypass.get():
         from app.runtime_adapter import run_sync
         try:
             run_sync(owner.await_mode, owner.loop)
