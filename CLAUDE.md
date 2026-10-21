@@ -360,7 +360,7 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
 **Antes de mexer em** `backend/app/adapters/` (claude_headless, codex, kimi, omp, pi), `codex_*.py`,
 `engines.py`, `model_picker.py`, `permission_mode.py`, `skill_bridge.py`, `omp_dirs.py`, `loop.py`,
 `terminal_input.py`, `state.py`, `crates/hangar-server/src/runtime/` (atores Claude/Codex,
-lançamento e relançamento), statusline/prévia, hooks de estado, ou em sessão sem terminal:
+lançamento, relançamento e religação ao mesmo cano em `cano_reconnect.rs`), statusline/prévia, hooks de estado, ou em sessão sem terminal:
 **leia a seção "Regras vigentes" de `docs/decisoes/harnesses.md`**. Cada regra ali já custou um
 bug calado.
 
@@ -545,6 +545,15 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   etapas, códigos e origem da falha. Texto de conversa, credenciais e saídas brutas ficam fora
   dele. O shell Electron também escreve lá (`privado/shell.log`): lançado pelo `.desktop`, o
   console dele vai pro `/dev/null`. Detalhes e compatibilidade em [plataforma.md](docs/decisoes/plataforma.md#diário-de-uso-causa-e-contexto-no-arquivo-exportado).
+- **Aviso na tela só para ação que falhou ou bloqueio real.** Falha de acompanhamento, dado velho
+  ou condição que some sozinha vai ao diário de uso e ao log, nunca a faixa, anel ou linha. A
+  classificação é uma só, `problem_gate::diagnostic`; os dois portões de saída (`gate_problem` da
+  conversa em `side.rs`, `gate_problems` da lista em `list/bridge.rs`) tiram o código de
+  diagnóstico do que publicam e o registram (`rust.problem_hidden`), e ele continua no estado
+  interno. No produtor, código de tela vence diagnóstico. Nenhum cliente desenha estado
+  "reconectando". `list_error` continua emitido; o cliente só o desenha com a lista vazia.
+  Código novo de diagnóstico entra em `DIAGNOSTIC` de `problem_gate.rs`. Critério e tabela em
+  [plataforma.md](docs/decisoes/plataforma.md#aviso-na-tela-só-para-ação-que-falhou-ou-bloqueio-real-20102026).
 - **Uma configuração do Jev para navegador, orquestração, voz, Computer Use e escolha de envio.** `jev_api_key`,
   `jev_endpoint` e `jev_model` no `runtime_config`; no ambiente `TYPESAFE_API_KEY`, `JEV_ENDPOINT`
   e `JEV_MODEL`, já resolvidos. Não existe chave do Jev só para o Computer Use. A regra do destino
@@ -611,7 +620,9 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   `DELETE queue/<id>`, este com `?only_waiting`, `POST queue/reorder` e `POST queue/<id>/steer`) e
   os controles do Codex são decididos no `hangar-server` (`session_write/table.rs`). Repasse ao Python só sem entrada no
   Rust (abertura, Pi/omp/Kimi) e nas rotas de pane de sessão sem terminal. Entrada doente é 503
-  `runtime_unhealthy`, corpo fora de forma é 422 `erro_corpo_invalido`, nunca repasse. Cada sessão
+  `runtime_unhealthy`, corpo fora de forma é 422 `erro_corpo_invalido`, nunca repasse. Sessão sem
+  terminal religando ao mesmo cano vivo não é entrada doente: a escrita vai ao ator e espera na
+  fila até religar. Cada sessão
   tem uma porta de entrada no Rust: o Python a fecha antes de congelar ou transferir a sessão
   (renomear, trocar de conta) e a reabre depois; fechada pela troca de conversa, recusa na hora
   (409), fechada por congelamento curto, a escrita espera. A saúde diz o que o Rust atende em
@@ -620,7 +631,8 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   `queue/*` do Claude a `/__hangar_server/claude/<nome>/<rota>`, tudo do Codex do Rust (`queue/*`
   incluídas) a
   `/__hangar_server/codex/<nome>/<rota>` (a mesma ponte recebe o texto de broadcast, grupo, par e
-  MCP para Codex com terminal); 421 = o Rust não atende e o Python segue, transporte que falha =
+  MCP para Codex com terminal); no Connect, o `DELETE` de Claude vai a
+  `POST /__hangar_server/claude/<nome>/close`, e Pi/omp/Kimi seguem fechando no Python; 421 = o Rust não atende e o Python segue, transporte que falha =
   5xx `<provedor>_bridge_failed`. Texto que nasce no Python para o Claude segue em `_send_one`, coberto
   só pelo `freeze`. Contrato e motivo em
   [plataforma.md](docs/decisoes/plataforma.md#escritas-do-claude-no-hangar-server) e
@@ -658,7 +670,7 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   terminal↔sem terminal, `/recarregar`, `/conta` com a conta ChatGPT fixa, o modelo e o Fast dela, e
   o bypass; o modo vem do spec e do observado, nunca do rodapé lido na hora. A transferência
   Claude→Codex (`/conta` com `credential_id`) segue no Python. Python: autorização das portas dele com o repasse acima e, depois do `DELETE` de Codex com terminal
-  concluído no Rust, só a limpeza externa (`share_store`/`sync_tunnel`, `ThenLink`, atalhos,
+  (e de Claude pelo Connect) concluído no Rust, só a limpeza externa (`share_store`/`sync_tunnel`, `ThenLink`, atalhos,
   caches), sem chamar o Rust de volta. Responsabilidade migrada nunca volta ao Python em
   `rust`/`pending`: Rust indisponível é erro visível. Modo de permissão gravado desconhecido é
   recusado; ausente é o padrão da abertura.
@@ -672,7 +684,8 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   `POST /internal/list/facts`; sessão sem terminal e Codex com terminal adotado, do
   `RuntimeRegistry`; pergunta segurada e presença do app no Claude, do `plugin::Store`. Falha
   nunca vira lista vazia nem a do Python: 503 com código no `GET`, `list_error` com código no SSE,
-  `problema` na linha quando só os fatos caíram. Convidado e outros métodos seguem ao Python.
+  `problema` interno na linha quando só os fatos caíram (a saída o tira e o registra no diário).
+  Convidado e outros métodos seguem ao Python.
   Medidas em [plataforma.md](docs/decisoes/plataforma.md#lista-do-dono-no-hangar-server).
 - **Os grupos são do Rust: no modo `rust`/`pending` só ele grava `.hangar-pair`.** Sidecars,
   fusão e arquivo de contrato e a varredura de membro morto (ausência por tempo, lista sem fatos
@@ -698,7 +711,7 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   Claude só roda no modo `python`, com a ponte desligada. Pi, omp e Kimi capturam pelo Python e
   guardam lá o estado temporal; Codex conserva estado e prévia nativos. `/clear` ou troca do filho
   descartam leituras antigas; sidecar Claude vazio continua sendo uma resposta; erro de captura
-  vira `problema` visível, nunca leitura Python.
+  vira `problema` registrado no diário e no log (não chega à tela), nunca leitura Python.
   Evidência em [plataforma.md](docs/decisoes/plataforma.md#observação-terminal-rust-erro-visível-sem-captura-python).
 - **Estado ao vivo de Claude com terminal é do `Monitor` do Rust no modo `rust`/`pending`, em
   qualquer porta.** Um por hub (`side.rs`), nascido com o primeiro assinante: o `/events` do dono
@@ -708,7 +721,8 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   (`LiveSources::deliverable`); o Python não sobe `StateMonitor` nem `PreviewBroker` dessas
   sessões e o hub descarta, registrando uma vez, os quatro que vierem dele. Captura em processo
   (`-C`; psmux avulso no Windows), fatos do plugin lidos do `plugin::Store` do Rust; leitura que
-  não vem é `problema=state_facts_unavailable`, nunca estado inventado. O `Sources` não tem método com corpo
+  não vem é `problema=state_facts_unavailable`, nunca estado inventado, e esse código vai ao diário
+  e ao log, não à tela (portão de saída, regra "Aviso na tela só para ação que falhou"). O `Sources` não tem método com corpo
   padrão: fonte que esquece um não compila. A lista lê o último `state` do `Monitor` vivo
   (`state/published.rs`) e não captura o pane dessa sessão. No modo `python` tudo roda como antes.
   Codex (`info.headless`), Claude (provider `ClaudeHeadless`) sem terminal e Codex com terminal
