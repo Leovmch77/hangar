@@ -906,8 +906,12 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                     }
                     Some(_) => {},
                 },
-                Err(failure) => if crate::warn_limit::allow(Some(&target.key),"stall_queue") {
-                    tracing::warn!(key=%target.key,session=%target.name,reason=?failure.kind(),"fila ilegível para o aviso de entrega parada");
+                Err(failure) => {
+                    // Sem rearmar, a mensagem presa nunca acende o aviso (o único caminho para o Reabrir).
+                    stall_dirty = true;
+                    if crate::warn_limit::allow(Some(&target.key),"stall_queue") {
+                        tracing::warn!(key=%target.key,session=%target.name,reason=?failure.kind(),"fila ilegível para o aviso de entrega parada");
+                    }
                 },
             }
         }
@@ -1582,7 +1586,10 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                     && matches!(event,None | Some(IoEvent::End { code:None })) && engine.view()["alive"] != false && {
                     let (pid,key) = (target.binding.pid,target.key.clone());
                     let birth = tokio::task::spawn_blocking(move||(super::process::liveness(pid,&key) == super::process::Liveness::Ours)
-                        .then(||crate::terminal_facts::agent_birth(pid)).flatten()).await.ok().flatten();
+                        .then(||crate::terminal_facts::agent_birth(pid)).flatten()).await.unwrap_or_else(|join| {
+                        tracing::warn!(key=%target.key,session=%target.name,reason=%join,"prova do cano vivo falhou; segue como queda");
+                        None
+                    });
                     if birth.is_some() { engine.cano_birth = birth; }
                     birth.is_some()
                 };

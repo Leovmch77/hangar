@@ -147,10 +147,7 @@ impl Hangar {
                         Err(_) => { list.error = Some(tr("invalid_response")); false }
                     },
                     "list_error" => {
-                        match super::list_error_note(!list.sessions.is_empty(), &frame.data) {
-                            Some(note) => list.error = Some(note),
-                            None => changed = false,
-                        }
+                        changed = super::apply_list_error(!list.sessions.is_empty(), &mut list.error, &frame.data, crate::log_line);
                         true
                     }
                     // Quem o mostra (chip, blocos, painel) é acertado por `live_changed`, na volta desta função.

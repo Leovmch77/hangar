@@ -275,6 +275,47 @@ async fn connect_delete_of_a_rust_claude_closes_through_the_bridge() {
     assert_eq!(python.hits_to("/api/sessions/s"), 0, "a ponte nunca devolve ao Python");
 }
 
+/// O fechamento pela ponte recusado (409) deixa a sessão viva, e ela continua voltando no reboot; o 421 (o
+/// Python fecha pelo nome) a tira da fotografia, como o fechamento que deu certo.
+#[tokio::test]
+async fn refused_connect_close_keeps_the_session_in_the_restore_snapshot() {
+    use hangar_server::list::bridge::{ListBridge, ListEnv, parse_dirs};
+    let (dir, store) = (tempfile::tempdir().unwrap(), Arc::new(InteractionStore::default()));
+    let (registry, _plugin) = registry_with_plugin(&store).await;
+    open_headless(&registry, dir.path(), "s").await;
+    let home = tempfile::tempdir().unwrap();
+    let snapshot = home.path().join(".hangar/session-restore.json");
+    std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+    std::fs::write(&snapshot, json!({"sessions": {"k-s": {"name": "s", "provider": "claude", "conversation": null},
+        "k-nada": {"name": "nada", "provider": "claude", "conversation": null}}}).to_string()).unwrap();
+    let names = || serde_json::from_slice::<Value>(&std::fs::read(&snapshot).unwrap()).unwrap()["sessions"].as_object().unwrap()
+        .values().map(|entry| entry["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let (_python, upstream) = fake::spawn_fake().await;
+    let mut state = hangar_server::routes::AppState::new(fake::config(upstream, "127.0.0.1"));
+    let h = home.path();
+    let dirs = parse_dirs(&json!({"home": h, "claude": h.join(".claude"), "codex_home": h.join(".codex"), "pi_sessions": h.join(".pi/agent/sessions"),
+        "omp_config": h.join(".omp"), "omp_agent": h.join(".omp/agent"), "kimi_home": h.join(".kimi-code")}).to_string());
+    assert!(dirs.is_some());
+    state.list = Arc::new(ListBridge::new(ListEnv { mux: Default::default(), capture_program: "missing-test-mux".into(),
+        procs: Arc::new(hangar_server::list::procs::SystemProcs::default()), dirs },
+        hangar_server::list::facts::FactsClient::new(upstream, SECRET.into())));
+    assert!(state.state.runtime.set(registry.clone()).is_ok());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let private = listener.local_addr().unwrap();
+    let router = hangar_server::routes::terminal_router(Arc::new(state));
+    tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap() });
+    let close = |name: &'static str| async move {
+        fake::client().post(format!("http://{private}/__hangar_server/claude/{name}/close"))
+            .header("x-hangar-internal", SECRET).send().await.unwrap().status().as_u16()
+    };
+    registry.ingress().hold("s", Duration::from_secs(1)).await.unwrap();
+    assert_eq!(close("s").await, 409);
+    assert!(names().contains(&"s".to_owned()), "recusado: a sessão viva segue na fotografia");
+    registry.ingress().release("s");
+    assert_eq!(close("nada").await, 421);
+    assert!(!names().contains(&"nada".to_owned()), "421: o Python fecha pelo nome, e ela não volta no reboot");
+}
+
 /// O Reabrir (`/recarregar`) do Claude que entrou pelo Connect chega à ponte e é atendido pela mesma rota
 /// da 8765: a recusa da reabertura (aqui o arquivo da sessão ilegível) volta com o código do Rust, e o que
 /// não é Claude daqui é 421, sem nunca voltar ao Python.

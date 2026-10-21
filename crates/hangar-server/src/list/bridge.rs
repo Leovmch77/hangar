@@ -907,6 +907,7 @@ impl ListBridge {
 /// não pode ser tapada por um código que o portão depois esconde.
 fn set_unless_screen(row: &mut SessionRow, code: String) {
     if row.problema.as_deref().is_none_or(crate::problem_gate::is_diagnostic) { row.problema = Some(code); }
+    else { list_facts::note("rust.problem_hidden", &row.name, code, "erro do plugin atrás do aviso de tela"); }
 }
 
 /// Causa interna de não identificar a pergunta aberta: a tela recebe `interacao_indisponivel` (lista e conversa).
@@ -1355,14 +1356,17 @@ mod tests {
         use crate::state::facts::PluginReading;
         let bridge = ListBridge::new(ListEnv { mux: Mux::default(), capture_program: "missing-test-mux".into(),
             procs: Arc::new(procs::SystemProcs::default()), dirs: None }, FactsClient::new("127.0.0.1:9".parse().unwrap(), "s".into()));
-        let stuck = || vec![serde_json::from_value::<SessionRow>(json!({"name":"s","provider":"claude","state":"working","problema":"terminal_input_stalled"})).unwrap()];
+        let stuck = || vec![serde_json::from_value::<SessionRow>(json!({"name":"stuck-wins","provider":"claude","state":"working","problema":"terminal_input_stalled"})).unwrap()];
         let mut rows = stuck();
-        bridge.project_plugins(&mut rows, &BTreeMap::from([("s".into(), Err("plugin_store_unavailable".into()))]));
+        bridge.project_plugins(&mut rows, &BTreeMap::from([("stuck-wins".into(), Err("plugin_store_unavailable".into()))]));
         assert_eq!(rows[0].problema.as_deref(), Some("terminal_input_stalled"), "leitura do plugin que falhou");
         let mut rows = stuck();
         let binding = InteractionBinding { key: "k".into(), conversation: "sid".into(), generation: 1 };
-        bridge.project_plugins(&mut rows, &BTreeMap::from([("s".into(), Ok(PluginReading { binding, facts: Err("runtime_binding".into()) }))]));
+        bridge.project_plugins(&mut rows, &BTreeMap::from([("stuck-wins".into(), Ok(PluginReading { binding, facts: Err("runtime_binding".into()) }))]));
         assert_eq!(rows[0].problema.as_deref(), Some("terminal_input_stalled"), "fatos do plugin que não vieram");
+        // O erro que ficou fora da linha vai ao diário.
+        let notes = list_facts::notes_for("stuck-wins");
+        for code in ["plugin_store_unavailable", "runtime_binding"] { assert!(notes.iter().any(|noted| noted == code), "{code} no diário: {notes:?}"); }
     }
 
     /// Decisão M11: a pergunta que o plugin segura chega ao card com o formulário e o ID dele, para o `/answer`.

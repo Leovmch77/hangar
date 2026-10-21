@@ -273,9 +273,13 @@ async fn after_close(st: &Arc<AppState>, name: &str) {
 /// dele). 421 = não é Claude aberto aqui, e o Python segue.
 async fn close_bridged(st: Arc<AppState>, peer: SocketAddr, name: &str, headers: &axum::http::HeaderMap) -> Response {
     let Some(runtime) = st.state.runtime.get().cloned() else { return not_ours() };
-    if let Some(dirs) = st.list.env().dirs.as_ref() { crate::session_open::restore::forget(&dirs.home, name); }
     crate::diag::record(crate::diag::diary_dir(), vec![close_line(name, headers, peer)], "sessão fechada");
-    match runtime.kill_claude(name).await {
+    let closed = runtime.kill_claude(name).await;
+    // Recusado, a sessão segue viva e volta no reboot; no 421 o Python a fecha pelo nome, então ela sai.
+    if !matches!(closed, Some(Err(_))) && let Some(dirs) = st.list.env().dirs.as_ref() {
+        crate::session_open::restore::forget(&dirs.home, name);
+    }
+    match closed {
         None => not_ours(),
         Some(Err(error)) => close_refusal(&error),
         Some(Ok(closed)) => {
