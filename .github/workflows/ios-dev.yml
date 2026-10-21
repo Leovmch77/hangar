@@ -41,6 +41,7 @@ jobs:
           if [ "$CONFIGURATION" = Release ]; then
             python3 -I - ../app.json Payload/*.app <<'PY'
           import json
+          import os
           import plistlib
           import sys
           import uuid
@@ -83,6 +84,13 @@ jobs:
                           raise ValueError("asset inválido")
               except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
                   raise SystemExit(f"Release sem app.manifest válido: {error}")
+              # A fonte do SideStore declara este mesmo número; diferente, ele recusa o IPA baixado.
+              info_path = app / "Info.plist"
+              with info_path.open("rb") as stream:
+                  info = plistlib.load(stream)
+              info["CFBundleVersion"] = os.environ["GITHUB_RUN_NUMBER"]
+              with info_path.open("wb") as stream:
+                  plistlib.dump(info, stream, fmt=plistlib.FMT_BINARY)
           PY
           fi
           zip -qry "$IPA_NAME.ipa" Payload
