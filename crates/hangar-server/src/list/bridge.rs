@@ -906,7 +906,7 @@ impl ListBridge {
 /// O erro do plugin entra na linha só no lugar de nada ou de diagnóstico: a mensagem presa (código de tela)
 /// não pode ser tapada por um código que o portão depois esconde.
 fn set_unless_screen(row: &mut SessionRow, code: String) {
-    if row.problema.as_deref().is_none_or(|current| crate::problem_gate::diagnostic(current, &row.state)) { row.problema = Some(code); }
+    if row.problema.as_deref().is_none_or(crate::problem_gate::is_diagnostic) { row.problema = Some(code); }
 }
 
 /// Causa interna de não identificar a pergunta aberta: a tela recebe `interacao_indisponivel` (lista e conversa).

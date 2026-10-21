@@ -148,7 +148,7 @@ fn headless_state(row: &mut SessionRow, retrato: Option<&BTreeMap<String, Value>
         // Retrato que não veio ou vista ilegível é acompanhamento (diário); erro durável do ator é falha real, a
         // mesma que o chat mostra como `runtime_falhou`.
         let actor_error = snapshot.and_then(|s| s["error"].as_str())
-            .filter(|code| !matches!(*code, "runtime_live_unavailable" | "runtime_snapshot_timeout") && !crate::problem_gate::diagnostic(code, ""));
+            .filter(|code| !matches!(*code, "runtime_live_unavailable" | "runtime_snapshot_timeout") && !crate::problem_gate::is_diagnostic(code));
         row.problema = Some(if actor_error.is_some() { "runtime_falhou" } else { "list_runtime_unavailable" }.into());
     }
     let live = snapshot.filter(|s| !broken && s["view"]["alive"] == true).map(|s| &s["view"]["public_state"]);

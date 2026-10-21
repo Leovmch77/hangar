@@ -337,14 +337,14 @@ impl<S: Sources> Monitor<S> {
     /// (a memória temporal não anda). Problema da observação ou dos fatos fica até a rodada boa.
     /// O problema do ator quando é de tela (mensagem presa, troca de conta): vence o diagnóstico da rodada.
     fn screen_runtime_problem(&self) -> Option<(String, String)> {
-        self.src.runtime_problem().filter(|(code, _)| !crate::problem_gate::diagnostic(code, ""))
+        self.src.runtime_problem().filter(|(code, _)| !crate::problem_gate::is_diagnostic(code))
     }
 
     async fn runtime_changed(&mut self) -> Option<Step> {
         let last = self.mem.last.as_ref()?;
         let now = self.src.runtime_problem();
         // Problema da observação fica até a rodada boa, salvo quando chega um de tela, que ele não pode tapar.
-        if last.problema.as_deref().is_some_and(|p| !edges::is_runtime_problem(p)) && self.screen_runtime_problem().is_none() {
+        if last.problema.as_deref().is_some_and(|p| !edges::is_runtime_problem(p)) && now.as_ref().is_none_or(|(code, _)| crate::problem_gate::is_diagnostic(code)) {
             return None;
         }
         let same = match &now {
@@ -511,10 +511,9 @@ impl<S: Sources> Monitor<S> {
         let loop_info = files.loop_info.unwrap_or_default();
         // O problema do runtime entra na chave: muda o evento mesmo com a tela parada. O de tela (mensagem presa)
         // vence o diagnóstico daqui, que o portão da saída esconderia.
-        let problem = match self.screen_runtime_problem() {
-            Some(screen) => Some(screen),
-            None => problem.map(|(p, d)| (p.to_owned(), d)).or_else(|| self.src.runtime_problem()),
-        };
+        let runtime = self.src.runtime_problem();
+        let problem = if runtime.as_ref().is_some_and(|(code, _)| !crate::problem_gate::is_diagnostic(code)) { runtime }
+            else { problem.map(|(p, d)| (p.to_owned(), d)).or(runtime) };
         let (problema, problema_detalhe) = problem.unzip();
         let mut event = StateEvent {
             session: name, state: a.state, label: a.label, question: a.question, options: a.options,
@@ -525,7 +524,7 @@ impl<S: Sources> Monitor<S> {
             claude_plan_pending: facts.plan_pending.clone(), ..Default::default()
         };
         let projection = super::facts::project_plugin_state(&mut event, &facts.questions);
-        if let Err(code) = &projection && event.problema.as_deref().is_none_or(|p| crate::problem_gate::diagnostic(p, &event.state)) {
+        if let Err(code) = &projection && !crate::problem_gate::keeps(event.problema.as_deref(), UNAVAILABLE) {
             event.problema = Some(UNAVAILABLE.into());
             event.problema_detalhe = Some(code.clone());
         }

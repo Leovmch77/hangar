@@ -187,7 +187,7 @@ fn in_column(el: impl IntoElement) -> Div {
 /// Faixa de problema da sessão: a frase do web pelo código, como no web; código sem frase mostra o detalhe cru.
 fn problem_banner(state: &SessionState) -> Option<String> {
     let code = state.problema.as_deref().filter(|code| !code.trim().is_empty());
-    match code.and_then(|code| crate::i18n::tr_web(&format!("problema_{code}"), &HashMap::new())) {
+    match code.and_then(problem_text) {
         Some(text) => Some(match state.problema_detalhe.as_deref().and_then(|d| d.lines().next()).filter(|d| !d.trim().is_empty()) {
             Some(detail) => format!("{text} — {detail}"),
             None => text,
@@ -195,6 +195,9 @@ fn problem_banner(state: &SessionState) -> Option<String> {
         None => state.problema_detalhe.clone().or_else(|| code.map(str::to_owned)),
     }
 }
+
+/// A frase do web para o código de problema, se houver.
+fn problem_text(code: &str) -> Option<String> { crate::i18n::tr_web(&format!("problema_{code}"), &HashMap::new()) }
 
 /// O `list_error` da lista: aviso só sem linha nenhuma na tela. Com a lista anterior de pé, uma rodada que
 /// falhou é diagnóstico (a próxima costuma voltar) e vai ao log, sem aviso que aparece e some.

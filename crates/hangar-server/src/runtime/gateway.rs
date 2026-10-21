@@ -360,13 +360,6 @@ impl RuntimeRegistry {
     }
     pub fn request_reopen(&self,name:&str) {
         let Some(registry) = self.self_ref.get().and_then(std::sync::Weak::upgrade) else { return };
-        // Conversa aberta: a religação ao cano já marcada é antecipada, sem abrir outra.
-        let (waker,wake_name) = (registry.clone(),name.to_owned());
-        tokio::spawn(async move {
-            let handle = waker.entries.lock().await.values().find(|entry|entry.name == wake_name && entry.provider == "claude")
-                .and_then(|entry|match &entry.handle { EntryHandle::Headless(handle)=>Some(handle.clone()),_=>None });
-            if let Some(handle) = handle { handle.wake_reconnect(); }
-        });
         if !self.reopening.lock().unwrap_or_else(|e|e.into_inner()).insert(name.to_owned()) { return; }
         let name = name.to_owned();
         tokio::spawn(async move {
@@ -397,6 +390,8 @@ impl RuntimeRegistry {
             if self.runtime_lost(name).await.is_none() { return Ok(false); }
             return self.open_claude_headless(name,true).await.transpose().map(|opened|opened.is_some());
         };
+        // Conversa aberta: a religação ao cano já marcada (Claude e Codex sem terminal) é antecipada, sem abrir outra.
+        if let EntryHandle::Headless(actor) = &handle { actor.wake_reconnect(); }
         let terminal = matches!(handle,EntryHandle::Terminal {..});
         if handle.snapshot().await.is_ok_and(|snapshot|healthy(terminal,&snapshot)) {
             handle.ensure_projection().await?;
@@ -913,9 +908,9 @@ impl RuntimeRegistry {
         }
     }
     /// Sem o sidecar a sessão foi fechada pelo nome: a entrada sai sem matar nada, em vez de religar e pôr
-    /// erro numa sessão que não existe mais. Chamar com a barreira da chave.
-    async fn release_closed_by_name(&self,key:&str,generation:u64,name:&str) -> bool {
-        if !super::lifecycle::claude_sidecar_absent(name) {return false;}
+    /// erro numa sessão que não existe mais. Chamar com a barreira da chave; `absent`: ausência já lida nesta volta.
+    async fn release_closed_by_name(&self,key:&str,generation:u64,name:&str,absent:bool) -> bool {
+        if !absent && !super::lifecycle::claude_sidecar_absent(name).await {return false;}
         if let Err(error)=self.close_locked(key,generation,false).await {
             tracing::warn!(key,session=name,code=%error.code,"entrada da sessão fechada pelo nome não saiu do Rust");
         }
@@ -946,7 +941,8 @@ impl RuntimeRegistry {
             let (mut gave_up,mut released)=(false,false);
             for attempt in 0..3 {
                 // Já fechada pelo nome: a primeira volta a solta sem esperar.
-                if attempt>0 || !super::lifecycle::claude_sidecar_absent(&name) {tokio::time::sleep(base * (1u32<<attempt)).await;}
+                let absent=attempt==0 && super::lifecycle::claude_sidecar_absent(&name).await;
+                if !absent {tokio::time::sleep(base * (1u32<<attempt)).await;}
                 if context.cancelled.load(std::sync::atomic::Ordering::Acquire) {break;}
                 let result=async {
                     let _ingress=super::lifecycle::ClosedIngress::acquire(&registry.ingress,&name).await?;
@@ -954,7 +950,7 @@ impl RuntimeRegistry {
                     // Sem a entrada desta vida, só segue quem a tirou numa volta anterior: outro a fechou depois
                     // de a religação ser aceita (o cancelamento do `close` pode ter vindo antes dela).
                     if !released && !registry.entries.lock().await.get(&key).is_some_and(|entry|entry.generation==generation) {return Err(failure("lifecycle_cancelled"));}
-                    if registry.release_closed_by_name(&key,generation,&name).await {return Err(failure(SESSION_CLOSED));}
+                    if registry.release_closed_by_name(&key,generation,&name,absent).await {return Err(failure(SESSION_CLOSED));}
                     let result=registry.reopen_headless_locked(&name,&key,generation,&id,None,true,Some(context.clone()),attempt).await;
                     released=!registry.entries.lock().await.contains_key(&key);
                     result
@@ -4024,6 +4020,19 @@ pub(crate) mod tests {
         assert!(snapshot["error"].is_null(),"religada sem erro: {snapshot}");
         registry.close(&key,1).await.unwrap();
         server.abort();
+    }
+
+    /// D2 vale para o Codex sem terminal também: abrir a conversa acorda a religação marcada do ator dele.
+    #[tokio::test]
+    async fn request_reopen_wakes_the_reconnect_of_a_headless_codex() {
+        let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into()));registry.bind_lifecycle();
+        let (handle,wakes)=super::super::actor::RuntimeHandle::counting_wakes("CX",1);
+        let binding=crate::interactions::InteractionBinding {key:"CX".into(),conversation:"thread".into(),generation:1};
+        registry.entries.lock().await.insert("CX".into(),Entry {generation:1,handle:EntryHandle::Headless(handle),lease_path:"CX.lock".into(),name:"cx-wake".into(),mods_life:0,provider:"codex".into(),account_key:None,relaunch:None,settings_owner:None,
+            mode_source:crate::terminal_facts::ModeSource {binding,transcript:"t.jsonl".into(),confirmed:None},live:registry.live_sender("cx-wake"),runtime_target:None,cano_birth:None,auto_respawn:None,respawn_inflight:false});
+        registry.request_reopen("cx-wake");
+        tokio::time::timeout(Duration::from_secs(5),async {while wakes.load(std::sync::atomic::Ordering::SeqCst)==0 {tokio::time::sleep(Duration::from_millis(10)).await;}})
+            .await.expect("a conversa aberta não acordou a religação do Codex");
     }
 
     /// Sessão sem terminal com o cano vivo da chave (`refuse` decide quais conexões ele recusa) e a subida do

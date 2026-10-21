@@ -99,7 +99,6 @@ pub struct CanoReconnect {
 
 impl CanoReconnect {
     pub fn new(waits:ReconnectWaits) -> Self { Self { waits,..Self::default() } }
-    pub fn waits(&self) -> &ReconnectWaits { &self.waits }
     /// Próxima tentativa: a espera da vez na lista curta (mensagem esperando) ou na normal. A espera
     /// conta do fim da tentativa anterior, por mais que ela tenha demorado.
     pub fn schedule(&mut self,now:f64,pending:bool) {

@@ -440,13 +440,12 @@ async def _codex_rust_port(name: str, request: Request):
         # A pergunta lateral vai sempre: a rota do Rust decide provedor e sessão.
         if reply is None and (rota == "btw" or (rota in {"input", "answer", "select", "select/submit", "permission-mode", "permission-modes", "model-effort", "recarregar"} or rota.startswith("queue/"))
                 and getattr(await _cached_info(name), "provider", "claude") == "claude"):
-            # O fork sem terminal tem 180 s; o prazo padrão da ponte cortaria a resposta.
-            prazo = (200,) if rota == "btw" else ()
-            if rota == "recarregar":
-                # A reabertura espera o Claude subir por até 5 min; quem pediu vai ao diário do Rust.
-                reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body, 360, headers=_who_asked(request))
-            else:
-                reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body, *prazo)
+            # O fork sem terminal tem 180 s e a reabertura espera o Claude subir por até 5 min; o prazo padrão da
+            # ponte cortaria a resposta. Quem pediu a recarga vai ao diário do Rust.
+            reload = rota == "recarregar"
+            prazo = (200,) if rota == "btw" else (360,) if reload else ()
+            who = {"headers": _who_asked(request)} if reload else {}
+            reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body, *prazo, **who)
         if reply:
             raise _RustReply(*reply)
 

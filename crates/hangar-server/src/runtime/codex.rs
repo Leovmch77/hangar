@@ -931,8 +931,7 @@ impl Engine {
     /// Diagnóstico do motor (controle caído, sem conexão, versão) não tapa código de tela (limite de uso, sem
     /// login), que o portão da saída mostraria; o de tela sempre entra.
     fn put_problem(&mut self,code:&str,detail:Option<String>) {
-        let screen = self.state.problema.as_deref().is_some_and(|current|!crate::problem_gate::diagnostic(current,""));
-        if screen && crate::problem_gate::diagnostic(code,"") { return; }
+        if crate::problem_gate::keeps(self.state.problema.as_deref(),code) { return; }
         self.state.problema = Some(code.into());
         self.state.problema_detalhe = detail;
     }

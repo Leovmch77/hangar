@@ -209,7 +209,7 @@ pub(super) fn reopen_warnings(value: &Value) -> Option<String> {
 
 /// O problema da tela pré-conversa: a frase da faixa pelo código; só texto sem frase própria aparece como veio.
 fn prethread_problem(problem: &str) -> String {
-    crate::i18n::tr_web(&format!("problema_{problem}"), &Default::default()).unwrap_or_else(|| problem.to_owned())
+    super::problem_text(problem).unwrap_or_else(|| problem.to_owned())
 }
 
 fn text(value: &Value, key: &str) -> String { value.get(key).and_then(Value::as_str).unwrap_or("").to_owned() }

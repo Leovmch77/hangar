@@ -487,6 +487,18 @@ impl RuntimeHandle {
     }
     /// Antecipa a religação ao cano que está esperando; caixa cheia ou ator fechado não importam.
     pub fn wake_reconnect(&self) { let _ = self.sender.try_send(Message::WakeReconnect); }
+    /// Ator de mentira que só conta os pedidos de religação; o resto da caixa cai sem resposta.
+    #[cfg(test)]
+    pub(super) fn counting_wakes(key:&str,generation:u64) -> (Self,Arc<std::sync::atomic::AtomicUsize>) {
+        let (sender,mut inbox) = mpsc::channel(8);
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = wakes.clone();
+        tokio::spawn(async move { while let Some(message) = inbox.recv().await {
+            if matches!(message,Message::WakeReconnect) { counted.fetch_add(1,Ordering::SeqCst); }
+        } });
+        (Self { sender,task:Arc::new(Mutex::new(None)),closed:Arc::new(AtomicBool::new(false)),events:broadcast::channel(1).0,
+            stopped:Arc::new(Mutex::new(None)),key:key.into(),generation },wakes)
+    }
     pub async fn drain(&self) -> Result<Value,RuntimeError> {
         let (send,receive) = oneshot::channel(); self.sender.send(Message::Drain(send)).await.map_err(|_|self.gone("runtime_closed"))?;
         receive.await.map_err(|_|self.gone("runtime_closed"))?
@@ -1196,14 +1208,12 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                         Err(failed)=>{
                             if let Some(id)=operation_id {mode_failures.insert(id,failed.clone());}
                             // Sidecar apagado: a sessão foi fechada pelo nome e não há onde gravar; a religação a solta.
-                            if failed.code!="lifecycle_sidecar_read" || !super::lifecycle::claude_sidecar_absent(&target.name) {enter_error(&mut error,&target,failed);}
+                            if failed.code!="lifecycle_sidecar_read" || !super::lifecycle::claude_sidecar_absent(&target.name).await {enter_error(&mut error,&target,failed);}
                             else {
                                 if crate::warn_limit::allow(Some(&target.key),"claude_sidecar_absent") {
                                     tracing::warn!(key=%target.key,session=%target.name,"sidecar da sessão sumiu; a gravação do estado não foi feita");
                                 }
-                                if let Some(policy)=&engine.policy {
-                                    policy.diag.report("rust.claude_sidecar_absent",&target.name,"claude_sidecar_absent","o sidecar da sessão sumiu (fechada pelo nome); a gravação do estado não foi feita");
-                                }
+                                effects.push_back(Effect::Diag { event:DiagEvent::ClaudeSidecarAbsent,code:"claude_sidecar_absent".into() });
                             }
                         },
                     }
@@ -1630,9 +1640,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                     lost @ (None | Some(IoEvent::End { code:None })) if (target.provider == "claude" || codex_cano_alive) && engine.view()["alive"] != false => {
                         if lost.is_some() {
                             tracing::warn!(key=%target.key,session=%target.name,"o cano mandou um envelope que o servidor não conhece; religando");
-                            if let Some(policy) = &engine.policy {
-                                policy.diag.report("rust.cano_protocol_invalid",&target.name,"cano_protocol_invalid","o cano mandou um envelope que o servidor não conhece; o ator religou ao mesmo processo");
-                            }
+                            effects.push_back(Effect::Diag { event:DiagEvent::CanoProtocolInvalid,code:"cano_protocol_invalid".into() });
                         }
                         io_open = false;
                         std::mem::replace(&mut io,super::codex_terminal::closed_io()).stop().await;
@@ -1822,9 +1830,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                     // Sem prova de que o pid é o mesmo processo, para de tentar; a sessão segue e a fila espera.
                     Reconnection::Stopped(failure) => {
                         tracing::warn!(key=%target.key,session=%target.name,provider=%target.provider,code=%failure.code,reason=%failure.message,"religação ao cano parou");
-                        if let Some(policy) = &engine.policy {
-                            policy.diag.report("rust.cano_reconnect_stopped",&target.name,"cano_reconnect_stopped","a religação ao cano parou: falta o que prova que o processo é o desta vida");
-                        }
+                        effects.push_back(Effect::Diag { event:DiagEvent::CanoReconnectStopped,code:"cano_reconnect_stopped".into() });
                         reconnect.cancel();
                     }
                 }

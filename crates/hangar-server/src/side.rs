@@ -2704,6 +2704,15 @@ mod tests {
         assert!(!frames(&lease.hub).contains(r#""problema":"outro""#), "problema diferente espera o prazo");
     }
 
+    /// Os quadros guardados no hub, em texto.
+    fn replay_text(hub: &Hub) -> String { hub.cache.lock().unwrap().replay().iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect() }
+
+    /// O `state` guardado no hub (vazio sem nenhum).
+    fn replayed_state(hub: &Hub) -> serde_json::Value {
+        replay_text(hub).split("\n\n").find(|f| f.starts_with("event: state")).and_then(|f| f.split_once("data: "))
+            .map(|(_, data)| serde_json::from_str(data.trim()).unwrap()).unwrap_or_default()
+    }
+
     /// Aviso de diagnóstico (fatos velhos, Codex sem conexão, controle do Codex caído) sai do estado na hora e o
     /// prazo não o traz de volta; o de tela (troca de conta sem destino, mensagem presa) espera o prazo e sai.
     #[tokio::test]
@@ -2712,11 +2721,7 @@ mod tests {
         let ctx = SideCtx { queue_dir: Some(dir.path().to_path_buf()), problem_hold: crate::problem_gate::HOLD, ..test_ctx() };
         let lease = ctx.hubs.acquire("diagnostico", queue_binding(dir.path(), "a"), &ctx);
         tokio::time::pause();
-        let state = |hub: &Hub| -> serde_json::Value {
-            let frames: String = hub.cache.lock().unwrap().replay().iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect();
-            frames.split("\n\n").find(|f| f.starts_with("event: state")).and_then(|f| f.split_once("data: "))
-                .map(|(_, data)| serde_json::from_str(data.trim()).unwrap()).unwrap_or_default()
-        };
+        let state = replayed_state;
         let with = |problema: &str| serde_json::json!({"state":"working","problema":problema,"problema_detalhe":"detalhe"}).to_string();
         let past_hold = || async {
             tokio::time::advance(crate::problem_gate::HOLD + std::time::Duration::from_millis(5)).await;
@@ -2747,10 +2752,7 @@ mod tests {
         let problem = |state: &str, detail: &str| -> serde_json::Value {
             let data = serde_json::json!({"state":state,"problema":"state_facts_unavailable","problema_detalhe":detail}).to_string();
             assert!(lease.hub.publish_own("state", &data));
-            let frames: String = lease.hub.cache.lock().unwrap().replay().iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect();
-            let state: serde_json::Value = frames.split("\n\n").find(|f| f.starts_with("event: state")).and_then(|f| f.split_once("data: "))
-                .map(|(_, data)| serde_json::from_str(data.trim()).unwrap()).unwrap_or_default();
-            state["problema"].clone()
+            replayed_state(&lease.hub)["problema"].clone()
         };
         assert_eq!(problem("awaiting_input", "askq_pane_mismatch"), "interacao_indisponivel", "card sem como responder: tela");
         assert_eq!(problem("awaiting_input", "runtime_binding"), "interacao_indisponivel");
@@ -2761,10 +2763,7 @@ mod tests {
             let mut data = serde_json::json!({"state":"awaiting_input","problema":"state_facts_unavailable","problema_detalhe":"plugin_store_unavailable"});
             data.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
             assert!(lease.hub.publish_own("state", &data.to_string()));
-            let frames: String = lease.hub.cache.lock().unwrap().replay().iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect();
-            let state: serde_json::Value = frames.split("\n\n").find(|f| f.starts_with("event: state")).and_then(|f| f.split_once("data: "))
-                .map(|(_, data)| serde_json::from_str(data.trim()).unwrap()).unwrap_or_default();
-            state["problema"].clone()
+            replayed_state(&lease.hub)["problema"].clone()
         };
         assert!(identified(serde_json::json!({"interaction_id":"sel-1"})).is_null(), "seletor com ID");
         assert!(identified(serde_json::json!({"codex_question":{"interaction_id":"form-1","questions":[]}})).is_null(), "formulário com ID");
@@ -2781,7 +2780,7 @@ mod tests {
         assert!(lease.hub.publish_own("state", r#"{"state":"awaiting_input","problema":"state_facts_unavailable","problema_detalhe":"askq_pane_mismatch"}"#));
         tokio::time::advance(crate::problem_gate::HOLD + std::time::Duration::from_millis(5)).await;
         for _ in 0..5 { tokio::task::yield_now().await; }
-        let frames: String = lease.hub.cache.lock().unwrap().replay().iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect();
+        let frames = replay_text(&lease.hub);
         assert!(frames.contains(r#""problema":"interacao_indisponivel""#), "{frames}");
         assert!(!frames.contains("state_facts_unavailable") && !frames.contains("askq_pane_mismatch"), "{frames}");
     }
@@ -2796,7 +2795,7 @@ mod tests {
             diag: crate::diag::DiagClient::new(sink, "s".into()), ..test_ctx() };
         let lease = ctx.hubs.acquire("velho", queue_binding(dir.path(), "a"), &ctx);
         assert!(lease.hub.publish_own("state", r#"{"state":"idle","problema":"state_facts_unavailable","problema_detalhe":"runtime_binding"}"#));
-        let frames: String = lease.hub.cache.lock().unwrap().replay().iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect();
+        let frames = replay_text(&lease.hub);
         assert!(frames.contains("event: state"), "o estado sai");
         assert!(!frames.contains("state_facts_unavailable") && !frames.contains("runtime_binding"), "sem o aviso: {frames}");
         assert!(lease.hub.problems.lock().unwrap().timer.is_none(), "nada retido para sair depois do prazo");

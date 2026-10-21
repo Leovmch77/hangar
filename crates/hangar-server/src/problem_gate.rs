@@ -6,18 +6,23 @@ use std::time::{Duration, Instant};
 pub const HOLD: Duration = Duration::from_secs(3);
 
 /// Falha de acompanhamento, dado velho ou condição que some sozinha: vai ao diário, nunca à tela.
-const DIAGNOSTIC: [&str; 17] = [
-    "state_facts_unavailable", "terminal_observacao_falhou", "permission_observe_failed",
-    "list_facts_unavailable", "list_capture_failed", "list_runtime_unavailable", "list_runtime_absent", "list_orq_unavailable",
-    "codex_versao_nao_conferida", "codex_sem_conexao", "state_feed_binding_unavailable", "runtime_absent", "state_feed_invalid",
-    crate::runtime::codex_terminal::CONTROL_LOST, "cano_reconnect_stopped", "cano_protocol_invalid", "claude_sidecar_absent",
+const DIAGNOSTIC: [&str; 11] = [
+    crate::state::facts::UNAVAILABLE, crate::state::monitor::OBSERVATION_FAILED, crate::state::monitor::PERMISSION_FAILED,
+    crate::list::facts::UNAVAILABLE, "list_capture_failed", "list_runtime_unavailable", crate::list::classify::RUNTIME_ABSENT,
+    crate::list::facts::ORQ_UNAVAILABLE, "codex_versao_nao_conferida", "codex_sem_conexao", crate::runtime::codex_terminal::CONTROL_LOST,
 ];
+
+/// O código vai só ao diário, qualquer que seja o estado da sessão.
+pub fn is_diagnostic(code: &str) -> bool { DIAGNOSTIC.contains(&code) }
 
 /// O código não pede a pessoa: sai da saída (lista e conversa) e vai ao diário. A pergunta sem identidade
 /// só pede a pessoa enquanto a sessão espera a resposta dela.
 pub fn diagnostic(code: &str, state: &str) -> bool {
-    DIAGNOSTIC.contains(&code) || (code == crate::list::bridge::INTERACTION_UNAVAILABLE && state != "awaiting_input")
+    is_diagnostic(code) || (code == crate::list::bridge::INTERACTION_UNAVAILABLE && state != "awaiting_input")
 }
+
+/// Diagnóstico não cobre código de tela: `new` não entra no lugar de `current`, que o portão mostraria.
+pub fn keeps(current: Option<&str>, new: &str) -> bool { current.is_some_and(|current| !is_diagnostic(current)) && is_diagnostic(new) }
 
 /// Registro do aviso tirado da tela: o diário recebe o código (uma vez por minuto por sessão e código) e o
 /// log, o detalhe, que o diário não aceita por ser texto livre.
@@ -94,12 +99,10 @@ mod tests {
 
     #[test]
     fn diagnostic_codes_stay_off_the_screen_and_screen_codes_stay_on() {
-        for code in ["state_facts_unavailable", "terminal_observacao_falhou", "permission_observe_failed", "list_facts_unavailable",
-            "list_capture_failed", "list_runtime_unavailable", "list_runtime_absent", "list_orq_unavailable", "codex_versao_nao_conferida",
-            "codex_sem_conexao", "state_feed_binding_unavailable", "runtime_absent", "state_feed_invalid", "codex_control_lost",
-            "cano_reconnect_stopped", "cano_protocol_invalid", "claude_sidecar_absent"] {
+        for code in DIAGNOSTIC {
             assert!(diagnostic(code, "working"), "{code} é diagnóstico");
             assert!(diagnostic(code, "awaiting_input"), "{code} é diagnóstico em qualquer estado");
+            assert!(keeps(Some("terminal_input_stalled"), code) && !keeps(Some(code), "terminal_input_stalled"), "{code} não cobre tela");
         }
         for code in ["headless_processo_caiu", "headless_caiu", "headless_nao_subiu", "headless_sem_login", "headless_sem_resposta",
             "headless_turno_erro", "codex_sem_login", "codex_hooks_nao_aprovados", "codex_limite_uso", "codex_headless_nao_subiu",

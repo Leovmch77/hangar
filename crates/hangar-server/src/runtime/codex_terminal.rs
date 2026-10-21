@@ -30,11 +30,6 @@ pub const DISCONNECTED:&str = "runtime_falhou";
 /// diagnóstico (`problem_gate::diagnostic`), nunca aviso na tela.
 pub const CONTROL_LOST:&str = "codex_control_lost";
 
-/// Espera da reconexão: primeira, multiplicador e teto (segundos).
-const RECONNECT_FIRST:f64 = 1.0;
-const RECONNECT_FACTOR:f64 = 1.5;
-const RECONNECT_MAX:f64 = 10.0;
-
 #[derive(Clone,Debug,PartialEq)]
 pub struct CodexTerminalTarget {
     pub key: String,
@@ -169,9 +164,7 @@ pub async fn reconnect(adoption:&Adoption) -> Attempt {
 
 /// Esperas da reconexão ao app-server adotado: 1 s, ×1,5, até 10 s, com ou sem mensagem esperando.
 pub(crate) fn reconnect_waits() -> ReconnectWaits {
-    let mut normal = vec![RECONNECT_FIRST];
-    while normal[normal.len()-1] < RECONNECT_MAX { normal.push((normal[normal.len()-1]*RECONNECT_FACTOR).min(RECONNECT_MAX)); }
-    let normal:Vec<Duration> = normal.into_iter().map(Duration::from_secs_f64).collect();
+    let normal:Vec<Duration> = [1.0,1.5,2.25,3.375,5.0625,7.59375,10.0].into_iter().map(Duration::from_secs_f64).collect();
     ReconnectWaits { pending:normal.clone(),normal,..ReconnectWaits::default() }
 }
 
