@@ -623,15 +623,17 @@ test('confere: noul no piso da conclusao passa; abaixo, torto ou ausente nao', (
 
 test('destino do Jev: mesma regra do destino_jev do backend', () => {
   assert.deepEqual(destinoDoJev({}),
-    { url: 'https://api.typesafe.ai/v1/systemone', modelo: 'jev-latest' });
+    { url: 'https://api.typesafe.ai/v1/systemone', modelo: 'jev-latest', tipo: 'typesafe' });
   assert.deepEqual(destinoDoJev({ JEV_ENDPOINT: 'https://openrouter.ai/api/alpha/decisions', JEV_MODEL: 'typesafe/jev-1.13-20260917' }),
-    { url: 'https://openrouter.ai/api/alpha/decisions', modelo: 'typesafe/jev-1.13-20260917' });
+    { url: 'https://openrouter.ai/api/alpha/decisions', modelo: 'typesafe/jev-1.13-20260917', tipo: 'openrouter' });
   assert.deepEqual(destinoDoJev({ JEV_ENDPOINT: '  ', JEV_MODEL: '' }),
-    { url: 'https://api.typesafe.ai/v1/systemone', modelo: 'jev-latest' });
+    { url: 'https://api.typesafe.ai/v1/systemone', modelo: 'jev-latest', tipo: 'typesafe' });
   assert.deepEqual(destinoDoJev({ TYPESAFE_API_KEY: 'sk-or-x' }),
-    { url: 'https://openrouter.ai/api/alpha/decisions', modelo: '~typesafe/jev-latest' });
+    { url: 'https://openrouter.ai/api/alpha/decisions', modelo: '~typesafe/jev-latest', tipo: 'openrouter' });
   assert.deepEqual(destinoDoJev({ TYPESAFE_API_KEY: 'sk-or-x', JEV_MODEL: 'typesafe/jev-latest' }),
-    { url: 'https://openrouter.ai/api/alpha/decisions', modelo: '~typesafe/jev-latest' });
+    { url: 'https://openrouter.ai/api/alpha/decisions', modelo: '~typesafe/jev-latest', tipo: 'openrouter' });
+  assert.deepEqual(destinoDoJev({ TYPESAFE_API_KEY: 'sk-or-x', JEV_ENDPOINT: 'https://api.typesafe.ai/v1/systemone' }),
+    { url: 'https://api.typesafe.ai/v1/systemone', modelo: 'jev-latest', tipo: 'typesafe' });
 });
 
 const http = require('node:http');
@@ -674,6 +676,77 @@ test('askJev: devolve answers e manda modelo, estado e chave', async () => {
   } finally {
     srv.close();
   }
+});
+
+async function pedidoDoAskJev(args, sufixo = '') {
+  let pedido;
+  const { srv, url } = await jevServer((req, res) => {
+    let corpo = '';
+    req.on('data', (c) => { corpo += c; });
+    req.on('end', () => {
+      pedido = { corpo: JSON.parse(corpo), headers: req.headers };
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ answers: {} }));
+    });
+  });
+  try {
+    await askJev({ url: url + sufixo, modelo: 'm', chave: 'k', perguntas: {}, ...args });
+    return pedido;
+  } finally {
+    srv.close();
+  }
+}
+
+const IMAGEM = { base64: 'iVBORw0KGgo=', largura: 1280, altura: 800 };
+
+test('askJev com imagem no OpenRouter: image_url no state, sem assets nem cabeçalho da Typesafe', async () => {
+  const { corpo, headers } = await pedidoDoAskJev({ estado: { pagina: 'arvore' }, imagem: IMAGEM, tipo: 'openrouter' });
+  assert.deepEqual(corpo.state, {
+    pagina: 'arvore',
+    tela: { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } },
+  });
+  assert.equal('assets' in corpo, false);
+  assert.equal(headers['typesafe-danger-zone-images'], undefined);
+});
+
+test('askJev com imagem na Typesafe: ref no state, assets no topo e cabeçalho; estado string vira { pagina }', async () => {
+  const { corpo, headers } = await pedidoDoAskJev({ estado: 'arvore', imagem: IMAGEM, tipo: 'typesafe' });
+  assert.equal(corpo.state.pagina, 'arvore');
+  assert.match(corpo.state.tela, /^img-[0-9a-f-]{36}$/);
+  assert.deepEqual(corpo.assets, { [corpo.state.tela]: { type: 'image', data_base64: 'iVBORw0KGgo=', format: 'png' } });
+  assert.equal(headers['typesafe-danger-zone-images'], 'true');
+});
+
+test('askJev com imagem sem tipo: o endereço decide o formato', async () => {
+  const typesafe = await pedidoDoAskJev({ estado: 'arvore', imagem: IMAGEM });
+  assert.match(typesafe.corpo.state.tela, /^img-[0-9a-f-]{36}$/);
+  const openrouter = await pedidoDoAskJev({ estado: 'arvore', imagem: IMAGEM }, '?via=openrouter.ai');
+  assert.equal(openrouter.corpo.state.tela.type, 'image_url');
+  assert.equal('assets' in openrouter.corpo, false);
+});
+
+test('dimensoesPng lê largura e altura do IHDR; o que não é PNG volta null', () => {
+  const { dimensoesPng } = require('./jev_objetivo.cjs');
+  // Assinatura PNG + IHDR de 1280x800 (0x500 x 0x320), RGBA 8 bits.
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452000005000000032008060000005d6c2a3a', 'hex');
+  assert.deepEqual(dimensoesPng(png), { largura: 1280, altura: 800 });
+  assert.equal(dimensoesPng(Buffer.from('ffd8ffe000104a464946000101000001000100000000000000', 'hex')), null);
+  const semIhdr = Buffer.from(png);
+  semIhdr.write('IDAT', 12, 'latin1');
+  assert.equal(dimensoesPng(semIhdr), null);
+  assert.equal(dimensoesPng(png.subarray(0, 20)), null);
+});
+
+test('imagemDentroDoLimite: cada lado entre 280 e 1568 e a área dentro do limite da Typesafe', () => {
+  const { imagemDentroDoLimite } = require('./jev_objetivo.cjs');
+  assert.equal(imagemDentroDoLimite({ largura: 280, altura: 280 }), true);
+  assert.equal(imagemDentroDoLimite({ largura: 1568, altura: 1568 }), true);
+  assert.equal(imagemDentroDoLimite({ largura: 1280, altura: 800 }), true);
+  assert.equal(imagemDentroDoLimite({ largura: 279, altura: 800 }), false);
+  assert.equal(imagemDentroDoLimite({ largura: 800, altura: 279 }), false);
+  assert.equal(imagemDentroDoLimite({ largura: 1569, altura: 800 }), false);
+  assert.equal(imagemDentroDoLimite({ largura: 800, altura: 1569 }), false);
+  assert.equal(imagemDentroDoLimite({ largura: 2560, altura: 1600 }), false);
 });
 
 test('askJev: status de erro vira "o Jev recusou"', async () => {

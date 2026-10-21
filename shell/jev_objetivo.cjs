@@ -1470,9 +1470,28 @@ function destinoDoJev(env) {
   if (endpoint.includes('openrouter.ai') || (!endpoint && chave.startsWith('sk-or-'))) {
     modelo = modelo || JEV_OPENROUTER_MODELO;
     if (modelo.startsWith('typesafe/') && modelo.endsWith('-latest')) modelo = `~${modelo}`;
-    return { url: endpoint || JEV_OPENROUTER_URL, modelo };
+    return { url: endpoint || JEV_OPENROUTER_URL, modelo, tipo: 'openrouter' };
   }
-  return { url: endpoint || JEV_TYPESAFE_URL, modelo: modelo || JEV_TYPESAFE_MODELO };
+  return { url: endpoint || JEV_TYPESAFE_URL, modelo: modelo || JEV_TYPESAFE_MODELO, tipo: 'typesafe' };
+}
+
+const LIMITE_IMAGEM = { ladoMin: 280, ladoMax: 1568, areaMin: 78_400, areaMax: 2_458_624 };
+
+// Limites que a Typesafe documenta para imagem no state; quem chama manda sem imagem fora deles.
+function imagemDentroDoLimite({ largura, altura }) {
+  const { ladoMin, ladoMax, areaMin, areaMax } = LIMITE_IMAGEM;
+  const area = largura * altura;
+  return largura >= ladoMin && largura <= ladoMax && altura >= ladoMin && altura <= ladoMax
+    && area >= areaMin && area <= areaMax;
+}
+
+const ASSINATURA_PNG = Buffer.from('89504e470d0a1a0a', 'hex');
+
+/** Largura e altura do IHDR sem decodificar a imagem; null se não for PNG. */
+function dimensoesPng(buf) {
+  if (buf.length < 24 || !buf.subarray(0, 8).equals(ASSINATURA_PNG)
+    || buf.toString('latin1', 12, 16) !== 'IHDR') return null;
+  return { largura: buf.readUInt32BE(16), altura: buf.readUInt32BE(20) };
 }
 
 const JEV_DEADLINE_MS = 15_000;
@@ -1480,14 +1499,28 @@ const JEV_DEADLINE_MS = 15_000;
 const semChave = (texto, chave) => (chave ? String(texto).split(chave).join('***') : String(texto));
 
 // Endpoint pendurado prendia o comando pra sempre, e um `until hangar-preview confere` parava calado.
-async function askJev({ url, modelo, chave, estado, perguntas, deadlineMs = JEV_DEADLINE_MS }) {
+async function askJev({ url, modelo, chave, estado, perguntas, deadlineMs = JEV_DEADLINE_MS, imagem, tipo }) {
+  const headers = { authorization: `Bearer ${chave}`, 'content-type': 'application/json' };
+  const pedido = { model: modelo, state: estado, questions: perguntas };
+  if (imagem) {
+    const state = typeof estado === 'string' ? { pagina: estado } : { ...estado };
+    // O OpenRouter ignora `assets` calado; só lê a imagem inline no state.
+    if ((tipo ?? (String(url).includes('openrouter.ai') ? 'openrouter' : 'typesafe')) === 'openrouter') {
+      state.tela = { type: 'image_url', image_url: { url: `data:image/png;base64,${imagem.base64}` } };
+    } else {
+      state.tela = `img-${crypto.randomUUID()}`;
+      pedido.assets = { [state.tela]: { type: 'image', data_base64: imagem.base64, format: 'png' } };
+      headers['TypeSafe-Danger-Zone-Images'] = 'true';
+    }
+    pedido.state = state;
+  }
   let r;
   let corpo;
   try {
     r = await fetch(url, {
       method: 'POST',
-      headers: { authorization: `Bearer ${chave}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ model: modelo, state: estado, questions: perguntas }),
+      headers,
+      body: JSON.stringify(pedido),
       signal: AbortSignal.timeout(deadlineMs),
     });
     corpo = await r.text();
@@ -1509,6 +1542,7 @@ module.exports = {
   parsarSnapshot, montarPerguntas, montarEstado, decidir, rodar, pedidoDeTexto,
   valorDoCampo, cabecaDoValor, jsDeSelecionar, jsDeEstarAberto, normalizar,
   perguntaDeConfere, chegouNoEstado, destinoDoJev, askJev, nomeComOrdem, avisoDeSucesso,
+  dimensoesPng, imagemDentroDoLimite, LIMITE_IMAGEM,
   LIMIARES, NENHUM, OPERACOES, SEM_SELECT, MAX_CANDIDATOS, CHAVE_SECRETA, semChave, mascararValores,
   SNAPSHOT_DO_LACO, ESPERA_ASSENTAR, JS_ESPERAR_OPCOES, semRotulo, rotulo, decidirPeloAuxiliar, pedidoDeAjuda, ESQUEMA_DO_AUXILIAR,
 };
