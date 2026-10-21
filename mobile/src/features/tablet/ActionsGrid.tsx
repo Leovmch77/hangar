@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
-import { getConfigForServer, resolveShortcuts, sendInputForServer, sendsDirect, shortcutMissingSecret, type Shortcut } from '@hangar/core';
+import { getConfigForServer, getProjectShortcuts, mergeProjectShortcuts, resolveShortcuts, sendInputForServer, sendsDirect, shortcutMissingSecret, type ProjectShortcut, type Shortcut } from '@hangar/core';
 import { useServers } from '../../stores/servers';
 import { chatStore } from '../../stores/chat';
 import { readDraft, writeDraft } from '../../stores/drafts';
@@ -20,16 +20,23 @@ export function ActionsGrid({ serverId, name }: { serverId: string; name: string
   const [items, setItems] = useState<Shortcut[] | null>(null);
   const [loadError, setLoadError] = useState('');
   const [retry, setRetry] = useState(0);
+  const [projectItems, setProjectItems] = useState<ProjectShortcut[] | null>(null);
+  const [projectError, setProjectError] = useState('');
+  const [projectRetry, setProjectRetry] = useState(0);
+  const inFlight = useRef(new Set<string>());
+  const confirming = useRef(new Set<string>());
+  const [sending, setSending] = useState(new Set<string>());
 
   useEffect(() => {
     let cancelled = false;
     setItems(null);
     setLoadError('');
-    if (!server) {
+    const target = useServers.getState().servers.find((s) => s.id === serverId);
+    if (!target) {
       setLoadError(m.chat_servidor_removido());
       return;
     }
-    getConfigForServer(server).then((config) => {
+    getConfigForServer(target).then((config) => {
       if (cancelled) return;
       if (!config || typeof config.campos !== 'object' || config.campos === null) throw new Error(m.native_invalid_response());
       const raw = config.campos.shortcuts?.valor;
@@ -38,30 +45,75 @@ export function ActionsGrid({ serverId, name }: { serverId: string; name: string
       if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
     });
     return () => { cancelled = true; };
-  }, [server, retry]);
+  }, [serverId, retry]);
 
-  async function run(shortcut: Shortcut) {
+  useEffect(() => {
+    let cancelled = false;
+    setProjectItems(null);
+    setProjectError('');
+    const target = useServers.getState().servers.find((s) => s.id === serverId);
+    if (!target) {
+      setProjectItems([]);
+      setProjectError(m.chat_servidor_removido());
+      return;
+    }
+    getProjectShortcuts(name, target).then((project) => {
+      if (cancelled) return;
+      if (!project || !Array.isArray(project.items)) throw new Error(m.native_invalid_response());
+      setProjectItems(project.items);
+    }).catch((e: unknown) => {
+      if (cancelled) return;
+      setProjectItems([]);
+      setProjectError(e instanceof Error ? e.message : String(e));
+    });
+    return () => { cancelled = true; };
+  }, [serverId, name, projectRetry]);
+
+  function fillDraft(text: string) {
+    try {
+      const current = readDraft(serverId, name) ?? {
+        version: 1 as const, text: '', revision: 0, transcript: null, attachments: [], submission: null,
+      };
+      writeDraft(serverId, name, { ...current, text, revision: current.revision + 1 });
+      chatStore(serverId, name).use.setState((s) => ({ draftUpdate: s.draftUpdate + 1 }));
+    } catch (e) {
+      toast.erro(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function run(shortcut: Shortcut, key: string) {
     if (shortcut.type === 'internal') {
       router.push(`/s/${serverId}/${name}/${shortcut.action === 'anexos' ? 'attachments' : 'terminal'}`);
       return;
     }
     if (shortcut.type !== 'send_text') return;
+    const direct = sendsDirect(shortcut);
+    if (direct) {
+      if (inFlight.current.has(key)) return;
+      inFlight.current.add(key);
+      setSending(new Set(inFlight.current));
+    }
     try {
-      const missing = shortcutMissingSecret(shortcut);
-      if (missing) throw new Error(m.atalhos_segredo_falta({ nome: missing }));
-      if (sendsDirect(shortcut)) {
+      if (direct) {
         if (!server) throw new Error(m.chat_servidor_removido());
         await sendInputForServer(server, name, shortcut.text);
         haptic.success();
       } else {
-        const current = readDraft(serverId, name) ?? {
-          version: 1 as const, text: '', revision: 0, transcript: null, attachments: [], submission: null,
-        };
-        writeDraft(serverId, name, { ...current, text: shortcut.text, revision: current.revision + 1 });
-        chatStore(serverId, name).use.setState((s) => ({ draftUpdate: s.draftUpdate + 1 }));
+        const current = readDraft(serverId, name);
+        if (current?.text.trim() && current.text !== shortcut.text) {
+          Alert.alert(m.composer_trocar_rascunho({ cmd: shortcut.text }), undefined, [
+            { text: m.native_cancel(), style: 'cancel' },
+            { text: m.comum_confirmar(), onPress: () => fillDraft(shortcut.text) },
+          ]);
+        } else fillDraft(shortcut.text);
       }
     } catch (e) {
       toast.erro(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (direct) {
+        inFlight.current.delete(key);
+        setSending(new Set(inFlight.current));
+      }
     }
   }
 
@@ -74,21 +126,37 @@ export function ActionsGrid({ serverId, name }: { serverId: string; name: string
     </View>
   );
   if (items === null) return <ActivityIndicator color={c.accent} />;
-  if (items.length === 0) return null;
+  const shortcuts = mergeProjectShortcuts(items, projectItems).filter(({ shortcut }) => shortcut.type !== 'shell');
+  if (shortcuts.length === 0 && projectItems !== null && !projectError) return null;
   return (
     <View style={styles.feedback}>
       <View style={styles.grid}>
-        {items.map((shortcut) => {
+        {shortcuts.map(({ shortcut, key }) => {
           const label = shortcut.type === 'internal' ? NATIVE_LABEL[shortcut.action]() : shortcut.label;
+          const actionKey = `${serverId}::${name}::${key}`;
+          const busy = sending.has(actionKey);
           return (
-            <Pressable key={shortcut.id} accessibilityRole="button" accessibilityLabel={label}
+            <Pressable key={key} accessibilityRole="button" accessibilityLabel={label}
+              disabled={busy} accessibilityState={{ disabled: busy, busy }}
               onPress={() => {
+                if (inFlight.current.has(actionKey) || confirming.current.has(actionKey)) return;
+                if (shortcut.type !== 'internal') {
+                  const missing = shortcutMissingSecret(shortcut);
+                  if (missing) {
+                    toast.erro(m.atalhos_segredo_falta({ nome: missing }));
+                    return;
+                  }
+                }
                 if (shortcut.confirm) {
+                  confirming.current.add(actionKey);
                   Alert.alert(m.native_shortcut_confirm({ label }), undefined, [
-                    { text: m.native_cancel(), style: 'cancel' },
-                    { text: m.comum_confirmar(), onPress: () => { void run(shortcut); } },
-                  ]);
-                } else void run(shortcut);
+                    { text: m.native_cancel(), style: 'cancel', onPress: () => { confirming.current.delete(actionKey); } },
+                    { text: m.comum_confirmar(), onPress: () => {
+                      confirming.current.delete(actionKey);
+                      void run(shortcut, actionKey);
+                    } },
+                  ], { onDismiss: () => { confirming.current.delete(actionKey); } });
+                } else void run(shortcut, actionKey);
               }}
               style={({ pressed }) => [styles.action, { borderColor: c.border, backgroundColor: pressed ? c.hover : c.inset }]}>
               <ShortcutIcon icon={shortcut.type === 'internal' ? NATIVE_ICON[shortcut.action] : shortcut.icon} size={22} color={c.accentText} />
@@ -97,6 +165,15 @@ export function ActionsGrid({ serverId, name }: { serverId: string; name: string
           );
         })}
       </View>
+      {projectItems === null ? <ActivityIndicator color={c.accent} /> : null}
+      {projectError ? (
+        <View style={styles.feedback}>
+          <Text accessibilityRole="alert" style={styles.error}>{projectError}</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel={m.native_retry()} onPress={() => setProjectRetry((n) => n + 1)} style={styles.retry}>
+            <Text style={[styles.label, { color: c.accentText }]}>{m.native_retry()}</Text>
+          </Pressable>
+        </View>
+      ) : null}
     </View>
   );
 }
