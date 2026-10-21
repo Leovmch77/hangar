@@ -48,6 +48,11 @@ pub(super) fn sends_direct(enabled: bool, state: &str, provider: &str) -> bool {
     enabled && state == "working" && matches!(provider, "claude" | "codex")
 }
 
+/// Aviso de entrega parada no painel: é onde a mensagem presa espera (a bolha dela some da conversa).
+pub(super) fn stalled_notice(panel: &model::QueuePanel, problem: Option<&str>, read_only: bool) -> bool {
+    !panel.entries.is_empty() && problem == Some(super::STALLED) && !read_only
+}
+
 impl Hangar {
     fn queue_busy(&self) -> bool { self.selected_key().is_some_and(|key| self.flight.busy(&key)) }
 
@@ -229,6 +234,8 @@ impl Hangar {
         let direct = appearance::get().steer_while_working;
         let supports = matches!(self.provider().0, "claude" | "codex");
         if panel.entries.is_empty() && !(supports && direct && self.chat.state.state == "working") { return None; }
+        let read_only = self.selected.as_ref().is_some_and(|s| s.read_only());
+        let stalled = stalled_notice(&panel, self.chat.state.problema.as_deref(), read_only);
         // Uma cópia por quadro, dividida pelas linhas e pelos handlers de setas e de soltar.
         let (entries, actions): (Rc<[QueueEntry]>, bool) = (panel.entries.iter().cloned().collect(), panel.actions);
         drop(panel);
@@ -269,9 +276,15 @@ impl Hangar {
             .on_click(cx.listener(|this, checked: &bool, _, cx| this.set_queue_jev(*checked, cx))));
         let top = div().flex().flex_wrap().items_center().gap(px(6.)).pr(px(10.))
             .child(div().flex_1().min_w_0().child(header)).children(toggle).children(jev_toggle);
+        // Fora da lista: com o painel recolhido o aviso e o Reabrir continuam à vista.
+        let stalled = stalled.then(|| div().id("queue-stalled").flex().flex_wrap().items_center().gap(px(8.)).px(px(12.)).pb(px(6.))
+            .child(div().flex_1().min_w_0().text_size(px(12.5)).text_color(theme::warning())
+                .child(tr_shared("problema_headless_delivery_stalled", &[])))
+            .child(Button::new("queue-stalled-reopen").xsmall().label(tr_shared("reabrir_sessao_presa", &[]))
+                .disabled(!self.reload_allowed()).on_click(cx.listener(|this, _, _, cx| this.reload(cx)))));
         // Mesmo material do cartão do composer, colado acima dele.
         let body = div().id("queue-panel").flex().flex_col().rounded(px(12.)).border_1().border_color(theme::border_strong())
-            .bg(theme::boxed()).child(top).children(list);
+            .bg(theme::boxed()).child(top).children(stalled).children(list);
         Some(div().mb(px(6.)).child(chrome::glass_panel(body, px(12.))).into_any_element())
     }
 
@@ -357,7 +370,21 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::sends_direct;
+    use super::{sends_direct, stalled_notice};
+    use crate::api::dto::ChatEvent;
+
+    #[test]
+    fn queue_panel_shows_the_stalled_delivery_with_reopen() {
+        // A mensagem que espera (`delivered:false`) está no painel, e a bolha dela some da conversa.
+        let waiting = ChatEvent { kind: "user_msg".into(), id: "queued-a".into(), text: Some("oi".into()), queued_delivered: Some(false), ..Default::default() };
+        let panel = crate::queue_panel::current(None, std::slice::from_ref(&waiting)).into_owned();
+        assert!(crate::queue_panel::hidden("queued-a", &panel));
+        assert!(stalled_notice(&panel, Some("headless_delivery_stalled"), false));
+        assert!(!stalled_notice(&panel, Some("headless_delivery_stalled"), true), "par só de leitura não reabre");
+        assert!(!stalled_notice(&panel, None, false));
+        assert!(!stalled_notice(&panel, Some("terminal_input_no_safe_delivery"), false));
+        assert!(!stalled_notice(&crate::queue_panel::QueuePanel::default(), Some("headless_delivery_stalled"), false), "fila vazia, nada preso");
+    }
 
     #[test]
     fn direct_send_only_while_claude_or_codex_works_with_the_option_on() {

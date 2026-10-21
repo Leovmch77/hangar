@@ -4874,7 +4874,6 @@ impl Hangar {
     fn render_message(&mut self, index: usize, id: &str, cx: &mut Context<Self>) -> AnyElement {
         let id = id.to_owned();
         let mut discard = None;
-        let mut reopen = false;
         let mut baton = None;
         let mut segments = None;
         // Sessão orq: linha do tempo do orquestrador já interpretada pelo backend, desenhada à parte.
@@ -4925,12 +4924,7 @@ impl Hangar {
                 notes.push(tr("delivery_unproved"));
                 discard = event.id.strip_prefix("queued-").map(str::to_owned);
             }
-            else if let Some(note) = stuck_note(event, self.chat.state.problema.as_deref()) {
-                notes.push(note);
-                // Só o dono reabre, e só pelo aviso de entrega parada.
-                reopen = self.chat.state.problema.as_deref() == Some(STALLED)
-                    && !self.selected.as_ref().is_some_and(|s| s.read_only());
-            }
+            else if let Some(note) = stuck_note(event, self.chat.state.problema.as_deref()) { notes.push(tr(note)); }
             else if event.queued() && event.queued_consumed != Some(true) { notes.push(tr(if event.queued_delivered == Some(true) { "delivering" } else { "queued" })); }
             if event.is_error == Some(true) { notes.push(tr("tool_error")); }
             (label, (!notes.is_empty()).then(|| notes.join(" · ")), event.kind == "user_msg", event.is_error == Some(true))
@@ -4938,16 +4932,13 @@ impl Hangar {
         let busy = self.selected_key().is_some_and(|key| self.flight.busy(&key));
         let discard = discard.map(|entry| Button::new(format!("discard-{id}")).small().ghost().label(tr("queue_discard")).disabled(busy)
             .on_click(cx.listener(move |this, _, _, cx| this.act(Action::Discard(entry.clone()), entry.clone(), cx))));
-        let reopen = reopen.then(|| Button::new(format!("reopen-{id}")).small().ghost().label(tr_shared("reabrir_sessao_presa", &[]))
-            .disabled(!self.reload_allowed()).on_click(cx.listener(|this, _, _, cx| this.reload(cx))));
         // O bastão chega pela fila: o cartão fica no lugar da bolha, e a nota de entrega (com o Descartar) embaixo dele.
         if let Some((event, card)) = baton {
             let card = self.render_baton_card(&id, event, card, cx);
             let row = div().id(SharedString::from(format!("message-{id}"))).w_full().flex().flex_col().gap_2().child(card)
                 .when_some(note, |el, note| el.child(div().flex().items_center().gap_2()
                     .child(div().min_w_0().text_sm().text_color(theme::warning()).child(note))
-                    .when_some(discard, |el, button| el.child(button))
-                    .when_some(reopen, |el, button| el.child(button))));
+                    .when_some(discard, |el, button| el.child(button))));
             return with_copy_menu(row, id, cx.weak_entity());
         }
         // Conversa sem cartões: usuário em bolha à direita, agente em texto corrido. Só o que não é nenhum dos
@@ -5020,8 +5011,7 @@ impl Hangar {
                 else { el.child(content) })
             .when_some(note, |el, note| el.child(div().flex().items_center().gap_2().when(user, |el| el.justify_end())
                 .child(div().min_w_0().text_sm().text_color(theme::warning()).child(note))
-                .when_some(discard, |el, button| el.child(button))
-                .when_some(reopen, |el, button| el.child(button))))
+                .when_some(discard, |el, button| el.child(button))))
             .when_some(actions, |el, actions| el.child(actions));
         with_copy_menu(row, id, cx.weak_entity())
     }
@@ -6203,16 +6193,15 @@ fn holds_queue(event: &ChatEvent, problem: Option<&str>) -> bool {
     problem == Some("terminal_input_delivery_unproved") && event.queued() && event.queued_delivered == Some(true) && event.desistiu != Some(true)
 }
 
-/// Mensagem sem entrega com o processo vivo e surdo: só a pessoa reabre, pelo botão na bolha.
+/// Mensagem sem entrega com o processo vivo e surdo: só a pessoa reabre, pelo painel "Na fila", onde ela espera.
 const STALLED: &str = "headless_delivery_stalled";
 
 /// A bolha ainda na fila, parada pelo problema da sessão: o motivo vai nela, não só na faixa do fim.
-fn stuck_note(event: &ChatEvent, problem: Option<&str>) -> Option<String> {
+fn stuck_note(event: &ChatEvent, problem: Option<&str>) -> Option<&'static str> {
     if !event.queued() || event.queued_delivered == Some(true) || event.desistiu == Some(true) { return None; }
     match problem {
-        Some("terminal_input_delivery_unproved") => Some(tr("queue_held")),
-        Some("terminal_input_no_safe_delivery") => Some(tr("no_safe_delivery")),
-        Some(STALLED) => Some(tr_shared("problema_headless_delivery_stalled", &[])),
+        Some("terminal_input_delivery_unproved") => Some("queue_held"),
+        Some("terminal_input_no_safe_delivery") => Some("no_safe_delivery"),
         _ => None,
     }
 }
@@ -7555,10 +7544,8 @@ mod tests {
         use super::stuck_note;
         crate::i18n::set_language(crate::appearance::Language::Pt);
         let queued = |delivered: Option<bool>| ChatEvent { kind: "user_msg".into(), id: "queued-a".into(), queued_delivered: delivered, ..Default::default() };
-        assert_eq!(stuck_note(&queued(Some(false)), Some("terminal_input_delivery_unproved")), Some(tr("queue_held")));
-        assert_eq!(stuck_note(&queued(None), Some("terminal_input_no_safe_delivery")), Some(tr("no_safe_delivery")));
-        assert_eq!(stuck_note(&queued(None), Some("headless_delivery_stalled")).as_deref(), Some("Não entregue: a sessão não responde ao servidor."));
-        assert_eq!(stuck_note(&queued(Some(true)), Some("headless_delivery_stalled")), None);
+        assert_eq!(stuck_note(&queued(Some(false)), Some("terminal_input_delivery_unproved")), Some("queue_held"));
+        assert_eq!(stuck_note(&queued(None), Some("terminal_input_no_safe_delivery")), Some("no_safe_delivery"));
         assert_eq!(stuck_note(&queued(Some(true)), Some("terminal_input_no_safe_delivery")), None, "a entregue tem nota própria");
         assert_eq!(stuck_note(&queued(Some(false)), None), None);
         assert_eq!(tr("no_safe_delivery"), "Esperando: o Hangar não consegue confirmar a conversa do terminal e não digita nada. Ele reabre o Claude quando a sessão parar.");
