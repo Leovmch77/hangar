@@ -32,9 +32,13 @@ const reportPushError = (e: unknown) => {
   registrarDiag({ evento: 'push.register_failed', nivel: 'erro', codigo: 'expo_push_register_failed', detalhe: e instanceof Error ? e.message : String(e) });
 };
 
-export default function Layout() {
+function TabletTextScaleSync() {
   const tablet = useTabletLandscape();
   useEffect(() => { setTabletTextScale(tablet); }, [tablet]);
+  return null;
+}
+
+export default function Layout() {
   const router = useRouter();
   const segments = useSegments();
   setFatalErrorRoute(segments);
@@ -105,6 +109,7 @@ export default function Layout() {
 
   return (
     <KeyboardProvider>
+      <TabletTextScaleSync />
       <GestureHandlerRootView style={{ flex: 1 }}>
         <Stack screenOptions={{ headerShown: false }}>
           {/* Android: o formSheet sobe a folha com o teclado (o KeyboardAvoidingView compensava de novo)
