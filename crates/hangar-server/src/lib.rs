@@ -13,6 +13,7 @@ pub mod watchdog;
 pub mod costs;
 pub mod costs_routes;
 pub mod costs_failure;
+pub mod device_install;
 pub mod diag;
 pub mod display_env;
 pub mod groups;
