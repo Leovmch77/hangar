@@ -29,19 +29,17 @@ def _isolated(monkeypatch, tmp_path):
 
 @pytest.fixture
 def join_expo(monkeypatch):
-    """O envio sai numa thread: o teste espera por ela em vez de dormir."""
+    """O envio sai no pool: o teste espera por ele em vez de dormir."""
     spawned = []
+    submit = push._expo_pool.submit
 
-    class Tracked(threading.Thread):
-        def start(self):
-            spawned.append(self)
-            super().start()
-    monkeypatch.setattr(push, "Thread", Tracked)
+    def tracked(*args):
+        spawned.append(submit(*args))
+    monkeypatch.setattr(push._expo_pool, "submit", tracked)
 
     def join():
-        for t in spawned:
-            t.join(5)
-            assert not t.is_alive()
+        for f in spawned:
+            f.result(5)
     return join
 
 
@@ -105,20 +103,27 @@ def test_send_runs_outside_lock_and_web_push_still_goes(monkeypatch, tmp_path):
     push_expo_bridge.configure("127.0.0.1:1", "sek")
     seen = []
     done = threading.Event()
+    submit = push._expo_pool.submit
+
+    # O lock se confere na entrega ao pool: dentro do pool ele pode estar preso pelo Web Push.
+    def tracked(*args):
+        seen.append(push._lock.locked())
+        return submit(*args)
+    monkeypatch.setattr(push._expo_pool, "submit", tracked)
 
     def fake_send(*args):
-        seen.append((push._lock.locked(), threading.current_thread() is threading.main_thread()))
+        seen.append(threading.current_thread() is threading.main_thread())
         done.set()
     monkeypatch.setattr(push_expo_bridge, "send", fake_send)
     push.notify_finished("s")
     assert done.wait(5)
-    assert seen == [(False, False)]
+    assert seen == [False, False]
     assert web == [True]
 
 
 def test_unconfigured_bridge_spawns_nothing(monkeypatch):
     monkeypatch.setattr(push_expo_bridge, "send", lambda *a: pytest.fail("send sem ponte"))
-    monkeypatch.setattr(push, "Thread", lambda **kw: pytest.fail("thread sem ponte"))
+    monkeypatch.setattr(push._expo_pool, "submit", lambda *a: pytest.fail("envio sem ponte"))
     push.notify_dead("s")
 
 

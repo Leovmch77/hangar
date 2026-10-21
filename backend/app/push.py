@@ -8,12 +8,15 @@ import json
 import logging
 from datetime import datetime, time as dtime
 from pathlib import Path
-from threading import Lock, Thread, Timer
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock, Timer
 
 from app import atomico, guest_users, push_expo_bridge
 from app.config import settings
 
 _log = logging.getLogger("hangar.push")
+# Poucos envios Expo ao mesmo tempo: rajada de avisos espera na fila em vez de abrir uma thread cada.
+_expo_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="push-expo")
 _lock = Lock()  # ponytail: lock global — single-user, baixa frequencia; por-endpoint so se virar gargalo
 
 # Textos que o push monta sozinho, no idioma da inscricao (backend nao tem Paraglide e sao poucas
@@ -278,7 +281,7 @@ def _to_expo(session_name: str, body_fn, title_suffix_fn, list_view: bool) -> No
         return {locale: fn(locale) for locale in ("pt", "en")}
     title = text(title_suffix_fn) if title_suffix_fn is not None else {"pt": session_name, "en": session_name}
     # A ponte bloqueia até 5 s: nem o laço nem o Web Push esperam por ela.
-    Thread(target=push_expo_bridge.send, args=(session_name, title, text(body_fn), list_view), daemon=True).start()
+    _expo_pool.submit(push_expo_bridge.send, session_name, title, text(body_fn), list_view)
 
 
 def notify_awaiting(session_name: str, body: str | None = None) -> None:
