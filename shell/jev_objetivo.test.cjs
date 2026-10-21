@@ -717,14 +717,6 @@ test('askJev com imagem na Typesafe: ref no state, assets no topo e cabeçalho; 
   assert.equal(headers['typesafe-danger-zone-images'], 'true');
 });
 
-test('askJev com imagem sem tipo: o endereço decide o formato', async () => {
-  const typesafe = await pedidoDoAskJev({ estado: 'arvore', imagem: IMAGEM });
-  assert.match(typesafe.corpo.state.tela, /^img-[0-9a-f-]{36}$/);
-  const openrouter = await pedidoDoAskJev({ estado: 'arvore', imagem: IMAGEM }, '?via=openrouter.ai');
-  assert.equal(openrouter.corpo.state.tela.type, 'image_url');
-  assert.equal('assets' in openrouter.corpo, false);
-});
-
 test('dimensoesPng lê largura e altura do IHDR; o que não é PNG volta null', () => {
   const { dimensoesPng } = require('./jev_objetivo.cjs');
   // Assinatura PNG + IHDR de 1280x800 (0x500 x 0x320), RGBA 8 bits.
@@ -737,7 +729,7 @@ test('dimensoesPng lê largura e altura do IHDR; o que não é PNG volta null', 
   assert.equal(dimensoesPng(png.subarray(0, 20)), null);
 });
 
-test('imagemDentroDoLimite: cada lado entre 280 e 1568 e a área dentro do limite da Typesafe', () => {
+test('imagemDentroDoLimite: cada lado entre 280 e 1568, limite da Typesafe', () => {
   const { imagemDentroDoLimite } = require('./jev_objetivo.cjs');
   assert.equal(imagemDentroDoLimite({ largura: 280, altura: 280 }), true);
   assert.equal(imagemDentroDoLimite({ largura: 1568, altura: 1568 }), true);

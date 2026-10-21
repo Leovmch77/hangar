@@ -1145,7 +1145,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       ...(recusa ? { envio_recusado: textoDaRecusa(recusa) } : {}),
       // O laço não conhece o destino do Jev: quem pergunta tira a imagem daqui, monta o formato e
       // devolve no mesmo objeto como o pedido saiu (`status`, `motivo`).
-      ...(print?.base64 ? { __imagem: { base64: print.base64, largura: print.largura, altura: print.altura } } : {}),
+      ...(print?.base64 ? { __imagem: print } : {}),
     };
     // Só o pedido que levou a imagem decide com os limites calibrados com print.
     const limiaresDoPedido = () => (estado.__imagem?.status === 'enviada' ? LIMIARES_COM_PRINT : LIMIARES);
@@ -1320,8 +1320,8 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       url: [...segredos].reduce((t, v) => t.split(v).join('(oculto)'), String(url).replace(/^ok:\s*"?|"$/g, '')),
       candidatos: candidatos.length,
       jev: { operacao: distribuicao(respostas.operacao), concluido: respostas.concluido?.noul ?? null, arriscado: respostas.arriscado?.noul ?? null },
-      imagem: estado.__imagem?.status ?? print?.status ?? null,
-      motivo: estado.__imagem?.motivo ?? print?.motivo ?? null,
+      imagem: print?.status ?? null,
+      motivo: print?.motivo ?? null,
       bloqueado: respostas.bloqueado?.noul ?? null,
       ...(decisao.parar ? { parar: decisao.parar }
         : { operacao: decisao.operacao, alvo: decisao.escolhido ? rotulo(decisao.escolhido) : null, confianca: decisao.confianca ?? null, via: decisao.via ?? 'jev' }),
@@ -1551,14 +1551,13 @@ function destinoDoJev(env) {
   return { url: endpoint || JEV_TYPESAFE_URL, modelo: modelo || JEV_TYPESAFE_MODELO, tipo: 'typesafe' };
 }
 
-const LIMITE_IMAGEM = { ladoMin: 280, ladoMax: 1568, areaMin: 78_400, areaMax: 2_458_624 };
+// Limites que a Typesafe documenta para imagem no state; quem chama manda sem imagem fora deles. A
+// faixa de área documentada (78.400 a 2.458.624) é 280² a 1568²: os lados já a garantem.
+const LIMITE_IMAGEM = { ladoMin: 280, ladoMax: 1568 };
 
-// Limites que a Typesafe documenta para imagem no state; quem chama manda sem imagem fora deles.
 function imagemDentroDoLimite({ largura, altura }) {
-  const { ladoMin, ladoMax, areaMin, areaMax } = LIMITE_IMAGEM;
-  const area = largura * altura;
-  return largura >= ladoMin && largura <= ladoMax && altura >= ladoMin && altura <= ladoMax
-    && area >= areaMin && area <= areaMax;
+  const { ladoMin, ladoMax } = LIMITE_IMAGEM;
+  return largura >= ladoMin && largura <= ladoMax && altura >= ladoMin && altura <= ladoMax;
 }
 
 const ASSINATURA_PNG = Buffer.from('89504e470d0a1a0a', 'hex');
@@ -1581,7 +1580,7 @@ async function askJev({ url, modelo, chave, estado, perguntas, deadlineMs = JEV_
   if (imagem) {
     const state = typeof estado === 'string' ? { pagina: estado } : { ...estado };
     // O OpenRouter ignora `assets` calado; só lê a imagem inline no state.
-    if ((tipo ?? (String(url).includes('openrouter.ai') ? 'openrouter' : 'typesafe')) === 'openrouter') {
+    if (tipo === 'openrouter') {
       state.tela = { type: 'image_url', image_url: { url: `data:image/png;base64,${imagem.base64}` } };
     } else {
       state.tela = `img-${crypto.randomUUID()}`;

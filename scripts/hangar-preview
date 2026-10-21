@@ -667,7 +667,7 @@ async function capturarPrint(chave) {
   let arquivo = null;
   try {
     arquivo = join(pastaDePrints(), `${randomUUID()}.png`);
-    const { texto, codigo } = await chamar(chave, 'shot', [arquivo, '--max', '1568'], flags.aba, lancar);
+    const { texto, codigo } = await chamar(chave, 'shot', [arquivo, '--max', String(jev.LIMITE_IMAGEM.ladoMax)], flags.aba, lancar);
     if (codigo !== 0) return { status: 'sem_print', motivo: semToken(texto).slice(0, 160) };
     let buf;
     try {
@@ -693,18 +693,23 @@ async function capturarPrint(chave) {
 function perguntadorDoJev(chaveJev) {
   const { url, modelo, tipo } = jev.destinoDoJev(process.env);
   let desligada = false;
-  // Sem o print, a pergunta de bloqueio falaria de uma tela que o Jev não recebeu.
-  const sem = (estado, { bloqueado, ...perguntas }) => jev.askJev({ url, modelo, chave: chaveJev, estado, perguntas });
-  return async (estado, perguntas, imagem) => {
-    if (!imagem) return { respostas: await sem(estado, perguntas), status: null };
-    if (desligada) return { respostas: await sem(estado, perguntas), status: 'desligada' };
-    try {
-      return { respostas: await jev.askJev({ url, modelo, chave: chaveJev, estado, perguntas, imagem, tipo }), status: 'enviada' };
-    } catch (err) {
-      desligada = true;
-      return { respostas: await sem(estado, perguntas), status: 'falhou', motivo: err.message };
+  const perguntar = async (estado, perguntas, imagem) => {
+    let motivo;
+    if (imagem && !desligada) {
+      try {
+        return { respostas: await jev.askJev({ url, modelo, chave: chaveJev, estado, perguntas, imagem, tipo }), status: 'enviada' };
+      } catch (err) {
+        desligada = true;
+        motivo = err.message;
+      }
     }
+    // Sem o print, a pergunta de bloqueio falaria de uma tela que o Jev não recebeu.
+    const { bloqueado, ...semBloqueio } = perguntas;
+    const status = !imagem ? null : motivo ? 'falhou' : 'desligada';
+    return { respostas: await jev.askJev({ url, modelo, chave: chaveJev, estado, perguntas: semBloqueio }), status, motivo };
   };
+  perguntar.desligada = () => desligada;
+  return perguntar;
 }
 
 if (cmd === 'confere') {
@@ -794,7 +799,8 @@ if (cmd === 'objetivo') {
     },
     // Tudo que o navegador devolve vira estado enviado ao Jev: o token não sai da máquina.
     executar: async (verbo, args) => semToken((await chamar(chave, verbo, args)).texto),
-    capturar: () => capturarPrint(chave),
+    // Imagem desligada pelo 8A: o print não iria a lugar nenhum.
+    capturar: async () => (perguntarAoJev.desligada() ? { status: 'desligada' } : capturarPrint(chave)),
     // A imagem sai do estado antes do envio (nunca vai como campo cru) e o resultado volta no mesmo
     // objeto, para o laço saber se decidiu com print sem mudar a assinatura do `perguntar`.
     perguntar: async (estado, perguntas) => {
