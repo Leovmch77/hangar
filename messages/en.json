@@ -1177,6 +1177,7 @@
   "canvas_ocultos_n": "Hidden ({n})",
   "fwd_enviado": "sent",
   "sessao_grupo_pareado": "Paired group: {label}",
+  "tab_group_children": "{n} sessions it opened",
   "lista_broadcast_falha": "failed: {nomes}",
   "sessao_stash_falhou": "stash failed",
   "ctx_usado_de_total": "{usado} of {total}",

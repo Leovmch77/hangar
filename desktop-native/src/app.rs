@@ -648,6 +648,8 @@ pub struct Hangar {
     tab_focus: HashMap<String, FocusHandle>,
     tabs_scroll: ScrollHandle,
     pending_tab_reveal: Option<sidebar::Target>,
+    /// Aba-mãe com a janela das filhas aberta.
+    tab_group_open: Option<sidebar::Target>,
     tab_reveal_scheduled: bool,
     appearance_note: Option<String>,
     // Por que o tema Desktop não está pintando com o papel de parede; `None` quando pinta ou não foi escolhido.
@@ -995,7 +997,7 @@ impl Hangar {
             mention: Default::default(),
             terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_caps: Vec::new(), plugin_local_tab: None, plugin_presentations: HashMap::new(), linked_children_open: HashSet::new(), plugin_body_scrolls: HashMap::new(), plugin_question_focus: cx.focus_handle(), plugin_tabs_scroll: ScrollHandle::new(), plugin_tabs_seen: None, plugin_tabs_waits: 0, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_draws: 0, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), pages: page_card::Pages::new(window.window_handle()), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
-            settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(), pending_tab_reveal: None, tab_reveal_scheduled: false,
+            settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(), pending_tab_reveal: None, tab_group_open: None, tab_reveal_scheduled: false,
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
             desktop_note: None,
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
@@ -5589,7 +5591,7 @@ impl Hangar {
             .role(Role::TabList).aria_label(tr("sessions"))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let step = match event.keystroke.key.as_str() { "left" => -1, "right" => 1, _ => return };
-                let targets = this.tab_targets();
+                let targets = this.tab_stops();
                 let Some(current) = targets.iter().position(|target| this.row_focus(target).is_some_and(|f| f.is_focused(window))) else { return };
                 let next = (current as isize + step).rem_euclid(targets.len() as isize) as usize;
                 if let Some(focus) = this.row_focus(&targets[next]) { focus.focus(window, cx); }
