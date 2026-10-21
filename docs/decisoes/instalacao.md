@@ -112,6 +112,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   Wrapper/tarefa/statusline só chegam por passo em `docs/atualizacoes/` — o pre-commit e o CI
   recusam commit em `install.*`/`scripts/`/`hooks/` sem passo (`HANGAR_SEM_PASSO=1` é o escape).
   Falha do instalador vai pra tela pela marca `##HANGAR-FALHA##`, nunca pela cauda.
+  O `install-native` roda na etapa `nativo`, como o `install-chromium`: script estreito, só com a
+  marca, na main e com a API que cabe; falha é aviso. Roda depois da prova de vida, inclusive na
+  atualização automática e na topologia manual; não desfaz a atualização do servidor.
 - **No Windows, `npm ci` na raiz só com o front parado**, e pasta que o atualizador cria dentro de
   `frontend/` entra no `.gitignore` — sobra não ignorada vira "mudança local" e desliga o dist do CI.
 - **Passo com comando diferente por sistema usa `comando_posix` e `comando_windows`.** `comando`
@@ -136,8 +139,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   recusa escopo transiente derrubava toda criação de sessão.
 - **Atualização cujo motor morreu no próprio reinício é concluída pelo backend novo.** Sem escopo
   transiente, o motor nasce no cgroup do backend e o `systemctl restart` o mata antes de gravar
-  "pronto". Na etapa `reiniciar`, backend com outro pid e disco no `commit_para` = sucesso; fora
-  disso, falha.
+  "pronto". Nas etapas `reiniciar` e `nativo`, backend com outro pid e disco no `commit_para` =
+  sucesso com aviso de que o app nativo não foi atualizado; fora disso, falha.
 - **`scripts/verificar-local` é exigido ao abrir PR e ao subir para a `main` ou para branch com PR
   aberto; branch sem PR sobe livre.** O hook PreToolUse do `gh pr create` (`.claude/settings.json`)
   confere o PR inteiro, desde o ponto em que a ponta saiu da base; a trava `pre-push` confere cada
@@ -190,6 +193,31 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **O bloco do MCP `hangar` no `config.toml` do Codex é reconhecido pela TABELA, não só pelos
   marcadores.** O app desktop reescreve o arquivo sem comentários; quem só procura `# >>> hangar`
   anexa de novo, e o TOML com chave duplicada derruba o ChatGPT e o Codex juntos.
+
+## App nativo na atualização do servidor (21/10/2026)
+
+Atualizar várias máquinas precisa trocar também o arquivo do app nativo em cada uma: o botão do
+app aberto só alcançava a própria máquina. O motor agora chama `install-native.sh` ou
+`install-native.ps1`, sem o instalador completo, depois da prova de vida do servidor e antes de
+concluir a atualização. A marca `~/.hangar/native/release.json` sem `sem_build` evita instalar app
+em quem não o usa; só a main entra porque esses scripts leem `native-latest`.
+
+Os scripts não conferem `requires_api`. Por isso o motor lê o manifesto e consulta, com a
+credencial do dono, `/api/client-api` no loopback da porta atualizada: API desconhecida ou menor
+que a exigida apenas registra o motivo no diário e conserva o app. Manifesto sem `requires_api`
+e servidor antigo com 404 valem API 1, pelo contrato existente. Falha do script, inclusive prazo
+de 900 s excedido, entra em `estado.avisos` e conserva `ok=True`: o servidor já está atualizado,
+e voltar seu código por causa do app quebraria a ordem servidor → app.
+
+Limite desta guarda: o script baixa o manifesto novamente. Se `native-latest` for republicada
+entre a conferência do motor e essa leitura, a oferta instalada pode exigir outra API. Fechar
+essa janela exige que o script use a mesma oferta conferida; os scripts não mudam nesta Task.
+
+O app aberto continua com a imagem anterior até ser reaberto. Se o motor morrer nas etapas
+`reiniciar` ou `nativo`, o backend novo mantém a prova de pid diferente e `commit_para`, conclui o
+servidor como atualizado e acrescenta o aviso do app não confirmado. Não tenta instalar de novo
+dentro da leitura de estado. A conferência real na DELPHI-02 não pôde ser feita nesta execução:
+`ssh delphi-02` respondeu `No route to host`; nem a presença do checkout foi confirmada.
 
 ## Restarting the backend.
 
