@@ -9044,5 +9044,12 @@
   "native_devices_a19": "Marque “Sem restrições”",
   "native_devices_a19_why": "Impede o Android de cortar a conexão do Hangar com a tela apagada.",
   "native_devices_a20": "Pronto",
-  "native_devices_a20_why": "Com “Sem restrições” marcado, está tudo configurado."
+  "native_devices_a20_why": "Com “Sem restrições” marcado, está tudo configurado.",
+  "tablet_sessions_empty": "Nenhuma sessão ativa",
+  "tablet_bar_position": "Posição da barra de sessões",
+  "tablet_bar_left": "À esquerda",
+  "tablet_bar_rail": "Esquerda recolhida",
+  "tablet_bar_bottom": "Embaixo",
+  "tablet_bar_top": "Em cima",
+  "tablet_new_session": "Nova sessão"
 }
