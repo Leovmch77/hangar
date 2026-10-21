@@ -57,6 +57,32 @@ pub const GROUP_GLYPH: &str = "brand/group-glyph.svg";
 pub const MACHINES_GLYPH: &str = "brand/machines.svg";
 pub const NO_TERMINAL: &str = "signals/no-terminal.svg";
 
+/// Prints do guia de instalação nos aparelhos (`app::devices`), pelo caminho `install-guide/<arquivo>`.
+macro_rules! install_guide {
+    ($($name:literal),* $(,)?) => {
+        fn install_guide(path: &str) -> Option<&'static [u8]> {
+            match path.strip_prefix("install-guide/")? { $($name => Some(include_bytes!(concat!("../assets/install-guide/", $name))),)* _ => None }
+        }
+    };
+}
+
+install_guide!("android-01-abrir-navegador.png", "android-02-baixando.png", "android-03-abrir-arquivo.png", "android-04-aviso-fonte.png",
+    "android-05-permitir-fonte.png", "android-06-instalar.png", "android-07-instalando.png", "android-08-abrir-app.png", "android-09-app-aberto.png",
+    "android-10-deslizar-para-cima.png", "android-11-abrir-configuracoes.png", "android-12-apps.png", "android-13-hangar.png",
+    "android-14-notificacoes.png", "android-15-ligar-notificacoes.png", "android-16-voltar.png", "android-17-uso-da-bateria.png",
+    "android-18-segundo-plano.png", "android-19-sem-restricoes.png", "android-20-pronto.png",
+    "ios-01-abrir-ajustes.png", "ios-02-geral.png", "ios-03-gestao-vpn-dispositivo.png", "ios-04-app-do-desenvolvedor.png", "ios-05-perfil-confiavel.png",
+    "ios-06-privacidade-seguranca.png", "ios-07-modo-desenvolvimento.png", "ios-08-chave-modo-desenvolvimento.png", "ios-09-abrir-app-store.png",
+    "ios-10-buscar-na-app-store.png", "ios-11-digitar-localdevvpn.png", "ios-12-obter-localdevvpn.png", "ios-13-confirmar-instalacao.png",
+    "ios-14-abrir-localdevvpn.png", "ios-15-assistente-next.png", "ios-16-assistente-next-2.png", "ios-17-assistente-next-3.png",
+    "ios-18-assistente-comecar.png", "ios-19-conectar.png", "ios-20-permitir-vpn.png", "ios-21-codigo-do-ipad.png", "ios-22-vpn-conectada.png",
+    "ios-23-abrir-sidestore.png", "ios-24-sidestore-rede-local.png", "ios-25-sidestore-notificacoes.png", "ios-sidestore-01-boas-vindas.png",
+    "ios-sidestore-02-arquivo-pareamento.png", "ios-sidestore-03-arquivos.png", "ios-sidestore-04-pasta-sidestore.png",
+    "ios-sidestore-07-pasta-sidestore.png", "ios-sidestore-08-localdevvpn.png", "ios-sidestore-09-apple-id.png",
+    "ios-sidestore-10-formulario-apple-id.png", "ios-sidestore-11-metodo-verificacao.png", "ios-sidestore-12-permitir-inicio-sessao.png",
+    "ios-sidestore-13-codigo-apple.png", "ios-sidestore-14-digitar-codigo.png", "ios-sidestore-17-tudo-pronto.png",
+    "ios-sidestore-20-sidestore-pronto.png", "ios-sidestore-23-hangar-instalado.png", "ios-sidestore-24-hangar-aberto.png");
+
 struct AppAssets;
 
 impl AssetSource for AppAssets {
@@ -71,7 +97,7 @@ impl AssetSource for AppAssets {
             "providers/kimi.svg" => return Ok(Some(Cow::Borrowed(include_bytes!("../assets/providers/kimi.svg")))),
             _ => {}
         }
-        if let Some(bytes) = fileicons::load(path) { return Ok(Some(Cow::Borrowed(bytes))); }
+        if let Some(bytes) = fileicons::load(path).or_else(|| install_guide(path)) { return Ok(Some(Cow::Borrowed(bytes))); }
         if let Some(bytes) = ExtraIcons.load(path)? { return Ok(Some(bytes)); }
         gpui_kit::assets::Assets.load(path)
     }

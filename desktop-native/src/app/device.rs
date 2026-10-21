@@ -251,6 +251,7 @@ impl Hangar {
         if page != Page::Accounts { self.accounts_page_left(); }
         if page != Page::Sync { self.sync_page_left(); }
         if page != Page::Connect { self.connect_page_left(); }
+        if page != Page::Devices { self.devices_page_left(); }
         match page {
             Page::General if !self.device.rate.loading && self.device.rate_value().is_none() => self.load_rate(cx),
             Page::Diary => self.load_diary(cx),
@@ -269,6 +270,7 @@ impl Hangar {
             Page::Windows => self.computer_opened(cx),
             Page::Sync => self.sync_opened(cx),
             Page::Connect => self.connect_opened(cx),
+            Page::Devices => self.devices_opened(cx),
             Page::SharedConfig => self.shared_config_opened(cx),
             Page::Migration => self.migration_opened(cx),
             _ => {}
