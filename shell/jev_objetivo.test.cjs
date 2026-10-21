@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { parsarSnapshot, montarPerguntas, montarEstado, decidir, rodar, pedidoDeTexto, valorDoCampo, cabecaDoValor, perguntaDeConfere, chegouNoEstado, destinoDoJev, NENHUM, SEM_SELECT, decidirPeloAuxiliar, pedidoDeAjuda, LIMIARES_COM_PRINT } = require('./jev_objetivo.cjs');
+const { parsarSnapshot, montarPerguntas, montarEstado, decidir, rodar, pedidoDeTexto, valorDoCampo, cabecaDoValor, perguntaDeConfere, chegouNoEstado, destinoDoJev, NENHUM, SEM_SELECT, decidirPeloAuxiliar, pedidoDeAjuda, THRESHOLDS_WITH_SCREENSHOT } = require('./jev_objetivo.cjs');
 
 const SNAPSHOT = `- RootWebArea "Cadastro"
   - link "Ver ajuda" [ref=@e1]
@@ -678,7 +678,7 @@ test('askJev: devolve answers e manda modelo, estado e chave', async () => {
   }
 });
 
-async function pedidoDoAskJev(args, sufixo = '') {
+async function askJevRequest(args, sufixo = '') {
   let pedido;
   const { srv, url } = await jevServer((req, res) => {
     let corpo = '';
@@ -697,10 +697,10 @@ async function pedidoDoAskJev(args, sufixo = '') {
   }
 }
 
-const IMAGEM = { base64: 'iVBORw0KGgo=', largura: 1280, altura: 800 };
+const IMAGE = { base64: 'iVBORw0KGgo=', width: 1280, height: 800 };
 
 test('askJev com imagem no OpenRouter: image_url no state, sem assets nem cabeçalho da Typesafe', async () => {
-  const { corpo, headers } = await pedidoDoAskJev({ estado: { pagina: 'arvore' }, imagem: IMAGEM, tipo: 'openrouter' });
+  const { corpo, headers } = await askJevRequest({ estado: { pagina: 'arvore' }, imagem: IMAGE, tipo: 'openrouter' });
   assert.deepEqual(corpo.state, {
     pagina: 'arvore',
     tela: { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } },
@@ -710,35 +710,35 @@ test('askJev com imagem no OpenRouter: image_url no state, sem assets nem cabeç
 });
 
 test('askJev com imagem na Typesafe: ref no state, assets no topo e cabeçalho; estado string vira { pagina }', async () => {
-  const { corpo, headers } = await pedidoDoAskJev({ estado: 'arvore', imagem: IMAGEM, tipo: 'typesafe' });
+  const { corpo, headers } = await askJevRequest({ estado: 'arvore', imagem: IMAGE, tipo: 'typesafe' });
   assert.equal(corpo.state.pagina, 'arvore');
   assert.match(corpo.state.tela, /^img-[0-9a-f-]{36}$/);
   assert.deepEqual(corpo.assets, { [corpo.state.tela]: { type: 'image', data_base64: 'iVBORw0KGgo=', format: 'png' } });
   assert.equal(headers['typesafe-danger-zone-images'], 'true');
 });
 
-test('dimensoesPng lê largura e altura do IHDR; o que não é PNG volta null', () => {
-  const { dimensoesPng } = require('./jev_objetivo.cjs');
+test('pngDimensions lê largura e altura do IHDR; o que não é PNG volta null', () => {
+  const { pngDimensions } = require('./jev_objetivo.cjs');
   // Assinatura PNG + IHDR de 1280x800 (0x500 x 0x320), RGBA 8 bits.
   const png = Buffer.from('89504e470d0a1a0a0000000d49484452000005000000032008060000005d6c2a3a', 'hex');
-  assert.deepEqual(dimensoesPng(png), { largura: 1280, altura: 800 });
-  assert.equal(dimensoesPng(Buffer.from('ffd8ffe000104a464946000101000001000100000000000000', 'hex')), null);
+  assert.deepEqual(pngDimensions(png), { width: 1280, height: 800 });
+  assert.equal(pngDimensions(Buffer.from('ffd8ffe000104a464946000101000001000100000000000000', 'hex')), null);
   const semIhdr = Buffer.from(png);
   semIhdr.write('IDAT', 12, 'latin1');
-  assert.equal(dimensoesPng(semIhdr), null);
-  assert.equal(dimensoesPng(png.subarray(0, 20)), null);
+  assert.equal(pngDimensions(semIhdr), null);
+  assert.equal(pngDimensions(png.subarray(0, 20)), null);
 });
 
-test('imagemDentroDoLimite: cada lado entre 280 e 1568, limite da Typesafe', () => {
-  const { imagemDentroDoLimite } = require('./jev_objetivo.cjs');
-  assert.equal(imagemDentroDoLimite({ largura: 280, altura: 280 }), true);
-  assert.equal(imagemDentroDoLimite({ largura: 1568, altura: 1568 }), true);
-  assert.equal(imagemDentroDoLimite({ largura: 1280, altura: 800 }), true);
-  assert.equal(imagemDentroDoLimite({ largura: 279, altura: 800 }), false);
-  assert.equal(imagemDentroDoLimite({ largura: 800, altura: 279 }), false);
-  assert.equal(imagemDentroDoLimite({ largura: 1569, altura: 800 }), false);
-  assert.equal(imagemDentroDoLimite({ largura: 800, altura: 1569 }), false);
-  assert.equal(imagemDentroDoLimite({ largura: 2560, altura: 1600 }), false);
+test('imageWithinLimits: cada lado entre 280 e 1568, limite da Typesafe', () => {
+  const { imageWithinLimits } = require('./jev_objetivo.cjs');
+  assert.equal(imageWithinLimits({ width: 280, height: 280 }), true);
+  assert.equal(imageWithinLimits({ width: 1568, height: 1568 }), true);
+  assert.equal(imageWithinLimits({ width: 1280, height: 800 }), true);
+  assert.equal(imageWithinLimits({ width: 279, height: 800 }), false);
+  assert.equal(imageWithinLimits({ width: 800, height: 279 }), false);
+  assert.equal(imageWithinLimits({ width: 1569, height: 800 }), false);
+  assert.equal(imageWithinLimits({ width: 800, height: 1569 }), false);
+  assert.equal(imageWithinLimits({ width: 2560, height: 1600 }), false);
 });
 
 test('askJev: status de erro vira "o Jev recusou"', async () => {
@@ -1503,29 +1503,29 @@ test('sem alvo com controles desabilitados na tela: espera a carga terminar ante
   assert.ok(executados.includes('wait --idle --timeout 5000'), executados.join('\n'));
 });
 
-const PRINT = { base64: 'iVBORw0KGgo=', largura: 1280, altura: 800 };
+const SCREENSHOT = { base64: 'iVBORw0KGgo=', width: 1280, height: 800 };
 // O `perguntar` do CLI marca no próprio objeto como o pedido saiu; o falso faz o mesmo.
-const perguntarComPrint = (status, r = () => resposta({ click: 'e2' }), vistos = []) => async (estado) => {
-  vistos.push(estado.__imagem);
-  if (estado.__imagem) estado.__imagem.status = status;
+const askWithScreenshotStatus = (status, r = () => resposta({ click: 'e2' }), vistos = []) => async (estado) => {
+  vistos.push(estado.__image);
+  if (estado.__image) estado.__image.status = status;
   return r();
 };
 
-test('com capturar, o passo leva o print ao perguntar e o trajeto registra imagem enviada', async () => {
+test('com capture, o passo leva o print ao perguntar e o trajeto registra imagem enviada', async () => {
   const eventos = [];
   const vistos = [];
   await rodar({
     objetivo: 'iniciar o cadastro',
     maxPassos: 1,
     executar: navegador([]),
-    capturar: async () => PRINT,
-    perguntar: perguntarComPrint('enviada', undefined, vistos),
+    capture: async () => SCREENSHOT,
+    perguntar: askWithScreenshotStatus('enviada', undefined, vistos),
     registrar: (e) => eventos.push(e),
   });
   assert.ok(vistos[0], 'o passo levou o print');
   assert.equal(vistos[0].base64, 'iVBORw0KGgo=');
-  assert.equal(vistos[0].largura, 1280);
-  assert.equal(vistos[0].altura, 800);
+  assert.equal(vistos[0].width, 1280);
+  assert.equal(vistos[0].height, 800);
   const d = eventos.find((e) => e.tipo === 'decisao');
   assert.equal(d.imagem, 'enviada');
   assert.equal(d.motivo, null);
@@ -1533,7 +1533,7 @@ test('com capturar, o passo leva o print ao perguntar e o trajeto registra image
 });
 
 test('print fora do limite ou ausente: o passo pergunta sem imagem e o trajeto diz por que', async () => {
-  for (const [capturar, imagem, motivo] of [
+  for (const [capture, imagem, motivo] of [
     [async () => ({ status: 'fora_do_limite', motivo: '2560x1600' }), 'fora_do_limite', '2560x1600'],
     [async () => ({ status: 'sem_print', motivo: 'erro: janela minimizada' }), 'sem_print', 'erro: janela minimizada'],
     [undefined, null, null],
@@ -1544,8 +1544,8 @@ test('print fora do limite ou ausente: o passo pergunta sem imagem e o trajeto d
       objetivo: 'iniciar o cadastro',
       maxPassos: 1,
       executar: navegador([]),
-      capturar,
-      perguntar: perguntarComPrint('enviada', undefined, vistos),
+      capture,
+      perguntar: askWithScreenshotStatus('enviada', undefined, vistos),
       registrar: (e) => eventos.push(e),
     });
     assert.equal(vistos[0], undefined);
@@ -1561,10 +1561,10 @@ test('a pergunta de bloqueio so vai quando o passo leva o print', () => {
   assert.ok(p.bloqueado, 'com print a pergunta vai');
   assert.equal(p.bloqueado.type, 'noul');
   assert.match(p.bloqueado.instructions, /screenshot `tela`/);
-  assert.equal(LIMIARES_COM_PRINT.bloqueado, 0.5);
+  assert.equal(THRESHOLDS_WITH_SCREENSHOT.bloqueado, 0.5);
 });
 
-const comBloqueio = (noul) => () => ({ ...resposta({ click: 'e2' }), bloqueado: { noul } });
+const withBlock = (noul) => () => ({ ...resposta({ click: 'e2' }), bloqueado: { noul } });
 
 test('bloqueio no print: o auxiliar escreve o motivo e o laco para com ele', async () => {
   const executados = [];
@@ -1575,8 +1575,8 @@ test('bloqueio no print: o auxiliar escreve o motivo e o laco para com ele', asy
     dados: { senha: 'S3gr3do!' },
     maxPassos: 2,
     executar: navegador(executados),
-    capturar: async () => PRINT,
-    perguntar: perguntarComPrint('enviada', comBloqueio(0.8)),
+    capture: async () => SCREENSHOT,
+    perguntar: askWithScreenshotStatus('enviada', withBlock(0.8)),
     ajudar: async (p) => { pedidos.push(p); return '{"acoes":[],"motivo":"a pagina pede login com uma conta que nao temos"}'; },
     registrar: (e) => eventos.push(e),
   });
@@ -1605,8 +1605,8 @@ test('bloqueio no print sem motivo do auxiliar, sem auxiliar ou com falha dele: 
       objetivo: 'iniciar o cadastro',
       maxPassos: 1,
       executar: navegador(executados),
-      capturar: async () => PRINT,
-      perguntar: perguntarComPrint('enviada', comBloqueio(0.8)),
+      capture: async () => SCREENSHOT,
+      perguntar: askWithScreenshotStatus('enviada', withBlock(0.8)),
       ajudar,
       registrar: (e) => eventos.push(e),
     });
@@ -1622,8 +1622,8 @@ test('bloqueio de um pedido que nao levou o print e ignorado', async () => {
     objetivo: 'iniciar o cadastro',
     maxPassos: 1,
     executar: navegador(executados),
-    capturar: async () => PRINT,
-    perguntar: perguntarComPrint('falhou', comBloqueio(0.9)),
+    capture: async () => SCREENSHOT,
+    perguntar: askWithScreenshotStatus('falhou', withBlock(0.9)),
     ajudar: async () => { chamado = true; return '{"acoes":[],"motivo":"x"}'; },
   });
   assert.equal(chamado, false);
@@ -1636,8 +1636,8 @@ test('bloqueio no print nao vence uma conclusao confirmada: o auxiliar nem e cha
     objetivo: 'iniciar o cadastro',
     maxPassos: 2,
     executar: navegador([]),
-    capturar: async () => PRINT,
-    perguntar: perguntarComPrint('enviada', () => ({ ...resposta({ op: 'DONE', confOp: 0.95, concluido: 0.9 }), bloqueado: { noul: 0.8 } })),
+    capture: async () => SCREENSHOT,
+    perguntar: askWithScreenshotStatus('enviada', () => ({ ...resposta({ op: 'DONE', confOp: 0.95, concluido: 0.9 }), bloqueado: { noul: 0.8 } })),
     ajudar: async () => { chamado = true; return '{"acoes":[],"motivo":"a pagina pede login"}'; },
   });
   assert.equal(r.sucesso, true);
@@ -1653,8 +1653,8 @@ test('auxiliar que discordou nao e reperguntado na mesma pagina; pagina nova per
     objetivo: 'iniciar o cadastro',
     maxPassos: 3,
     executar: async (verbo, args) => (verbo === 'text' ? texto : base(verbo, args)),
-    capturar: async () => PRINT,
-    perguntar: perguntarComPrint('enviada', comBloqueio(0.8)),
+    capture: async () => SCREENSHOT,
+    perguntar: askWithScreenshotStatus('enviada', withBlock(0.8)),
     ajudar: async () => { chamadas += 1; return '{"acoes":[],"motivo":""}'; },
     registrar: (e) => { eventos.push(e); if (e.tipo === 'bloqueio' && e.passo === 2) texto = 'Outra pagina'; },
   });
@@ -1669,8 +1669,8 @@ test('motivo do auxiliar vira uma linha de ate 200 caracteres no parou e no even
     objetivo: 'iniciar o cadastro',
     maxPassos: 1,
     executar: navegador([]),
-    capturar: async () => PRINT,
-    perguntar: perguntarComPrint('enviada', comBloqueio(0.8)),
+    capture: async () => SCREENSHOT,
+    perguntar: askWithScreenshotStatus('enviada', withBlock(0.8)),
     ajudar: async () => JSON.stringify({ acoes: [], motivo: `  login\n  exigido ${'x'.repeat(300)}` }),
     registrar: (e) => eventos.push(e),
   });
@@ -1694,8 +1694,8 @@ test('captura que passa do teto ou sem quadro: o passo segue sem imagem e os seg
       objetivo: 'iniciar o cadastro',
       maxPassos: 3,
       executar: navegador([]),
-      capturar: withCaptureCeiling(() => { chamadas += 1; return lenta(); }, { timeoutMs: 50 }),
-      perguntar: perguntarComPrint('enviada', undefined, vistos),
+      capture: withCaptureCeiling(() => { chamadas += 1; return lenta(); }, { timeoutMs: 50 }),
+      perguntar: askWithScreenshotStatus('enviada', undefined, vistos),
       registrar: (e) => eventos.push(e),
     });
     assert.equal(chamadas, 1, motivo);

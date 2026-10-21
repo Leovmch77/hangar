@@ -151,17 +151,17 @@ test('sidecar com pid morto e recusado com a mesma mensagem do sidecar ausente',
 });
 
 // Só o cabeçalho que o CLI lê (assinatura + IHDR com largura e altura).
-function png(largura, altura) {
+function png(width, height) {
   const b = Buffer.alloc(33);
   Buffer.from('89504e470d0a1a0a', 'hex').copy(b, 0);
   b.writeUInt32BE(13, 8);
   b.write('IHDR', 12, 'latin1');
-  b.writeUInt32BE(largura, 16);
-  b.writeUInt32BE(altura, 20);
+  b.writeUInt32BE(width, 16);
+  b.writeUInt32BE(height, 20);
   return b;
 }
 
-const ctlComPrint = (shots = []) => ({
+const ctlWithScreenshot = (shots = []) => ({
   enfileirar: (fn) => fn(),
   snapshot: async () => '- RootWebArea "Lista"\n  - button "Novo" [ref=@e1]',
   capturarPagina: async () => { shots.push(Date.now()); return { isEmpty: () => false, toPNG: () => png(1280, 800) }; },
@@ -184,7 +184,7 @@ test('confere manda o print; recusado com imagem, refaz sem ela e responde pelo 
   const shots = [];
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hangar-preview-tmp-'));
   const naCaptura = [];
-  const base = ctlComPrint(shots);
+  const base = ctlWithScreenshot(shots);
   const ctl = {
     ...base,
     capturarPagina: async () => {
@@ -239,7 +239,7 @@ test('objetivo com o print recusado: o passo 1 registra a falha, os seguintes va
   await new Promise((r) => jevFalso.listen(0, '127.0.0.1', r));
   let clicou = false;
   const ctl = {
-    ...ctlComPrint(),
+    ...ctlWithScreenshot(),
     snapshot: async () => (clicou ? '- RootWebArea "Cadastro"\n  - button "Voltar" [ref=@e2]' : '- RootWebArea "Lista"\n  - button "Novo" [ref=@e1]'),
     texto: async () => (clicou ? 'Cadastro concluido' : 'Lista de pacientes'),
     avaliar: async (js) => (js === 'location.href' ? (clicou ? 'http://x.test/cadastro' : 'http://x.test/lista') : 'ok'),
@@ -276,7 +276,7 @@ test('objetivo com o print recusado: o passo 1 registra a falha, os seguintes va
 });
 
 test('shot com --max e sem caminho grava no caminho padrao, nunca num arquivo chamado --max', async () => {
-  const srv = await subirServidor({ controladorDe: () => ctlComPrint(), escrever: () => {} });
+  const srv = await subirServidor({ controladorDe: () => ctlWithScreenshot(), escrever: () => {} });
   const home = homeComSidecar({ porta: srv.porta, token: srv.token, pid: process.pid });
 
   const r = await rodarCli(['shot', '--max', '1568', '--sessao', 'sessaoteste'], { home, cwd: home });

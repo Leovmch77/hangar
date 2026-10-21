@@ -90,7 +90,7 @@ const OPERACOES = {
 // errada encerra o trabalho. Com o piso da operacao o laco declarou pronto com 0,50, sem ter salvo.
 const LIMIARES = { operacao: 0.3, alvo: 0.6, arriscado: 0.5, arriscadoAlvo: 0.3, conclusao: 0.6 };
 // Decisão de um pedido que levou o print: a calibração com print ajusta estes valores à parte.
-const LIMIARES_COM_PRINT = { ...LIMIARES, bloqueado: 0.5 };
+const THRESHOLDS_WITH_SCREENSHOT = { ...LIMIARES, bloqueado: 0.5 };
 
 const distribuicao = (resposta) => Object.entries(resposta?.probabilities ?? {})
   .sort((a, b) => b[1] - a[1]).slice(0, 3)
@@ -242,7 +242,7 @@ const listasFechadas = (candidatos, editaveis, aberta) => (aberta ? [] : candida
  * campo ou clicar noutro lugar a fecha e joga fora o passo. Isso o código sabe, então não vira
  * pergunta — perguntando, o laço alternava entre abrir a lista e digitar noutro campo sem fim.
  */
-function montarPerguntas(candidatos, dados = {}, editaveis = new Set(), listaAberta = '', acabouDeDigitar = false, comImagem = false) {
+function montarPerguntas(candidatos, dados = {}, editaveis = new Set(), listaAberta = '', acabouDeDigitar = false, withImage = false) {
   const opcoes = candidatos.filter((c) => c.papel === PAPEL_DE_OPCAO);
   // `combobox` ENTRA em clicaveis: o dropdown do Radix e um <button role="combobox"> que so abre
   // com clique, e a lista de opcoes so aparece na arvore depois de aberto. `option` tambem entra:
@@ -313,7 +313,7 @@ function montarPerguntas(candidatos, dados = {}, editaveis = new Set(), listaAbe
       instructions: 'The next operation would buy, send, publish, or delete something that another person would see or that cannot be undone.',
     },
     // Só se pergunta o que o print mostra: sem ele, o Jev julgaria pela árvore um bloqueio que não vê.
-    ...(comImagem ? {
+    ...(withImage ? {
       bloqueado: {
         type: 'noul',
         instructions: 'A dialog, error or login wall on the screenshot `tela` prevents progress toward the goal and no '
@@ -692,7 +692,7 @@ function riscoDoClique(respostas, escolhido, candidatos, gemeos, limiares) {
 const OPERACOES_DO_AUXILIAR = new Set(['CLICK', 'SELECT', 'TYPE_TEXT']);
 
 /** Troca os valores secretos de `dados` por "(oculto)": o auxiliar é outro terceiro. */
-function ocultador(cofre) {
+function secretMasker(cofre) {
   const segredos = Object.entries(cofre).filter(([k, v]) => ehSegredo(k) && typeof v === 'string' && v).map(([, v]) => v);
   return (s) => segredos.reduce((t, v) => t.split(v).join('(oculto)'), String(s ?? ''));
 }
@@ -700,7 +700,7 @@ function ocultador(cofre) {
 /** O que o modelo auxiliar recebe quando o Jev não achou alvo: só observação, nunca valor de `dados`. */
 function pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respostas, recusa = '', bloqueados = [], valores = {}, vazios = [] }) {
   // Senha de `dados` que a página reexibe (revisão, OTP) não sai daqui.
-  const oculto = ocultador(cofre);
+  const oculto = secretMasker(cofre);
   url = oculto(url);
   texto = oculto(texto);
   return [
@@ -742,8 +742,8 @@ function pedidoDeAjuda({ objetivo, url, candidatos, texto, feito, cofre, respost
  * O Jev viu um bloqueio no print: o auxiliar só escreve o porquê, ou discorda com motivo vazio.
  * A resposta cabe no `ESQUEMA_DO_AUXILIAR` (com `acoes` vazia), o mesmo que o `ajudar` impõe.
  */
-function pedidoDeMotivo({ objetivo, url, texto, cofre }) {
-  const oculto = ocultador(cofre);
+function blockReasonRequest({ objetivo, url, texto, cofre }) {
+  const oculto = secretMasker(cofre);
   return [
     'Um laco que navega numa pagina web rumo a um objetivo viu no print da tela um dialogo, erro ou tela de login '
       + 'que parece impedir o objetivo.',
@@ -1014,7 +1014,7 @@ class FalhaDoNavegador extends Error {
  * `escreverTexto(pedido)` com o LLM pequeno. `ajudar(pedido)`, opcional, devolve o texto do modelo
  * auxiliar que escolhe o passo quando o Jev fica sem alvo confiável.
  */
-async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, escreverTexto, ajudar, capturar, permitirRisco = false, log = () => {}, registrar = () => {}, feitoInicial = [] }) {
+async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, escreverTexto, ajudar, capture, permitirRisco = false, log = () => {}, registrar = () => {}, feitoInicial = [] }) {
   // Quem repetiu um roteiro e divergiu entrega os passos já feitos: o Jev continua dali.
   const feito = [...feitoInicial];
   // Passos que o auxiliar propôs depois do primeiro: usados antes de chamá-lo de novo.
@@ -1027,7 +1027,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
   // Lista+valor ja tentados: valor que nao "pega" nao vira clique na mesma lista a cada passo.
   const listasTentadas = new Set();
   // Páginas (url + texto) em que o auxiliar já discordou do bloqueio: a mesma tela não o chama de novo.
-  const discordouEm = new Set();
+  const disagreedOn = new Set();
   const camposSecretos = new Set();
   let reolhou = 0;
   let urlDosEscritos = '';
@@ -1065,12 +1065,12 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
   };
   for (let passo = 1; passo <= maxPassos; passo += 1) {
     // Em paralelo: sao leituras independentes, e em serie somavam um ida e volta cada por passo.
-    const [snapshot, url, texto, anotacaoLida, print] = await Promise.all([
+    const [snapshot, url, texto, anotacaoLida, screenshot] = await Promise.all([
       executar('snapshot', SNAPSHOT_DO_LACO),
       executar('url', []),
       executar('text', []),
       valoresAtuais(executar, log),
-      capturar ? capturar().catch((err) => ({ status: 'sem_print', motivo: String(err?.message ?? err).slice(0, 160) })) : null,
+      capture ? capture().catch((err) => ({ status: 'sem_print', motivo: String(err?.message ?? err).slice(0, 160) })) : null,
     ]);
     // O navegador responde erro como TEXTO. Sem esta checagem, um `erro: a aba nao descongelou`
     // seria lido como uma página sem elementos e o laço reportaria a página errada em vez da falha.
@@ -1145,16 +1145,16 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       ...(recusa ? { envio_recusado: textoDaRecusa(recusa) } : {}),
       // O laço não conhece o destino do Jev: quem pergunta tira a imagem daqui, monta o formato e
       // devolve no mesmo objeto como o pedido saiu (`status`, `motivo`).
-      ...(print?.base64 ? { __imagem: print } : {}),
+      ...(screenshot?.base64 ? { __image: screenshot } : {}),
     };
     // Só o pedido que levou a imagem decide com os limites calibrados com print.
-    const limiaresDoPedido = () => (estado.__imagem?.status === 'enviada' ? LIMIARES_COM_PRINT : LIMIARES);
+    const stepThresholds = () => (estado.__image?.status === 'enviada' ? THRESHOLDS_WITH_SCREENSHOT : LIMIARES);
     if (!candidatos.length) {
       // Página de sucesso costuma não ter nada clicável: DONE ainda precisa ser perguntado, e com
       // a mesma prova do laço normal — a página confirmando, não só o Jev preferindo DONE.
       const { concluido } = await perguntar(estado, { concluido: montarPerguntas([]).concluido });
       const prova = typeof concluido?.noul === 'number' ? concluido.noul : 0;
-      const { conclusao } = limiaresDoPedido();
+      const { conclusao } = stepThresholds();
       return {
         feito,
         sucesso: prova >= conclusao,
@@ -1165,28 +1165,28 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     }
 
     const acabouDeDigitar = String(feito.at(-1) ?? '').startsWith('TYPE_TEXT');
-    const respostas = await perguntar(estado, montarPerguntas(candidatos, cofre, anotacao.editaveis, anotacao.lista_aberta, acabouDeDigitar, Boolean(estado.__imagem)));
-    const limiares = limiaresDoPedido();
+    const respostas = await perguntar(estado, montarPerguntas(candidatos, cofre, anotacao.editaveis, anotacao.lista_aberta, acabouDeDigitar, Boolean(estado.__image)));
+    const thresholds = stepThresholds();
     const terminal = TERMINAIS.has(respostas.operacao?.choice);
     // Bloqueio visto no print não para sozinho: o auxiliar escreve o porquê ou discorda, e o passo segue.
     // DONE/BLOCKED já são uma parada que o `decidir` julga: o bloqueio não a sobrepõe.
-    let bloqueio = null;
-    const pBloqueio = respostas.bloqueado?.noul;
-    if (!terminal && estado.__imagem?.status === 'enviada' && typeof pBloqueio === 'number' && pBloqueio >= limiares.bloqueado) {
-      const evento = { passo, tipo: 'bloqueio', bloqueado: pBloqueio };
-      const pagina = `${url}\n${texto}`;
-      if (!ajudar) registrar({ ...evento, resultado: 'sem_auxiliar' });
-      else if (discordouEm.has(pagina)) registrar({ ...evento, resultado: 'auxiliar_discordou_antes' });
+    let block = null;
+    const blockProbability = respostas.bloqueado?.noul;
+    if (!terminal && estado.__image?.status === 'enviada' && typeof blockProbability === 'number' && blockProbability >= thresholds.bloqueado) {
+      const event = { passo, tipo: 'bloqueio', bloqueado: blockProbability };
+      const page = `${url}\n${texto}`;
+      if (!ajudar) registrar({ ...event, resultado: 'sem_auxiliar' });
+      else if (disagreedOn.has(page)) registrar({ ...event, resultado: 'auxiliar_discordou_antes' });
       else {
         try {
-          const bruto = await ajudar(pedidoDeMotivo({ objetivo, url, texto, cofre }));
+          const raw = await ajudar(blockReasonRequest({ objetivo, url, texto, cofre }));
           // Texto de terceiro que vira a linha `parou` e o trajeto: uma linha, curta.
-          const motivo = String(lerTextos(bruto).motivo ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
-          if (!motivo) discordouEm.add(pagina);
-          registrar({ ...evento, resultado: motivo ? 'bloqueado' : 'auxiliar_discorda', motivo: motivo || null });
-          if (motivo) bloqueio = { parar: `bloqueado: ${motivo}` };
+          const reason = String(lerTextos(raw).motivo ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+          if (!reason) disagreedOn.add(page);
+          registrar({ ...event, resultado: reason ? 'bloqueado' : 'auxiliar_discorda', motivo: reason || null });
+          if (reason) block = { parar: `bloqueado: ${reason}` };
         } catch (err) {
-          registrar({ ...evento, resultado: 'auxiliar_falhou', motivo: String(err?.message ?? err).slice(0, 200) });
+          registrar({ ...event, resultado: 'auxiliar_falhou', motivo: String(err?.message ?? err).slice(0, 200) });
         }
       }
     }
@@ -1196,14 +1196,14 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     // So quando o Jev quer seguir trabalhando: DONE/BLOCKED nao abrem lista nenhuma.
     let preencheuLista = false;
     let refsAtuais = null;
-    const fechadas = terminal || bloqueio ? [] : listasFechadas(candidatos, anotacao.editaveis, normalizar(anotacao.lista_aberta));
+    const fechadas = terminal || block ? [] : listasFechadas(candidatos, anotacao.editaveis, normalizar(anotacao.lista_aberta));
     const homonimos = (nome) => fechadas.filter((x) => x.nome === nome).length > 1;
     for (const c0 of fechadas) {
       // Dois campos com o mesmo rotulo nao se distinguem pelo nome: ficam para o Jev.
       if (homonimos(c0.nome)) continue;
       const v = respostas[cabecaDoValor(c0.ref)];
       const chave = v?.choice;
-      if (!chave || chave === NENHUM || forca(v) < limiares.alvo || typeof cofre[chave] !== 'string' || ehSegredo(chave)) continue;
+      if (!chave || chave === NENHUM || forca(v) < thresholds.alvo || typeof cofre[chave] !== 'string' || ehSegredo(chave)) continue;
       const tentativa = `${c0.nome}=${cofre[chave]}`;
       if (listasTentadas.has(tentativa)) continue;
       const atualDaLista = Object.entries(anotacao.valores).find(([k]) => normalizar(k) === normalizar(c0.nome))?.[1];
@@ -1242,10 +1242,10 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     }
     // Com a ordem explicita de quem chamou, a trava de risco vira registro: o passo segue e o log diz
     // qual clique arriscado foi liberado.
-    let decisao = bloqueio ?? decidir(respostas, candidatos, limiares);
+    let decisao = block ?? decidir(respostas, candidatos, thresholds);
     if (permitirRisco && decisao.parar?.startsWith('operacao arriscada')) {
       log(`jev-objetivo passo ${passo}: risco liberado por --permitir-risco (${decisao.parar})`);
-      decisao = decidir(respostas, candidatos, { ...limiares, arriscado: Infinity, arriscadoAlvo: Infinity });
+      decisao = decidir(respostas, candidatos, { ...thresholds, arriscado: Infinity, arriscadoAlvo: Infinity });
     }
     // Tela que acabou de mudar (formulario abrindo, listas carregando) deixa o Jev sem alvo firme num
     // estado que nao e o final: antes de desistir, espera e olha de novo, uma vez por passo.
@@ -1262,10 +1262,10 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     // dele não muda a parada, mas vai junto no texto dela.
     if (ajudar && decisao.parar && / sem alvo confiavel/.test(decisao.parar)) {
       const liberado = (fazer, origem) => {
-        const d = fazer(limiares);
+        const d = fazer(thresholds);
         if (!(permitirRisco && d.parar?.startsWith('operacao arriscada'))) return d;
         log(`jev-objetivo passo ${passo}: risco liberado por --permitir-risco (${d.parar}, ${origem})`);
-        return fazer({ ...limiares, arriscado: Infinity, arriscadoAlvo: Infinity });
+        return fazer({ ...thresholds, arriscado: Infinity, arriscadoAlvo: Infinity });
       };
       let ajuda = null;
       // O passo seguinte que o auxiliar já propôs vem antes de chamá-lo de novo, se o elemento
@@ -1320,8 +1320,8 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       url: [...segredos].reduce((t, v) => t.split(v).join('(oculto)'), String(url).replace(/^ok:\s*"?|"$/g, '')),
       candidatos: candidatos.length,
       jev: { operacao: distribuicao(respostas.operacao), concluido: respostas.concluido?.noul ?? null, arriscado: respostas.arriscado?.noul ?? null },
-      imagem: print?.status ?? null,
-      motivo: print?.motivo ?? null,
+      imagem: screenshot?.status ?? null,
+      motivo: screenshot?.motivo ?? null,
       bloqueado: respostas.bloqueado?.noul ?? null,
       ...(decisao.parar ? { parar: decisao.parar }
         : { operacao: decisao.operacao, alvo: decisao.escolhido ? rotulo(decisao.escolhido) : null, confianca: decisao.confianca ?? null, via: decisao.via ?? 'jev' }),
@@ -1386,7 +1386,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
       } else if (decisao.operacao === 'TYPE_TEXT') {
         const vazio = (c) => !Object.entries(anotacao.valores).find(([k]) => normalizar(k) === normalizar(c.nome))?.[1];
         const vizinhos = candidatos.filter((c) => PAPEIS_DE_TEXTO.has(c.papel) && !semRotulo(c.nome) && !ehEditavel(c, anotacao.editaveis) && vazio(c)
-          && !(respostas[cabecaDoValor(c.ref)]?.choice in cofre && forca(respostas[cabecaDoValor(c.ref)]) >= limiares.alvo
+          && !(respostas[cabecaDoValor(c.ref)]?.choice in cofre && forca(respostas[cabecaDoValor(c.ref)]) >= thresholds.alvo
             && cabeNoCampo(c, String(cofre[respostas[cabecaDoValor(c.ref)].choice]))))
           .map((c) => c.nome);
         const { valor, origem, parou, falta, pular } = await valorDoCampo({
@@ -1399,7 +1399,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
           feito,
           escreverTexto,
           tipos: anotacao.tipos,
-          limiares,
+          limiares: thresholds,
           recusa: recusaParaTexto,
           buscasSemOpcao: buscasVazias.get(decisao.escolhido.nome) ?? 0,
         });
@@ -1454,7 +1454,7 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
           const chave = v?.choice;
           // Sem valor de `dados`, o que o modelo de texto ja escreveu para este campo no pedido unico.
           const escrito = String(escritos.get(c.nome) ?? '').trim();
-          if (!(chave && chave !== NENHUM && forca(v) >= limiares.alvo && typeof cofre[chave] === 'string' && cabeNoCampo(c, cofre[chave]))) {
+          if (!(chave && chave !== NENHUM && forca(v) >= thresholds.alvo && typeof cofre[chave] === 'string' && cabeNoCampo(c, cofre[chave]))) {
             if (!escrito || escrito.includes(SEM_VALOR) || ehSegredo(c.nome) || atual(c)) continue;
             log(`jev-objetivo passo ${passo}: TYPE_TEXT @${c.ref} ("${c.nome}" <- ${escrito.slice(0, 40)} via llm) (mesmo pedido)`);
             await preencher(c, escrito);
@@ -1524,9 +1524,9 @@ function perguntaDeConfere(estado) {
   };
 }
 
-function chegouNoEstado(respostas, limiares = LIMIARES) {
+function chegouNoEstado(respostas, thresholds = LIMIARES) {
   const p = respostas?.chegou?.noul;
-  return typeof p === 'number' ? { p, ok: p >= limiares.conclusao } : { p: 0, ok: false };
+  return typeof p === 'number' ? { p, ok: p >= thresholds.conclusao } : { p: 0, ok: false };
 }
 
 const JEV_TYPESAFE_URL = 'https://api.typesafe.ai/v1/systemone';
@@ -1553,20 +1553,20 @@ function destinoDoJev(env) {
 
 // Limites que a Typesafe documenta para imagem no state; quem chama manda sem imagem fora deles. A
 // faixa de área documentada (78.400 a 2.458.624) é 280² a 1568²: os lados já a garantem.
-const LIMITE_IMAGEM = { ladoMin: 280, ladoMax: 1568 };
+const IMAGE_LIMITS = { minSide: 280, maxSide: 1568 };
 
-function imagemDentroDoLimite({ largura, altura }) {
-  const { ladoMin, ladoMax } = LIMITE_IMAGEM;
-  return largura >= ladoMin && largura <= ladoMax && altura >= ladoMin && altura <= ladoMax;
+function imageWithinLimits({ width, height }) {
+  const { minSide, maxSide } = IMAGE_LIMITS;
+  return width >= minSide && width <= maxSide && height >= minSide && height <= maxSide;
 }
 
-const ASSINATURA_PNG = Buffer.from('89504e470d0a1a0a', 'hex');
+const PNG_SIGNATURE = Buffer.from('89504e470d0a1a0a', 'hex');
 
 /** Largura e altura do IHDR sem decodificar a imagem; null se não for PNG. */
-function dimensoesPng(buf) {
-  if (buf.length < 24 || !buf.subarray(0, 8).equals(ASSINATURA_PNG)
+function pngDimensions(buf) {
+  if (buf.length < 24 || !buf.subarray(0, 8).equals(PNG_SIGNATURE)
     || buf.toString('latin1', 12, 16) !== 'IHDR') return null;
-  return { largura: buf.readUInt32BE(16), altura: buf.readUInt32BE(20) };
+  return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
 }
 
 const CAPTURE_TIMEOUT_MS = 5000;
@@ -1599,7 +1599,7 @@ const semChave = (texto, chave) => (chave ? String(texto).split(chave).join('***
 // Endpoint pendurado prendia o comando pra sempre, e um `until hangar-preview confere` parava calado.
 async function askJev({ url, modelo, chave, estado, perguntas, deadlineMs = JEV_DEADLINE_MS, imagem, tipo }) {
   const headers = { authorization: `Bearer ${chave}`, 'content-type': 'application/json' };
-  const pedido = { model: modelo, state: estado, questions: perguntas };
+  const payload = { model: modelo, state: estado, questions: perguntas };
   if (imagem) {
     const state = typeof estado === 'string' ? { pagina: estado } : { ...estado };
     // O OpenRouter ignora `assets` calado; só lê a imagem inline no state.
@@ -1607,10 +1607,10 @@ async function askJev({ url, modelo, chave, estado, perguntas, deadlineMs = JEV_
       state.tela = { type: 'image_url', image_url: { url: `data:image/png;base64,${imagem.base64}` } };
     } else {
       state.tela = `img-${crypto.randomUUID()}`;
-      pedido.assets = { [state.tela]: { type: 'image', data_base64: imagem.base64, format: 'png' } };
+      payload.assets = { [state.tela]: { type: 'image', data_base64: imagem.base64, format: 'png' } };
       headers['TypeSafe-Danger-Zone-Images'] = 'true';
     }
-    pedido.state = state;
+    payload.state = state;
   }
   let r;
   let corpo;
@@ -1618,7 +1618,7 @@ async function askJev({ url, modelo, chave, estado, perguntas, deadlineMs = JEV_
     r = await fetch(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify(pedido),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(deadlineMs),
     });
     corpo = await r.text();
@@ -1640,7 +1640,7 @@ module.exports = {
   parsarSnapshot, montarPerguntas, montarEstado, decidir, rodar, pedidoDeTexto,
   valorDoCampo, cabecaDoValor, jsDeSelecionar, jsDeEstarAberto, normalizar,
   perguntaDeConfere, chegouNoEstado, destinoDoJev, askJev, nomeComOrdem, avisoDeSucesso,
-  dimensoesPng, imagemDentroDoLimite, LIMITE_IMAGEM, withCaptureCeiling, CAPTURE_TIMEOUT_MS,
-  LIMIARES, LIMIARES_COM_PRINT, NENHUM, OPERACOES, SEM_SELECT, MAX_CANDIDATOS, CHAVE_SECRETA, semChave, mascararValores,
+  pngDimensions, imageWithinLimits, IMAGE_LIMITS, withCaptureCeiling, CAPTURE_TIMEOUT_MS,
+  LIMIARES, THRESHOLDS_WITH_SCREENSHOT, NENHUM, OPERACOES, SEM_SELECT, MAX_CANDIDATOS, CHAVE_SECRETA, semChave, mascararValores,
   SNAPSHOT_DO_LACO, ESPERA_ASSENTAR, JS_ESPERAR_OPCOES, semRotulo, rotulo, decidirPeloAuxiliar, pedidoDeAjuda, ESQUEMA_DO_AUXILIAR,
 };
