@@ -21,15 +21,21 @@ pub struct Progress { pub stage: String, pub error: Option<DeviceError>, pub sou
 
 fn lost() -> DeviceError { DeviceError { code: "connection_failed".into(), detail: None } }
 
+/// A recusa do corpo; sem ela, 404 é servidor de antes destas rotas.
+fn refusal(status: u16, body: Option<Value>) -> DeviceError {
+    let own = body.and_then(|v| v.get("error").cloned()).and_then(|e| serde_json::from_value(e).ok());
+    own.unwrap_or_else(|| if status == 404 { DeviceError { code: "server_outdated".into(), detail: None } } else { lost() })
+}
+
 impl Api {
     async fn device_call(&self, method: Method, path: &str, query: &[(&str, &str)], body: Option<Value>, seconds: u64) -> Result<Value, DeviceError> {
         let mut req = self.client.request(method, self.server_url(&["device-install", path], query)).timeout(Duration::from_secs(seconds));
         if let Some(body) = body { req = req.json(&body); }
         let response = req.send().await.map_err(|_| lost())?;
-        let ok = response.status().is_success();
-        let value: Value = response.json().await.map_err(|_| lost())?;
-        if ok { return Ok(value); }
-        Err(value.get("error").cloned().and_then(|e| serde_json::from_value(e).ok()).unwrap_or_else(lost))
+        let status = response.status();
+        let value: Option<Value> = response.json().await.ok();
+        if status.is_success() { return value.ok_or_else(lost); }
+        Err(refusal(status.as_u16(), value))
     }
 
     pub async fn device_scan(&self) -> Result<Scan, DeviceError> {
@@ -59,5 +65,21 @@ impl Api {
     pub async fn device_progress(&self, job: &str) -> Result<Progress, DeviceError> {
         let value = self.device_call(Method::GET, "progress", &[("job", job)], None, 10).await?;
         serde_json::from_value(value).map_err(|_| lost())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn devices_404_without_refusal_means_outdated_server() {
+        assert_eq!(refusal(404, None).code, "server_outdated");
+        assert_eq!(refusal(404, Some(json!({"detail": "Not Found"}))).code, "server_outdated");
+        // 404 com recusa própria é do servidor novo (trabalho esquecido), não servidor antigo.
+        let unknown = json!({"error": {"code": "device_install_unknown_job", "detail": null}});
+        assert_eq!(refusal(404, Some(unknown)).code, "device_install_unknown_job");
+        assert_eq!(refusal(502, None).code, "connection_failed");
     }
 }

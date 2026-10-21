@@ -8851,6 +8851,7 @@
   "native_devices_err_device_install_unknown_job": "The server no longer knows this install (did it restart?). Start again.",
   "native_devices_err_device_install_not_waiting": "The install isn't waiting for a code right now.",
   "native_devices_err_connection_failed": "No answer from the server. Check that it's running and try again.",
+  "native_devices_err_server_outdated": "This Hangar server doesn't have device install yet. Update the server (Update button) and try again.",
   "native_devices_ios_trust": "Plug in the cable and tap “Trust” on the device",
   "native_devices_ios_trust_why": "Without it, this computer can't talk to the iPhone or iPad. Then enter the device passcode.",
   "native_devices_ios_service": "Install Apple's device service",

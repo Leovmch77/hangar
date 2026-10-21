@@ -91,6 +91,7 @@ const ERROR_CODES: &[&str] = &[
     "device_install_login_refused", "device_install_apple_busy", "device_install_anisette_unreachable", "device_install_download_failed",
     "device_install_download_mismatch", "device_install_sign_failed", "device_install_not_installed", "device_error",
     "device_install_forbidden", "device_install_busy", "device_install_unknown_job", "device_install_not_waiting", "connection_failed",
+    "server_outdated",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,6 +201,8 @@ pub(in crate::app) struct Devices {
     code_sending: bool,
     code_error: Option<String>,
     qr: Vec<(String, Arc<Image>)>,
+    /// O print aberto em tamanho maior; um clique no print abre e fecha.
+    enlarged: Option<&'static str>,
 }
 
 pub(super) enum DevicesReply {
@@ -366,17 +369,17 @@ impl Hangar {
             |this: &mut Hangar, n, _, cx| { this.devices.platform = if n == 0 { Platform::Ios } else { Platform::Android }; cx.notify(); }, cx);
         let page = page.child(div().mt(px(20.)).flex().child(picker));
         match platform {
-            Platform::Android => page.child(self.render_android()).into_any_element(),
+            Platform::Android => page.child(self.render_android(cx)).into_any_element(),
             Platform::Ios => page.child(self.render_ios(cx)).into_any_element(),
         }
     }
 
-    fn render_android(&mut self) -> Div {
+    fn render_android(&mut self, cx: &mut Context<Self>) -> Div {
         let qr = self.qr(APK_URL);
         div().flex().flex_col()
             .child(settings_box().mt(px(20.)).child(qr_block(qr, tr("devices_apk_qr"), APK_URL)))
             .child(self.heading("devices_android_steps"))
-            .child(steps_box(&ANDROID, 1))
+            .child(steps_box(&ANDROID, 1, self.devices.enlarged, cx))
     }
 
     fn render_ios(&mut self, cx: &mut Context<Self>) -> Div {
@@ -395,7 +398,8 @@ impl Hangar {
             _ => page.child(self.render_device_box(phase, cx)),
         };
         let before = before_steps(phase);
-        if !before.is_empty() { page = page.child(div().mt(px(12.)).child(steps_box(before, 1))); }
+        let enlarged = self.devices.enlarged;
+        if !before.is_empty() { page = page.child(div().mt(px(12.)).child(steps_box(before, 1, enlarged, cx))); }
         if phase == Phase::Login { page = page.child(self.heading("devices_login_heading")).child(self.render_login(cx)); }
         let sections = after_sections(phase);
         if !sections.is_empty() {
@@ -407,10 +411,10 @@ impl Hangar {
                 if section.source_qr && let Some(link) = &source {
                     page = page.child(settings_box().mb(px(12.)).child(qr_block(source_qr.clone(), tr("devices_source_qr"), link)));
                 }
-                page = page.child(steps_box(section.steps, number));
+                page = page.child(steps_box(section.steps, number, enlarged, cx));
                 number += section.steps.len();
             }
-            page = page.child(self.heading("devices_reserve_heading")).child(steps_box(std::slice::from_ref(&IOS_RESERVE), number));
+            page = page.child(self.heading("devices_reserve_heading")).child(steps_box(std::slice::from_ref(&IOS_RESERVE), number, enlarged, cx));
         }
         page
     }
@@ -530,18 +534,26 @@ fn qr_block(qr: Option<Arc<Image>>, label: String, link: &str) -> Div {
             .child(div().font_family(theme::MONO).text_size(px(12.)).text_color(theme::muted()).whitespace_normal().child(link.to_owned())))
 }
 
-/// Uma linha por passo: número, o que tocar, o porquê e o print à direita (quando já existe).
-fn steps_box(steps: &[GuideStep], first: usize) -> Div {
+/// Uma linha por passo: número, o que tocar, o porquê e o print à direita (quando já existe), pequeno até o clique.
+fn steps_box(steps: &[GuideStep], first: usize, enlarged: Option<&'static str>, cx: &mut Context<Hangar>) -> Div {
     settings_box().children(steps.iter().enumerate().map(|(n, step)| {
         let image = step.image.filter(|image| !PENDING_CAPTURE.contains(image));
+        let shot = image.map(|image| {
+            let (w, h) = if enlarged == Some(image) { (440., 640.) } else { (150., 216.) };
+            div().id(SharedString::from(format!("devices-shot-{image}"))).flex_shrink_0().w(px(w)).h(px(h)).cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.devices.enlarged = if this.devices.enlarged == Some(image) { None } else { Some(image) };
+                    cx.notify();
+                }))
+                .child(img(format!("{ASSET_DIR}{image}")).size_full().object_fit(ObjectFit::Contain))
+        });
         div().when(n > 0, |el| el.border_t_1().border_color(theme::border())).px_4().py(px(14.)).flex().items_start().gap(px(14.))
             .child(div().size(px(24.)).flex_shrink_0().rounded_full().bg(theme::accent_dim()).flex().items_center().justify_center()
                 .text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::accent_text()).child((first + n).to_string()))
             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(4.))
                 .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).whitespace_normal().child(tr(step.title_key)))
                 .child(div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(tr(step.why_key))))
-            .children(image.map(|image| div().flex_shrink_0().w(px(240.)).h(px(340.))
-                .child(img(format!("{ASSET_DIR}{image}")).size_full().object_fit(ObjectFit::Contain))))
+            .children(shot)
     }))
 }
 
