@@ -2238,7 +2238,7 @@ def _sidecar_state(name: str) -> str:
         return "absent"
     except (OSError, ValueError):
         return "unreadable"
-    if not isinstance(data, dict) or not isinstance(data.get("peers") or [], list):
+    if not isinstance(data, dict) or not isinstance(data.get("peers", []), list):
         return "unreadable"
     return "absent"
 
