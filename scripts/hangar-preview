@@ -41,7 +41,7 @@
 // (quem monta o painel na tela) e `list` só lê os sidecares de sessão — os dois têm que funcionar
 // mesmo com o shell fora do ar.
 import { execFileSync } from 'node:child_process';
-import { accessSync, appendFileSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, appendFileSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
@@ -651,9 +651,22 @@ function abrirTrajeto(dados) {
  * O print que vai ao Jev: `{ base64, largura, altura }`, ou `{ status, motivo }` quando não há o que
  * mandar. O arquivo temporário sai sempre; o Electron ignora o `--max` e o print grande cai no limite.
  */
+let pastaDosPrints = null;
+// O print da página pode ter dado sensível: fica numa pasta 0700 só deste processo, que sai com ele.
+function pastaDePrints() {
+  if (!pastaDosPrints) {
+    pastaDosPrints = mkdtempSync(join(tmpdir(), 'hangar-jev-'));
+    process.on('exit', () => {
+      try { rmSync(pastaDosPrints, { recursive: true, force: true }); } catch { /* o tmp do sistema limpa depois */ }
+    });
+  }
+  return pastaDosPrints;
+}
+
 async function capturarPrint(chave) {
-  const arquivo = join(tmpdir(), `hangar-jev-${process.pid}-${randomUUID()}.png`);
+  let arquivo = null;
   try {
+    arquivo = join(pastaDePrints(), `${randomUUID()}.png`);
     const { texto, codigo } = await chamar(chave, 'shot', [arquivo, '--max', '1568'], flags.aba, lancar);
     if (codigo !== 0) return { status: 'sem_print', motivo: semToken(texto).slice(0, 160) };
     let buf;

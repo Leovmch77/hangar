@@ -1026,6 +1026,8 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
   const pulados = new Set();
   // Lista+valor ja tentados: valor que nao "pega" nao vira clique na mesma lista a cada passo.
   const listasTentadas = new Set();
+  // Páginas (url + texto) em que o auxiliar já discordou do bloqueio: a mesma tela não o chama de novo.
+  const discordouEm = new Set();
   const camposSecretos = new Set();
   let reolhou = 0;
   let urlDosEscritos = '';
@@ -1165,16 +1167,22 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     const acabouDeDigitar = String(feito.at(-1) ?? '').startsWith('TYPE_TEXT');
     const respostas = await perguntar(estado, montarPerguntas(candidatos, cofre, anotacao.editaveis, anotacao.lista_aberta, acabouDeDigitar, Boolean(estado.__imagem)));
     const limiares = limiaresDoPedido();
+    const terminal = TERMINAIS.has(respostas.operacao?.choice);
     // Bloqueio visto no print não para sozinho: o auxiliar escreve o porquê ou discorda, e o passo segue.
+    // DONE/BLOCKED já são uma parada que o `decidir` julga: o bloqueio não a sobrepõe.
     let bloqueio = null;
     const pBloqueio = respostas.bloqueado?.noul;
-    if (estado.__imagem?.status === 'enviada' && typeof pBloqueio === 'number' && pBloqueio >= limiares.bloqueado) {
+    if (!terminal && estado.__imagem?.status === 'enviada' && typeof pBloqueio === 'number' && pBloqueio >= limiares.bloqueado) {
       const evento = { passo, tipo: 'bloqueio', bloqueado: pBloqueio };
+      const pagina = `${url}\n${texto}`;
       if (!ajudar) registrar({ ...evento, resultado: 'sem_auxiliar' });
+      else if (discordouEm.has(pagina)) registrar({ ...evento, resultado: 'auxiliar_discordou_antes' });
       else {
         try {
           const bruto = await ajudar(pedidoDeMotivo({ objetivo, url, texto, cofre }));
-          const motivo = String(lerTextos(bruto).motivo ?? '').trim();
+          // Texto de terceiro que vira a linha `parou` e o trajeto: uma linha, curta.
+          const motivo = String(lerTextos(bruto).motivo ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+          if (!motivo) discordouEm.add(pagina);
           registrar({ ...evento, resultado: motivo ? 'bloqueado' : 'auxiliar_discorda', motivo: motivo || null });
           if (motivo) bloqueio = { parar: `bloqueado: ${motivo}` };
         } catch (err) {
@@ -1188,7 +1196,6 @@ async function rodar({ objetivo, dados, maxPassos = 15, perguntar, executar, esc
     // So quando o Jev quer seguir trabalhando: DONE/BLOCKED nao abrem lista nenhuma.
     let preencheuLista = false;
     let refsAtuais = null;
-    const terminal = TERMINAIS.has(respostas.operacao?.choice);
     const fechadas = terminal || bloqueio ? [] : listasFechadas(candidatos, anotacao.editaveis, normalizar(anotacao.lista_aberta));
     const homonimos = (nome) => fechadas.filter((x) => x.nome === nome).length > 1;
     for (const c0 of fechadas) {

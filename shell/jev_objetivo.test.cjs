@@ -1637,3 +1637,52 @@ test('bloqueio de um pedido que nao levou o print e ignorado', async () => {
   assert.equal(chamado, false);
   assert.ok(executados.includes('click @e2'));
 });
+
+test('bloqueio no print nao vence uma conclusao confirmada: o auxiliar nem e chamado', async () => {
+  let chamado = false;
+  const r = await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 2,
+    executar: navegador([]),
+    capturar: async () => PRINT,
+    perguntar: perguntarComPrint('enviada', () => ({ ...resposta({ op: 'DONE', confOp: 0.95, concluido: 0.9 }), bloqueado: { noul: 0.8 } })),
+    ajudar: async () => { chamado = true; return '{"acoes":[],"motivo":"a pagina pede login"}'; },
+  });
+  assert.equal(r.sucesso, true);
+  assert.equal(chamado, false);
+});
+
+test('auxiliar que discordou nao e reperguntado na mesma pagina; pagina nova pergunta de novo', async () => {
+  const eventos = [];
+  let chamadas = 0;
+  let texto = 'Cadastro de paciente';
+  const base = navegador([]);
+  await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 3,
+    executar: async (verbo, args) => (verbo === 'text' ? texto : base(verbo, args)),
+    capturar: async () => PRINT,
+    perguntar: perguntarComPrint('enviada', comBloqueio(0.8)),
+    ajudar: async () => { chamadas += 1; return '{"acoes":[],"motivo":""}'; },
+    registrar: (e) => { eventos.push(e); if (e.tipo === 'bloqueio' && e.passo === 2) texto = 'Outra pagina'; },
+  });
+  assert.equal(chamadas, 2);
+  assert.deepEqual(eventos.filter((e) => e.tipo === 'bloqueio').map((e) => e.resultado),
+    ['auxiliar_discorda', 'auxiliar_discordou_antes', 'auxiliar_discorda']);
+});
+
+test('motivo do auxiliar vira uma linha de ate 200 caracteres no parou e no evento', async () => {
+  const eventos = [];
+  const r = await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 1,
+    executar: navegador([]),
+    capturar: async () => PRINT,
+    perguntar: perguntarComPrint('enviada', comBloqueio(0.8)),
+    ajudar: async () => JSON.stringify({ acoes: [], motivo: `  login\n  exigido ${'x'.repeat(300)}` }),
+    registrar: (e) => eventos.push(e),
+  });
+  const esperado = `login exigido ${'x'.repeat(186)}`;
+  assert.equal(r.parou, `bloqueado: ${esperado}`);
+  assert.equal(eventos.find((e) => e.tipo === 'bloqueio').motivo, esperado);
+});

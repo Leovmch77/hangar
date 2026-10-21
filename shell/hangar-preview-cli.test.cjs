@@ -182,15 +182,31 @@ test('confere manda o print; recusado com imagem, refaz sem ela e responde pelo 
   });
   await new Promise((r) => jevFalso.listen(0, '127.0.0.1', r));
   const shots = [];
-  const srv = await subirServidor({ controladorDe: () => ctlComPrint(shots), escrever: () => {} });
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hangar-preview-tmp-'));
+  const naCaptura = [];
+  const base = ctlComPrint(shots);
+  const ctl = {
+    ...base,
+    capturarPagina: async () => {
+      naCaptura.push(...fs.readdirSync(tmp).map((n) => ({ n, modo: fs.statSync(path.join(tmp, n)).mode & 0o777 })));
+      return base.capturarPagina();
+    },
+  };
+  const srv = await subirServidor({ controladorDe: () => ctl, escrever: () => {} });
   const home = homeComSidecar({ porta: srv.porta, token: srv.token, pid: process.pid });
 
   const r = await rodarCli(['confere', 'a lista mostra o botao Novo', '--sessao', 'sessaoteste'], {
     home,
-    env: { JEV_ENDPOINT: `http://127.0.0.1:${jevFalso.address().port}/v1/systemone`, TYPESAFE_API_KEY: 'chave-teste', JEV_MODEL: '' },
+    env: { JEV_ENDPOINT: `http://127.0.0.1:${jevFalso.address().port}/v1/systemone`, TYPESAFE_API_KEY: 'chave-teste', JEV_MODEL: '', TMPDIR: tmp, TEMP: tmp, TMP: tmp },
   });
   srv.fechar();
   jevFalso.close();
+
+  // O print vive numa pasta só do dono, que some com o processo.
+  assert.equal(naCaptura.length, 1);
+  assert.match(naCaptura[0].n, /^hangar-jev-/);
+  if (process.platform !== 'win32') assert.equal(naCaptura[0].modo, 0o700);
+  assert.deepEqual(fs.readdirSync(tmp), []);
 
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout.trim(), 'confere: 0.90');
@@ -200,6 +216,63 @@ test('confere manda o print; recusado com imagem, refaz sem ela e responde pelo 
   assert.equal(corpos[0].assets[corpos[0].state.tela].format, 'png');
   assert.equal(typeof corpos[1].state, 'string', 'sem imagem, o corpo e o de antes');
   assert.match(r.stderr, /400/);
+});
+
+test('objetivo com o print recusado: o passo 1 registra a falha, os seguintes vao sem imagem e sem a pergunta de bloqueio', async () => {
+  const corpos = [];
+  const jevFalso = http.createServer((req, res) => {
+    let bruto = '';
+    req.on('data', (d) => { bruto += d; });
+    req.on('end', () => {
+      const corpo = JSON.parse(bruto);
+      corpos.push(corpo);
+      if (corpo.state?.tela) { res.writeHead(400); res.end('imagem recusada'); return; }
+      const naLista = /Lista de pacientes/.test(corpo.state?.texto_da_pagina ?? '');
+      const answers = naLista
+        ? { operacao: { choice: 'CLICK', confidence: 0.95 }, click_target: { choice: 'e1', confidence: 0.95 },
+          concluido: { noul: 0.05 }, arriscado: { noul: 0.01 }, click_risk: { choice: '_nenhum', probabilities: { _nenhum: 0.99, e1: 0.01 } } }
+        : { operacao: { choice: 'DONE', confidence: 0.95 }, concluido: { noul: 0.95 }, arriscado: { noul: 0.01 } };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ answers }));
+    });
+  });
+  await new Promise((r) => jevFalso.listen(0, '127.0.0.1', r));
+  let clicou = false;
+  const ctl = {
+    ...ctlComPrint(),
+    snapshot: async () => (clicou ? '- RootWebArea "Cadastro"\n  - button "Voltar" [ref=@e2]' : '- RootWebArea "Lista"\n  - button "Novo" [ref=@e1]'),
+    texto: async () => (clicou ? 'Cadastro concluido' : 'Lista de pacientes'),
+    avaliar: async (js) => (js === 'location.href' ? (clicou ? 'http://x.test/cadastro' : 'http://x.test/lista') : 'ok'),
+    clicar: async () => { clicou = true; return 'ok'; },
+    esperar: async () => 'ok',
+  };
+  const srv = await subirServidor({ controladorDe: () => ctl, escrever: () => {} });
+  const home = homeComSidecar({ porta: srv.porta, token: srv.token, pid: process.pid });
+  const pasta = fs.mkdtempSync(path.join(os.tmpdir(), 'hangar-preview-roteiro-'));
+
+  const r = await rodarCli(['objetivo', 'abrir o cadastro novo', '--pasta', pasta, '--sessao', 'sessaoteste'], {
+    home,
+    env: { JEV_ENDPOINT: `http://127.0.0.1:${jevFalso.address().port}/v1/systemone`, TYPESAFE_API_KEY: 'chave-teste', JEV_MODEL: '',
+      JEV_TEXTO_BASE_URL: '', JEV_TEXTO_API_KEY: '', JEV_TEXTO_MODELO: '' },
+  });
+  srv.fechar();
+  jevFalso.close();
+
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  const arquivo = r.stdout.match(/^trajeto: (.+)$/m)?.[1];
+  assert.ok(arquivo, r.stdout);
+  const bruto = fs.readFileSync(arquivo, 'utf8');
+  assert.ok(!bruto.includes(png(1280, 800).toString('base64')), 'o trajeto nunca leva o PNG');
+  const decisoes = bruto.trim().split('\n').map((l) => JSON.parse(l)).filter((e) => e.tipo === 'decisao');
+  assert.equal(decisoes.length, 2);
+  assert.equal(decisoes[0].imagem, 'falhou');
+  assert.match(decisoes[0].motivo, /400/);
+  assert.equal(decisoes[1].imagem, 'desligada');
+  assert.equal(corpos.length, 3, 'passo 1 com e sem print, passo 2 so sem');
+  assert.ok(corpos[0].state.tela);
+  assert.equal(corpos[2].state.tela, undefined);
+  assert.equal(corpos[2].questions.bloqueado, undefined);
+  assert.ok(corpos[2].questions.operacao, 'o passo 2 e o pedido normal do laco');
 });
 
 test('shot com --max e sem caminho grava no caminho padrao, nunca num arquivo chamado --max', async () => {
