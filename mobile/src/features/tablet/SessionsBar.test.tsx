@@ -115,6 +115,30 @@ describe('SessionsBar', () => {
     expect(state.retain).toHaveBeenCalledOnce();
     act(() => root.render(null)); expect(state.release).toHaveBeenCalledOnce();
   });
+  it.each(['top', 'bottom'] as const)('%s mostra a tarefa acima do cartão da mãe', placement => {
+    state.rows = [
+      { ...session, pair_gid: 'g', pair_task: '  PM-123 tela  ' },
+      { ...session, name: 'filha', pair_gid: 'g', linked_by: 'api', state: 'working' },
+    ];
+    render(placement);
+    const label = [...container.querySelectorAll('span')].find(el => el.textContent === 'PM-123 tela');
+    expect(label).toBeDefined();
+    expect(label!.nextElementSibling?.getAttribute('aria-label')).toContain('api,');
+  });
+  it.each(['top', 'bottom'] as const)('%s sem tarefa não inventa rótulo com nomes das sessões', placement => {
+    state.rows = [{ ...session, pair_gid: 'g' }, { ...session, name: 'filha', pair_gid: 'g' }];
+    render(placement);
+    expect([...container.querySelectorAll('span')].some(el => el.textContent === 'api, filha')).toBe(false);
+  });
+  it('preserva o bloco montado pelo gid quando os estados dos membros mudam', () => {
+    state.rows = [{ ...session, pair_gid: 'g', state: 'working' }, { ...session, name: 'web', pair_gid: 'g' }];
+    render('bottom');
+    const before = container.querySelector('button[aria-label^="api,"]')!.parentElement;
+    state.rows = [{ ...state.rows[0], state: 'idle' }, { ...state.rows[1], state: 'awaiting_input' }];
+    render('bottom');
+    const after = container.querySelector('button[aria-label^="api,"]')!.parentElement;
+    expect(after).toBe(before);
+  });
 });
 
 it('SessionChip identifica a máquina com o ícone e o nome dela', () => {

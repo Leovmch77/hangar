@@ -20,7 +20,32 @@ describe('barRows', () => {
   it('junta mãe e filha ligada, mesmo sem metadados de pareamento', () => {
     const parent = session('mae');
     const child = session('filha', 'nb', { linked_by: 'mae', state: 'working' });
-    expect(barRows([parent, child], identities)).toEqual([{ kind: 'group', label: null, members: [child, parent] }]);
+    expect(barRows([parent, child], identities)).toEqual([{ kind: 'group', key: 'mother:nb::mae', label: null, members: [parent, child] }]);
+  });
+
+  it('numa cadeia mantém a mãe do topo antes das filhas sem reordenar o resto', () => {
+    const parent = session('mae');
+    const child = session('filha', 'nb', { linked_by: 'mae', state: 'working' });
+    const grandchild = session('neta', 'nb', { linked_by: 'filha', state: 'awaiting_input' });
+    const [group] = barRows([child, grandchild, parent], identities);
+    expect(group).toEqual({ kind: 'group', key: 'mother:nb::mae', label: null, members: [parent, grandchild, child] });
+  });
+
+  it('põe o líder da orquestração primeiro mesmo quando outro membro pede resposta', () => {
+    const parent = session('lider', 'nb', { pair_gid: 'g', provider: 'orq' });
+    const child = session('executor', 'nb', { pair_gid: 'g', state: 'awaiting_input' });
+    expect(barRows([child, parent], identities)).toEqual([
+      { kind: 'group', key: 'local:nb/g', label: null, members: [parent, child] },
+    ]);
+  });
+
+  it('mantém a chave pelo gid quando o estado troca o primeiro membro da lista', () => {
+    const a = session('api', 'nb', { pair_gid: 'g', state: 'working' });
+    const b = session('web', 'nb', { pair_gid: 'g' });
+    const before = barRows([a, b], identities)[0];
+    const after = barRows([{ ...a, state: 'idle' }, { ...b, state: 'awaiting_input' }], identities)[0];
+    expect(before).toMatchObject({ kind: 'group', key: 'local:nb/g', label: null });
+    expect(after).toMatchObject({ kind: 'group', key: 'local:nb/g', label: null });
   });
 
   it('não confunde mães com o mesmo nome em máquinas diferentes', () => {
@@ -37,7 +62,7 @@ describe('barRows', () => {
     const b = session('web', 'vm', { ...pair, state: 'awaiting_input' });
     const single = session('solta', 'nb', { state: 'working' });
     expect(barRows([single, a, b], identities)).toEqual([
-      { kind: 'group', label: 'PM-123 tela', members: [b, a] }, { kind: 'single', session: single },
+      { kind: 'group', key: 'fed:notebook/g', label: 'PM-123 tela', members: [b, a] }, { kind: 'single', session: single },
     ]);
   });
 

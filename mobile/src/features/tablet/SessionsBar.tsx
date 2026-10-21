@@ -62,7 +62,13 @@ export function SessionsBar({ placement, selected, onPick, onNew }: Props) {
     <View style={[styles.group, horizontal && styles.horizontalGroup]}>
       {!horizontal && placement !== 'rail' && item.label ? <Text numberOfLines={1}
         style={[styles.groupLabel, { color: theme.tokens.text.muted }]}>{item.label}</Text> : null}
-      {item.members.map(sessionItem)}
+      {horizontal && item.label ? <>
+        <View key={keyOf(item.members[0])} style={styles.mother}>
+          <Text numberOfLines={1} style={[styles.groupLabel, styles.horizontalLabel, { color: theme.tokens.text.muted }]}>{item.label}</Text>
+          {sessionItem(item.members[0])}
+        </View>
+        {item.members.slice(1).map(sessionItem)}
+      </> : item.members.map(sessionItem)}
     </View>
   );
 
@@ -70,8 +76,8 @@ export function SessionsBar({ placement, selected, onPick, onNew }: Props) {
     <>
       <Glass variant="panel" style={[styles.bar, horizontal ? styles.horizontal : placement === 'rail' ? styles.rail : styles.left]}>
         <FlatList key={horizontal ? 'horizontal' : 'vertical'} data={items} horizontal={horizontal}
-          style={styles.list} contentContainerStyle={styles.items}
-          keyExtractor={item => keyOf(item.kind === 'single' ? item.session : item.members[0])}
+          style={styles.list} contentContainerStyle={[styles.items, horizontal && styles.horizontalItems]}
+          keyExtractor={item => item.kind === 'single' ? keyOf(item.session) : item.key}
           renderItem={renderItem} showsHorizontalScrollIndicator={false} showsVerticalScrollIndicator={false}
           ListEmptyComponent={<View style={styles.emptyState}>
             {loading ? <ActivityIndicator accessibilityLabel={m.lista_carregando()} /> :
@@ -112,11 +118,14 @@ const styles = StyleSheet.create((theme) => ({
   horizontal: { height: 62, flexDirection: 'row', alignItems: 'center' },
   list: { flex: 1 },
   items: { padding: theme.base.space[1], gap: theme.base.space[1], flexGrow: 1 },
+  horizontalItems: { paddingVertical: 0, alignItems: 'center' },
   railItem: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', borderRadius: theme.base.radius.md },
   dot: { position: 'absolute', right: 5, bottom: 5 },
   group: { borderWidth: 1, borderColor: theme.tokens.border.subtle, borderRadius: theme.base.radius.md, overflow: 'hidden' },
   horizontalGroup: { flexDirection: 'row', alignItems: 'center' },
+  mother: { maxWidth: 220 },
   groupLabel: { fontSize: theme.base.text.xxxs, paddingHorizontal: theme.base.space[3], paddingTop: theme.base.space[1] },
+  horizontalLabel: { paddingTop: 0, lineHeight: 12 },
   empty: { fontSize: theme.base.text.xxxs, padding: theme.base.space[1], alignSelf: 'center', flexShrink: 1 },
   emptyState: { justifyContent: 'center', flexShrink: 1 },
   controls: { alignItems: 'center', padding: theme.base.space[1] },
