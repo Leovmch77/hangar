@@ -5,7 +5,7 @@
 //! `<exe>.old` (no Windows, `<exe>.old-<horário>` se o `.old` ainda estiver preso). O processo velho continua de pé
 //! até o novo gravar o próprio pid em `<exe>.alive`: se ele morrer ou não der sinal a tempo, o anterior volta para o
 //! lugar e este processo segue aberto. Nunca fica sem app.
-use crate::{api::{Api, Failure}, i18n::tr, theme};
+use crate::{api::{Api, Failure}, i18n::{tr, tr_shared}, theme};
 use gpui_kit::{assets::IconName, component::{button::*, notification::Notification, *}, *};
 use serde::Deserialize;
 use serde_json::Value;
@@ -1056,6 +1056,9 @@ impl Updater {
 
     /// Rótulo curto e explicação do botão parado, conforme o plano.
     fn idle_texts(&self, plan: &Plan) -> (String, String) {
+        if !plan.visible() && self.update_all_count() >= 2 {
+            return (tr_shared("update_all_button", &[("n", &self.update_all_count().to_string())]), tr_shared("update_all_title", &[]));
+        }
         let version = self.offer.as_ref().map(|o| o.version.clone()).unwrap_or_default();
         let tip = match (&plan.server, plan.app) {
             (ServerStep::Held(hold), _) if hold.stops() => hold.text(),

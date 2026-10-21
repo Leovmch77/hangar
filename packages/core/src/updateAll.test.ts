@@ -142,6 +142,15 @@ describe('API e execução por máquina', () => {
     expect(final('ok')?.status).toBe('atualizado');
   });
 
+  it.each([401, 403])('encerra imediatamente com erro de autenticação no acompanhamento (%s)', async (status) => {
+    read = (_id, count) => count === 1 ? json(ready()) : json({ detail: 'fixture-auth-error' }, status);
+    await updateAll([server('auth')], onChange, options);
+    expect(reads.get('auth')).toBe(2);
+    expect(clock).toBe(2000);
+    expect(final('auth')).toMatchObject({ status: 'falhou', error: `${status}: fixture-auth-error`, warnings: [] });
+    expect(final('auth')?.errorCode).toBeUndefined();
+  });
+
   it('acompanha por ts, tolera rede no reinício, publica passo e avisos, sem usar pid', async () => {
     read = (_id, count) => {
       if (count === 1 || count === 2) return json(ready({ fase: 'pronto', ok: true }));

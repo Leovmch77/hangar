@@ -152,6 +152,9 @@ export async function updateAll(
         if (status === 'falhou') value.error = state.erro?.replace(/\.+$/, '') || '?';
         if (status === 'atualizado' || status === 'atualizado_manual' || status === 'falhou') return finish(value);
       } catch (error) {
+        if (typeof error === 'object' && error !== null && 'status' in error && (error.status === 401 || error.status === 403)) {
+          return finish({ status: 'falhou', error: errorMessage(error), state: latest.state, warnings: latest.warnings });
+        }
         silent++;
         value = { ...latest, status: 'esperando', error: errorMessage(error) };
       }

@@ -193,6 +193,7 @@ async fn run_machine(machine: Machine, mut publish: impl FnMut(Status, Vec<Strin
                 latest_warnings = warnings(&value["estado"]);
                 Some(follow_status(&value["estado"], baseline))
             }
+            Err(error) if matches!(error.status, Some(401 | 403)) => Some(Status::Failed(failure_text(&error))),
             Err(_) => { silent += 1; None }
         };
         let limit = limit_status(status.as_ref(), silent, started.elapsed());
@@ -537,5 +538,38 @@ mod tests {
         first.join().unwrap(); second.join().unwrap();
         assert!(matches!(a.last(), Some(Status::Failed(error)) if error.contains("fixture-failure")));
         assert_eq!(b.last(), Some(&Status::Current));
+    }
+
+    #[test]
+    fn update_all_review_follow_auth_failure_finishes_immediately() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for status in [401, 403] {
+            let (machine, server) = mock(vec![
+                ("GET /api/atualizacao?procurar=1 ", 200, json!({"atualizacao_disponivel":true,"estado":{"ts":"old"}})),
+                ("POST /api/atualizacao/iniciar ", 200, json!({"ok":true,"pid":123})),
+                ("GET /api/atualizacao ", status, json!({"detail":"fixture-auth-error"})),
+            ]);
+            let mut states = Vec::new();
+            let result = runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(8), run_machine(machine, |s, _| states.push(s))).await
+            });
+            server.join().unwrap();
+            result.expect("a recusa de autenticação deve encerrar na primeira leitura");
+            assert!(matches!(states.last(), Some(Status::Failed(error)) if error.contains("fixture-auth-error")), "{states:?}");
+            assert_eq!(states.len(), 3, "consulta, início e falha, sem esperar outra leitura");
+        }
+    }
+
+    #[test]
+    fn update_all_review_idle_button_names_all_machines_without_a_local_offer() {
+        crate::i18n::english_in_this_thread(false);
+        let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None, offer: None,
+            local: None, server: None, server_api: None, server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0,
+            run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None,
+            suspended: false, intent_lock: None, all_servers: vec![entry("local"), entry("remote")], batch: None, all_running: false };
+        assert!(!updater.plan().visible());
+        assert_eq!(updater.idle_texts(&updater.plan()), ("Atualizar todas as máquinas (2)".into(), "Atualizar todas as máquinas".into()));
+        updater.all_servers.push(entry("other"));
+        assert_eq!(updater.idle_texts(&updater.plan()).0, "Atualizar todas as máquinas (3)");
     }
 }
