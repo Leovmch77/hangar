@@ -1,0 +1,73 @@
+import type { ReactNode } from 'react';
+import { Pressable, Text, View } from 'react-native';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { useRouter } from 'expo-router';
+import { useTabletPrefs } from '../../stores/tabletPrefs';
+import { useServers } from '../../stores/servers';
+import { Screen } from '../../ui/Screen';
+import { HangarMark } from '../../ui/HangarMark';
+import { Icon } from '../../ui/Icon';
+import { LiveVoiceChatButton } from '../voice/LiveVoiceChatButton';
+import { SessionsBar } from './SessionsBar';
+import { ContextPanel } from './ContextPanel';
+import * as m from '../../paraglide/messages';
+
+type Props = { selected?: { serverId: string; name: string }; children: ReactNode; active?: boolean };
+
+// A área central conserva o mesmo lugar na árvore ao girar ou mudar a posição da barra.
+export function TabletShell({ selected, children, active = true }: Props) {
+  const router = useRouter();
+  const { theme } = useUnistyles();
+  const placement = useTabletPrefs(s => s.placement);
+  const panelOpen = useTabletPrefs(s => s.panelOpen);
+  const activeId = useServers(s => s.activeId);
+  const voiceServer = selected?.serverId ?? activeId;
+  const bar = (position: typeof placement) => active && placement === position ? (
+    <SessionsBar placement={placement} selected={selected}
+      onPick={s => router.replace(`/s/${encodeURIComponent(s.serverId)}/${encodeURIComponent(s.name)}` as never)}
+      onNew={() => router.push('/create')} />
+  ) : null;
+
+  return (
+    <Screen edges={active ? undefined : []}>
+      {active ? <View style={styles.top}>
+        <Pressable onPress={() => router.dismissTo('/')} accessibilityRole="button" accessibilityLabel={m.chat_ir_inicio()} style={styles.brand}>
+          <HangarMark size={24} color={theme.tokens.accent.base} />
+          <Text style={styles.brandName}>{m.native_brand()}</Text>
+        </Pressable>
+        <View style={styles.spacer} />
+        <Pressable onPress={() => router.push('/search')} accessibilityRole="button" accessibilityLabel={m.lista_buscar()} style={styles.search}>
+          <Icon name="Search" size={20} color={theme.tokens.text.secondary} />
+          <Text style={styles.searchLabel}>{m.lista_buscar()}</Text>
+        </Pressable>
+        <View style={styles.spacer} />
+        {voiceServer ? <LiveVoiceChatButton serverId={voiceServer} name={selected?.name} /> : null}
+        <Pressable onPress={() => router.push('/config')} accessibilityRole="button" accessibilityLabel={m.config_modal_titulo()} style={styles.button}>
+          <Icon name="Settings" size={20} color={theme.tokens.text.secondary} />
+        </Pressable>
+      </View> : null}
+      <View style={active && placement === 'top' ? styles.horizontal : undefined}>{bar('top')}</View>
+      <View style={[styles.row, active && styles.tabletRow]}>
+        {bar('left')}
+        {bar('rail')}
+        <View key="conversation" style={styles.center}>{children}</View>
+        {active && selected && panelOpen ? <ContextPanel serverId={selected.serverId} name={selected.name} /> : null}
+      </View>
+      <View style={active && placement === 'bottom' ? styles.horizontal : undefined}>{bar('bottom')}</View>
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create(theme => ({
+  top: { minHeight: 44, flexDirection: 'row', alignItems: 'center', paddingHorizontal: theme.base.space[3], gap: theme.base.space[2] },
+  brand: { minHeight: 44, minWidth: 44, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
+  brandName: { color: theme.tokens.text.primary, fontSize: theme.base.text.base, fontWeight: theme.base.weight.bold },
+  button: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
+  spacer: { flex: 1 },
+  search: { minHeight: 44, maxWidth: 340, flex: 1, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2] },
+  searchLabel: { color: theme.tokens.text.secondary, fontSize: theme.base.text.sm, flexShrink: 1 },
+  row: { flex: 1, flexDirection: 'row', minHeight: 0 },
+  tabletRow: { gap: theme.base.space[2], paddingHorizontal: theme.base.space[2], paddingBottom: theme.base.space[2] },
+  center: { flex: 1, minWidth: 0, minHeight: 0 },
+  horizontal: { marginHorizontal: theme.base.space[2] },
+}));

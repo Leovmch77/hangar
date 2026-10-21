@@ -4,7 +4,10 @@ import { useIsFocused, useLocalSearchParams, useNavigation, useRoute, useRouter 
 import { ChatBody } from '../../../../src/chat/ChatBody';
 import { SessionsDrawer } from '../../../../src/features/sessions/SessionsDrawer';
 import { ServerSheet } from '../../../../src/features/sessions/ServerSheet';
-import { Screen } from '../../../../src/ui/Screen';
+import { TabletShell } from '../../../../src/features/tablet/TabletShell';
+import { useTabletLandscape } from '../../../../src/features/tablet/layout';
+import { useTabletPrefs } from '../../../../src/stores/tabletPrefs';
+import { READING_MAX } from '../../../../src/chat/conversationColumn';
 import { WorkingMarkPaused } from '../../../../src/ui/WorkingMark';
 
 // A faixa da borda esquerda fica com o voltar nativo do iOS.
@@ -17,6 +20,9 @@ export default function ChatScreen() {
   const serverId = Array.isArray(params.server) ? params.server[0] : (params.server ?? '');
   const name = Array.isArray(params.name) ? params.name[0] : (params.name ?? '');
   const [serversOpen, setServersOpen] = useState(false);
+  const tablet = useTabletLandscape();
+  const panelOpen = useTabletPrefs(s => s.panelOpen);
+  const togglePanel = useTabletPrefs(s => s.togglePanel);
   const deepStack = useStackPosition() >= 2;
   const onBack = useCallback(() => {
     if (router.canGoBack()) router.back();
@@ -25,13 +31,15 @@ export default function ChatScreen() {
 
   return (
     <WorkingMarkPaused.Provider value={!focused}>
-    <Screen edges={[]}>
-      <SessionsDrawer edgeStart={Platform.OS === 'ios' ? IOS_BACK_EDGE : undefined} onClose={() => router.dismissTo('/')} onOpenServers={() => setServersOpen(true)}>
+    <TabletShell selected={{ serverId, name }} active={tablet}>
+      <SessionsDrawer enabled={!tablet} edgeStart={Platform.OS === 'ios' ? IOS_BACK_EDGE : undefined} onClose={() => router.dismissTo('/')} onOpenServers={() => setServersOpen(true)}>
         <ChatBody key={`${serverId}::${name}`} serverId={serverId} name={name}
+                  header={tablet ? 'tablet' : 'phone'} panelOpen={panelOpen} onTogglePanel={togglePanel}
+                  maxReading={tablet && !panelOpen ? READING_MAX : undefined}
                   askFallback={params.askFallback} onBack={onBack} deepStack={deepStack} />
       </SessionsDrawer>
       <ServerSheet open={serversOpen} onFechar={() => setServersOpen(false)} />
-    </Screen>
+    </TabletShell>
     </WorkingMarkPaused.Provider>
   );
 }

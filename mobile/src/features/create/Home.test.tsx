@@ -38,6 +38,7 @@ vi.mock('../../stores/aparencia', async () => {
   return { useAparencia: create(() => ({ homeScreen: 'sessions' })) };
 });
 vi.mock('../../ui/Screen', () => ({ Screen: ({ children }: { children: ReactNode }) => children }));
+vi.mock('../tablet/TabletShell', () => ({ TabletShell: ({ children }: { children: ReactNode }) => children }));
 vi.mock('../../ui/Icon', () => ({ Icon: ({ name }: { name: string }) => React.createElement('span', { 'data-icon': name }) }));
 vi.mock('../voice/LiveVoiceChatButton', () => ({ LiveVoiceChatButton: () => null }));
 vi.mock('../sessions/SessionList', () => ({ SessionList: ({ variant }: { variant?: string }) => React.createElement('div', { 'data-list': variant }) }));
