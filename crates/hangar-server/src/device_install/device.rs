@@ -1,8 +1,9 @@
 //! O aparelho de verdade, pelo usbmuxd (Linux/macOS) ou pelo serviço da Apple (Windows).
 //! Portado do device-spike, provado num iPad com iPadOS 26.5.
+use std::collections::HashSet;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use futures_util::future::BoxFuture;
 use idevice::afc::errors::AfcError;
@@ -142,7 +143,9 @@ impl DeviceLink for UsbLink {
             let p = provider(udid).await?;
             let mut mis = MisagentClient::connect(&p).await.map_err(from_idevice)?;
             let profiles = mis.copy_all().await.map_err(from_idevice)?;
-            Ok(profiles.iter().filter(|raw| is_development_profile(raw)).count() as u32)
+            let mut ip = InstallationProxyClient::connect(&p).await.map_err(from_idevice)?;
+            let installed = ip.get_apps(Some("User"), None).await.map_err(from_idevice)?.into_keys().collect();
+            Ok(count_dev_apps(&profiles, SystemTime::now(), &installed))
         })
     }
 
@@ -262,14 +265,27 @@ fn dict(bytes: &[u8]) -> Result<Dictionary, DeviceError> {
         .ok_or_else(|| DeviceError::Other("plist is not a dictionary".into()))
 }
 
+/// Só ocupa vaga o perfil de desenvolvimento válido de um app ainda instalado: quem apagou apps
+/// do SideStore continua com os perfis deles no aparelho.
+fn count_dev_apps(profiles: &[Vec<u8>], now: SystemTime, installed: &HashSet<String>) -> u32 {
+    profiles.iter().filter_map(|raw| active_dev_app(raw, now)).filter(|b| installed.contains(b)).count() as u32
+}
+
 /// Perfis vêm embrulhados em CMS; o plist XML está em claro dentro deles.
-fn is_development_profile(raw: &[u8]) -> bool {
-    let Some(start) = raw.windows(5).position(|w| w == b"<?xml") else { return false };
-    let Some(end) = raw.windows(8).rposition(|w| w == b"</plist>") else { return false };
-    dict(&raw[start..end + 8])
-        .ok()
-        .and_then(|d| d.get("Entitlements")?.as_dictionary()?.get("get-task-allow")?.as_boolean())
-        .unwrap_or(false)
+fn active_dev_app(raw: &[u8], now: SystemTime) -> Option<String> {
+    let start = raw.windows(5).position(|w| w == b"<?xml")?;
+    let end = raw.windows(8).rposition(|w| w == b"</plist>")?;
+    let d = dict(&raw[start..end + 8]).ok()?;
+    if SystemTime::from(d.get("ExpirationDate")?.as_date()?) <= now {
+        return None;
+    }
+    let ent = d.get("Entitlements")?.as_dictionary()?;
+    if !ent.get("get-task-allow")?.as_boolean()? {
+        return None;
+    }
+    // "TEAMID.com.exemplo.app" → o bundle instalado.
+    let (_, bundle) = ent.get("application-identifier")?.as_string()?.split_once('.')?;
+    Some(bundle.to_string())
 }
 
 fn is_not_found(e: &IdeviceError) -> bool {
@@ -338,13 +354,31 @@ mod tests {
         assert!(!file.exists());
     }
 
-    #[test]
-    fn development_profile_is_read_from_inside_the_cms() {
-        let plist = br#"<?xml version="1.0"?><plist version="1.0"><dict><key>Entitlements</key><dict><key>get-task-allow</key><true/></dict></dict></plist>"#;
+    fn profile(expires: &str, app_id: &str) -> Vec<u8> {
         let mut raw = b"\x30\x82junk".to_vec();
-        raw.extend_from_slice(plist);
+        raw.extend_from_slice(
+            format!(
+                "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>\
+                 <key>ExpirationDate</key><date>{expires}</date>\
+                 <key>Entitlements</key><dict><key>get-task-allow</key><true/>\
+                 <key>application-identifier</key><string>{app_id}</string></dict></dict></plist>"
+            )
+            .as_bytes(),
+        );
         raw.extend_from_slice(b"\x00sig");
-        assert!(is_development_profile(&raw));
-        assert!(!is_development_profile(b"no plist"));
+        raw
+    }
+
+    #[test]
+    fn only_unexpired_profiles_of_installed_apps_use_a_slot() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000); // 2027-01-15
+        let installed: std::collections::HashSet<String> = ["com.a.app".into(), "com.b.app".into()].into();
+        let profiles = [
+            profile("2027-01-20T00:00:00Z", "TEAM1.com.a.app"),
+            profile("2026-12-01T00:00:00Z", "TEAM1.com.b.app"), // vencido
+            profile("2027-01-20T00:00:00Z", "TEAM1.com.gone.app"), // app apagado
+            b"no plist".to_vec(),
+        ];
+        assert_eq!(count_dev_apps(&profiles, now, &installed), 1);
     }
 }

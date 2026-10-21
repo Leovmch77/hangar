@@ -75,7 +75,7 @@ pub trait DeviceLink: Send + Sync {
     fn list(&self) -> BoxFuture<'_, Result<Vec<DeviceInfo>, DeviceError>>;
     /// Faz aparecer "Confiar neste computador?" e espera a resposta.
     fn request_trust<'a>(&'a self, udid: &'a str) -> BoxFuture<'a, Result<(), DeviceError>>;
-    /// Perfis de desenvolvimento instalados: a Apple ID gratuita aceita três apps ativos.
+    /// Apps instalados com perfil de desenvolvimento válido: a Apple ID gratuita aceita três ativos.
     fn dev_apps<'a>(&'a self, udid: &'a str) -> BoxFuture<'a, Result<u32, DeviceError>>;
     /// Instala um `.ipa` ou `.app` já assinado.
     fn install_sidestore<'a>(&'a self, udid: &'a str, signed_ipa: &'a Path) -> BoxFuture<'a, Result<(), DeviceError>>;
