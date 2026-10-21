@@ -11,7 +11,11 @@ use std::time::Duration;
 pub struct DeviceError { pub code: String, pub detail: Option<String> }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct Device { pub udid: String, pub name: String, pub ios_version: String, pub trusted: bool }
+pub struct Device {
+    pub udid: String, pub name: String, pub ios_version: String, pub trusted: bool,
+    /// Bloqueado ou desconectado: aí `trusted: false` não quer dizer "não confiado".
+    #[serde(default)] pub error: Option<DeviceError>,
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct Scan { pub service: String, pub devices: Vec<Device> }
@@ -21,10 +25,11 @@ pub struct Progress { pub stage: String, pub error: Option<DeviceError>, pub sou
 
 fn lost() -> DeviceError { DeviceError { code: "connection_failed".into(), detail: None } }
 
-/// A recusa do corpo; sem ela, 404 é servidor de antes destas rotas.
+/// A recusa do corpo; sem ela, 404 é servidor de antes destas rotas e 401 é token recusado.
 fn refusal(status: u16, body: Option<Value>) -> DeviceError {
     let own = body.and_then(|v| v.get("error").cloned()).and_then(|e| serde_json::from_value(e).ok());
-    own.unwrap_or_else(|| if status == 404 { DeviceError { code: "server_outdated".into(), detail: None } } else { lost() })
+    let code = |c: &str| DeviceError { code: c.into(), detail: None };
+    own.unwrap_or_else(|| match status { 404 => code("server_outdated"), 401 => code("unauthorized"), _ => lost() })
 }
 
 impl Api {
@@ -82,5 +87,6 @@ mod tests {
         let unknown = json!({"error": {"code": "device_install_unknown_job", "detail": null}});
         assert_eq!(refusal(404, Some(unknown)).code, "device_install_unknown_job");
         assert_eq!(refusal(502, None).code, "connection_failed");
+        assert_eq!(refusal(401, Some(json!({"detail": "unauthorized"}))).code, "unauthorized");
     }
 }

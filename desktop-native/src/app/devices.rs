@@ -91,7 +91,7 @@ const ERROR_CODES: &[&str] = &[
     "device_install_login_refused", "device_install_apple_busy", "device_install_anisette_unreachable", "device_install_download_failed",
     "device_install_download_mismatch", "device_install_sign_failed", "device_install_not_installed", "device_error",
     "device_install_forbidden", "device_install_busy", "device_install_unknown_job", "device_install_not_waiting", "connection_failed",
-    "server_outdated",
+    "server_outdated", "unauthorized",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,9 +178,21 @@ fn qr_svg(text: &str) -> Option<Arc<Image>> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Platform { #[default] Ios, Android }
 
-struct Job { id: String, progress: Option<Progress>, lost: Option<DeviceError> }
+/// Consultas seguidas (uma por segundo) que podem cair antes de dar o trabalho por perdido.
+const PROGRESS_TOLERATED_FAILURES: u32 = 5;
+
+struct Job { id: String, progress: Option<Progress>, lost: Option<DeviceError>, failures: u32 }
 
 impl Job {
+    fn new(id: String) -> Self { Job { id, progress: None, lost: None, failures: 0 } }
+    /// Só queda de rede (ou resposta ilegível) se repete; recusa do servidor não muda tentando de novo.
+    fn record(&mut self, result: Result<Progress, DeviceError>) {
+        match result {
+            Ok(progress) => (self.progress, self.failures) = (Some(progress), 0),
+            Err(error) if error.code == "connection_failed" && self.failures + 1 < PROGRESS_TOLERATED_FAILURES => self.failures += 1,
+            Err(error) => self.lost = Some(error),
+        }
+    }
     fn stage(&self) -> Stage {
         if self.lost.is_some() { return Stage::Failed; }
         self.progress.as_ref().and_then(|p| Stage::parse(&p.stage)).unwrap_or(Stage::Login)
@@ -320,19 +332,13 @@ impl Hangar {
             DevicesReply::Started(result) => {
                 d.starting = false;
                 match result {
-                    Ok(id) => { d.job = Some(Job { id, progress: None, lost: None }); self.poll_progress(); }
+                    Ok(id) => { d.job = Some(Job::new(id)); self.poll_progress(); }
                     Err(error) => d.form_error = Some(error_message(&error)),
                 }
             }
             DevicesReply::Progress(id, result) => {
                 let Some(job) = d.job.as_mut().filter(|j| j.id == id) else { return };
-                match result {
-                    Ok(progress) => job.progress = Some(progress),
-                    // O servidor esqueceu o trabalho (reiniciou): não há mais o que consultar.
-                    Err(error) if error.code == "device_install_unknown_job" => job.lost = Some(error),
-                    // Queda passageira: a próxima consulta tenta de novo.
-                    Err(_) => {}
-                }
+                job.record(result);
                 if job.stage().running() {
                     cx.spawn(async move |this, cx| {
                         cx.background_executor().timer(Duration::from_secs(1)).await;
@@ -449,7 +455,11 @@ impl Hangar {
                             .loading(waiting).disabled(d.trusting.is_some())
                             .on_click(cx.listener(move |this, _, _, cx| this.trust_device(udid.clone(), cx)))
                     };
-                    let status = if device.trusted { tr("devices_trusted") } else { tr("devices_not_trusted") };
+                    let status = match &device.error {
+                        Some(error) => error_message(error),
+                        None if device.trusted => tr("devices_trusted"),
+                        None => tr("devices_not_trusted"),
+                    };
                     body = body.child(div().border_t_1().border_color(theme::border()).px_4().py(px(12.)).flex().items_center().gap(px(12.))
                         .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
                             .child(div().text_size(px(13.5)).font_weight(FontWeight::MEDIUM).truncate().child(device.name.clone()))
@@ -572,7 +582,24 @@ mod tests {
 
     fn scan(service: &str, devices: &[(&str, bool)]) -> Scan {
         Scan { service: service.into(), devices: devices.iter().map(|(udid, trusted)| Device { udid: (*udid).into(), name: "iPad".into(),
-            ios_version: "26.5".into(), trusted: *trusted }).collect() }
+            ios_version: "26.5".into(), trusted: *trusted, error: None }).collect() }
+    }
+
+    #[test]
+    fn devices_progress_retries_only_network_drops_and_only_for_a_while() {
+        let err = |code: &str| Err(DeviceError { code: code.into(), detail: None });
+        for code in ["device_install_unknown_job", "device_install_forbidden", "server_outdated", "unauthorized"] {
+            let mut job = Job::new("j".into());
+            job.record(err(code));
+            assert_eq!(job.stage(), Stage::Failed, "{code}");
+        }
+        let mut job = Job::new("j".into());
+        for _ in 0..PROGRESS_TOLERATED_FAILURES - 1 { job.record(err("connection_failed")); }
+        assert!(job.lost.is_none());
+        job.record(Ok(Progress { stage: "downloading".into(), error: None, source_url: String::new() }));
+        assert_eq!(job.failures, 0);
+        for _ in 0..PROGRESS_TOLERATED_FAILURES { job.record(err("connection_failed")); }
+        assert_eq!(job.lost.as_ref().map(|e| e.code.as_str()), Some("connection_failed"));
     }
 
     #[test]
