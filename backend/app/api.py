@@ -2276,7 +2276,14 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
     # Entrou pelo Connect: o Claude aberto no Rust fecha lá, como o da 8765; 421 (`None`) segue aqui.
     # Só Claude: com o Rust em `pending`, a ponte responderia 503 ao Pi/omp/Kimi, que fecham aqui.
     port = (request.scope.get("server") or (None, None))[1] if request is not None else None
-    if not closed and port == CONNECT_PORT and port != settings.port and getattr(await _cached_info(name), "provider", None) == "claude":
+    provider = None
+    if not closed and port == CONNECT_PORT and port != settings.port:
+        # Sem a lista o provedor fica desconhecido e fecha-se aqui: falhar o DELETE não fecharia nada.
+        try:
+            provider = getattr(await _cached_info(name), "provider", None)
+        except (list_bridge.ListBridgeError, tmux.MuxIndisponivel) as e:
+            _log.warning("kill(%s): provedor desconhecido sem a lista, fecha pelo Python: %s", name, e)
+    if provider == "claude":
         from app import runtime_coordinator
         reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, "close", "POST", b"", headers=_who_asked(request))
         if reply is not None:

@@ -2566,6 +2566,13 @@ mod cano_reconnect {
                             if silent.load(Ordering::Acquire) { continue; }
                             let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
                             if reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.is_err() { break; }
+                            // Claude: o `initialize` da abertura se perde com a primeira conexão; nas seguintes a CLI responde.
+                            if n > 1 && frame["type"] == "control_request" && frame["request"]["subtype"] == "initialize" {
+                                let response = json!({"type":"control_response","response":{"subtype":"success","request_id":frame["request_id"],"response":{}}});
+                                let reply = json!({"type":"cano_output","frame":response.to_string()});
+                                if reader.get_mut().write_all(format!("{reply}\n").as_bytes()).await.is_err() { break; }
+                                continue;
+                            }
                             // Codex: o app-server falso responde a todo pedido JSON-RPC (o Claude não manda `id` com `method`).
                             // Com `busy`, a thread segue trabalhando e o `turn/start` fica sem resposta (a dele se perde na queda).
                             if let (Some(id),Some(method)) = (frame.get("id"),frame["method"].as_str()) {
@@ -2597,14 +2604,15 @@ mod cano_reconnect {
 
     async fn actor(dir:&std::path::Path,cano:&LiveCano,pid:u32,birth:Option<f64>,diag:std::net::SocketAddr,waits:Waits)
         -> (RuntimeHandle,tokio::sync::broadcast::Receiver<RuntimeEvent>) {
-        actor_with(dir,cano,pid,birth,diag,waits,false).await
+        actor_with(dir,cano,pid,birth,diag,waits,false,true).await
     }
 
     /// `cards`: com a loja de interações, os cartões publicados levam o ID que os responde.
-    async fn actor_with(dir:&std::path::Path,cano:&LiveCano,pid:u32,birth:Option<f64>,diag:std::net::SocketAddr,waits:Waits,cards:bool)
+    /// `initialized: false`: o ator manda o `initialize` na abertura.
+    async fn actor_with(dir:&std::path::Path,cano:&LiveCano,pid:u32,birth:Option<f64>,diag:std::net::SocketAddr,waits:Waits,cards:bool,initialized:bool)
         -> (RuntimeHandle,tokio::sync::broadcast::Receiver<RuntimeEvent>) {
         let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
-            metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
+            metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":initialized}),
             binding:CanoBinding { pid,escuta:cano.escuta.clone(),token:"secret-test".into(),versao:2 },
             lease_path:dir.join("key.lock"),state_path:dir.join("key.queue-state.json"),projection_dir:dir.join("projection"),
             transcript:dir.join("chat.jsonl"),created:0.0 };
@@ -2818,6 +2826,23 @@ mod cano_reconnect {
     }
 
     #[tokio::test]
+    async fn initialize_lost_with_the_socket_is_sent_again_on_reconnect() {
+        // O retrato do cano não guarda a resposta do `initialize`: sem reenvio a sessão fica "iniciando" e nunca entrega.
+        let dir = tempfile::tempdir().unwrap();
+        let proc = sleeper(dir.path());
+        let cano = live_cano(|_|Answer::Serve).await;
+        let (handle,_rx) = actor_with(dir.path(),&cano,proc.0.id(),birth(&proc),crate::refused_address(),waits(&[0,50],&[0,50],60_000),false,false).await;
+        let initializes = ||cano.frames.lock().unwrap().iter().filter(|frame|frame["request"]["subtype"] == "initialize").count();
+        wait_for("o initialize da abertura sai",||initializes() == 1).await;
+        cano.cut.notify_one();
+        wait_for("religa e manda o initialize de novo",||initializes() == 2).await;
+        handle.command(input("in-1","oi")).await.unwrap();
+        wait_for("entrega depois da resposta",||cano.said("oi") == 1).await;
+        assert!(healthy(&handle).await);
+        handle.stop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn an_unknown_envelope_from_a_live_cano_reconnects_instead_of_a_crash() {
         // Cano e servidor de versões diferentes: o leitor encerra no envelope que não conhece, com o processo vivo.
         let dir = tempfile::tempdir().unwrap();
@@ -2845,7 +2870,7 @@ mod cano_reconnect {
         let proc = sleeper(dir.path());
         let request = json!({"type":"control_request","request_id":7,"request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}});
         let cano = live_cano_with(|_|Answer::Serve,vec![request]).await;
-        let (handle,_rx) = actor_with(dir.path(),&cano,proc.0.id(),birth(&proc),crate::refused_address(),waits(&[0,50],&[0,50],60_000),true).await;
+        let (handle,_rx) = actor_with(dir.path(),&cano,proc.0.id(),birth(&proc),crate::refused_address(),waits(&[0,50],&[0,50],60_000),true,true).await;
         let before = state_until(&handle,"cartão da permissão",|state|state["interaction_id"].is_string()).await["interaction_id"].clone();
         cano.cut.notify_one();
         wait_for("religação",||cano.accepts() == 2).await;

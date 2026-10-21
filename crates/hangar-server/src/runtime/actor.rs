@@ -1808,8 +1808,9 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                         (cano_lost,cano_check_at,stall_due) = (false,None,None);
                         tracing::info!(key=%target.key,session=%target.name,provider=%target.provider,"sessão sem terminal religada ao mesmo cano");
                         effects.extend(engine.reattach(snapshot)?);
-                        // O Codex abre a mesma thread de novo na conexão nova (o `initialize` repetido é sucesso).
-                        if std::mem::take(&mut boot_pending) || target.provider == "codex" {
+                        // O Codex abre a mesma thread de novo na conexão nova (o `initialize` repetido é sucesso). O Claude
+                        // com `initialize` em voo na queda reenvia: o retrato não guarda a resposta e a CLI aceita o segundo.
+                        if std::mem::take(&mut boot_pending) || target.provider == "codex" || engine.view()["iniciando"] == true {
                             let id = format!("bootstrap:{}:{}:{}",target.key,target.generation,unique());
                             match queue.exec(target.generation,&format!("prepare:{id}"),clock(start),Action::Prepare { id:id.clone(),payload:json!({"kind":"bootstrap"}),entry_id:None }).await {
                                 Ok(_)=>effects.extend(engine.initialize(id)?),

@@ -185,6 +185,26 @@ def test_delete_entering_the_connect_port_is_closed_by_the_rust(monkeypatch):
     assert len(bridged) == 3 and killed[3:] == [False], "Pi fecha pelo nome, sem passar pela ponte"
 
 
+@pytest.mark.parametrize("failure", [api_mod.list_bridge.ListBridgeError("list_bridge_unavailable"),
+                                     api_mod.tmux.MuxIndisponivel("mux")])
+def test_connect_delete_without_the_list_closes_here(monkeypatch, failure):
+    """Lista indisponível não descobre o provedor: o DELETE pelo Connect fecha pelo nome, sem 503."""
+    killed, bridged = [], []
+    monkeypatch.setattr(api_mod.registry, "kill", lambda name, closed_by_rust=False: killed.append(closed_by_rust) or [])
+    monkeypatch.setattr(api_mod, "_recusa_orq", lambda name: None)
+    monkeypatch.setattr(api_mod, "_jsonl_of_session", lambda name: None)
+    monkeypatch.setattr(api_mod, "_invalidate_lists", lambda: None)
+    monkeypatch.setattr(api_mod, "_sidecar_state", lambda name: "absent")
+
+    def cached(name):
+        raise failure
+    monkeypatch.setattr(api_mod, "_cached_info_sync", cached)
+    monkeypatch.setattr(runtime_coordinator, "rust_claude", lambda *args, **kw: bridged.append(args))
+    request = _request(api_mod.CONNECT_PORT, "/api/sessions/ct", body=b"", method="DELETE")
+    assert asyncio.run(api_mod.kill_session("ct", request=request))["ok"] is True
+    assert (killed, bridged) == ([False], [])
+
+
 def test_connect_close_of_a_grouped_claude_leaves_the_group_from_here(monkeypatch):
     """O Rust fecha o Claude do Connect sem sair do grupo: a saída vai pela ponte daqui, com a fase lida antes."""
     left = []
