@@ -2,7 +2,8 @@
 
 Capturados no AVD `hangar` (celular, Android 16, 1080×2400), idioma do sistema pt-BR, em 2026-10-20.
 O APK veio de um servidor local aberto no Chrome (no guia real, o link vem do QR).
-Arquivos `-marked` têm um retângulo vermelho no lugar do toque; passos sem toque não têm cópia marcada.
+Passos com toque têm um retângulo vermelho no lugar do toque; passos sem toque ficam sem marca.
+Reduzidos para 820 px de largura e 256 cores, como os do iOS.
 
 | Arquivo | Passo | Onde tocar | Por quê |
 |---|---|---|---|
