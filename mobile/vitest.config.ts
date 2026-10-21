@@ -14,6 +14,7 @@ export default defineConfig({
       'react-native-unistyles': path.resolve(__dirname, 'src/__mocks__/react-native-unistyles.ts'),
       'react-native-webview': path.resolve(__dirname, 'src/__mocks__/react-native-webview.ts'),
       'expo-image': path.resolve(__dirname, 'src/__mocks__/expo-image.ts'),
+      'expo-screen-orientation': path.resolve(__dirname, 'src/__mocks__/expo-screen-orientation.ts'),
       'react-native-reanimated': path.resolve(__dirname, 'src/__mocks__/react-native-reanimated.ts'),
       'react-native-worklets': path.resolve(__dirname, 'src/__mocks__/react-native-worklets.ts'),
       'react-native-svg': path.resolve(__dirname, 'src/__mocks__/react-native-svg.ts'),

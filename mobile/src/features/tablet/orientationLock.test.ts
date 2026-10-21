@@ -1,18 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as ScreenOrientation from 'expo-screen-orientation';
 import { applyOrientationLock, orientationFor } from './orientationLock';
 
-const { getSize, lockAsync, unlockAsync } = vi.hoisted(() => ({
+const { getSize } = vi.hoisted(() => ({
   getSize: vi.fn(),
-  lockAsync: vi.fn(),
-  unlockAsync: vi.fn(),
 }));
 
 vi.mock('react-native', () => ({ Dimensions: { get: getSize } }));
-vi.mock('expo-screen-orientation', () => ({
-  OrientationLock: { PORTRAIT_UP: 3 },
-  lockAsync,
-  unlockAsync,
-}));
+const lockAsync = vi.spyOn(ScreenOrientation, 'lockAsync');
+const unlockAsync = vi.spyOn(ScreenOrientation, 'unlockAsync');
 
 beforeEach(() => {
   vi.resetAllMocks();

@@ -24,7 +24,7 @@ vi.mock('../../stores/sessions', () => ({
   useSessions: { getState: () => ({ setForeground: () => {} }) },
   setMachineDiscovery: (fn: typeof mocks.connected) => { mocks.connected = fn; },
 }));
-vi.mock('../../stores/aparencia', () => ({ aplicarTemaSalvo: () => {}, useAparencia: Object.assign((select: (s: object) => unknown) => select({}), { getState: () => ({}) }) }));
+vi.mock('../../stores/aparencia', () => ({ aplicarTemaSalvo: () => {}, setTabletTextScale: () => {}, useAparencia: Object.assign((select: (s: object) => unknown) => select({}), { getState: () => ({}) }) }));
 vi.mock('../../theme/aplicarMaterial', () => ({ aplicarMaterial: () => {} }));
 vi.mock('../../features/voice/LiveVoiceRoot', () => ({ LiveVoiceRoot: () => null }));
 vi.mock('../../features/push/expoPush', () => ({
