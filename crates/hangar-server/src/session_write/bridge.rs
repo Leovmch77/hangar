@@ -40,8 +40,8 @@ fn as_owner(req: &mut Request, name: &str, rest: &str) -> bool {
 /// `/__hangar_server/claude/<nome>/<rota>`: `POST` em `input`, `answer`, `select`, `select/submit`,
 /// `permission-mode` e `model-effort`, `GET` em `permission-modes`, e as rotas do painel da fila (`DELETE`/`PATCH
 /// queue/<id>`, `POST queue/reorder` e `queue/<id>/steer`), de sessão Claude com entrada no Rust, pela
-/// mesma rota do dono; `POST`/`GET btw` de qualquer sessão (a rota decide); `POST close`, o `DELETE` do Claude
-/// aberto aqui que entrou pelo Connect. Outra rota, método ou sessão: 421.
+/// mesma rota do dono; `POST`/`GET btw` e `POST recarregar` de qualquer sessão (a rota decide); `POST close`, o
+/// `DELETE` do Claude aberto aqui que entrou pelo Connect. Outra rota, método ou sessão: 421.
 pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, mut req: Request) -> Response {
     use super::{answer, control, input, permissions};
     if !crate::workspace_routes::private_ok(&st, peer, req.headers()) { return StatusCode::NOT_FOUND.into_response(); }
@@ -51,6 +51,13 @@ pub async fn claude(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         return crate::session_open::server::bridge(State(st), ConnectInfo(peer), req).await;
     }
     if rest == "close" && req.method() == Method::POST { return close_bridged(st, peer, &name, req.headers()).await; }
+    // Reabrir que entrou pelo Connect: a rota da 8765 decide Codex, Claude e o que segue ao Python (421).
+    if rest == "recarregar" && req.method() == Method::POST {
+        let line = asked_line("sessao.recarga_pedida", "session_reload_requested_by_owner", &name, req.headers(), peer);
+        crate::diag::record(crate::diag::diary_dir(), vec![line], "sessão recarregada");
+        if !as_owner(&mut req, &name, &rest) { return not_ours(); }
+        return super::relaunch::reload(State(st), ConnectInfo(peer), req).await;
+    }
     // Pergunta lateral (`POST`/`GET btw`): a própria rota decide sessão, provedor e modo, inclusive o
     // Claude sem terminal parado, que ainda não tem entrada.
     if rest == "btw" && matches!(*req.method(), Method::POST | Method::GET) {
@@ -260,8 +267,12 @@ async fn dispatch(st: Arc<AppState>, peer: SocketAddr, method: &str, rest: &str,
 /// Quem pediu o fechamento: o cliente e a origem que a requisição traz (o dono não manda identidade própria). O
 /// pedido, não o resultado: o encerramento pode falhar depois, e a sessão que some sem ele vai como `sessao.sumiu`.
 fn close_line(name: &str, headers: &axum::http::HeaderMap, peer: SocketAddr) -> serde_json::Value {
+    asked_line("sessao.fechamento_pedido", "session_close_requested_by_owner", name, headers, peer)
+}
+
+fn asked_line(evento: &str, codigo: &str, name: &str, headers: &axum::http::HeaderMap, peer: SocketAddr) -> serde_json::Value {
     let header = |key: &str| headers.get(key).and_then(|v| v.to_str().ok()).map(|v| v.chars().take(80).collect::<String>());
-    json!({"evento": "sessao.fechamento_pedido", "nivel": "ok", "sessao": name, "codigo": "session_close_requested_by_owner",
+    json!({"evento": evento, "nivel": "ok", "sessao": name, "codigo": codigo,
         "cliente": header("user-agent"), "req": header("x-hangar-req"), "origem": header("x-forwarded-for").unwrap_or_else(|| peer.ip().to_string())})
 }
 

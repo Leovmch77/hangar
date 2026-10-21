@@ -185,6 +185,22 @@ def test_delete_entering_the_connect_port_is_closed_by_the_rust(monkeypatch):
     assert len(bridged) == 3 and killed[3:] == [False], "Pi fecha pelo nome, sem passar pela ponte"
 
 
+def test_claude_reopen_entering_the_connect_port_goes_to_the_rust(monkeypatch):
+    calls = []
+    _provider(monkeypatch, ct="claude")
+    monkeypatch.setattr(runtime_coordinator, "rust_codex_terminal", lambda *args: None)
+    monkeypatch.setattr(runtime_coordinator, "rust_claude", lambda *args, **kw: calls.append((args, kw)) or (200, b'{"ok": true}'))
+    request = _request(api_mod.CONNECT_PORT, "/api/sessions/ct/recarregar", body=b"")
+    request.scope["headers"] = [(b"user-agent", b"Hangar/iPad"), (b"x-hangar-req", b"r-2"), (b"x-forwarded-for", b"100.64.0.7")]
+    with pytest.raises(api_mod._RustReply) as reply:
+        asyncio.run(api_mod._codex_rust_port("ct", request))
+    assert reply.value.args == (200, b'{"ok": true}')
+    # A reabertura espera o Claude subir por até 5 min: o prazo da ponte passa disso.
+    (args, kw), = calls
+    assert args[:4] == ("ct", "recarregar", "POST", b"") and args[4] > 300, args
+    assert kw == {"headers": {"user-agent": "Hangar/iPad", "x-hangar-req": "r-2", "x-forwarded-for": "100.64.0.7"}}
+
+
 def test_the_claude_bridge_carries_who_asked(monkeypatch):
     seen = []
 

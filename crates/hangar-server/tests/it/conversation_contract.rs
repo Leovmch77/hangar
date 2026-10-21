@@ -274,3 +274,36 @@ async fn connect_delete_of_a_rust_claude_closes_through_the_bridge() {
     assert!(!registry.has_entry(None, "s").await, "o encerramento passou pelo Rust: a entrada desta vida saiu");
     assert_eq!(python.hits_to("/api/sessions/s"), 0, "a ponte nunca devolve ao Python");
 }
+
+/// O Reabrir (`/recarregar`) do Claude que entrou pelo Connect chega à ponte e é atendido pela mesma rota
+/// da 8765: a recusa da reabertura (aqui o arquivo da sessão ilegível) volta com o código do Rust, e o que
+/// não é Claude daqui é 421, sem nunca voltar ao Python.
+#[tokio::test]
+async fn connect_reload_of_a_claude_goes_through_the_bridge() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = home.path().join(".hangar/claude-headless");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("s.json"), "não é json").unwrap();
+    let env = hangar_server::accounts::environment::AccountEnvironment::from_map([("HOME".to_owned(), home.path().to_string_lossy().into_owned())].into());
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let registry = Arc::new(RuntimeRegistry::new(crate::session_write_control::policy(calls).await, "secret-test".into(), "instance-test".into())
+        .with_codex_environment(env));
+    let (python, upstream) = fake::spawn_fake().await;
+    let state = hangar_server::routes::AppState::new(fake::config(upstream, "127.0.0.1"));
+    assert!(state.state.runtime.set(registry).is_ok());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let private = listener.local_addr().unwrap();
+    let router = hangar_server::routes::terminal_router(Arc::new(state));
+    tokio::spawn(async move { axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap() });
+    let reload = |name: &'static str| async move {
+        let response = fake::client().post(format!("http://{private}/__hangar_server/claude/{name}/recarregar"))
+            .header("x-hangar-internal", SECRET).send().await.unwrap();
+        let status = response.status().as_u16();
+        (status, serde_json::from_str::<Value>(&response.text().await.unwrap()).unwrap_or(Value::Null))
+    };
+    let (status, reply) = reload("s").await;
+    assert_eq!((status, reply["detail"]["code"].as_str(), reply["detail"]["params"]["code"].as_str()),
+        (409, Some("erro_recarregar"), Some("claude_sidecar_read")), "{reply}");
+    assert_eq!(reload("nada").await.0, 421);
+    assert_eq!(python.hits_to("/api/sessions/s/recarregar") + python.hits_to("/api/sessions/nada/recarregar"), 0);
+}
