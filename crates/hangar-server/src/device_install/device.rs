@@ -41,7 +41,14 @@ impl UsbLink {
         pr.udid = Some(udid.to_string());
         let mut lc = LockdownClient::connect(p).await.map_err(from_idevice)?;
         lc.start_session(&pr).await.map_err(from_idevice)?;
-        let ios = lockdown_str(&mut lc, "ProductVersion").await;
+        // Aqui a versão escolhe os arquivos: erro de leitura sobe, nunca vira "".
+        let ios = lc
+            .get_value(Some("ProductVersion"), None)
+            .await
+            .map_err(from_idevice)?
+            .as_string()
+            .map(str::to_string)
+            .unwrap_or_default();
         lc.set_value("EnableWifiDebugging", true.into(), Some("com.apple.mobile.wireless_lockdown"))
             .await
             .map_err(from_idevice)?;

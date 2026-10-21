@@ -21,6 +21,9 @@ pub fn needs_rppairing(ios: &str) -> bool {
 
 /// Nome e conteúdo de cada arquivo. `rp` é obrigatório a partir do 17.4.
 pub fn files(ios: &str, lockdown: &Dictionary, rp: Option<&Dictionary>) -> Result<Vec<(&'static str, Vec<u8>)>, DeviceError> {
+    if ios.split('.').next().and_then(|major| major.parse::<u32>().ok()).is_none() {
+        return Err(DeviceError::Other(format!("unreadable iOS version {ios:?}")));
+    }
     if !needs_rppairing(ios) {
         let ld = xml(lockdown)?;
         return Ok(vec![(ALT_FILE, ld.clone()), (LOCKDOWN_FILE, ld)]);
@@ -153,6 +156,14 @@ mod tests {
             assert_eq!(names(&f), vec![ALT_FILE, LOCKDOWN_FILE], "{ios}");
             assert_eq!(parsed(&f[0].1), lockdown());
             assert_eq!(parsed(&f[1].1), lockdown());
+        }
+    }
+
+    // Versão ilegível cairia na faixa < 17.4 e gravaria o lockdown num iOS 26.
+    #[test]
+    fn unreadable_version_is_refused() {
+        for ios in ["", "?", ".5"] {
+            assert!(matches!(files(ios, &lockdown(), Some(&rp())), Err(DeviceError::Other(_))), "{ios:?}");
         }
     }
 
