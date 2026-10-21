@@ -95,6 +95,8 @@ pub struct AppState {
     pub share: Option<Arc<crate::share::ShareState>>,
     /// A porta do convidado já está escutando; a saúde anuncia.
     pub guest_bound: std::sync::atomic::AtomicBool,
+    /// Instalar o SideStore no iPhone/iPad do cabo; o teste troca aparelho e Apple por falsos.
+    pub device_install: Arc<crate::device_install::job::DeviceInstall>,
 }
 
 impl AppState {
@@ -149,6 +151,13 @@ impl AppState {
             Err(e) => { tracing::error!("{e}"); None }
         };
         if let Some(share) = &share { list.set_shares(share.clone()); }
+        let hangar_dir = std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()).join(".hangar");
+        let device_install = {
+            let env = crate::accounts::environment::AccountEnvironment::capture();
+            Arc::new(crate::device_install::job::DeviceInstall::new(
+                Arc::new(crate::device_install::UsbLink::new(&hangar_dir)), Arc::new(crate::device_install::apple::IsideloadSigner), &hangar_dir)
+                .with_config(Arc::new(move || crate::runtime::codex_launch::runtime_config(&env))))
+        };
         let groups = crate::groups::from_env(list.env().dirs.as_ref(),
             Arc::new(crate::groups::orq::PythonOrq::new(cfg.upstream, cfg.internal_secret.clone(), http.clone())), list.clone());
         AppState { accounts: crate::accounts::AccountService::new(crate::accounts::environment::AccountEnvironment::capture()), command_catalog: Arc::default(), groups, peers: Arc::new(crate::groups::peers_from_env()), auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, public_v6: None, diag,
@@ -162,7 +171,7 @@ impl AppState {
             workspace_meta_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             costs, fx, reports: Arc::new(crate::costs::ReportCache::default()),
             origins_home: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()),
-            hangar_dir: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()).join(".hangar"),
+            hangar_dir, device_install,
             upload_naming: Default::default(),
             origins: std::sync::Mutex::new(indexmap::IndexMap::new()),
             list, state,
@@ -555,6 +564,12 @@ fn public_routes(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router 
         // Planos e catálogo de plugins e skills: o dono no Rust; o resto segue ao Python.
         .merge(crate::plans::routes::router())
         .route("/api/claude/customizations", get(crate::claude_customizations::catalog_route).fallback(pass_any))
+        // SideStore no iPhone/iPad do cabo: só o dono, nunca repassado (a senha da Apple ID não vai ao Python).
+        .route("/api/device-install/devices", get(crate::device_install::routes::devices))
+        .route("/api/device-install/progress", get(crate::device_install::routes::progress))
+        .route("/api/device-install/trust", axum::routing::post(crate::device_install::routes::trust))
+        .route("/api/device-install/start", axum::routing::post(crate::device_install::routes::start))
+        .route("/api/device-install/code", axum::routing::post(crate::device_install::routes::code))
         .fallback(pass_any)
         .layer(axum::middleware::from_fn(crate::migration_status::count_public))
         .with_state(state.clone())
@@ -645,7 +660,7 @@ pub(crate) fn forward_for(st: &AppState, peer: SocketAddr, req: &Request) -> For
 }
 
 /// Chegou pela 8766: o `GuestConn` só existe no listener do convidado.
-fn on_guest_port(req: &Request) -> bool {
+pub(crate) fn on_guest_port(req: &Request) -> bool {
     req.extensions().get::<ConnectInfo<crate::share::gate::GuestConn>>().is_some()
 }
 

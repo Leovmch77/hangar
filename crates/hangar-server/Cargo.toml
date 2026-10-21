@@ -82,6 +82,12 @@ image = { version = "=0.25.10", default-features = false, features = ["png", "jp
 num-bigint = "=0.5.1"
 idevice.workspace = true
 plist.workspace = true
+# Login Apple e assinatura do SideStore (`device_install::apple`): a versão provada no iPad, sem o
+# keyring do sistema (o estado fica em `~/.hangar/devices/apple`).
+isideload = { version = "=0.5.0", default-features = false, features = ["install", "tokio-mt", "fs-storage"] }
+rootcause = "=0.12.1"
+# A senha da Apple ID só em memória, zerada ao sair.
+zeroize = { version = "=1.9.0", features = ["serde"] }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

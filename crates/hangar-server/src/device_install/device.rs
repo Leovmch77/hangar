@@ -194,6 +194,16 @@ impl DeviceLink for UsbLink {
             write_file(&mut afc, &path, &merged).await
         })
     }
+
+    fn pairing_file<'a>(&'a self, udid: &'a str) -> BoxFuture<'a, Result<Vec<u8>, DeviceError>> {
+        Box::pin(async move {
+            let p = provider(udid).await?;
+            // O primeiro é o que o SideStore lê nesta versão (o mesmo que o spike provou).
+            let (_, bytes) = self.pairing_files(udid, &p).await?.into_iter().next()
+                .ok_or_else(|| DeviceError::Other("no pairing file".into()))?;
+            Ok(bytes)
+        })
+    }
 }
 
 /// Erro do idevice para o que a tela sabe explicar.
@@ -270,7 +280,7 @@ async fn write_file(afc: &mut AfcClient, path: &str, bytes: &[u8]) -> Result<(),
     f.close().await.map_err(from_idevice)
 }
 
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     let mut b = std::fs::DirBuilder::new();
     b.recursive(true);
     #[cfg(unix)]

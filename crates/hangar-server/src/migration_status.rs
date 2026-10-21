@@ -101,6 +101,9 @@ pub fn rust_route(method: &Method, path: &str) -> bool {
     if crate::orq_conductor::matches(method, path) { return true; }
     if crate::session_media::is_media(method, path) { return true; }
     if crate::accounts::http::matches(method, path) { return true; }
+    // SideStore no aparelho do cabo (`device_install::routes`): nunca repassado.
+    if *method == Method::GET && matches!(path, "/api/device-install/devices" | "/api/device-install/progress") { return true; }
+    if *method == Method::POST && matches!(path, "/api/device-install/trust" | "/api/device-install/start" | "/api/device-install/code") { return true; }
     if *method == Method::GET {
         if matches!(path, "/api/sessions" | "/api/sessions/events" | "/api/sessions/creation-progress" | "/api/costs" | "/api/cotacao" | "/api/uso" | "/api/migration/status" | "/api/presence"
             | "/api/voice" | "/api/voice/settings" | "/api/voice/memory" | "/api/jev/aux/cliproxy" | "/api/jev/delivery" | "/api/client-api") {

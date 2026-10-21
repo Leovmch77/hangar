@@ -1,7 +1,10 @@
 //! iPhone/iPad no cabo: listar, pedir confiança, instalar o SideStore já assinado e gravar o
-//! pareamento no container dele. Login Apple e assinatura não moram aqui.
+//! pareamento no container dele. Login Apple e assinatura moram em `apple`; o trabalho, em `job`.
+pub mod apple;
 pub mod device;
+pub mod job;
 pub mod pairing;
+pub mod routes;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -81,6 +84,8 @@ pub trait DeviceLink: Send + Sync {
     fn write_pairing<'a>(&'a self, udid: &'a str, app_bundle: &'a str) -> BoxFuture<'a, Result<(), DeviceError>>;
     /// Anisette do SideStore em `Library/Preferences/<app_bundle>.plist`, sem perder as outras chaves.
     fn write_sidestore_prefs<'a>(&'a self, udid: &'a str, app_bundle: &'a str) -> BoxFuture<'a, Result<(), DeviceError>>;
+    /// O arquivo de pareamento principal desta versão do iOS, que a assinatura põe cifrado no bundle.
+    fn pairing_file<'a>(&'a self, udid: &'a str) -> BoxFuture<'a, Result<Vec<u8>, DeviceError>>;
 }
 
 /// Aparelho de mentira para os testes deste módulo e das rotas.
@@ -132,6 +137,9 @@ impl DeviceLink for FakeLink {
     }
     fn write_sidestore_prefs<'a>(&'a self, udid: &'a str, app_bundle: &'a str) -> BoxFuture<'a, Result<(), DeviceError>> {
         self.run(|| record(&self.prefs, (udid.to_string(), app_bundle.to_string())))
+    }
+    fn pairing_file<'a>(&'a self, udid: &'a str) -> BoxFuture<'a, Result<Vec<u8>, DeviceError>> {
+        self.run(|| format!("pairing-{udid}").into_bytes())
     }
 }
 
