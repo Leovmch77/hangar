@@ -11,11 +11,15 @@ import { readDraft, writeDraft } from '../../stores/drafts';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const api = vi.hoisted(() => ({ config: vi.fn() }));
+const api = vi.hoisted(() => ({ config: vi.fn(), send: vi.fn() }));
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
   getConfigForServer: api.config,
+  sendInputForServer: api.send,
 }));
+const feedback = vi.hoisted(() => ({ ok: vi.fn(), erro: vi.fn(), success: vi.fn() }));
+vi.mock('../../ui/Toast', () => ({ toast: { ok: feedback.ok, erro: feedback.erro } }));
+vi.mock('../../ui/haptics', () => ({ haptic: { success: feedback.success } }));
 const memory = vi.hoisted(() => new Map<string, string>());
 vi.mock('../../stores/prefs', () => ({ prefs: {
   getString: (key: string) => memory.get(key),
@@ -26,9 +30,10 @@ const send = vi.hoisted(() => vi.fn());
 const updates = createStore(() => ({ draftUpdate: 0 }));
 vi.mock('../../stores/chat', () => ({ chatStore: () => ({ send, use: updates }) }));
 const target = vi.hoisted(() => ({ id: 'srv', label: 'Casa', baseUrl: 'http://casa', token: 'test' }));
+const other = vi.hoisted(() => ({ id: 'other', label: 'Ativo', baseUrl: 'http://ativo', token: 'other-test' }));
 vi.mock('../../stores/servers', () => ({ useServers: Object.assign(
-  (select: (s: { servers: typeof target[] }) => unknown) => select({ servers: [target] }),
-  { getState: () => ({ servers: [target] }) },
+  (select: (s: { servers: typeof target[]; activeId: string }) => unknown) => select({ servers: [other, target], activeId: other.id }),
+  { getState: () => ({ servers: [other, target], activeId: other.id }) },
 ) }));
 const push = vi.hoisted(() => vi.fn());
 vi.mock('expo-router', () => ({ useRouter: () => ({ push }) }));
@@ -57,6 +62,7 @@ beforeEach(() => {
   memory.clear();
   updates.setState({ draftUpdate: 0 });
   send.mockResolvedValue(undefined);
+  api.send.mockResolvedValue(undefined);
   api.config.mockResolvedValue(config([shortcut()]));
 });
 afterEach(() => {
@@ -68,10 +74,29 @@ afterEach(() => {
 });
 
 describe('ActionsGrid', () => {
+  it.each([false, true])('envio direto preserva o rascunho com áudio e anexos (envio pendente=%s)', async (pending) => {
+    writeDraft('srv', 'sess', {
+      version: 1, text: 'rascunho com ditado', revision: 7, transcript: '/t/sess.jsonl',
+      attachments: [{ uri: 'file:///image.png', name: 'image.png', mime: 'image/png', kind: 'image' }],
+      recordings: [{ id: 'voice-1', serverPath: '/up/sess/voice.m4a' }],
+      submission: pending ? { text: 'outra mensagem', draftRevision: 6, status: 'sending' } : null,
+    });
+    const before = memory.get('draft.v1:srv::sess');
+    const container = await render();
+    await act(async () => button(container).click());
+    expect(api.send).toHaveBeenCalledExactlyOnceWith(target, 'sess', '/finalizar-pm');
+    expect(send).not.toHaveBeenCalled();
+    expect(memory.get('draft.v1:srv::sess')).toBe(before);
+    expect(updates.getState().draftUpdate).toBe(0);
+    expect(feedback.success).toHaveBeenCalledOnce();
+    expect(feedback.erro).not.toHaveBeenCalled();
+  });
+
   it('send_direct ausente envia o texto para a sessão', async () => {
     const container = await render();
     await act(async () => button(container).click());
-    expect(send).toHaveBeenCalledExactlyOnceWith('/finalizar-pm');
+    expect(api.send).toHaveBeenCalledExactlyOnceWith(target, 'sess', '/finalizar-pm');
+    expect(send).not.toHaveBeenCalled();
     expect(api.config).toHaveBeenCalledExactlyOnceWith(target);
   });
 
@@ -86,6 +111,7 @@ describe('ActionsGrid', () => {
     });
     expect(updates.getState().draftUpdate).toBe(1);
     expect(send).not.toHaveBeenCalled();
+    expect(api.send).not.toHaveBeenCalled();
   });
 
   it('confirm true só envia depois do OK', async () => {
@@ -95,11 +121,13 @@ describe('ActionsGrid', () => {
     await act(async () => button(container).click());
     expect(alert).toHaveBeenCalledOnce();
     expect(send).not.toHaveBeenCalled();
+    expect(api.send).not.toHaveBeenCalled();
     const buttons = alert.mock.calls[0][2]!;
     const cancel = buttons.find((item) => item.style === 'cancel');
     expect(cancel).toBeDefined();
     await act(async () => buttons.find((item) => item.style !== 'cancel')!.onPress!());
-    expect(send).toHaveBeenCalledExactlyOnceWith('/finalizar-pm');
+    expect(api.send).toHaveBeenCalledExactlyOnceWith(target, 'sess', '/finalizar-pm');
+    expect(send).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -111,6 +139,7 @@ describe('ActionsGrid', () => {
     await act(async () => button(container, label()).click());
     expect(push).toHaveBeenCalledExactlyOnceWith(path);
     expect(send).not.toHaveBeenCalled();
+    expect(api.send).not.toHaveBeenCalled();
   });
 
   it('mostra carregamento, erro de config e permite tentar novamente', async () => {
@@ -144,13 +173,20 @@ describe('ActionsGrid', () => {
   });
 
   it('falha no envio aparece e mantém a grade para outra tentativa', async () => {
-    send.mockRejectedValueOnce(new Error('Envio recusado'));
+    api.send.mockRejectedValueOnce(new Error('Envio recusado'));
+    writeDraft('srv', 'sess', { version: 1, text: 'antes', revision: 4, transcript: '/t/sess.jsonl',
+      attachments: [], recordings: [{ id: 'voice-1', serverPath: '/up/sess/voice.m4a' }], submission: null });
+    const before = memory.get('draft.v1:srv::sess');
     const container = await render();
     await act(async () => button(container).click());
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Envio recusado');
+    expect(feedback.erro).toHaveBeenCalledExactlyOnceWith('Envio recusado');
+    expect(feedback.success).not.toHaveBeenCalled();
+    expect(memory.get('draft.v1:srv::sess')).toBe(before);
     await act(async () => button(container).click());
-    expect(send).toHaveBeenCalledTimes(2);
-    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(api.send).toHaveBeenCalledTimes(2);
+    expect(feedback.success).toHaveBeenCalledOnce();
+    expect(memory.get('draft.v1:srv::sess')).toBe(before);
+    expect(send).not.toHaveBeenCalled();
     expect(api.config).toHaveBeenCalledOnce();
   });
 
@@ -159,7 +195,8 @@ describe('ActionsGrid', () => {
     const container = await render();
     await act(async () => button(container).click());
     expect(send).not.toHaveBeenCalled();
+    expect(api.send).not.toHaveBeenCalled();
     expect(readDraft('srv', 'sess')).toBeNull();
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain(m.atalhos_segredo_falta({ nome: 'TOKEN' }));
+    expect(feedback.erro).toHaveBeenCalledExactlyOnceWith(m.atalhos_segredo_falta({ nome: 'TOKEN' }));
   });
 });

@@ -2,10 +2,12 @@ import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
-import { getConfigForServer, resolveShortcuts, sendsDirect, shortcutMissingSecret, type Shortcut } from '@hangar/core';
+import { getConfigForServer, resolveShortcuts, sendInputForServer, sendsDirect, shortcutMissingSecret, type Shortcut } from '@hangar/core';
 import { useServers } from '../../stores/servers';
 import { chatStore } from '../../stores/chat';
 import { readDraft, writeDraft } from '../../stores/drafts';
+import { haptic } from '../../ui/haptics';
+import { toast } from '../../ui/Toast';
 import { useSettingsColors } from '../config/colors';
 import { panelShortcuts } from '../shortcuts/panelShortcuts';
 import { ShortcutIcon, NATIVE_ICON, NATIVE_LABEL } from '../shortcuts/ShortcutIcon';
@@ -18,13 +20,11 @@ export function ActionsGrid({ serverId, name }: { serverId: string; name: string
   const [items, setItems] = useState<Shortcut[] | null>(null);
   const [loadError, setLoadError] = useState('');
   const [retry, setRetry] = useState(0);
-  const [error, setError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
     setItems(null);
     setLoadError('');
-    setError('');
     if (!server) {
       setLoadError(m.chat_servidor_removido());
       return;
@@ -41,7 +41,6 @@ export function ActionsGrid({ serverId, name }: { serverId: string; name: string
   }, [server, retry]);
 
   async function run(shortcut: Shortcut) {
-    setError('');
     if (shortcut.type === 'internal') {
       router.push(`/s/${serverId}/${name}/${shortcut.action === 'anexos' ? 'attachments' : 'terminal'}`);
       return;
@@ -50,17 +49,19 @@ export function ActionsGrid({ serverId, name }: { serverId: string; name: string
     try {
       const missing = shortcutMissingSecret(shortcut);
       if (missing) throw new Error(m.atalhos_segredo_falta({ nome: missing }));
-      const chat = chatStore(serverId, name);
-      if (sendsDirect(shortcut)) await chat.send(shortcut.text);
-      else {
+      if (sendsDirect(shortcut)) {
+        if (!server) throw new Error(m.chat_servidor_removido());
+        await sendInputForServer(server, name, shortcut.text);
+        haptic.success();
+      } else {
         const current = readDraft(serverId, name) ?? {
           version: 1 as const, text: '', revision: 0, transcript: null, attachments: [], submission: null,
         };
         writeDraft(serverId, name, { ...current, text: shortcut.text, revision: current.revision + 1 });
-        chat.use.setState((s) => ({ draftUpdate: s.draftUpdate + 1 }));
+        chatStore(serverId, name).use.setState((s) => ({ draftUpdate: s.draftUpdate + 1 }));
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      toast.erro(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -76,7 +77,6 @@ export function ActionsGrid({ serverId, name }: { serverId: string; name: string
   if (items.length === 0) return null;
   return (
     <View style={styles.feedback}>
-      {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
       <View style={styles.grid}>
         {items.map((shortcut) => {
           const label = shortcut.type === 'internal' ? NATIVE_LABEL[shortcut.action]() : shortcut.label;
