@@ -1,7 +1,7 @@
 import 'react-native-url-polyfill/auto';
 import '../src/theme/unistyles';
 import { useEffect } from 'react';
-import { AppState, Platform, type AppStateStatus } from 'react-native';
+import { AppState, Dimensions, Platform, type AppStateStatus } from 'react-native';
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 // Sem o KeyboardProvider, KeyboardStickyView/KeyboardChatScrollView lançam em runtime
@@ -13,7 +13,7 @@ import { setChatsForeground } from '../src/stores/chat';
 import { setQueueDeliveryForeground } from '../src/chat/useQueueDelivery';
 import { setMachineDiscovery, useSessions } from '../src/stores/sessions';
 import { aplicarTemaSalvo, setTabletTextScale, useAparencia } from '../src/stores/aparencia';
-import { useTabletLandscape } from '../src/features/tablet/layout';
+import { isTabletLandscape, useTabletLandscape } from '../src/features/tablet/layout';
 import { aplicarMaterial } from '../src/theme/aplicarMaterial';
 import { Toaster, toast } from '../src/ui/Toast';
 import { LiveVoiceRoot } from '../src/features/voice/LiveVoiceRoot';
@@ -25,7 +25,9 @@ import { registrarDiag } from '@hangar/core';
 
 configureCore();
 aplicarTemaSalvo();
-aplicarMaterial(useAparencia.getState());
+aplicarMaterial(useAparencia.getState(), {
+  escalaTexto: isTabletLandscape(Dimensions.get('window')) ? 19 / 17 : 1,
+});
 installNotificationHandler();
 
 const reportPushError = (e: unknown) => {
