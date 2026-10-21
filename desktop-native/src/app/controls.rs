@@ -207,6 +207,11 @@ pub(super) fn reopen_warnings(value: &Value) -> Option<String> {
     (!avisos.is_empty()).then(|| avisos.join(" · "))
 }
 
+/// O problema da tela pré-conversa: a frase da faixa pelo código; só texto sem frase própria aparece como veio.
+fn prethread_problem(problem: &str) -> String {
+    crate::i18n::tr_web(&format!("problema_{problem}"), &Default::default()).unwrap_or_else(|| problem.to_owned())
+}
+
 fn text(value: &Value, key: &str) -> String { value.get(key).and_then(Value::as_str).unwrap_or("").to_owned() }
 
 fn catalog_engine_matches(catalog: &Value, engine: Option<&str>) -> bool {
@@ -1358,8 +1363,7 @@ impl Hangar {
                         .child(self.elapsed_slot(panes::Area::Conversation, "prethread-elapsed", since, None)));
                 }
                 if let Some(problem) = session.problema.as_ref().filter(|p| !p.trim().is_empty() && *p != &label) {
-                    let problem = if problem == "codex_abertura_falhou" { tr_shared("problema_codex_abertura_falhou", &[]) } else { problem.clone() };
-                    body = body.child(div().text_sm().text_color(theme::warning()).child(problem));
+                    body = body.child(div().text_sm().text_color(theme::warning()).child(prethread_problem(problem)));
                 }
             }
         }
@@ -1374,7 +1378,17 @@ impl Hangar {
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
-    use super::{Choice, ModeTarget, claude_effort_current, claude_model_current, codex_fast_state, keep, mode_ahead, only_match, reopen_warnings, spaced, step_free};
+    use super::{Choice, ModeTarget, claude_effort_current, claude_model_current, codex_fast_state, keep, mode_ahead, only_match, prethread_problem, reopen_warnings, spaced, step_free};
+
+    #[test]
+    fn prethread_problem_shows_the_phrase_never_the_raw_code() {
+        crate::i18n::set_language(crate::appearance::Language::Pt);
+        assert_eq!(prethread_problem("headless_processo_caiu"), "O processo do Claude caiu; o próximo prompt tenta de novo");
+        assert_eq!(prethread_problem("codex_limite_uso"), crate::i18n::tr_shared("problema_codex_limite_uso", &[]));
+        assert_ne!(prethread_problem("codex_limite_uso"), "codex_limite_uso");
+        // Texto livre do servidor, sem frase própria, aparece como veio.
+        assert_eq!(prethread_problem("broken config"), "broken config");
+    }
 
     #[test]
     fn reopen_warnings_join_what_the_server_sent() {

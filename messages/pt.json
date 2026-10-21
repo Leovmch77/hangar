@@ -1034,6 +1034,8 @@
   "problema_headless_turno_erro": "O último turno terminou com erro",
   "problema_runtime_falhou": "O runtime da sessão falhou",
   "problema_headless_sem_login": "Esta conta não está logada no Claude — abra um terminal e rode `claude /login` uma vez (com a mesma conta); depois é só mandar o prompt de novo",
+  "problema_headless_delivery_stalled": "Não entregue: a sessão não responde ao servidor.",
+  "reabrir_sessao_presa": "Reabrir",
   "problema_terminal_observacao_falhou": "Observação do terminal indisponível",
   "problema_state_facts_unavailable": "Estado talvez velho: o servidor não respondeu o que o plugin da sessão disse",
   "problema_permission_observe_failed": "Não deu para confirmar o modo de permissão desta sessão",

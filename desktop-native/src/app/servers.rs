@@ -146,7 +146,13 @@ impl Hangar {
                         }
                         Err(_) => { list.error = Some(tr("invalid_response")); false }
                     },
-                    "list_error" => { list.error = Some(tr("list_stale")); true }
+                    "list_error" => {
+                        match super::list_error_note(!list.sessions.is_empty(), &frame.data) {
+                            Some(note) => list.error = Some(note),
+                            None => changed = false,
+                        }
+                        true
+                    }
                     // Quem o mostra (chip, blocos, painel) é acertado por `live_changed`, na volta desta função.
                     "shortcut_terminals" => { list.live_terms = super::terminal::parse_live_terms(&frame.data); changed = false; true }
                     _ => { changed = false; true }
