@@ -13,6 +13,7 @@ import { ToolGroup } from './tools/ToolGroup';
 import { ToolCard } from './tools/ToolCard';
 import { AgentesRodando, PensamentoVivo, WorkingLine } from './LiveWork';
 import { projectConversation, type ConversationProjection, type MessageRow } from './conversationProjection';
+import { conversationInset } from './conversationColumn';
 import { ToolDetailSheet, type ToolDetailHandle } from './tools/ToolDetailSheet';
 import type { ConversationRow } from './tools/fold';
 import { HtmlPageCard } from './tools/HtmlPageCard';
@@ -51,6 +52,7 @@ interface Props {
   alignItemsAtEnd?: boolean;
   preserveToolGroupPosition?: boolean;
   nestedScrollEnabled?: boolean;
+  maxReading?: number;
   // Bloco "trabalhando" do fim (ausente = lista só de leitura, como a do subagente).
   stateEvent?: StateEvent | null;
   turnSeen?: number | null;
@@ -88,6 +90,7 @@ export function MessageList({
   alignItemsAtEnd = true,
   preserveToolGroupPosition = false,
   nestedScrollEnabled,
+  maxReading,
   stateEvent = null,
   turnSeen = null,
   pensamento = '',
@@ -107,6 +110,7 @@ export function MessageList({
   const folha = useAparencia((s) => (s.leitura === 'sheet' ? s.solidezFolha : null));
   const { theme } = useUnistyles();
   const { width } = useWindowDimensions();
+  const [boxWidth, setBoxWidth] = useState<number | null>(null);
   const previous = useRef<ConversationProjection | null>(null);
   const projection = projectConversation(previous.current, {
     events, eventsRevision, pref, merge: look === 'tree', terminal: look === 'terminal', tasksEnabled: tarefasLigadas,
@@ -313,11 +317,11 @@ export function MessageList({
   }, [resumeFollowing, look]);
 
   // Largura da coluna (Aparência › Texto da conversa): abaixo de 100% a conversa estreita no meio.
-  const recuo = ((width - 2 * theme.base.space[4]) * (1 - theme.conversa.coluna)) / 2;
+  const recuo = conversationInset(boxWidth ?? width, theme.conversa.coluna, theme.base.space[4], maxReading);
   const elevado = hexParaRgb(theme.tokens.bg.elevated);
 
   return (
-    <View style={styles.area}>
+    <View style={styles.area} onLayout={(e) => setBoxWidth(e.nativeEvent.layout.width)}>
     {/* Leitura Folha: a folha atrás da conversa; a Solidez da folha diz quanto ela tapa o fundo. */}
     {folha !== null && elevado ? (
       <View
