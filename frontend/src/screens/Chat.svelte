@@ -1232,7 +1232,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     recargaDispensada = true;
     try { localStorage.setItem(recargaKey, '1'); } catch { /* sem storage: vale só nesta aba */ }
   }
-  // Codex preso tentando falar com o provedor: o turno nunca fecha, então reinicia trabalhando.
+  // Codex preso tentando falar com o provedor, ou mensagem presa com a sessão sem terminal surda
+  // (Reabrir da bolha): o turno nunca fecha, então reinicia trabalhando.
   async function reiniciarCodex() {
     if (recarregando) return;
     recarregando = true;
@@ -3663,6 +3664,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       onOpenSession={abrirRemetente}
       onOpenOrq={() => (orqOpen = true)}
       onDescartarFila={descartarFila}
+      onReabrirPresa={soLeituraPar ? undefined : reiniciarCodex}
       hiddenQueued={queuePanelShown ? (ev) => hiddenByQueuePanel(ev, queueList) : undefined}
     />
   {/if}

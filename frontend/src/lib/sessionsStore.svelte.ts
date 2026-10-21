@@ -373,7 +373,10 @@ function createSessionsStore() {
         registrarSucesso(s.id);
         cancelarPrazo();
         arm();   // conexão está viva — só o produtor de dados falhou
-        slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: m.sessao_erro_servidor() });
+        const sessions = slots.get(s.id)?.sessions ?? null;
+        // Com linhas na tela a lista boa continua e a falha fica só no diário; sem linha nenhuma o
+        // erro distingue "o servidor não respondeu" de "não há sessão".
+        slots.set(s.id, { sessions, error: sessions?.length ? null : m.sessao_erro_servidor() });
         recompute();
       });
       es.onerror = () => {

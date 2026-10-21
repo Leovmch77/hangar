@@ -50,6 +50,24 @@ it('falha real marca os outros servidores, nunca o ativo; erro do produtor não 
   expect(estaDesligado('vpn')).toBe(false);   // a máquina respondeu: não é rede
 });
 
+it('falha do produtor com linhas na tela vai ao diário e não marca o servidor', () => {
+  const registrar = vi.fn();
+  configureDiag({ registrar, novoReq: () => 'list-error' });
+  sessionsStore.retain();
+  streams.get('vpn')!.get('sessions')!({ data: JSON.stringify([{ name: 'hangar', jsonl: '/h' }]) });
+  streams.get('vpn')!.get('list_error')!({ data: '' });
+  expect(registrar).toHaveBeenCalledWith(expect.objectContaining({ evento: 'lista.falhou' }), 'http://vpn');
+  expect(sessionsStore.byServer.find(s => s.server.id === 'vpn')?.error).toBeNull();
+  expect(sessionsStore.rows.some(s => s.name === 'hangar')).toBe(true);
+});
+
+it('falha do produtor sem linha nenhuma em todos os servidores continua marcando cada um', () => {
+  sessionsStore.retain();
+  for (const id of ['lan', 'vpn']) streams.get(id)!.get('list_error')!({ data: '' });
+  // É o que acende o "Sem resposta de {servidores}" da lista vazia.
+  expect(sessionsStore.byServer.every(s => s.error)).toBe(true);
+});
+
 it('resposta recebida fora da lista retoma o stream e atualiza as sessões antigas', () => {
   vi.useFakeTimers();
   sessionsStore.retain();
