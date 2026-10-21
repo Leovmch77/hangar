@@ -33,6 +33,7 @@ const SIDESTORE_BUNDLE: &str = "com.SideStore.SideStore";
 const FREE_APP_LIMIT: u32 = 3;
 const CODE_WAIT: Duration = Duration::from_secs(600);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+static SIGNING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Clone, Copy, Debug)]
 pub struct Pinned {
@@ -204,7 +205,12 @@ impl DeviceInstall {
         }
         let svc = self.clone();
         tokio::spawn(async move {
-            match svc.run(&job, start).await {
+            // Tarefa interna: um pânico (isideload) vira `failed` em vez de deixar o aparelho ocupado.
+            let inner = job.clone();
+            let outcome = tokio::spawn(async move { svc.run(&inner, start).await })
+                .await
+                .unwrap_or_else(|_| Err(Failure::with(DEVICE_ERROR, "panic")));
+            match outcome {
                 Ok(()) => job.set(Stage::Done, None),
                 Err(f) => {
                     tracing::warn!(code = f.code, "device install failed");
@@ -254,14 +260,16 @@ impl DeviceInstall {
         let tmp = tempfile::tempdir_in(&self.dir).map_err(|e| Failure::with(DOWNLOAD_FAILED, e.to_string()))?;
         let ipa = download(&self.http, &self.pinned, tmp.path()).await?;
 
-        job.set(Stage::Signing, None);
-        let signed = session.sign(SignRequest { ipa: &ipa, udid: &udid, device_name: &device.name, pairing: &pairing }).await?;
-        drop(session);
-
-        job.set(Stage::Installing, None);
-        let installed = self.link.install_sidestore(&udid, &signed).await;
-        let _ = std::fs::remove_dir_all(&signed);
-        installed?;
+        // O isideload extrai sempre no mesmo lugar do temp e o estado em `devices/apple` é um só:
+        // um aparelho assina e instala por vez.
+        {
+            let _one = SIGNING.lock().await;
+            job.set(Stage::Signing, None);
+            let signed = session.sign(SignRequest { ipa: &ipa, udid: &udid, device_name: &device.name, pairing: &pairing }).await?;
+            drop(session);
+            job.set(Stage::Installing, None);
+            self.link.install_sidestore(&udid, &signed.app).await?;
+        }
 
         // Antes de a pessoa abrir o SideStore: aberto, ele guardaria as preferências antigas.
         job.set(Stage::Pairing, None);

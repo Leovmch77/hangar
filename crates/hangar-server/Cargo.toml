@@ -86,6 +86,8 @@ plist.workspace = true
 # keyring do sistema (o estado fica em `~/.hangar/devices/apple`).
 isideload = { version = "=0.5.0", default-features = false, features = ["install", "tokio-mt", "fs-storage"] }
 rootcause = "=0.12.1"
+# A pasta temporária onde o isideload extrai o IPA, para apagá-la.
+isideload-vfs = "=0.0.1"
 # A senha da Apple ID só em memória, zerada ao sair.
 zeroize = { version = "=1.9.0", features = ["serde"] }
 

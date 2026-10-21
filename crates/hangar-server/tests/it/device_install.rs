@@ -267,6 +267,62 @@ async fn only_the_owner_token_and_never_a_forwarded_request() {
     assert_eq!(s.python.hits_to("/api/device-install/devices"), 0);
 }
 
+/// Onde o fake extrai o IPA do trabalho (o isideload extrai no temp do sistema).
+fn extracted(s: &Server) -> std::path::PathBuf {
+    s.dir.path().join("devices/SideStore.ipa_extracted")
+}
+
+async fn sign_and_wait(s: &Server, stage: &str, error: &str) -> Value {
+    let job = s.start().await;
+    s.wait(&job, "awaiting_code", None).await;
+    s.code(&job, json!({"code": "123456"})).await;
+    s.wait(&job, stage, Some(error)).await
+}
+
+#[tokio::test]
+async fn a_panic_in_signing_fails_the_job_and_frees_the_device() {
+    let s = serve(link(), FakeSigner { sign_panics: true, ..signer() }).await;
+    let p = sign_and_wait(&s, "failed", "device_error").await;
+    assert_eq!(p["error"]["detail"], "panic");
+    assert!(!extracted(&s).exists(), "a pasta com a chave do certificado ficou no disco");
+    let (status, body) = s.post("start", json!({"udid": UDID, "apple_id": "a@b.c", "password": PASSWORD})).await;
+    assert_eq!(status, 200, "o aparelho continuou ocupado: {body}");
+}
+
+#[tokio::test]
+async fn failed_or_finished_signing_leaves_no_extracted_app() {
+    let s = serve(link(), FakeSigner { sign_error: Some(hangar_server::device_install::job::Failure::new("device_install_sign_failed")), ..signer() }).await;
+    sign_and_wait(&s, "failed", "device_install_sign_failed").await;
+    assert!(!extracted(&s).exists(), "falha no meio da assinatura deixou a extração");
+
+    let s = serve(link(), signer()).await;
+    sign_and_wait(&s, "failed", "device_install_not_installed").await;
+    assert_eq!(s.link.installs.lock().unwrap().len(), 1);
+    assert!(!extracted(&s).exists(), "instalado, a extração tinha de sumir");
+}
+
+#[tokio::test]
+async fn two_devices_never_sign_at_the_same_time() {
+    let other = DeviceInfo { udid: "00008101-0000000000000002".into(), ..ipad() };
+    let l = FakeLink { devices: vec![ipad(), other.clone()], ..Default::default() };
+    l.installed.lock().unwrap().push(BUNDLE.into());
+    let s = serve(l, FakeSigner { sign_delay: Duration::from_millis(200), ..signer() }).await;
+    let mut jobs = Vec::new();
+    for udid in [UDID, other.udid.as_str()] {
+        let (status, body) = s.post("start", json!({"udid": udid, "apple_id": "a@b.c", "password": PASSWORD})).await;
+        assert_eq!(status, 200, "{body}");
+        jobs.push(body["job"].as_str().unwrap().to_string());
+    }
+    for job in &jobs {
+        s.wait(job, "awaiting_code", None).await;
+        s.code(job, json!({"code": "123456"})).await;
+    }
+    for job in &jobs {
+        s.wait(job, "done", None).await;
+    }
+    assert_eq!(s.signer.signing.1.load(std::sync::atomic::Ordering::SeqCst), 1, "duas assinaturas juntas dividiriam a pasta do temp");
+}
+
 fn assert_no_password_on_disk(dir: &std::path::Path) {
     for entry in std::fs::read_dir(dir).unwrap().flatten() {
         let path = entry.path();

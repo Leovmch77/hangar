@@ -40,6 +40,22 @@ pub struct SignRequest<'a> {
     pub pairing: &'a [u8],
 }
 
+/// Pasta onde o IPA foi extraído e assinado, com a chave do certificado dentro: apagada quando sai de
+/// cena, inclusive por erro ou pânico no meio da assinatura.
+pub struct Scratch(pub PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// O `.app` assinado vive dentro de `scratch`: instalar antes de soltar.
+pub struct Signed {
+    pub app: PathBuf,
+    pub scratch: Scratch,
+}
+
 pub trait AppleSigner: Send + Sync {
     fn login(&self, login: Login, ask: AskCode) -> BoxFuture<'_, Result<Box<dyn AppleSession>, Failure>>;
 }
@@ -47,7 +63,7 @@ pub trait AppleSigner: Send + Sync {
 pub trait AppleSession: Send {
     fn team_id(&mut self) -> BoxFuture<'_, Result<String, Failure>>;
     /// Registra o aparelho e devolve o `.app` assinado.
-    fn sign<'a>(&'a mut self, req: SignRequest<'a>) -> BoxFuture<'a, Result<PathBuf, Failure>>;
+    fn sign<'a>(&'a mut self, req: SignRequest<'a>) -> BoxFuture<'a, Result<Signed, Failure>>;
 }
 
 /// `device_install_anisette` do runtime-config na frente da lista provada.
@@ -93,6 +109,11 @@ pub struct FakeSigner {
     /// Servidores de anisette fora do ar.
     pub down: Vec<String>,
     pub sign_error: Option<Failure>,
+    /// Assinatura que entra em pânico depois de extrair, como um erro inesperado do isideload.
+    pub sign_panics: bool,
+    /// Quanto a assinatura demora, e quantas chegaram a rodar juntas.
+    pub sign_delay: std::time::Duration,
+    pub signing: Arc<(std::sync::atomic::AtomicUsize, std::sync::atomic::AtomicUsize)>,
     pub tried: Mutex<Vec<String>>,
     /// Servidor que recebeu a senha, uma entrada por envio.
     pub logins: Mutex<Vec<String>>,
@@ -123,7 +144,14 @@ impl AppleSigner for FakeSigner {
                     Some(CodeReply::Submit(_)) => wrong = true,
                 }
             }
-            let session = FakeSession { team_id: self.team_id.clone(), error: self.sign_error.clone(), signed: self.signed.clone() };
+            let session = FakeSession {
+                team_id: self.team_id.clone(),
+                error: self.sign_error.clone(),
+                panics: self.sign_panics,
+                delay: self.sign_delay,
+                signing: self.signing.clone(),
+                signed: self.signed.clone(),
+            };
             Ok(Box::new(session) as Box<dyn AppleSession>)
         })
     }
@@ -132,7 +160,16 @@ impl AppleSigner for FakeSigner {
 struct FakeSession {
     team_id: String,
     error: Option<Failure>,
+    panics: bool,
+    delay: std::time::Duration,
+    signing: Arc<(std::sync::atomic::AtomicUsize, std::sync::atomic::AtomicUsize)>,
     signed: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+}
+
+/// Onde o fake extrai: `<pasta acima do IPA>/<nome do IPA>_extracted`, como o isideload faz no temp.
+pub fn fake_extract_dir(ipa: &Path) -> PathBuf {
+    let name = ipa.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    ipa.parent().and_then(Path::parent).unwrap_or(Path::new(".")).join(format!("{name}_extracted"))
 }
 
 impl AppleSession for FakeSession {
@@ -140,15 +177,25 @@ impl AppleSession for FakeSession {
         let id = self.team_id.clone();
         Box::pin(async move { Ok(id) })
     }
-    fn sign<'a>(&'a mut self, req: SignRequest<'a>) -> BoxFuture<'a, Result<PathBuf, Failure>> {
+    fn sign<'a>(&'a mut self, req: SignRequest<'a>) -> BoxFuture<'a, Result<Signed, Failure>> {
         Box::pin(async move {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.signing.0.fetch_add(1, SeqCst) + 1;
+            self.signing.1.fetch_max(now, SeqCst);
+            tokio::time::sleep(self.delay).await;
+            self.signing.0.fetch_sub(1, SeqCst);
+            let scratch = Scratch(fake_extract_dir(req.ipa));
+            let app = scratch.0.join("Payload/SideStore.app");
+            std::fs::create_dir_all(&app).map_err(|e| Failure::with(SIGN_FAILED, e.to_string()))?;
+            std::fs::write(app.join("ALTCertificate.p12"), b"chave").map_err(|e| Failure::with(SIGN_FAILED, e.to_string()))?;
+            if self.panics {
+                panic!("fake isideload panic");
+            }
             if let Some(e) = &self.error {
                 return Err(e.clone());
             }
             lock(&self.signed).push((req.udid.to_string(), req.pairing.to_vec()));
-            let app = req.ipa.with_file_name("SideStore.app");
-            std::fs::create_dir_all(&app).map_err(|e| Failure::with(SIGN_FAILED, e.to_string()))?;
-            Ok(app)
+            Ok(Signed { app, scratch })
         })
     }
 }
@@ -250,16 +297,19 @@ mod real {
             Box::pin(async move { Ok(self.sideloader.get_team().await.map_err(|e| sign_failure(&e))?.team_id) })
         }
 
-        fn sign<'a>(&'a mut self, req: SignRequest<'a>) -> BoxFuture<'a, Result<PathBuf, Failure>> {
+        fn sign<'a>(&'a mut self, req: SignRequest<'a>) -> BoxFuture<'a, Result<Signed, Failure>> {
             Box::pin(async move {
                 let team = self.sideloader.get_team().await.map_err(|e| sign_failure(&e))?;
                 self.sideloader.get_dev_session().ensure_device_registered(&team, req.device_name, req.udid, None).await
                     .map_err(|e| sign_failure(&e))?;
+                // Mesmo caminho que o `Application::new` do isideload usa para extrair o IPA.
+                let name = req.ipa.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let scratch = Scratch(isideload_vfs::fs::temp_dir().join(format!("{name}_extracted")));
                 let signed = self.sideloader
                     .sign_app(req.ipa.to_path_buf(), Some(team), false, None::<fn(f32) -> std::future::Ready<()>>, Some(req.pairing), Some(req.udid))
                     .await;
                 match signed {
-                    Ok((app, _)) => Ok(app),
+                    Ok((app, _)) => Ok(Signed { app, scratch }),
                     Err(e) => Err(match lock(&self.certs).take() {
                         Some(certs) => Failure::with(CERT_LIMIT, cert_list(&certs)),
                         None => sign_failure(&e),
