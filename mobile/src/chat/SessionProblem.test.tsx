@@ -25,4 +25,10 @@ describe('SessionProblem', () => {
     expect(await texto('limit_switch_failed')).toBe(m.problema_limit_switch_failed());
     expect(await texto('limit_switch_no_target')).toBe(m.problema_limit_switch_no_target());
   });
+
+  it('mensagem presa sem entrega tem frase própria, não a de código desconhecido', async () => {
+    const out = await texto('headless_delivery_stalled');
+    expect(out).toBe(m.problema_headless_delivery_stalled());
+    expect(out).not.toBe(m.session_problem_unknown());
+  });
 });

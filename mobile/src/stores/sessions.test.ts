@@ -646,6 +646,28 @@ test('REST sem rede permite SSE recuperar e erro repetido agenda somente um retr
   rel();
 });
 
+test('list_error com linhas na tela vai ao diário e não desenha erro do servidor', async () => {
+  const diagnostics: { evento?: string; codigo?: string }[] = [];
+  configureDiag({ registrar: (entry) => { diagnostics.push(entry); }, novoReq: () => 'lista-teste' });
+  const rel = useSessions.getState().retain();
+  await settle();
+  created[0].trigger('sessions', JSON.stringify([{ name: 'viva', state: 'working' }]));
+  created[0].trigger('list_error', '{}');
+  expect(useSessions.getState().rows.map((s) => s.name)).toEqual(['viva']);
+  expect(useSessions.getState().byServer[0].error).toBeNull();
+  expect(diagnostics).toContainEqual(expect.objectContaining({ evento: 'lista.falhou', codigo: 'produtor_falhou' }));
+  rel();
+});
+
+test('list_error sem lista na tela mantém o aviso de bloqueio do servidor', async () => {
+  const rel = useSessions.getState().retain();
+  await settle();
+  created[0].trigger('list_error', '{}');
+  expect(useSessions.getState().rows).toEqual([]);
+  expect(useSessions.getState().byServer[0].error).toBe(m.sessao_erro_servidor());
+  rel();
+});
+
 describe('recusas e recuperação da lista', () => {
   const outageKey = 'hangar_servidores_desligados';
   const repliesKey = 'hangar_servidores_responderam';

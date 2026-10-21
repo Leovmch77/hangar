@@ -31,6 +31,7 @@ const problemLabels: Record<string, () => string> = {
   headless_processo_caiu: m.problema_headless_processo_caiu,
   headless_turno_erro: m.problema_headless_turno_erro,
   headless_sem_login: m.problema_headless_sem_login,
+  headless_delivery_stalled: m.problema_headless_delivery_stalled,
   runtime_falhou: m.problema_runtime_falhou,
   terminal_observacao_falhou: m.problema_terminal_observacao_falhou,
   state_facts_unavailable: m.problema_state_facts_unavailable,
