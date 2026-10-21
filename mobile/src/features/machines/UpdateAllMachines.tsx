@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState, useSyncExternalStore } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { ownUpdatableServers, updateAll } from '@hangar/core';
@@ -34,47 +34,40 @@ function statusText(value: UpdateAllState): string {
 
 const needsAttention = (value: UpdateAllState) => ['falhou', 'fora_do_ar', 'travado'].includes(value.status);
 
+// A rodada vive fora do componente: sair da tela não a para, e voltar mostra a mesma em vez de abrir outra.
+type Round = { busy: boolean; count: number; rows: UpdateAllResult[]; error: string };
+let round: Round = { busy: false, count: 0, rows: [], error: '' };
+const listeners = new Set<() => void>();
+const setRound = (patch: Partial<Round>) => { round = { ...round, ...patch }; listeners.forEach((listener) => listener()); };
+const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
+
 export function UpdateAllMachines({ servers }: { servers: readonly Server[] }) {
   const c = useSettingsColors();
   const candidates = ownUpdatableServers(servers);
-  const alive = useRef(true);
-  const running = useRef(false);
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [count, setCount] = useState(0);
-  const [rows, setRows] = useState<UpdateAllResult[]>([]);
-  const [error, setError] = useState('');
-  useEffect(() => {
-    alive.current = true;
-    return () => { alive.current = false; };
-  }, []);
+  const { busy, count, rows, error } = useSyncExternalStore(subscribe, () => round);
 
   const start = async () => {
     setOpen(true);
-    if (running.current) return;
-    running.current = true;
-    setBusy(true); setCount(candidates.length); setRows([]); setError('');
+    if (round.busy) return;
+    setRound({ busy: true, count: candidates.length, rows: [], error: '' });
     try {
       const results = await updateAll(candidates, (id, state) => {
-        if (!alive.current) return;
         const server = candidates.find((entry) => entry.id === id);
         if (!server) return;
         // O core só publica representantes depois de tirar endereços da mesma máquina.
-        setRows((previous) => previous.some((row) => row.server.id === id)
-          ? previous.map((row) => row.server.id === id ? { server, state } : row)
-          : [...previous, { server, state }]);
+        setRound({ rows: round.rows.some((row) => row.server.id === id)
+          ? round.rows.map((row) => row.server.id === id ? { server, state } : row)
+          : [...round.rows, { server, state }] });
       });
-      if (!alive.current) return;
-      setRows(results);
+      setRound({ rows: results });
       if (!results.length || results.some((row) => needsAttention(row.state))) haptic.error();
       else haptic.success();
     } catch (cause) {
-      if (!alive.current) return;
-      setError(m.update_all_failed({ erro: cause instanceof Error ? cause.message : String(cause) }));
+      setRound({ error: m.update_all_failed({ erro: cause instanceof Error ? cause.message : String(cause) }) });
       haptic.error();
     } finally {
-      running.current = false;
-      if (alive.current) setBusy(false);
+      setRound({ busy: false });
     }
   };
 

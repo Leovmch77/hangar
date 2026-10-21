@@ -75,6 +75,27 @@ describe('atualizar todas as máquinas', () => {
     expect(mocks.notification).toHaveBeenCalledWith('error');
   });
 
+  it('sair da tela no meio da rodada não abre outra ao voltar e mostra a que segue', async () => {
+    let publish!: (id: string, state: UpdateAllState) => void;
+    let finish!: (results: UpdateAllResult[]) => void;
+    mocks.updateAll.mockImplementation((_servers, onChange) => {
+      publish = onChange;
+      return new Promise<UpdateAllResult[]>((resolve) => { finish = resolve; });
+    });
+    await render();
+    await click(m.update_all_button({ n: '2' }));
+    await act(async () => root.unmount());
+    root = createRoot(el);
+    await render();
+    await act(async () => publish(first.id, { status: 'esperando', warnings: [] }));
+    await click(m.update_all_button({ n: '2' }));
+    expect(mocks.updateAll).toHaveBeenCalledTimes(1);
+    expect(el.textContent).toContain(first.label);
+    expect(el.textContent).toContain(m.update_all_waiting());
+    await act(async () => finish([{ server: first, state: { status: 'atualizado', warnings: [] } }]));
+    expect(el.textContent).toContain(m.update_all_updated());
+  });
+
   it.each([
     [{ status: 'consultando' }, () => m.update_all_checking()],
     [{ status: 'iniciando' }, () => m.update_all_starting()],
