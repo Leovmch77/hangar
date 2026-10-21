@@ -75,7 +75,8 @@ async function register(servers: Server[], ask: boolean): Promise<PushResult> {
   // Servidor fora do ar não impede os outros; a falha de cada um já vai ao diário pelo apiFetch.
   const results = await Promise.allSettled(servers.filter(pushable).map((s) =>
     subscribeExpoPushForServer(s, token, locale)));
-  return results.some((r) => r.status === 'fulfilled') ? 'registered' : 'failed';
+  // Um servidor recusado precisa cair no retry; só tudo aceito (e ao menos um) é registro.
+  return results.length > 0 && results.every((r) => r.status === 'fulfilled') ? 'registered' : 'failed';
 }
 
 /** Muda quando o registro precisa ser refeito: servidor entrou ou saiu, foi renomeado, ou o idioma mudou. */

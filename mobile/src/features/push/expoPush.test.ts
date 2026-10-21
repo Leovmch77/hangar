@@ -71,9 +71,9 @@ describe('registerExpoPush', () => {
     expect(h.subscribe).toHaveBeenCalledWith(work, 'ExponentPushToken[abc]', 'pt');
   });
 
-  it('falha num servidor não impede o outro', async () => {
+  it('falha num servidor não impede o outro, mas a rodada conta como falha', async () => {
     h.subscribe.mockImplementation(async (s: { id: string }) => { if (s.id === 'casa') throw new Error('404'); });
-    expect(await registerExpoPush([casa, work])).toBe('registered');
+    expect(await registerExpoPush([casa, work])).toBe('failed');
     expect(h.subscribe).toHaveBeenCalledWith(work, 'ExponentPushToken[abc]', 'pt');
   });
 
