@@ -720,7 +720,7 @@ if (cmd === 'confere') {
   const chave = chaveAlvo();
   // O corte daqui (cabeça e cauda) é o que vale: o teto do snapshot só corta a cauda, onde a prova
   // pode estar, então ele recebe a página inteira.
-  const [snap, screenshot] = await Promise.all([chamar(chave, 'snapshot', ['--max', '1000000']), jev.withCaptureCeiling(() => captureScreenshot(chave))()]);
+  const snap = await chamar(chave, 'snapshot', ['--max', '1000000']);
   // Falta de chave, erro do snapshot e da chamada ao Jev saem 2: com 1, um laço `until confere`
   // giraria achando que a tela só não chegou lá. Navegador fechado ou shell fora do ar ainda saem 1
   // (helpers comuns).
@@ -730,16 +730,30 @@ if (cmd === 'confere') {
   let arvore = jev.mascararValores(semToken(snap.texto));
   // A prova pode estar no topo ou no fim da página; o miolo de uma lista longa é repetição.
   if (arvore.length > 100_000) arvore = `${arvore.slice(0, 50_000)}\n…\n${arvore.slice(-50_000)}`;
-  let reply;
+  const { url, modelo, tipo } = jev.destinoDoJev(process.env);
+  const perguntas = jev.perguntaDeConfere(estado);
+  let respostas;
   try {
-    reply = await jevAsker(chaveJev)(arvore, jev.perguntaDeConfere(estado), screenshot.base64 ? screenshot : null);
+    respostas = await jev.askJev({ url, modelo, chave: chaveJev, estado: arvore, perguntas });
   } catch (err) {
     erro(err.message, 2);
   }
-  const status = reply.status ?? screenshot.status;
-  // A saída é a de sempre; o print que não foi aparece no stderr.
-  if (status !== 'enviada') console.error(`hangar-preview: aviso: confere sem o print (${status}: ${reply.reason ?? screenshot.motivo ?? ''})`);
-  const { p, ok } = jev.chegouNoEstado(reply.answers, status === 'enviada' ? jev.THRESHOLDS_WITH_SCREENSHOT : jev.LIMIARES);
+  let { p, ok } = jev.chegouNoEstado(respostas);
+  // Resposta em dúvida: a mesma pergunta vai de novo com o print. Recusado com imagem, fica a resposta
+  // sem imagem que já veio (8A), e o print que não foi aparece no stderr.
+  if (p >= jev.CONFERE_DOUBT_RANGE.min && p <= jev.CONFERE_DOUBT_RANGE.max) {
+    const screenshot = await jev.withCaptureCeiling(() => captureScreenshot(chave))();
+    let missing = screenshot.base64 ? null : `${screenshot.status}: ${screenshot.motivo ?? ''}`;
+    if (screenshot.base64) {
+      try {
+        ({ p, ok } = jev.chegouNoEstado(await jev.askJev({ url, modelo, chave: chaveJev, estado: arvore, perguntas, imagem: screenshot, tipo }),
+          jev.THRESHOLDS_WITH_SCREENSHOT));
+      } catch (err) {
+        missing = `falhou: ${err.message}`;
+      }
+    }
+    if (missing) console.error(`hangar-preview: aviso: confere sem o print (${semToken(missing)})`);
+  }
   console.log(`confere: ${p.toFixed(2)}`);
   process.exit(ok ? 0 : 1);
 }

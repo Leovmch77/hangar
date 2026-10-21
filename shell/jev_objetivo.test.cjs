@@ -1504,35 +1504,122 @@ test('sem alvo com controles desabilitados na tela: espera a carga terminar ante
 });
 
 const SCREENSHOT = { base64: 'iVBORw0KGgo=', width: 1280, height: 800 };
-// O `perguntar` do CLI marca no próprio objeto como o pedido saiu; o falso faz o mesmo.
-const askWithScreenshotStatus = (status, r = () => resposta({ click: 'e2' }), vistos = []) => async (estado) => {
+// Operação abaixo do piso: a decisão fraca que leva ao print.
+const fraca = () => resposta({ confOp: 0.2 });
+// O `perguntar` do CLI marca no próprio objeto como o pedido saiu; o falso faz o mesmo. Sem imagem
+// responde `semImagem`, com imagem `comImagem`.
+const askWithScreenshotStatus = (status, comImagem = () => resposta({ click: 'e2' }), vistos = [], semImagem = fraca) => async (estado) => {
   vistos.push(estado.__image);
-  if (estado.__image) estado.__image.status = status;
-  return r();
+  if (!estado.__image) return semImagem();
+  estado.__image.status = status;
+  return comImagem();
 };
 
-test('com capture, o passo leva o print ao perguntar e o trajeto registra imagem enviada', async () => {
+test('passo forte: nenhuma captura, pedido sem imagem nem pergunta de bloqueio, trajeto diz nao_precisou', async () => {
   const eventos = [];
-  const vistos = [];
+  const pedidos = [];
+  let capturas = 0;
   await rodar({
     objetivo: 'iniciar o cadastro',
     maxPassos: 1,
     executar: navegador([]),
-    capture: async () => SCREENSHOT,
-    perguntar: askWithScreenshotStatus('enviada', undefined, vistos),
+    capture: async () => { capturas += 1; return SCREENSHOT; },
+    perguntar: async (estado, perguntas) => { pedidos.push({ estado, perguntas }); return resposta({ click: 'e2' }); },
     registrar: (e) => eventos.push(e),
   });
-  assert.ok(vistos[0], 'o passo levou o print');
-  assert.equal(vistos[0].base64, 'iVBORw0KGgo=');
-  assert.equal(vistos[0].width, 1280);
-  assert.equal(vistos[0].height, 800);
+  assert.equal(capturas, 0);
+  assert.equal(pedidos.length, 1);
+  assert.equal('__image' in pedidos[0].estado, false);
+  assert.equal(pedidos[0].perguntas.bloqueado, undefined);
+  const d = eventos.find((e) => e.tipo === 'decisao');
+  assert.equal(d.imagem, 'nao_precisou');
+  assert.equal(d.motivo, null);
+  assert.equal(d.bloqueado, null);
+  assert.equal(d.alvo, 'button "Iniciar cadastro"');
+});
+
+test('passo fraco: captura uma vez, refaz a mesma pergunta com a imagem e o bloqueio, decide pela resposta com imagem', async () => {
+  const eventos = [];
+  const pedidos = [];
+  const executados = [];
+  let capturas = 0;
+  await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 1,
+    executar: navegador(executados),
+    capture: async () => { capturas += 1; return { ...SCREENSHOT }; },
+    perguntar: async (estado, perguntas) => {
+      pedidos.push({ estado, perguntas });
+      if (!estado.__image) return fraca();
+      estado.__image.status = 'enviada';
+      return resposta({ click: 'e1' });
+    },
+    registrar: (e) => eventos.push(e),
+  });
+  assert.equal(capturas, 1);
+  assert.equal(pedidos.length, 2);
+  assert.equal(pedidos[1].estado.__image.base64, 'iVBORw0KGgo=');
+  assert.ok(pedidos[1].perguntas.bloqueado, 'a pergunta com imagem leva o bloqueio');
+  assert.deepEqual(Object.keys(pedidos[1].perguntas.operacao.criteria), Object.keys(pedidos[0].perguntas.operacao.criteria));
+  assert.equal(pedidos[1].estado.texto_da_pagina, pedidos[0].estado.texto_da_pagina);
+  assert.ok(executados.includes('click @e1'), executados.join('\n'));
   const d = eventos.find((e) => e.tipo === 'decisao');
   assert.equal(d.imagem, 'enviada');
   assert.equal(d.motivo, null);
-  assert.equal(d.bloqueado, null);
+  assert.equal(d.alvo, 'link "Ver ajuda"');
 });
 
-test('print fora do limite ou ausente: o passo pergunta sem imagem e o trajeto diz por que', async () => {
+test('sem alvo: olha de novo sem print, depois uma captura com a mesma pergunta, ainda fraca vai ao auxiliar', async () => {
+  const eventos = [];
+  const pedidos = [];
+  const ajudas = [];
+  const executados = [];
+  let capturas = 0;
+  await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 1,
+    executar: navegador(executados),
+    capture: async () => { capturas += 1; return { ...SCREENSHOT }; },
+    perguntar: async (estado) => {
+      pedidos.push(Boolean(estado.__image));
+      if (estado.__image) estado.__image.status = 'enviada';
+      return resposta({ click: NENHUM });
+    },
+    ajudar: async (p) => { ajudas.push(p); return '{"acoes":[{"operacao":"CLICK","ref":"e2"}],"motivo":"abrir o cadastro"}'; },
+    registrar: (e) => eventos.push(e),
+  });
+  assert.deepEqual(pedidos, [false, false, true]);
+  assert.equal(capturas, 1);
+  assert.equal(ajudas.length, 1);
+  assert.ok(executados.includes('click @e2'), executados.join('\n'));
+  const d = eventos.find((e) => e.tipo === 'decisao');
+  assert.equal(d.imagem, 'enviada');
+  assert.equal(d.via, 'auxiliar');
+});
+
+test('pagina sem elemento acionavel: conclusao em duvida refaz com o print; confirmada de cara nem captura', async () => {
+  for (const [semImagem, capturasEsperadas, sucesso] of [[0.4, 1, true], [0.9, 0, true]]) {
+    const pedidos = [];
+    let capturas = 0;
+    const r = await rodar({
+      objetivo: 'salvar o cadastro',
+      maxPassos: 2,
+      executar: navegador([], SO_TEXTO),
+      capture: async () => { capturas += 1; return { ...SCREENSHOT }; },
+      perguntar: async (estado, perguntas) => {
+        pedidos.push(Object.keys(perguntas));
+        if (!estado.__image) return { concluido: { noul: semImagem } };
+        estado.__image.status = 'enviada';
+        return { concluido: { noul: 0.8 } };
+      },
+    });
+    assert.equal(capturas, capturasEsperadas, String(semImagem));
+    assert.equal(r.sucesso, sucesso);
+    assert.ok(pedidos.every((k) => k.length === 1 && k[0] === 'concluido'), JSON.stringify(pedidos));
+  }
+});
+
+test('passo fraco com print fora do limite ou ausente: segue com a decisao sem imagem e o trajeto diz por que', async () => {
   for (const [capture, imagem, motivo] of [
     [async () => ({ status: 'fora_do_limite', motivo: '2560x1600' }), 'fora_do_limite', '2560x1600'],
     [async () => ({ status: 'sem_print', motivo: 'erro: janela minimizada' }), 'sem_print', 'erro: janela minimizada'],
@@ -1548,10 +1635,11 @@ test('print fora do limite ou ausente: o passo pergunta sem imagem e o trajeto d
       perguntar: askWithScreenshotStatus('enviada', undefined, vistos),
       registrar: (e) => eventos.push(e),
     });
-    assert.equal(vistos[0], undefined);
+    assert.deepEqual(vistos, [undefined], 'sem imagem nao ha segunda pergunta');
     const d = eventos.find((e) => e.tipo === 'decisao');
     assert.equal(d.imagem, imagem);
     assert.equal(d.motivo, motivo);
+    assert.match(d.parar, /^operacao indecisa/);
   }
 });
 
@@ -1690,16 +1778,19 @@ test('captura que passa do teto ou sem quadro: o passo segue sem imagem e os seg
     let chamadas = 0;
     const eventos = [];
     const vistos = [];
+    // Sem alvo em todo passo: o auxiliar faz o passo andar depois da captura que não veio.
     await rodar({
       objetivo: 'iniciar o cadastro',
       maxPassos: 3,
       executar: navegador([]),
       capture: withCaptureCeiling(() => { chamadas += 1; return lenta(); }, { timeoutMs: 50 }),
-      perguntar: askWithScreenshotStatus('enviada', undefined, vistos),
+      perguntar: askWithScreenshotStatus('enviada', undefined, vistos, () => resposta({ click: NENHUM })),
+      ajudar: async () => '{"acoes":[{"operacao":"CLICK","ref":"e2"}],"motivo":"abrir"}',
       registrar: (e) => eventos.push(e),
     });
     assert.equal(chamadas, 1, motivo);
-    assert.deepEqual(vistos, [undefined, undefined, undefined]);
+    // Dois pedidos por passo (o segundo depois de olhar de novo), nenhum com imagem.
+    assert.deepEqual(vistos, Array(6).fill(undefined));
     assert.deepEqual(eventos.filter((e) => e.tipo === 'decisao').map((e) => [e.imagem, e.motivo]), [
       ['sem_print', motivo],
       ['sem_print', 'captura desligada'],
