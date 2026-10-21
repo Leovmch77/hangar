@@ -263,6 +263,16 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   adiado à primeira conexão. Claude sem socket nunca é estacionado. O Codex com terminal usa a
   mesma vaga com 1 s × 1,5 até 10 s. Ver
   [religação ao mesmo cano](#religação-ao-mesmo-cano-vivo-e-avisos-fora-da-tela-20102026).
+- **Cano que não repassa a saída do Claude: o estado segue o transcript.** Turno aberto, o transcript
+  já termina nele (`assistant` com `end_turn` ou `stop_hook_summary` depois da última mensagem da
+  pessoa e de qualquer `assistant` ou `tool_result` da thread principal, toda entrega provada) e nenhuma
+  linha da CLI pelo cano por `OUTPUT_LOST` (60 s, contados também do carimbo do fim; sem carimbo, da
+  primeira vez que o fim foi visto): o turno sai da vista (idle, sem resposta inventada) e, nessa vida, o fim
+  de cada turno vem do transcript, conferido a cada 250 ms. Vale na adoção da subida com o retrato de
+  turno aberto. A sessão segue usável: entrega, fila e Reabrir como sempre, nada na tela; o diário
+  recebe `cano_output_lost` uma vez por vida. Linha da CLI que volte a chegar devolve o fim ao
+  `result`. O servidor não mata nem reabre (D1/P4), e o cano segue sem matar o filho na falha de
+  leitura. Ver [saída do cano perdida](#saída-do-cano-perdida-o-estado-segue-o-transcript-21102026).
 - **Processo do cano é um módulo só (`runtime/process.rs`), Claude e Codex.** Subir espera o
   `listen` por 10 s; matar confere a identidade do pid (pid reaproveitado nunca é morto) e apaga
   `cano-<chave16>*` só na pasta da sessão, nunca numa derivada de caminho gravado no arquivo. A
@@ -971,6 +981,28 @@ log) e `runtime_closed` uma vez por minuto já tinham causa e correção (`3ae69
 processo vivo continua sendo religado sem fim; sem mensagem esperando não há aviso, com mensagem
 aparece `headless_delivery_stalled`. Consertar o cano surdo é no `hangar-cano`, fora da branch
 (D7).
+
+## Saída do cano perdida: o estado segue o transcript (21/10/2026)
+
+**O caso real (uma sessão Claude sem terminal "Trabalhando" havia 14 h).** No log do cano (`cano-63f411cf11d4f0ad.log`, 20/10): `15:26:40 leitura do
+stdout do claude falhou: linha acima do teto` com o binário anterior a `021564ace`. O cano seguiu
+vivo, escrevendo no stdin e sem ler o stdout. Às 15:32 a mensagem foi entregue (`outcome="direct"`) e
+respondida: o transcript termina em `assistant` `end_turn` às 18:32:06Z e `stop_hook_summary`. O
+`result` nunca chegou, e a vista ficou `working` por mais de 14 h; a conversa no app vinha do
+transcript e funcionava. A religação não age porque o socket não caiu.
+
+**Decisão.** O estado, não a sessão, é que estava errado. O ator do Claude sem terminal confere o
+transcript pelo mesmo `ReceiptIndex` da confirmação (que agora guarda o último fim de turno): turno
+aberto, fim no transcript depois da última mensagem da pessoa, a entrada ativa e toda despachada
+provadas, e o cano calado por `OUTPUT_LOST` desde a última linha e desde o carimbo do fim. Então
+encerra o turno na vista. Daí em diante, na mesma vida, o fim de cada turno vem do transcript. Matar
+o filho no cano (desfeito em `7de6112a0`) e trocar o processo pelo servidor contrariam D1/P4 e não
+foram adotados. O cano novo já pula a linha acima do teto (`021564ace`); a detecção cobre o cano
+antigo ainda vivo e qualquer outra surdez.
+
+**Limites.** Entrada cujo texto não se prova no transcript (comando local, anexo) deixa o turno
+aberto, como antes. Pedido de permissão ou pergunta que só chega pela saída do cano não aparece com
+o cano surdo. Testes: `runtime_actor::cano_reconnect::a_turn_*` e `adopting_a_mute_cano_*`.
 
 ## Entradas juntadas pela CLI numa mensagem só (14/10/2026)
 

@@ -93,6 +93,8 @@ pub struct ClaudeEngine {
     background: BTreeSet<String>,
     /// Último evento da CLI ou comando nosso, no relógio do motor: daqui conta o tempo parado.
     active_at: f64,
+    /// O cano parou de repassar a saída da CLI (`headless_cano_surdo`): entrega desligada até trocar o processo.
+    deaf: bool,
 }
 
 const ECHO_LIMIT: usize = 64;
@@ -136,7 +138,7 @@ impl ClaudeEngine {
             preview:LiveBuffer::default(),thinking:LiveBuffer::default(),tool_input:LiveBuffer::default(),tool_name:None,tool_visible:false,
             label:None,compacting:false,turn_start:None,label_deadline:None,tokens_closed:0,tokens_message:None,gen_start:None,
             token_chars:0,thinking_start:None,thought_s:0.0,tasks:Vec::new(),usage:metadata.get("usage").cloned().unwrap_or(Value::Null),
-            context_window:metadata["context_window"].as_u64(),cost:metadata["cost"].as_f64(),effort_intent,effort_deadline:None,active_input:None,slash_input:None,unknown:BTreeSet::new(),surface:None,stderr_tail:Vec::new(),problem_persisted,subagents:BTreeMap::new(),echoes:std::collections::VecDeque::new(),background:BTreeSet::new(),active_at:clock.monotonic_s,metadata };
+            context_window:metadata["context_window"].as_u64(),cost:metadata["cost"].as_f64(),effort_intent,effort_deadline:None,active_input:None,slash_input:None,unknown:BTreeSet::new(),surface:None,stderr_tail:Vec::new(),problem_persisted,subagents:BTreeMap::new(),echoes:std::collections::VecDeque::new(),background:BTreeSet::new(),active_at:clock.monotonic_s,deaf:false,metadata };
         if let Some(controls) = engine.metadata["control_carry"].as_array() {
             for control in controls {
                 let Ok(request_id) = serde_json::from_value::<RequestId>(control["request_id"].clone()) else { continue };
@@ -347,6 +349,38 @@ impl ClaudeEngine {
             self.state.problema = None; self.state.problema_detalhe = None;
             self.changed(&mut effects,false);
         }
+        effects
+    }
+
+    /// O transcript provou o fim do turno que o cano não repassou (`result` perdido): o turno sai da vista, sem
+    /// resposta inventada (a CLI já a gravou), e daqui em diante o fim de cada turno desta vida vem do transcript.
+    pub fn transcript_turn_end(&mut self) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        self.deaf = true;
+        self.in_progress = false; self.turn_start = None; self.label_deadline = None; self.label = None;
+        self.pending.clear(); self.question = None;
+        if let Some(id) = self.active_input.take() {
+            if let Some(wire) = self.wires.get_mut(&id) { wire.final_result = true; }
+            effects.push(Effect::Reply { operation_id:id,disposition:Disposition::Accepted,payload:json!({"consumed":true}) });
+        }
+        self.clear_streams(&mut effects);
+        self.changed(&mut effects,false);
+        // Como no `result`: o esforço preparado sai antes da fila.
+        if self.effort_intent.as_ref().is_some_and(|intent|intent["status"] == "prepared") { self.dispatch_effort(&mut effects); }
+        else { effects.push(Effect::WakeQueue); }
+        effects
+    }
+
+    /// A saída do cano já foi dada como perdida nesta vida: o fim do turno vem do transcript, sem prazo.
+    pub fn deaf(&self) -> bool { self.deaf }
+    pub fn active_input(&self) -> Option<&str> { self.active_input.as_deref() }
+    /// Turno aberto com o processo vivo e o socket de pé: o que a vigília do transcript confere.
+    pub fn turn_watch(&self) -> bool { self.in_progress && self.alive && self.transport_up }
+
+    /// Linha da CLI chegou pelo cano: ele lê o stdout, e o fim do turno volta a ser o `result` (com o prazo de antes).
+    pub fn heard(&mut self) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        if std::mem::take(&mut self.deaf) { self.changed(&mut effects,false); }
         effects
     }
 
