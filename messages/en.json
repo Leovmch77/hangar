@@ -9044,5 +9044,12 @@
   "native_devices_a19": "Choose “Unrestricted”",
   "native_devices_a19_why": "Keeps Android from cutting Hangar's connection when the screen is off.",
   "native_devices_a20": "Done",
-  "native_devices_a20_why": "With “Unrestricted” selected, everything is set."
+  "native_devices_a20_why": "With “Unrestricted” selected, everything is set.",
+  "tablet_sessions_empty": "No active sessions",
+  "tablet_bar_position": "Sessions bar position",
+  "tablet_bar_left": "Left",
+  "tablet_bar_rail": "Collapsed left",
+  "tablet_bar_bottom": "Bottom",
+  "tablet_bar_top": "Top",
+  "tablet_new_session": "New session"
 }
