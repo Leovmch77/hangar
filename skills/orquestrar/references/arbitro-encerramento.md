@@ -86,8 +86,16 @@ live session list; keep the watchdog until eligible candidates are closed. Do no
 current arbiter, an open Task's session or someone moved to another group/identity. Record
 and report unresolved impediments; do not declare all closed or silently disarm.
 
-Done when the patch exists at `~/.hangar/orq/<date>-<gid>.md`, execucao_fim is logged,
-cleanup is confirmed, the monitors are disarmed and the retrospective is closed.
+Depois da retrospectiva, de `execucao_fim` e da conferência de que nenhuma sessão ou prova
+continua em andamento, rode `orq podar` para listar os diretórios regeneráveis e seus bytes
+lógicos; depois `orq podar --apply` e `orq podar --check`. A poda conserva relatórios, registro,
+eventos e capturas. Registro ilegível falha nos dois modos; execução ativa ou retomada só é
+recusada pelo `--apply`, e a simulação apenas lista o que seria removido. `--check` acusa também
+sandbox órfão e termina com código 1 enquanto houver diretório regenerável. Registre o resultado
+em `orq log`; falha na poda permanece como impedimento de encerramento.
+
+Pronto quando o patch existe em `~/.hangar/orq/<date>-<gid>.md`, `execucao_fim` está registrado,
+a poda e a limpeza foram conferidas, os monitores foram desarmados e a retrospectiva foi fechada.
 
 ## Arbiter succession
 

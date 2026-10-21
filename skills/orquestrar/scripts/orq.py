@@ -13,6 +13,7 @@ import argparse
 import fnmatch
 import hashlib
 import http.client
+import importlib.machinery
 import importlib.util
 import io
 import json
@@ -2485,10 +2486,46 @@ def cmd_advance(a) -> int:
     return 0
 
 
+def cmd_storage(a) -> int:
+    """Transporte local para o dono do armazenamento, sem motor de limpeza no Python."""
+    loader = importlib.machinery.SourceFileLoader("orq_hangar_open", str(HERE.parents[2] / "scripts" / "hangar-open"))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(mod)
+    binary = mod.server_bin()
+    if not binary:
+        raise OrqError("hangar-server não encontrado; atualize o servidor antes de executar a poda ou a prova")
+    directory = a.dir or os.environ.get("ORQ_DIR")
+    if a.cmd == "prune-archive":
+        directory = a.dir or str(Path.home() / ".hangar" / "orq")
+    if not directory:
+        raise OrqError("informe --dir ou ORQ_DIR")
+    args = [binary, "orq-storage", a.cmd, str(Path(directory).expanduser())]
+    if a.cmd == "proof":
+        args += a.command
+    else:
+        args += [flag for flag in ("--apply", "--check", "--receipt") if getattr(a, flag[2:], False)]
+    try:
+        # O sinal mandado ao orq precisa chegar a quem limpa a prova; no Windows o execv não preserva o código de saída.
+        if a.cmd == "proof" and os.name != "nt":
+            os.execv(binary, args)
+        return subprocess.run(args).returncode
+    except OSError as error:
+        raise OrqError(f"não foi possível executar o hangar-server: {error}") from error
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="orq", description=__doc__.splitlines()[0])
     p.add_argument("--dir")
     sub = p.add_subparsers(dest="cmd", required=True)
+    for name in ("podar", "prune-archive"):
+        s = sub.add_parser(name, help="lista builds e caches; --apply remove somente de execuções encerradas")
+        mode = s.add_mutually_exclusive_group()
+        mode.add_argument("--apply", action="store_true")
+        mode.add_argument("--check", action="store_true")
+        if name == "prune-archive":
+            s.add_argument("--receipt", action="store_true", help="grava o resultado da atualização")
+    s = sub.add_parser("proof", help="executa a prova com builds e caches em temporário descartável")
+    s.add_argument("command", nargs=argparse.REMAINDER)
     s = sub.add_parser("init", help="write orq.json (arbiter, once at launch)")
     s.add_argument("--arbiter", required=True)
     s.add_argument("--repo", required=True)
@@ -2561,6 +2598,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 CMDS = {"init": cmd_init, "readiness": cmd_readiness, "plan-check": cmd_plan_check, "event": cmd_event, "check": cmd_check,
+        "podar": cmd_storage, "prune-archive": cmd_storage, "proof": cmd_storage,
         "read": cmd_read, "ball": cmd_ball, "done": cmd_done, "team": cmd_team,
         "lock": cmd_lock, "screen": cmd_lock, "commit": cmd_commit, "notify": cmd_notify, "log": cmd_log,
         "apply-patch": cmd_apply_patch, "batch": cmd_batch, "review-package": cmd_review_package,

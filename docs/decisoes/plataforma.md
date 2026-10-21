@@ -3,6 +3,40 @@
 Decisões medidas, com data e número. O `CLAUDE.md` carrega a regra;
 a medição que a sustenta mora aqui. Conteúdo movido sem alteração.
 
+## Armazenamento das provas de orquestração
+
+A issue #242 relatou centenas de GB de builds e caches dentro do histórico durável das
+orquestrações encerradas. Os comandos de prova recebiam um `HOME` dentro de `provas/`, e o
+encerramento conferia sessões e monitores, sem conferir os diretórios regeneráveis.
+
+O CLI `orq` repassa `proof`, `podar` e `prune-archive` ao `hangar-server orq-storage`, sem abrir
+servidor. `proof` cria uma etapa temporária fora do histórico, isola `HOME`, saída do Cargo e
+caches de pacotes e a remove ao terminar, inclusive em erro ou interrupção. O toolchain instalado
+permanece disponível por `RUSTUP_HOME`; relatórios, logs e capturas são publicados pelo próprio
+comando antes de sair. No Linux o temporário padrão fica em `/var/tmp` para não ocupar o tmpfs;
+`ORQ_PROOF_TMPDIR` permite escolher outro disco. Encerramento forçado que não permite destrutores
+pode deixar a etapa temporária, mas ela permanece fora da pasta durável.
+
+`podar` simula por padrão. `--apply` exige `execucao_fim` sem retomada posterior e registro legível;
+prova e poda usam uma trava compartilhada/exclusiva por execução. A varredura não segue links nem
+junctions, nem entra no `.git`. Remove diretórios de build, caches conhecidos de Cargo, uv, pip e
+npm, `node_modules` e `sandboxes`; evidências fora desses diretórios permanecem. O tamanho informado
+é a soma dos bytes lógicos dos arquivos, não uma promessa sobre blocos físicos compartilhados.
+`--check` retorna 1 enquanto houver diretório regenerável ou sandbox órfão.
+
+O passo de atualização cria `~/.hangar/orq-prune-request-v1` antes de baixar o Rust. Na próxima
+inicialização, o binário novo consome esse pedido: cada execução válida encerrada é podada;
+ativa, retomada, ocupada ou ilegível é preservada e aparece no recibo
+`~/.hangar/orq-pruned-v1.json`. O pedido só sai depois de gravar o recibo; falha conserva o pedido
+para tentar de novo. A execução pode ser repetida, também por `prune-archive --apply --receipt`.
+O encerramento das skills exige
+publicar as evidências antes da poda e conferir a ausência dos diretórios regeneráveis depois.
+
+Prova de regressão: a simulação lista os resíduos sem removê-los, a aplicação mantém relatórios,
+logs e capturas, a segunda aplicação não encontra resíduos, e uma prova com saída 7 conserva seu
+relatório e remove o temporário. A interface pública do CLI também cobre o recibo da atualização
+com execuções ativas e registros ilegíveis preservados.
+
 ## Revisão de código
 
 Antes do PR, revisão local e as verificações do projeto. No PR, o app CodeRabbit do GitHub
