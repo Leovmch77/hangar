@@ -20,6 +20,7 @@ use idevice::{IdeviceError, IdeviceService};
 use plist::Dictionary;
 
 use super::pairing::{self, ALT_FILE, LOCKDOWN_FILE, REMOTE_FILE};
+use super::job::Failure;
 use super::{DeviceError, DeviceInfo, DeviceLink};
 
 const LABEL: &str = "hangar";
@@ -103,15 +104,28 @@ impl DeviceLink for UsbLink {
                     continue;
                 }
                 let p = d.to_provider(addr()?, LABEL);
-                let mut lc = LockdownClient::connect(&p).await.map_err(from_idevice)?;
+                // Um aparelho que não responde não esconde os outros: vai na lista com o próprio erro.
+                let mut lc = match LockdownClient::connect(&p).await {
+                    Ok(lc) => lc,
+                    Err(e) => {
+                        let error = Some(Failure::from(from_idevice(e)));
+                        out.push(DeviceInfo { udid: d.udid, name: String::new(), ios_version: String::new(), trusted: false, error });
+                        continue;
+                    }
+                };
                 let name = lockdown_str(&mut lc, "DeviceName").await;
                 let ios_version = lockdown_str(&mut lc, "ProductVersion").await;
-                // Confiado = há registro de pareamento E o aparelho aceita sessão com ele.
-                let trusted = match m.get_pair_record(&d.udid).await {
-                    Ok(pr) => lc.start_session(&pr).await.is_ok(),
-                    Err(_) => false,
+                // Confiado = há registro de pareamento E o aparelho aceita sessão com ele. Bloqueado ou
+                // desconectado não diz nada sobre a confiança: vai como erro, não como "não confiado".
+                let (trusted, error) = match m.get_pair_record(&d.udid).await {
+                    Ok(pr) => match lc.start_session(&pr).await.map_err(from_idevice) {
+                        Ok(_) => (true, None),
+                        Err(e @ (DeviceError::Locked | DeviceError::Disconnected)) => (false, Some(Failure::from(e))),
+                        Err(_) => (false, None),
+                    },
+                    Err(_) => (false, None),
                 };
-                out.push(DeviceInfo { udid: d.udid, name, ios_version, trusted });
+                out.push(DeviceInfo { udid: d.udid, name, ios_version, trusted, error });
             }
             Ok(out)
         })

@@ -163,7 +163,7 @@ impl DeviceInstall {
             pinned: SIDESTORE_IPA,
             config: Arc::new(|| Value::Null),
             code_wait: CODE_WAIT,
-            http: crate::http_client().timeout(DOWNLOAD_TIMEOUT).build().unwrap_or_default(),
+            http: crate::http_client().timeout(DOWNLOAD_TIMEOUT).build().expect("cliente http da instalação nos aparelhos"),
             jobs: Mutex::default(),
         }
     }
@@ -205,11 +205,12 @@ impl DeviceInstall {
             let inner = job.clone();
             let outcome = tokio::spawn(async move { svc.run(&inner, start).await })
                 .await
-                .unwrap_or_else(|_| Err(Failure::with(DEVICE_ERROR, "panic")));
+                .unwrap_or_else(|e| Err(Failure::with(DEVICE_ERROR, panic_message(e))));
             match outcome {
                 Ok(()) => job.set(Stage::Done, None),
                 Err(f) => {
-                    tracing::warn!(code = f.code, "device install failed");
+                    // O detalhe vem dos erros do aparelho/Apple; a senha nunca entra num `Failure`.
+                    tracing::warn!(code = f.code, detail = f.detail.as_deref().unwrap_or(""), "device install failed");
                     job.set(Stage::Failed, Some(f));
                 }
             }
@@ -320,6 +321,14 @@ async fn download(http: &reqwest::Client, pinned: &Pinned, dir: &Path) -> Result
     let path = dir.join("SideStore.ipa");
     std::fs::write(&path, &bytes).map_err(|e| Failure::with(DOWNLOAD_FAILED, e.to_string()))?;
     Ok(path)
+}
+
+fn panic_message(e: tokio::task::JoinError) -> String {
+    let Ok(payload) = e.try_into_panic() else { return "cancelled".into() };
+    match payload.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| payload.downcast_ref::<String>().cloned()) {
+        Some(msg) => format!("panic: {msg}"),
+        None => "panic".into(),
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {

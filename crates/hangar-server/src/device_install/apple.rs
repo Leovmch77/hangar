@@ -229,7 +229,7 @@ mod real {
         fn login(&self, login: Login, ask: AskCode) -> BoxFuture<'_, Result<Box<dyn AppleSession>, Failure>> {
             Box::pin(async move {
                 static INIT: std::sync::Once = std::sync::Once::new();
-                INIT.call_once(|| { let _ = isideload::init(); });
+                INIT.call_once(|| if let Err(e) = isideload::init() { tracing::error!("isideload init failed: {e:?}"); });
                 let Login { apple_id, password, anisette, storage } = login;
                 let email = apple_id.trim().to_lowercase();
                 let (email_ref, password_ref, storage_ref, ask_ref) = (&email, &password, &storage, &ask);
@@ -297,7 +297,9 @@ mod real {
         fn sign<'a>(&'a mut self, req: SignRequest<'a>) -> BoxFuture<'a, Result<Signed, Failure>> {
             Box::pin(async move {
                 let team = self.sideloader.get_team().await.map_err(|e| sign_failure(&e))?;
-                self.sideloader.get_dev_session().ensure_device_registered(&team, req.device_name, req.udid, None).await
+                // O nome vem do aparelho e pode chegar vazio; a Apple quer algum para listar o aparelho na conta.
+                let device_name = Some(req.device_name.trim()).filter(|n| !n.is_empty()).unwrap_or("iPhone");
+                self.sideloader.get_dev_session().ensure_device_registered(&team, device_name, req.udid, None).await
                     .map_err(|e| sign_failure(&e))?;
                 // Mesmo caminho que o `Application::new` do isideload usa para extrair o IPA.
                 let name = req.ipa.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

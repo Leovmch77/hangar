@@ -16,7 +16,7 @@ const BUNDLE: &str = "com.SideStore.SideStore.TEAMID1234";
 const IPA: &[u8] = b"ipa sintetico";
 
 fn ipad() -> DeviceInfo {
-    DeviceInfo { udid: UDID.into(), name: "iPad".into(), ios_version: "26.5".into(), trusted: true }
+    DeviceInfo { udid: UDID.into(), name: "iPad".into(), ios_version: "26.5".into(), trusted: true, error: None }
 }
 
 fn link() -> FakeLink {
@@ -282,7 +282,7 @@ async fn sign_and_wait(s: &Server, stage: &str, error: &str) -> Value {
 async fn a_panic_in_signing_fails_the_job_and_frees_the_device() {
     let s = serve(link(), FakeSigner { sign_panics: true, ..signer() }).await;
     let p = sign_and_wait(&s, "failed", "device_error").await;
-    assert_eq!(p["error"]["detail"], "panic");
+    assert_eq!(p["error"]["detail"], "panic: fake isideload panic");
     assert!(!extracted(&s).exists(), "a pasta com a chave do certificado ficou no disco");
     let (status, body) = s.post("start", json!({"udid": UDID, "apple_id": "a@b.c", "password": PASSWORD})).await;
     assert_eq!(status, 200, "o aparelho continuou ocupado: {body}");

@@ -24,6 +24,9 @@ pub struct DeviceInfo {
     pub name: String,
     pub ios_version: String,
     pub trusted: bool,
+    /// Bloqueado, desconectado ou sem resposta: `trusted` aí não quer dizer "não confiado".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<job::Failure>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,7 +155,7 @@ mod tests {
     use super::*;
 
     fn ipad(trusted: bool) -> DeviceInfo {
-        DeviceInfo { udid: "00008101-00113CEC3CBA601E".into(), name: "iPad".into(), ios_version: "26.5".into(), trusted }
+        DeviceInfo { udid: "00008101-00113CEC3CBA601E".into(), name: "iPad".into(), ios_version: "26.5".into(), trusted, error: None }
     }
 
     #[tokio::test]

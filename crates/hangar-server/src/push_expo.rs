@@ -124,8 +124,10 @@ async fn deliver(path: PathBuf, base: String, diag: DiagClient, notify: Notify) 
         let ids: Vec<&str> = registry.pending.iter().map(|p| p.ticket_id.as_str()).collect();
         match post(client, format!("{base}/--/api/v2/push/getReceipts"), json!({"ids": ids})).await {
             Ok(reply) => for (id, receipt) in reply["data"].as_object().into_iter().flatten() {
-                if unregistered(receipt) && let Some(p) = registry.pending.iter().find(|p| &p.ticket_id == id) {
-                    dead.insert(p.token.clone());
+                if unregistered(receipt) {
+                    if let Some(p) = registry.pending.iter().find(|p| &p.ticket_id == id) { dead.insert(p.token.clone()); }
+                } else if receipt["status"] == "error" {
+                    report(&format!("push_expo_receipt_error:{}", receipt["details"]["error"].as_str().unwrap_or("unknown")));
                 }
                 read_ids.insert(id.clone());
             },
