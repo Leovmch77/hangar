@@ -1,13 +1,18 @@
 import { useEffect, useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import type { StateEvent } from '@hangar/core';
+import { DELIVERY_STALLED, type StateEvent } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { superficie } from '../theme/superficie';
 
 interface Props {
   problem?: StateEvent['problema'];
   detail?: StateEvent['problema_detalhe'];
+}
+
+/** Com o painel "Na fila" à mostra, a entrega parada fica só nele (com o Reabrir): aqui ela seria anunciada duas vezes. */
+export function showsSessionProblem(problem: StateEvent['problema'] | undefined, queuePanelShown: boolean): boolean {
+  return !!problem && !(problem === DELIVERY_STALLED && queuePanelShown);
 }
 
 const problemLabels: Record<string, () => string> = {

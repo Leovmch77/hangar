@@ -2,7 +2,7 @@
 // Toque longo na linha abre o menu (Subir, Descer, Orientar, Editar, Apagar), como o T3 mobile; tocar no
 // texto mostra a mensagem inteira. Fila vazia não ocupa espaço nenhum.
 import { useEffect, useState } from 'react';
-import { ActionSheetIOS, ActivityIndicator, Platform, Pressable, ScrollView, Text, View } from 'react-native';
+import { AccessibilityInfo, ActionSheetIOS, ActivityIndicator, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { MenuView, type NativeActionEvent } from '@react-native-menu/menu';
 import * as Haptics from 'expo-haptics';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
@@ -54,6 +54,8 @@ interface Props {
 function ReopenStalled({ serverId, name }: { serverId: string; name: string }) {
   const { theme } = useUnistyles();
   const [busy, setBusy] = useState(false);
+  // O VoiceOver não anuncia `accessibilityRole="alert"` num Text: o aviso é falado ao aparecer.
+  useEffect(() => { AccessibilityInfo.announceForAccessibility(m.problema_headless_delivery_stalled()); }, []);
   const reopen = async () => {
     const server = useServers.getState().servers.find((s) => s.id === serverId);
     if (!server) { toast.erro(m.chat_servidor_removido()); return; }
@@ -62,7 +64,7 @@ function ReopenStalled({ serverId, name }: { serverId: string; name: string }) {
       await recarregarSessao(name, server);
       haptic.success();
     } catch (e) {
-      toast.erro((e instanceof Error ? e.message : formataErro(e)) || m.native_invalid_response());
+      toast.erro(m.erro_recarregar({ erro: (e instanceof Error ? e.message : formataErro(e)) || m.erro_desconhecido() }));
     } finally {
       setBusy(false);
     }

@@ -3056,6 +3056,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   const problemaChave = $derived(stateEvent?.problema ? `${stateEvent.problema}\n${stateEvent.problema_detalhe ?? ''}` : null);
   const faixaProblema = $derived.by(() => {
     if (!problemaChave || problemaChave === problemaDispensado) return null;
+    // O painel "Na fila" já mostra este aviso com o Reabrir; repetir aqui o leitor de tela anunciaria duas vezes.
+    if (stateEvent?.problema === DELIVERY_STALLED && queuePanelShown && queueList.entries.length > 0) return null;
     const texto = textoProblema(stateEvent?.problema ?? null);
     if (!texto) return null;
     // Hook que barrou o prompt, ou código e motivo da falha do runtime: o detalhe é a informação
@@ -3870,7 +3872,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
             <QueuePanel panel={queueList} editingId={queueEdit?.entryId ?? null} busy={queueBusy}
                         onEdit={startQueueEdit} onCancelEdit={cancelQueueEdit}
                         onSteer={steerQueued} onRemove={removeQueued} onReorder={reorderQueued}
-                        stalled={stateEvent?.problema === DELIVERY_STALLED}
+                        stalled={stateEvent?.problema === DELIVERY_STALLED} reopening={recarregando}
                         onReopen={soLeituraPar ? undefined : reiniciarCodex} />
           {/if}
         {/snippet}
