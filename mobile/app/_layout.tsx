@@ -18,10 +18,18 @@ import { Toaster, toast } from '../src/ui/Toast';
 import { LiveVoiceRoot } from '../src/features/voice/LiveVoiceRoot';
 import { setFatalErrorRoute, takeFatalErrorNotice } from '../src/net/fatalErrors';
 import * as m from '../src/paraglide/messages';
+import { installNotificationHandler, pushRegistrationKey, registerExpoPush, retryExpoPushIfDenied, useNotificationNavigation } from '../src/features/push/expoPush';
+import { getLocale } from '../src/paraglide/runtime';
+import { registrarDiag } from '@hangar/core';
 
 configureCore();
 aplicarTemaSalvo();
 aplicarMaterial(useAparencia.getState());
+installNotificationHandler();
+
+const reportPushError = (e: unknown) => {
+  registrarDiag({ evento: 'push.register_failed', nivel: 'erro', codigo: 'expo_push_register_failed', detalhe: e instanceof Error ? e.message : String(e) });
+};
 
 export default function Layout() {
   const router = useRouter();
@@ -52,11 +60,21 @@ export default function Layout() {
       setChatsForeground(active);
       setQueueDeliveryForeground(active);
       useSessions.getState().setForeground(active);
+      if (active) retryExpoPushIfDenied(useServers.getState().servers).catch(reportPushError);
     };
     apply(initial);
     const subscription = AppState.addEventListener('change', apply);
     return () => subscription.remove();
   }, []);
+
+  useNotificationNavigation();
+  // A lista se regrava por outros motivos (rede local aprendida); só servidor, nome ou idioma refazem o registro.
+  useAparencia((s) => s.idioma); // re-renderiza para o getLocale abaixo ler o idioma novo
+  const pushKey = pushRegistrationKey(servers, getLocale());
+  useEffect(() => {
+    if (!ready || !pushKey) return;
+    registerExpoPush(useServers.getState().servers).catch(reportPushError);
+  }, [ready, pushKey]);
 
   useEffect(() => {
     if (!ready) return;

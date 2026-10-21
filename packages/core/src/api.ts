@@ -1484,6 +1484,13 @@ export async function subscribePush(s: Server, subscription: PushSubscriptionJSO
   if (!res.ok) throw new Error(`subscribe ${res.status}`);
 }
 
+// App nativo (Android): o aparelho tem um token Expo só, repetido em cada servidor com o id que o
+// app usa para ele — o toque na notificação volta com esse id para abrir a conversa certa.
+export async function subscribeExpoPushForServer(s: Server, token: string, locale: string): Promise<void> {
+  const body = { token, server_id: s.id, label: s.label, locale };
+  await apiFetchForServer(s, '/api/push/expo/subscribe', { method: 'POST', body: JSON.stringify(body) });
+}
+
 // Preferencias de push (feature #5): sessoes silenciadas + janela de quiet hours global — do servidor
 // ATIVO (mesma convencao das ops por-sessao, que sempre miram o server selecionado no momento).
 export function getPushSettings(): Promise<{ muted: string[]; quiet_hours: { start: string; end: string } | null }> {

@@ -668,7 +668,7 @@ impl AccountService {
 /// Cliente para os serviços de fora (cotas, OAuth): respeita o proxy do ambiente, como o
 /// `urllib` do Python fazia; quem só sai por proxy não pode perder cota nem login.
 pub(crate) fn external_client(timeout: Duration) -> Result<reqwest::Client, AccountError> {
-    reqwest::Client::builder()
+    crate::http_client()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(timeout)
         .build()

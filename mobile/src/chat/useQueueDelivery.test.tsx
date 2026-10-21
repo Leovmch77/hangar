@@ -14,6 +14,7 @@ vi.mock('../stores/prefs', () => ({ prefs: { getString: (key: string) => disk.ge
   disk.set(key, value);
 } } }));
 vi.mock('@react-native-menu/menu', () => ({ MenuView: () => null }));
+vi.mock('expo-secure-store', () => ({ getItemAsync: async () => null, setItemAsync: async () => {} }));
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
 const toastErro = vi.hoisted(() => vi.fn());
 vi.mock('../ui/Toast', () => ({ toast: { erro: toastErro } }));

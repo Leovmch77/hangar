@@ -32,7 +32,7 @@ _log = logging.getLogger("hangar.rust_server")
 HEALTH_PATH = "/__hangar_server/health"
 # Versão do contrato interno (rotas /internal, side-events, ambiente). Tem de casar com o
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
-RUST_SERVER_PROTOCOL = 86
+RUST_SERVER_PROTOCOL = 87
 START_TIMEOUT = 10.0
 OP_TIMEOUT_S = 75
 CRASH_WINDOW = 60.0
@@ -291,10 +291,10 @@ class RuntimeTransport:
 
 def _point_bridges(address: str | None, secret: str | None) -> None:
     """Pontes Python → Rust no endereço privado dele, ou em nada; o observador primeiro, que recusa endereço torto."""
-    from app import account_bridge, costs_sources, groups_bridge, list_bridge, push, transcription_bridge, workspace_bridge
+    from app import account_bridge, costs_sources, groups_bridge, list_bridge, push, push_expo_bridge, transcription_bridge, workspace_bridge
     costs_sources.set_served_by_rust(address is not None)
     for bridge in (terminal_observer, workspace_bridge, claude_customizations, list_bridge,
-                   groups_bridge, transcription_bridge):
+                   groups_bridge, transcription_bridge, push_expo_bridge):
         bridge.configure(address, secret)
     account_bridge.configure_preparation(address, secret)
     push.configure_presence(address, secret)

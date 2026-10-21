@@ -144,7 +144,7 @@ impl Harness {
         let address = listener.local_addr().unwrap();
         let app = router(state.clone());
         let server = tokio::spawn(async move { axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap() });
-        Self { _dir: dir, base, address, upstream, collector, state, tasks: vec![up_task, server], client: reqwest::Client::new() }
+        Self { _dir: dir, base, address, upstream, collector, state, tasks: vec![up_task, server], client: hangar_server::http_client().build().unwrap() }
     }
 
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
@@ -342,7 +342,7 @@ async fn served_usage_matches_python_golden_for_all_and_each_filter() {
 async fn usage_auth_methods_and_invalid_bool_forward_before_reading_origins() {
     let h = Harness::new(true, false).await;
     for token in [None, Some("convidado")] {
-        let request = reqwest::Client::new().get(format!("http://{}/api/uso", h.address));
+        let request = hangar_server::http_client().build().unwrap().get(format!("http://{}/api/uso", h.address));
         let request = if let Some(token) = token { request.bearer_auth(token) } else { request };
         assert_eq!(request.send().await.unwrap().status(), 401);
     }
@@ -467,11 +467,11 @@ async fn unknown_period_is_applied_as_all() {
 #[tokio::test]
 async fn missing_or_guest_token_goes_to_python_without_starting_scopes() {
     let h = Harness::new(true, false).await;
-    let response = reqwest::Client::new().get(format!("http://{}/api/costs", h.address)).send().await.unwrap();
+    let response = hangar_server::http_client().build().unwrap().get(format!("http://{}/api/costs", h.address)).send().await.unwrap();
     assert_eq!(response.status(), 401);
     assert!(h.forwarded("GET", "/api/costs"));
     assert!(!h.forwarded("GET", "/internal/costs/scopes"));
-    let response = reqwest::Client::new().get(format!("http://{}/api/costs", h.address)).bearer_auth("convidado").send().await.unwrap();
+    let response = hangar_server::http_client().build().unwrap().get(format!("http://{}/api/costs", h.address)).bearer_auth("convidado").send().await.unwrap();
     assert_eq!(response.status(), 401);
 }
 
@@ -767,7 +767,7 @@ async fn session_cost_owner_gate_methods_and_query_token_preserve_contract() {
     let h = Harness::new(false, false).await;
     h.upstream.infos.lock().unwrap().insert("session".into(), json!({"provider":"codex", "jsonl":h.base.join("codex/sessions/2026/09/30/rollout-c1.jsonl")}));
     for token in [None, Some("convidado")] {
-        let mut request = reqwest::Client::new().get(format!("http://{}/api/sessions/session/cost", h.address));
+        let mut request = hangar_server::http_client().build().unwrap().get(format!("http://{}/api/sessions/session/cost", h.address));
         if let Some(token) = token { request = request.bearer_auth(token); }
         let response = request.send().await.unwrap();
         assert_eq!(response.status(), 401);
@@ -782,7 +782,7 @@ async fn session_cost_owner_gate_methods_and_query_token_preserve_contract() {
         assert!(h.forwarded(method.as_str(), "/api/sessions/session/cost"));
     }
     assert!(!h.forwarded("GET", "/internal/sessions/session/info"));
-    let response = reqwest::Client::new().get(format!("http://{}/api/sessions/session/cost?token={OWNER}", h.address)).send().await.unwrap();
+    let response = hangar_server::http_client().build().unwrap().get(format!("http://{}/api/sessions/session/cost?token={OWNER}", h.address)).send().await.unwrap();
     assert_eq!(response.status(), 200);
     assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap()["has_usage"], true);
     assert!(h.forwarded("GET", "/internal/sessions/session/info"));

@@ -1,4 +1,5 @@
 pub mod dto;
+pub mod device_install;
 mod local;
 pub mod route;
 pub mod sse;

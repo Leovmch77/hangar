@@ -80,6 +80,7 @@ mod subagent;
 mod dictation;
 mod sync;
 mod connect;
+mod devices;
 mod guests;
 mod shared_config;
 mod tree;
@@ -281,6 +282,8 @@ enum Payload {
     WorktreeSettings(worktree_settings::WorktreeSettingsReply),
     Sync(sync::SyncReply),
     Connect(connect::ConnectReply),
+    // Instalar o app nos aparelhos pelo cabo do servidor desta máquina.
+    Devices(devices::DevicesReply),
     // Configuração compartilhada: fala com várias máquinas, cada uma pelo token dela.
     SharedConfig(shared_config::SharedConfigReply),
     // Máquinas: identificador, alcance e reinício do servidor conectado.
@@ -696,6 +699,7 @@ pub struct Hangar {
     worktree_settings: worktree_settings::WorktreeSettings,
     sync: sync::Sync,
     connect: connect::Connect,
+    devices: devices::Devices,
     shared: shared_config::SharedConfig,
     machines: machines::Machines,
     // Custos e Estatísticas de uso: página própria por cima da janela, fora das Configurações.
@@ -1018,7 +1022,7 @@ impl Hangar {
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
             device: device::Device::new(window, cx), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), orq_history: None, orq_history_serial: 0, home_usage: Default::default(), recents: Default::default(), reopen: None, shortcuts: shortcuts::Shortcuts::default(),
             worktree_settings: worktree_settings::WorktreeSettings::default(),
-            server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), connect: connect::Connect::default(), shared: shared_config::SharedConfig::default(), machines: machines::Machines::default(),
+            server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), connect: connect::Connect::default(), devices: devices::Devices::default(), shared: shared_config::SharedConfig::default(), machines: machines::Machines::default(),
             costs: Default::default(), worktrees: Default::default(), artifacts: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar, machines_tray,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
@@ -1384,6 +1388,7 @@ impl Hangar {
         self.sync = sync::Sync::default();
         // Sem isto, um "Ligar" em voo da conexão anterior deixava a página travada e o código dela montado.
         self.connect = connect::Connect::default();
+        self.devices = devices::Devices::default();
         self.shared = shared_config::SharedConfig::default();
         self.controls = controls::Controls::default();
         self.accounts = accounts::Accounts::default();
@@ -1924,6 +1929,7 @@ impl Hangar {
             }
             Payload::Sync(reply) => { self.receive_sync(reply, window, cx); return; }
             Payload::Connect(reply) => { self.receive_connect(reply, window, cx); return; }
+            Payload::Devices(reply) => { self.receive_devices(reply, window, cx); return; }
             Payload::SharedConfig(reply) => { self.receive_shared_config(reply, cx); return; }
             Payload::Machines(reply) => { self.receive_machines(reply, window, cx); return; }
             Payload::Computer(reply) => { self.receive_computer(reply, window, cx); return; }

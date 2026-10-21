@@ -40,6 +40,10 @@ rusqlite = { version = "=0.40.2", features = ["bundled"] }
 rayon = "=1.12.0"
 hangar-codex = { path = "hangar-codex" }
 tokio-tungstenite = "=0.29.0"
+# Aparelho iOS pelo cabo (`device_install`): versão provada no iPad, a mesma que o isideload usa, e com o
+# mesmo backend de cripto dele (ring).
+idevice = { version = "=0.1.68", default-features = false, features = ["ring", "usbmuxd", "house_arrest", "afc", "installation_proxy", "misagent", "core_device_proxy", "remote_pairing", "tcp", "tunnel_tcp_stack", "xpc", "rsd", "pair"] }
+plist = "=1.10.2"
 
 # Depuração só de linhas: o backtrace sai com arquivo e linha, e cada executável de teste cai a menos
 # da metade. Nas dependências, nenhuma. Variáveis no depurador: CARGO_PROFILE_DEV_DEBUG=full.

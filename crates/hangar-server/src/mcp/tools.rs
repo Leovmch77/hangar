@@ -184,7 +184,7 @@ fn link_refusal(me: &str, alvo: &str, sidecar: Option<&Sidecar>) -> Option<Strin
 
 impl Tools {
     pub fn new(st: Arc<AppState>, api: Router) -> Self {
-        let http = reqwest::Client::builder().no_proxy().build().unwrap_or_default();
+        let http = crate::http_client().no_proxy().build().expect("cliente http do MCP");
         let server_id = st.server_id.clone();
         Self { st, api, http, server_id, nav_locks: Mutex::default() }
     }

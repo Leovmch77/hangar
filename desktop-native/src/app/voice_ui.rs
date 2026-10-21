@@ -834,7 +834,7 @@ impl Hangar {
         match name {
             "switch_session" => self.voice_switch(call, &args, window, cx),
             "hangar_actions" => {
-                let sections: Vec<&str> = settings::Page::sections().map(settings::Page::key).collect();
+                let sections: Vec<&str> = settings::Page::shown(self.api.as_ref()).map(settings::Page::key).collect();
                 self.voice_reply(call, true, hangar_actions_text(&sections));
             }
             // Recusa de ação da tela é recado para o organizador, que conta ao usuário pela voz; no cartão ficaria como erro.
@@ -863,7 +863,7 @@ impl Hangar {
                 let page = match arg.filter(|a| !a.trim().is_empty()) {
                     None => settings::Page::Appearance,
                     Some(spoken) => {
-                        let sections: Vec<settings::Page> = settings::Page::sections().collect();
+                        let sections: Vec<settings::Page> = settings::Page::shown(self.api.as_ref()).collect();
                         let keys: Vec<&str> = sections.iter().map(|p| p.key()).collect();
                         match pick_section(spoken, &keys) {
                             Some(i) => sections[i],

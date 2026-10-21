@@ -34,7 +34,7 @@ impl DeviceOAuth {
             return Err(AccountError::io());
         }
         // O servidor OAuth de verdade passa pelo proxy do ambiente; o de loopback, nunca.
-        let mut builder = reqwest::Client::builder();
+        let mut builder = crate::http_client();
         if loopback {
             builder = builder.no_proxy();
         }

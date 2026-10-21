@@ -58,7 +58,7 @@ pub struct Pick { pub choice: String, pub p: f64 }
 
 /// Respostas por pergunta. Erro volta como texto curto para o diário (nunca a chave).
 pub async fn ask(config: &Config, state: &str, questions: &Value) -> Result<std::collections::HashMap<String, Pick>, String> {
-    let client = reqwest::Client::builder().timeout(TIMEOUT).build().map_err(|_| "cliente http".to_owned())?;
+    let client = crate::http_client().timeout(TIMEOUT).build().map_err(|_| "cliente http".to_owned())?;
     let mut model = FALLBACK.lock().ok().and_then(|f| f.clone())
         .filter(|(url, refused, _)| *url == config.url && *refused == config.model)
         .map_or_else(|| config.model.clone(), |(_, _, fallback)| fallback);

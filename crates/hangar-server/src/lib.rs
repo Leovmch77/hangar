@@ -13,6 +13,7 @@ pub mod watchdog;
 pub mod costs;
 pub mod costs_routes;
 pub mod costs_failure;
+pub mod device_install;
 pub mod diag;
 pub mod display_env;
 pub mod groups;
@@ -35,6 +36,7 @@ pub mod routes;
 pub mod runtime;
 pub mod session_open;
 pub mod session_defaults;
+pub mod push_expo;
 pub mod session_media;
 pub mod session_write;
 pub mod share_reach;
@@ -67,7 +69,14 @@ mod warn_limit;
 
 /// Versão do contrato com o Python (rotas `/internal`, eventos do side-events, ambiente). O
 /// Python (`RUST_SERVER_PROTOCOL`) recusa um binário de outra versão e atende sozinho.
-pub const INTERNAL_PROTOCOL: u32 = 86;
+pub const INTERNAL_PROTOCOL: u32 = 87;
+
+/// Todo cliente HTTP do servidor nasce aqui. Uma dependência liga `gzip`, `http2` e (no Windows)
+/// `native-tls` no reqwest, e o Cargo estende isso a todo cliente: sem estes desligamentos ele
+/// passaria a descomprimir sozinho, negociar HTTP/2 e usar o TLS do sistema.
+pub fn http_client() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().no_gzip().http1_only().tls_backend_rustls()
+}
 
 /// Todo socket TCP do servidor, aceito ou aberto. Sem isso o Nagle segura o último pedaço de uma
 /// resposta em pedaços até o ACK atrasado do outro lado; o asyncio do Python já liga sozinho.

@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Text, TextInput, View } from 'react-native';
+import { AppState, Platform, Text, TextInput, View } from 'react-native';
+import { getPermissionsAsync } from 'expo-notifications';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { getPushSettingsForServer, setQuietHoursForServer, type Server } from '@hangar/core';
 import { Box, Chip, ConfigRow, Disclosure, Muted, RowShell, ServerConfigPage, useInputStyle } from '../../src/features/config/ServerConfigParts';
 import { Pill } from '../../src/features/config/PageHeader';
 import { useServerConfig } from '../../src/features/config/serverConfig';
 import { useSettingsColors } from '../../src/features/config/colors';
+import { openNotificationSettings } from '../../src/features/push/expoPush';
 import * as m from '../../src/paraglide/messages';
 
 const KEYS = ['notify_finished', 'finish_min_seconds', 'notify_dead', 'stall_seconds'];
@@ -13,9 +15,29 @@ const KEYS = ['notify_finished', 'finish_min_seconds', 'notify_dead', 'stall_sec
 export default function Notifications() {
   const cfg = useServerConfig();
   return (
-    <ServerConfigPage title={m.native_settings_page_notifications()} cfg={cfg} extra={cfg.server ? <QuietHours server={cfg.server} /> : null}>
+    <ServerConfigPage title={m.native_settings_page_notifications()} cfg={cfg} extra={<>{Platform.OS === 'android' ? <DevicePush /> : null}{cfg.server ? <QuietHours server={cfg.server} /> : null}</>}>
       <Box>{KEYS.map((k) => <ConfigRow key={k} cfg={cfg} k={k} />)}</Box>
     </ServerConfigPage>
+  );
+}
+
+/** Permissão do aparelho, relida ao voltar dos ajustes do sistema. */
+function DevicePush() {
+  const [granted, setGranted] = useState<boolean | null>(null);
+  useEffect(() => {
+    const read = () => { getPermissionsAsync().then((p) => setGranted(p.status === 'granted'), () => setGranted(false)); };
+    read();
+    const sub = AppState.addEventListener('change', (state) => { if (state === 'active') read(); });
+    return () => sub.remove();
+  }, []);
+  if (granted === null) return null;
+  return (
+    <Box>
+      <RowShell icon="Bell" title={m.push_device_row()}
+        chips={<Chip text={granted ? m.push_device_on() : m.push_device_off()} tone={granted ? 'success' : 'muted'} />}>
+        {granted ? null : <View style={styles.line}><Pill icon="Settings" label={m.push_device_open_settings()} onPress={() => { void openNotificationSettings(); }} /></View>}
+      </RowShell>
+    </Box>
   );
 }
 

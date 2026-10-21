@@ -49,7 +49,7 @@ impl WindowClient {
             return Err(AccountError::io());
         }
         Ok(Self {
-            client: reqwest::Client::builder()
+            client: crate::http_client()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(15))

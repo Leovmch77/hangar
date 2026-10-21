@@ -14,21 +14,27 @@ mod appearance_page;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Page {
     General, Appearance, Diary, About, Migration,
-    Servers, Sync, Connect, SharedConfig, Accounts, Orchestration, Harnesses, Voice, Jev, Windows, Notifications, Shortcuts, Attachments, Worktrees, Advanced,
+    Servers, Sync, Connect, Devices, SharedConfig, Accounts, Orchestration, Harnesses, Voice, Jev, Windows, Notifications, Shortcuts, Attachments, Worktrees, Advanced,
 }
 
 impl Page {
     const DEVICE: [Page; 4] = [Page::General, Page::Appearance, Page::Diary, Page::About];
-    const SERVER: [Page; 15] = [Page::Servers, Page::Sync, Page::Connect, Page::SharedConfig, Page::Accounts, Page::Orchestration, Page::Harnesses, Page::Voice,
-        Page::Jev, Page::Windows, Page::Notifications, Page::Shortcuts, Page::Attachments, Page::Worktrees, Page::Advanced];
+    const SERVER: [Page; 16] = [Page::Servers, Page::Sync, Page::Connect, Page::Devices, Page::SharedConfig, Page::Accounts, Page::Orchestration, Page::Harnesses,
+        Page::Voice, Page::Jev, Page::Windows, Page::Notifications, Page::Shortcuts, Page::Attachments, Page::Worktrees, Page::Advanced];
 
     /// As seções da navegação, na ordem dela; a voz abre uma pelo `key`.
     pub(super) fn sections() -> impl Iterator<Item = Page> { Self::DEVICE.into_iter().chain(Self::SERVER) }
 
+    /// O aparelho vai no cabo do computador do servidor: a instalação só existe ligada ao servidor desta máquina.
+    pub(super) fn visible(self, api: Option<&Api>) -> bool { self != Page::Devices || api.is_some_and(Api::is_loopback) }
+
+    /// As seções que a navegação e a busca mostram com esta conexão.
+    pub(super) fn shown(api: Option<&Api>) -> impl Iterator<Item = Page> + '_ { Self::sections().filter(move |p| p.visible(api)) }
+
     pub(super) fn key(self) -> &'static str {
         match self {
             Page::General => "general", Page::Appearance => "appearance", Page::Diary => "diary", Page::About => "about", Page::Migration => "migration",
-            Page::Servers => "servers", Page::Sync => "sync", Page::Connect => "connect", Page::SharedConfig => "shared_config", Page::Accounts => "accounts", Page::Orchestration => "orchestration",
+            Page::Servers => "servers", Page::Sync => "sync", Page::Connect => "connect", Page::Devices => "devices", Page::SharedConfig => "shared_config", Page::Accounts => "accounts", Page::Orchestration => "orchestration",
             Page::Harnesses => "harnesses", Page::Voice => "voice", Page::Jev => "jev", Page::Windows => "windows", Page::Notifications => "notifications",
             Page::Shortcuts => "shortcuts", Page::Attachments => "attachments", Page::Worktrees => "worktrees", Page::Advanced => "advanced",
         }
@@ -37,7 +43,7 @@ impl Page {
     fn icon(self) -> IconName {
         match self {
             Page::General => IconName::Globe, Page::Appearance => IconName::Palette, Page::Diary => IconName::FileText,
-            Page::About => IconName::Info, Page::Migration => IconName::Activity, Page::Servers => IconName::Server, Page::Sync => IconName::RefreshCw, Page::Connect => IconName::Globe, Page::SharedConfig => IconName::Layers,
+            Page::About => IconName::Info, Page::Migration => IconName::Activity, Page::Servers => IconName::Server, Page::Sync => IconName::RefreshCw, Page::Connect => IconName::Globe, Page::Devices => IconName::Smartphone, Page::SharedConfig => IconName::Layers,
             Page::Accounts => IconName::User, Page::Orchestration => IconName::Users, Page::Harnesses => IconName::Activity,
             Page::Voice => IconName::Mic, Page::Jev => IconName::Zap, Page::Windows => IconName::Monitor, Page::Notifications => IconName::Bell,
             Page::Shortcuts => IconName::Keyboard, Page::Attachments => IconName::Paperclip, Page::Worktrees => IconName::GitBranch, Page::Advanced => IconName::SlidersHorizontal,
@@ -154,14 +160,14 @@ fn matching(query: &str, texts: &[(String, String)]) -> Vec<usize> {
     texts.iter().enumerate().filter(|(_, (title, desc))| fold(title).contains(&query) || fold(desc).contains(&query)).map(|(n, _)| n).collect()
 }
 
-fn find(query: &str) -> Vec<Found> {
+fn find(query: &str, api: Option<&Api>) -> Vec<Found> {
     let rows = PAGE_ROWS.iter().flat_map(|&(page, rows)| rows.iter()
         // Sem bandeja no sistema a linha não é desenhada.
         .filter(|(title, _)| crate::tray::SUPPORTED || *title != "settings_tray")
         .filter(|(title, _)| cfg!(target_os = "linux") || !matches!(*title, "settings_chrome_autofill" | "settings_full_chrome"))
         .map(move |&(title, desc)| (Found { page, row: Some(title) }, tr(title), desc.map(tr).unwrap_or_default())));
     // Páginas que ainda não têm linhas continuam achadas pelo nome e abrem no aviso delas.
-    let pages = Page::DEVICE.into_iter().chain(Page::SERVER).map(|page| (Found { page, row: None }, page.title(), String::new()));
+    let pages = Page::shown(api).map(|page| (Found { page, row: None }, page.title(), String::new()));
     let all: Vec<_> = rows.chain(pages).collect();
     let texts: Vec<(String, String)> = all.iter().map(|(_, title, desc)| (title.clone(), desc.clone())).collect();
     matching(query, &texts).into_iter().map(|n| all[n].0).collect()
@@ -450,7 +456,7 @@ impl SettingsUi {
         subscriptions.push(cx.subscribe_in(&search, window, |this: &mut Hangar, state, event: &InputEvent, _, cx| match event {
             InputEvent::Change => {
                 let ui = &mut this.settings_ui;
-                ui.found = find(&state.read(cx).value());
+                ui.found = find(&state.read(cx).value(), this.api.as_ref());
                 (ui.pick, ui.hit) = (0, None);
                 cx.notify();
             }
@@ -506,6 +512,7 @@ impl Hangar {
             self.accounts_page_left();
             self.sync_page_left();
             self.connect_page_left();
+            self.devices_page_left();
             let ui = &mut self.settings_ui;
             (ui.live, ui.hit, ui.drag) = (false, None, None);
             self.root_focus.focus(window, cx);
@@ -819,7 +826,7 @@ impl Hangar {
                     .child(group(tr("settings_group_device")))
                     .children(Page::DEVICE.map(|p| nav_item(p, page, cx)))
                     .child(group(tr("settings_group_server")).child(server))
-                    .children(Page::SERVER.map(|p| nav_item(p, page, cx)))
+                    .children(Page::SERVER.into_iter().filter(|p| p.visible(self.api.as_ref())).map(|p| nav_item(p, page, cx)))
             })
             .child(div().h(px(48.)).flex_shrink_0().mx(px(-10.)).px(px(10.)).border_t_1().border_color(theme::border()).flex().items_center()
                 .child(Button::new("settings-back").ghost().w_full().h(px(32.))
@@ -851,6 +858,7 @@ impl Hangar {
             Page::Connect => self.render_connect(cx),
             Page::SharedConfig => self.render_shared_config(cx),
             Page::Windows => self.render_computer(cx),
+            Page::Devices => self.render_devices(window, cx),
         };
         let scroll = div().id("settings-content").role(Role::TabPanel).aria_label(page.title())
             .accessibility_id(format!("settings-page-{}", page.key())).flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.settings_ui.scroll)

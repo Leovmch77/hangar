@@ -36,8 +36,18 @@ function releaseArtifact(channel = 'preview', runtime = 'native-2', configuredRu
   return app;
 }
 
+// O CI sempre define GITHUB_RUN_NUMBER; o passo grava esse número no CFBundleVersion.
+const RUN_NUMBER = '4242';
+
 function verify(app: string) {
-  return spawnSync('python3', ['-I', '-', join(app, '../app.json'), app], { input: verifyArtifact, encoding: 'utf8' });
+  return spawnSync('python3', ['-I', '-', join(app, '../app.json'), app],
+    { input: verifyArtifact, encoding: 'utf8', env: { ...process.env, GITHUB_RUN_NUMBER: RUN_NUMBER } });
+}
+
+// O Info.plist sai em formato binário, que o @expo/plist não lê.
+function bundleVersion(app: string) {
+  const read = 'import plistlib, sys; print(plistlib.load(open(sys.argv[1], "rb"))["CFBundleVersion"])';
+  return spawnSync('python3', ['-I', '-c', read, join(app, 'Info.plist')], { encoding: 'utf8' }).stdout.trim();
 }
 
 afterEach(() => {
@@ -46,9 +56,11 @@ afterEach(() => {
 
 describe('verificação OTA do IPA no GitHub', () => {
   it('aceita o Release com preview e runtime nativo independente da versão visível', () => {
-    const result = verify(releaseArtifact());
+    const app = releaseArtifact();
+    const result = verify(app);
     expect(result.stderr).toBe('');
     expect(result.status).toBe(0);
+    expect(bundleVersion(app)).toBe(RUN_NUMBER);
   });
 
   it('aceita o Release quando app.json e artefato usam native-3', () => {

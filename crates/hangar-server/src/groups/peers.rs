@@ -162,7 +162,7 @@ impl PeerClient {
         let http = match slot.get() {
             Some(http) => http,
             None => {
-                let built = reqwest::Client::builder().connect_timeout(READ_TIMEOUT).read_timeout(read).timeout(total).build()
+                let built = crate::http_client().connect_timeout(READ_TIMEOUT).read_timeout(read).timeout(total).build()
                     .map_err(|e| transport(server, &e))?;
                 slot.get_or_init(|| built)
             }

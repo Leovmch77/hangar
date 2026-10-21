@@ -595,7 +595,7 @@ pub fn opencode(html: &str, now: f64) -> Vec<Value> {
 /// Cliente das fontes: proxy do ambiente, sem seguir redirecionamento (a chave nunca vai a outro
 /// endereço) e conexão com prazo curto, para recusa não ocupar o prazo inteiro.
 pub fn client() -> Result<reqwest::Client, crate::accounts::catalog::AccountError> {
-    reqwest::Client::builder()
+    crate::http_client()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(10))
         .connect_timeout(std::time::Duration::from_secs(3))

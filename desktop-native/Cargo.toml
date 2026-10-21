@@ -45,6 +45,8 @@ tree-sitter-pascal = "=0.10.2"
 tree-sitter-dart = "=0.2.0"
 tree-sitter-kotlin-sg = "=0.4.1"
 sysinfo = { version = "=0.31.4", default-features = false, features = ["system"] }
+# QR do APK e da fonte do SideStore na tela de instalar nos aparelhos; só o SVG.
+qrcode = { version = "=0.14.1", default-features = false, features = ["svg"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 wry = "=0.55.1"

@@ -135,7 +135,7 @@ enum Ask { Answered(u16, String), Down(String), Uncertain(String) }
 const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(190);
 
 async fn ask_server(base: &str, token: &str, body: &[u8]) -> Ask {
-    let client = match reqwest::Client::builder().timeout(OPEN_TIMEOUT).build() {
+    let client = match crate::http_client().timeout(OPEN_TIMEOUT).build() {
         Ok(client) => client,
         Err(error) => return Ask::Uncertain(error.to_string()),
     };
