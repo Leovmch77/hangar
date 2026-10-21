@@ -2,12 +2,12 @@
 import { act, createElement, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AggSession, Server } from '@hangar/core';
+import type { AggSession, Server, StateEvent } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 import { ContextTab } from './ContextTab';
 import { ContextPanel } from './ContextPanel';
 
-const state = vi.hoisted(() => ({ statusLine: null as string | null, rows: [] as AggSession[] }));
+const state = vi.hoisted(() => ({ statusLine: null as string | null, stateEvent: null as StateEvent | null, rows: [] as AggSession[] }));
 const servers = vi.hoisted(() => ({ ready: true, servers: [
   { id: 'srv', label: 'Casa', baseUrl: 'https://casa.test', token: 'test' },
 ] as Server[] }));
@@ -33,6 +33,7 @@ let root: Root;
 let container: HTMLDivElement;
 beforeEach(() => {
   state.statusLine = null;
+  state.stateEvent = null;
   state.rows = [];
   servers.ready = true;
   servers.servers = [{ id: 'srv', label: 'Casa', baseUrl: 'https://casa.test', token: 'test' }];
@@ -105,15 +106,27 @@ describe('ContextTab', () => {
     expect(container.querySelector(`[aria-label="${m.tablet_actions()}"]`)).toBeNull();
   });
 
-  it('antes da primeira statusline mostra carregamento e conserva as ações', () => {
+  it('antes do primeiro estado mostra carregamento e conserva as ações', () => {
     render();
     expect(container.textContent).toContain('loading');
     expect(container.textContent).not.toContain(m.tablet_context_empty());
     expect(container.textContent).toContain('action-srv-sess');
   });
 
+  it('ao receber estado sem statusline mostra o vazio e conserva as ações', () => {
+    render();
+    expect(container.textContent).toContain('loading');
+    state.stateEvent = { session: 'sess', state: 'idle' };
+    render();
+    expect(container.textContent).toContain(m.tablet_context_empty());
+    expect(container.textContent).not.toContain('loading');
+    expect(container.textContent).toContain(m.tablet_actions());
+    expect(container.textContent).toContain('action-srv-sess');
+  });
+
   it.each(['', '💵 $0.00'])('com statusline %j sem contexto mostra o vazio e conserva as ações', (statusLine) => {
     state.statusLine = statusLine;
+    state.stateEvent = { session: 'sess', state: 'idle', status_line: statusLine };
     render();
     expect(container.textContent).toContain(m.tablet_context_empty());
     expect(container.textContent).toContain(m.tablet_actions());

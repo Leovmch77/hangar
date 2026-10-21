@@ -13,6 +13,7 @@ const clamp = (pct: number) => Math.min(100, Math.max(0, pct));
 export function ContextTab({ serverId, name }: { serverId: string; name: string }) {
   const { theme } = useUnistyles();
   const statusLine = chatStore(serverId, name).use((s) => s.statusLine);
+  const loading = chatStore(serverId, name).use((s) => s.stateEvent === null);
   const session = useSessions((s) => s.byServerRecord?.[serverId]?.find((item) => item.name === name)
     ?? s.rows.find((item) => item.serverId === serverId && item.name === name) ?? null);
   const fields = useMemo(() => parseStatusLine(statusLine, session), [statusLine, session]);
@@ -35,7 +36,7 @@ export function ContextTab({ serverId, name }: { serverId: string; name: string 
         {pct != null ? <>
           <Text style={[styles.percent, { color: tone(pct) }]}>{Math.round(clamp(pct))}%</Text>
           {bar(m.ctx_uso_contexto(), pct)}
-        </> : statusLine === null ? <ActivityIndicator color={theme.tokens.text.muted} accessibilityLabel={m.comum_carregando()} />
+        </> : loading ? <ActivityIndicator color={theme.tokens.text.muted} accessibilityLabel={m.comum_carregando()} />
           : <Text style={styles.muted}>{m.tablet_context_empty()}</Text>}
       </View>
 
