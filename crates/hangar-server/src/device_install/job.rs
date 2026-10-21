@@ -33,6 +33,7 @@ const SIDESTORE_BUNDLE: &str = "com.SideStore.SideStore";
 const FREE_APP_LIMIT: u32 = 3;
 const CODE_WAIT: Duration = Duration::from_secs(600);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+// Global do processo, não do `Jobs`: o temp de extração do isideload é do processo inteiro.
 static SIGNING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Clone, Copy, Debug)]
@@ -260,8 +261,9 @@ impl DeviceInstall {
         let tmp = tempfile::tempdir_in(&self.dir).map_err(|e| Failure::with(DOWNLOAD_FAILED, e.to_string()))?;
         let ipa = download(&self.http, &self.pinned, tmp.path()).await?;
 
-        // O isideload extrai sempre no mesmo lugar do temp e o estado em `devices/apple` é um só:
-        // um aparelho assina e instala por vez.
+        // O isideload extrai sempre no mesmo lugar do temp: um aparelho assina e instala por vez.
+        // ponytail: login, anisette e Team ID acima também escrevem em `devices/apple` e rodam fora
+        // da trava; duas instalações ao mesmo tempo podem se atropelar ali. Trava por conta se importar.
         {
             let _one = SIGNING.lock().await;
             job.set(Stage::Signing, None);

@@ -48,7 +48,8 @@ impl Api {
         self.device_call(Method::POST, "trust", &[], Some(json!({"udid": udid})), 135).await.map(drop)
     }
 
-    /// A senha só existe dentro deste pedido.
+    /// A senha só existe dentro deste pedido. Melhor esforço: o `drop` não zera a memória e o
+    /// `json!` guarda uma cópia própria.
     pub async fn device_start(&self, udid: &str, apple_id: &str, password: String) -> Result<String, DeviceError> {
         let body = json!({"udid": udid, "apple_id": apple_id, "password": password});
         drop(password);
