@@ -266,7 +266,10 @@ impl Hangar {
             .or_else(|| self.servers.iter().filter(|s| !s.disabled).find_map(|s| Api::new(&s.address, &s.token).ok().filter(Api::is_loopback)));
         let active = self.api.clone().filter(|_| !self.active_invite());
         let Some(updater) = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone()) else { return };
-        updater.update(cx, |updater, cx| updater.set_servers(local, active, cx));
+        updater.update(cx, |updater, cx| {
+            updater.set_update_all_servers(self.servers.clone(), cx);
+            updater.set_servers(local, active, cx);
+        });
     }
 
     /// Só as máquinas do app Electron; a aparência é o Importar das configurações que traz.
