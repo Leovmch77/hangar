@@ -40,7 +40,11 @@ Before pasting a proof, say what would make it fail. Then:
 
 ## The proof stage
 
-- Own `HOME`: `HOME=<proof dir> <command> --directory <worktree>/...`.
+- Rode `orq proof -- <comando>`, no diretório de trabalho da Task.
+  O comando recebe `HOME`, `CARGO_HOME`, `CARGO_TARGET_DIR` e caches de pacotes temporários,
+  fora da pasta durável; `ORQ_PROOF_ROOT` aponta para essa etapa. Grave nela builds e sandboxes,
+  copiando só relatórios, logs e capturas necessários para `<durable dir>/provas/` antes de sair.
+  A etapa é removida ao terminar, inclusive quando o comando falha ou é interrompido.
 - The project's installers (`install*.sh`) stay unrun.
 - Own instance, torn down at the end; the user's services keep running.
 - Kill by exact PID. Used `pkill -f` anyway → say so unprompted.

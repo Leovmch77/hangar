@@ -49,6 +49,10 @@ git clone --no-hardlinks --no-checkout -- <repo> <new-sandbox>
 git -C <new-sandbox> checkout --detach <object>
 ```
 
+- Execute a rodada por `orq proof -- <comando>` e crie a cópia em
+  `$ORQ_PROOF_ROOT/sandbox`. O comando copia os resultados para a pasta durável antes de sair;
+  o temporário e seus caches são removidos pelo `orq`. Confira que o caminho da etapa deixou
+  de existir antes de entregar o parecer. Falha na remoção impede concluir a rodada.
 - Check the copy's `HEAD` before testing; use the environment preparation the plan defines.
 - Never `git worktree add` from the protected checkout.
 - Only the copy receives the mutation; product and test fixes stay with the executor.

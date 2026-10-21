@@ -388,6 +388,12 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   esse registro ao grupo por `/orq/grupo`, preservando escolhas. O vigia fecha executor e
   revisor concluídos; desarmar somente após conferir a limpeza. Evidência em plataforma.md.
 
+- **Provas de orquestração usam temporário fora da pasta durável.** `orq proof` isola builds,
+  caches e sandboxes; só resultados publicados permanecem no histórico. Depois da retrospectiva,
+  `orq podar --apply` remove os diretórios regeneráveis de execução encerrada, e `--check`
+  confere a limpeza. A atualização poda também execuções antigas válidas e registra as que
+  preservou. Contrato em [plataforma.md](docs/decisoes/plataforma.md#armazenamento-das-provas-de-orquestração).
+
 - **O nome antigo (`claude-pocket`) só existe em ponte de compatibilidade.** Escreva com o nome
   novo; nunca leia o antigo em código novo. O que resta é migração, e ela nunca funde duas pastas.
 - **Comentário explica o PORQUÊ, e é curto.** Medição, versão de CLI e data envelhecem: num
