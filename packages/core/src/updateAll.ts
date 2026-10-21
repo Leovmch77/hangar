@@ -83,6 +83,8 @@ const POLL_MS = 2000;
 const SILENT_READS = 300;
 const FOLLOW_CEILING_MS = 30 * 60 * 1000;
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
+const httpStatus = (error: unknown): unknown =>
+  typeof error === 'object' && error !== null && 'status' in error ? error.status : undefined;
 
 /** Publica só representantes de máquinas distintas e devolve seus desfechos na ordem da lista. */
 export async function updateAll(
@@ -123,8 +125,7 @@ export async function updateAll(
     try {
       snapshot = await getAtualizacaoEm(server, true, opts.fetch);
     } catch (error) {
-      const httpError = typeof error === 'object' && error !== null && 'status' in error;
-      return finish({ status: httpError ? 'falhou' : 'fora_do_ar', error: errorMessage(error), warnings: [] });
+      return finish({ status: httpStatus(error) !== undefined ? 'falhou' : 'fora_do_ar', error: errorMessage(error), warnings: [] });
     }
     const classification = classify(snapshot);
     if (classification === 'em_dia') return finish({ status: 'em_dia', warnings: [] });
@@ -152,7 +153,8 @@ export async function updateAll(
         if (status === 'falhou') value.error = state.erro?.replace(/\.+$/, '') || '?';
         if (status === 'atualizado' || status === 'atualizado_manual' || status === 'falhou') return finish(value);
       } catch (error) {
-        if (typeof error === 'object' && error !== null && 'status' in error && (error.status === 401 || error.status === 403)) {
+        const status = httpStatus(error);
+        if (status === 401 || status === 403) {
           return finish({ status: 'falhou', error: errorMessage(error), state: latest.state, warnings: latest.warnings });
         }
         silent++;

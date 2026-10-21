@@ -198,13 +198,13 @@ def estado_para_tela() -> dict:
         return atual
     if _restarted_into_target(atual):
         _log.info("atualizacao concluida pelo backend novo: o motor %s morreu no reinicio que pediu", dono)
-        reason = ("a atualizacao foi concluida pelo servidor novo" if atual.get("etapa") == "reiniciar"
-                  else "o processo que o atualizava nao existe mais")
         try:
             nativo = _nativo_instalado()
         except (OSError, ValueError):
             nativo = True
         if nativo:
+            reason = ("a atualizacao foi concluida pelo servidor novo" if atual.get("etapa") == "reiniciar"
+                      else "o processo que o atualizava nao existe mais")
             _avisar(f"app nativo nao atualizou: {reason}")
         _dist_velho_apagar()
         _escrever(fase="pronto", ok=True, texto="Atualizado")
