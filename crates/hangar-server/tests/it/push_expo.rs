@@ -225,6 +225,16 @@ async fn two_tokens_go_in_one_send() {
 }
 
 #[tokio::test]
+async fn more_than_a_hundred_tokens_go_in_batches() {
+    let fixture = Fixture::start().await;
+    for i in 0..101 { fixture.subscribe(&format!("ExponentPushToken[t{i}]"), "Casa", "pt", true).await; }
+    fixture.notify(false).await;
+    let calls = wait_until(|| fixture.calls(), |c| c.len() >= 2).await;
+    let sizes: Vec<usize> = calls.iter().map(|c| c.1.as_array().unwrap().len()).collect();
+    assert_eq!(sizes, [100, 1]);
+}
+
+#[tokio::test]
 async fn subscribe_during_a_send_survives_its_write() {
     let fixture = Fixture::start().await;
     fixture.subscribe(TOKEN, "Casa", "pt", true).await;

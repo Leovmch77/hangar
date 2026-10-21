@@ -27,7 +27,7 @@ fn failure(status: StatusCode, f: Failure) -> Response {
 }
 
 fn bad_body() -> Response {
-    failure(StatusCode::UNPROCESSABLE_ENTITY, Failure::new("erro_corpo_invalido"))
+    failure(StatusCode::UNPROCESSABLE_ENTITY, Failure::new("device_install_bad_request"))
 }
 
 /// Recusa repasse (Python, convidado), outra origem e quem não traz o token do dono.
@@ -40,7 +40,7 @@ fn guard(st: &AppState, peer: SocketAddr, req: &Request) -> Result<(), Response>
     let token = crate::auth::presented_token(h, req.uri().query(), req.method(), false);
     if !st.auth.is_owner(&ip, token.as_deref()) {
         st.auth.record_fail(&ip);
-        return Err(failure(StatusCode::UNAUTHORIZED, Failure::new("erro_nao_autorizado")));
+        return Err(failure(StatusCode::UNAUTHORIZED, Failure::new("unauthorized")));
     }
     Ok(())
 }

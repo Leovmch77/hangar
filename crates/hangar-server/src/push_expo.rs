@@ -134,9 +134,9 @@ async fn deliver(path: PathBuf, base: String, diag: DiagClient, notify: Notify) 
             Err(code) => report(code),
         }
     }
-    let targets: Vec<&Entry> = registry.tokens.iter().filter(|e| !dead.contains(&e.token)).take(MAX_MESSAGES).collect();
+    let all: Vec<&Entry> = registry.tokens.iter().filter(|e| !dead.contains(&e.token)).collect();
     let mut tickets = Vec::new();
-    if !targets.is_empty() {
+    for targets in all.chunks(MAX_MESSAGES) {
         let messages: Vec<Value> = targets.iter().map(|e| {
             let data = if notify.list { json!({"server": e.server_id}) } else { json!({"server": e.server_id, "session": notify.session}) };
             json!({"to": e.token, "title": format!("{} · {}", e.label, notify.title.pick(&e.locale)),
@@ -148,7 +148,7 @@ async fn deliver(path: PathBuf, base: String, diag: DiagClient, notify: Notify) 
                 let answered = reply["data"].as_array().map_or(&[][..], Vec::as_slice);
                 if answered.len() != targets.len() { report("push_expo_ticket_count"); }
                 let mut failed = 0;
-                for (ticket, entry) in answered.iter().zip(&targets) {
+                for (ticket, entry) in answered.iter().zip(targets) {
                     match ticket["id"].as_str() {
                         Some(id) if ticket["status"] == "ok" => tickets.push(Pending { ticket_id: id.into(), token: entry.token.clone() }),
                         _ if unregistered(ticket) => { dead.insert(entry.token.clone()); }

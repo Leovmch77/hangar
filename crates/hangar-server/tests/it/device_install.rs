@@ -247,7 +247,11 @@ async fn only_the_owner_token_and_never_a_forwarded_request() {
     let s = serve(link(), signer()).await;
     let devices = format!("{}/devices", s.url);
     assert_eq!(client().get(&devices).send().await.unwrap().status(), 401, "loopback sem token");
-    assert_eq!(client().get(&devices).bearer_auth("outro").send().await.unwrap().status(), 401);
+    let r = client().get(&devices).bearer_auth("outro").send().await.unwrap();
+    assert_eq!(r.status(), 401);
+    assert_eq!(r.json::<Value>().await.unwrap()["error"]["code"], "unauthorized");
+    let (status, body) = s.post("trust", json!({"sem_udid": true})).await;
+    assert_eq!((status, body["error"]["code"].clone()), (422, json!("device_install_bad_request")));
     for (name, value) in [("x-forwarded-for", "192.0.2.1"), ("x-hangar-guest", "assinado"), ("origin", "http://evil.example")] {
         let r = client().get(&devices).bearer_auth(OWNER).header(name, value).send().await.unwrap();
         assert_eq!(r.status(), 403, "{name}");
