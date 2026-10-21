@@ -7,7 +7,6 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
@@ -291,33 +290,6 @@ def transcription_config():
             "state_path": str(Path.home() / ".hangar" / "transcription-wait.json")}
 
 
-class _ProtocolText(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    kind: Literal["group", "orq", "external"]
-    me: str = ""
-    others: list[str] = []
-    task: str = ""
-    contract: str | None = None
-    # A linha do contrato de outra máquina entra com o grupo entre máquinas; hoje não muda o texto.
-    contract_remote: bool = False
-    harness: dict[str, str] = {}
-    peer: str = ""
-    owner: str = ""
-
-
-@router.post("/pair/text")
-async def pair_text(body: _ProtocolText) -> dict:
-    """Texto do protocolo que o Rust entrega a quem entra no grupo: a fonte continua `pair_texto`."""
-    from app import pair_texto
-    if body.kind == "orq":
-        return {"text": pair_texto.texto_grupo_orq(body.task)}
-    if body.kind == "external":
-        return {"text": pair_texto.texto_par_externo(body.me, body.peer, body.owner)}
-    if not body.others:
-        raise HTTPException(400)
-    return {"text": pair_texto.texto_grupo(body.me, body.others, body.task, body.contract, body.harness)}
-
-
 class _OrqGid(BaseModel):
     model_config = ConfigDict(extra="forbid")
     gid: str
@@ -332,10 +304,6 @@ class _OrqNames(BaseModel):
     names: list[str]
 
 
-class _OrqAssociate(_OrqPromote):
-    mtime: float
-
-
 @router.post("/orq/group-phase")
 async def orq_group_phase(body: _OrqGid) -> dict:
     from app.adapters.orq import runs
@@ -344,7 +312,7 @@ async def orq_group_phase(body: _OrqGid) -> dict:
 
 @router.post("/orq/promote")
 async def orq_promote(body: _OrqPromote) -> dict:
-    """O que o `pair.join_group` faz quando um grupo `orq` nasce, com os mesmos erros da rota `/pair`."""
+    """O Rust promove o time quando um grupo `orq` nasce, com os mesmos erros da rota `/pair`."""
     from app import orq_context, orq_md
     try:
         await internal_thread(orq_context.promote, body.name, body.gid)
@@ -361,13 +329,6 @@ async def orq_is_orchestrator(body: _OrqNames) -> dict:
     """Os nomes que são a linha do orquestrador: a recusa `_recusa_orq` das rotas de par."""
     from app.adapters.orq import runs
     return {"names": await internal_thread(lambda: [n for n in body.names if runs.find(n)])}
-
-
-@router.post("/orq/associate")
-async def orq_associate(body: _OrqAssociate) -> dict:
-    """`orq_context.associate` sem o `pair._LOCK`: o Rust segura o lock de grupo em volta."""
-    from app import api, orq_context
-    return await api._orq_associate(orq_context.associate_unlocked, body.name, body.gid, body.mtime)
 
 
 @router.get("/costs/scopes")

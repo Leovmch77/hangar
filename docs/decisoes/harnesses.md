@@ -888,6 +888,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   provados pelo golden do contrato. Ver
   [entradas juntadas pela CLI](#entradas-juntadas-pela-cli-numa-mensagem-só-14102026).
 
+- **O protocolo de grupo volta depois de `/clear` e compactação pelo `hangar-server pair-context`.**
+  É o comando do `SessionStart` (`startup|resume|clear|compact`) que o `hook_installer.py` grava em
+  cada conta, com a pasta `.hangar-pair` no argv e `|| exit 0`: lê o sidecar e os pares externos do
+  disco, sem rede nem token, e responde com o servidor parado. Grupo com par de fora traz as duas
+  partes. Só o Claude tem esse gancho: Codex, Pi, omp e Kimi perdem o protocolo ao compactar
+  (limite registrado). Ver [grupos: o Rust grava](plataforma.md#grupos-o-rust-grava).
+
 ## Religação ao mesmo cano vivo e avisos fora da tela (20/10/2026)
 
 (Branch `fix/session-recovery-and-alerts`, plano
@@ -952,8 +959,11 @@ do Rust aberto), no binário da `beta` anterior a `3ae696a96`. Agora: sidecar au
 leituras que toleram a troca do Windows tira a entrada sem matar nem dar erro
 (`release_closed_by_name`, `claude_sidecar_absent` no diário); `close()` sem kill ganha da
 religação em curso; o `DELETE` de Claude que entra pelo Connect (8768) vai ao Rust
-(`POST /__hangar_server/claude/<nome>/close`, contrato interno 84 → 85), com quem pediu no diário.
-Pi, omp e Kimi seguem fechando pelo nome no Python.
+(`POST /__hangar_server/claude/<nome>/close`, contrato interno 85 → 86 depois de juntar a `main`),
+com quem pediu no diário; a saída do grupo desse fechamento fica com o Python, que lê a fase do
+`orq` antes, para o Rust não perguntar de volta numa chamada dele. O Reabrir pelo Connect também vai
+ao Rust (`POST /__hangar_server/claude/<nome>/recarregar`). Pi, omp e Kimi seguem fechando pelo nome
+no Python.
 
 **Fora desta entrega.** `lifecycle_process_read` repetido nas sessões com terminal (17× no mesmo
 log) e `runtime_closed` uma vez por minuto já tinham causa e correção (`3ae696a96`;

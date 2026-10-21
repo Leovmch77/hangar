@@ -4,8 +4,8 @@ desta máquina (gravado no .env, onde o hangar-send e o pydantic na subida do ba
 A Task 1 só registra o roteador com a listagem vazia. As Tasks 5 e 8 (Lote B) escrevem
 aqui dentro, sem tocar em api.py.
 
-Nome do módulo: `peers_api` de propósito — `app/peers.py` já é a lógica de pareamento
-cross-server, e o módulo de rota não pode ocupar o nome dela.
+Nome do módulo: `peers_api` de propósito — `app/peers.py` já é a leitura do
+peers.json e as chamadas a outras máquinas, e o módulo de rota não pode ocupar o nome dela.
 """
 import hashlib
 import hmac

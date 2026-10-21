@@ -213,9 +213,9 @@ class Settings(BaseSettings):
     # default permissivo de proposito: o login do convidado e cookie, e aceitar origem arbitraria
     # deixaria qualquer site abrir um terminal com ele.
     term_origins: str = ""
-    # CP_SERVER_ID: id DESTA maquina no peers.json (mesmo que o hangar-send usa). Vazio = pareamento
-    # cross-server desligado; quando setado, vira o endereco de resposta 'srv::sessao' que o backend
-    # remoto recebe pra registrar o vinculo reverso. Recado 1:1 cross-server segue so no hangar-send.
+    # CP_SERVER_ID: id DESTA máquina no peers.json (mesmo que o hangar-send usa). Vazio = grupo
+    # entre máquinas desligado; quando setado, vira o endereço de resposta 'srv::sessao' e o nome
+    # desta máquina nos grupos entre máquinas. Recado 1:1 entre máquinas segue só no hangar-send.
     server_id: str = ""
     # Web Push (notificacao quando uma sessao fica awaiting_input). Par VAPID COMPARTILHADO entre os
     # servidores (single-user controla todos -> uma inscricao do celular serve os 3). Vazio = push

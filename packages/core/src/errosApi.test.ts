@@ -136,3 +136,22 @@ describe('recusas da abertura e da reabertura no Rust', () => {
     if (contem) expect(texto).toContain(contem);
   });
 });
+
+describe('grupos entre máquinas', () => {
+  it.each([
+    'groups_need_rust_server', 'erro_grupo_peer_nao_registrado', 'erro_grupo_peer_versao_antiga',
+    'erro_grupo_identificador_divergente', 'erro_grupo_identificador_trocado', 'erro_grupo_identificador_igual',
+    'erro_grupo_inexistente', 'erro_grupo_membro_nao_confirmado', 'erro_grupo_dono_indisponivel',
+    'erro_grupo_acesso_externo_falhou', 'erro_grupo_fila_cheia', 'erro_grupo_fusao_entre_donos',
+    'erro_grupo_orq_entre_maquinas', 'erro_grupo_mudou', 'erro_contrato_mudou', 'erro_link_remoto',
+  ])('%s vira frase do app, não o texto do servidor', (code) => {
+    const texto = formataErro({ code, params: { servidor: 'casa', membros: ['casa::a', 'casa::b'] }, msg: 'texto-do-servidor' });
+    expect(texto).not.toBe('texto-do-servidor');
+    expect(texto).not.toBe(code);
+  });
+
+  it('a lista de membros entra na frase', () => {
+    const texto = formataErro({ code: 'erro_grupo_membro_nao_confirmado', params: { membros: ['casa::a', 'casa::b'] }, msg: 'x' });
+    expect(texto).toContain('casa::a; casa::b');
+  });
+});

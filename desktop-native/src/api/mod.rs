@@ -142,6 +142,44 @@ fn envelope_code(body: Option<&Value>) -> Option<String> {
     body?.get("detail")?.get("code")?.as_str().map(str::to_owned)
 }
 
+/// Recusa ou aviso de grupo `{code, params}`: a frase do web pelo código.
+pub fn group_text(envelope: &Value) -> Option<String> {
+    let code = envelope.get("code")?.as_str()?;
+    if !(code.starts_with("erro_grupo_") || code.starts_with("erro_pareamento_") || matches!(code, "groups_need_rust_server"
+        | "erro_contrato_mudou" | "erro_link_remoto" | "erro_sessao_nao_pareada" | "erro_sessao_sem_grupo" | "erro_peer_nao_avisado"
+        | "erro_group_message_tempestade")) { return None; }
+    envelope_text(envelope)
+}
+
+/// `{code, params}` pela frase do web; `None` = código sem frase.
+fn envelope_text(envelope: &Value) -> Option<String> {
+    let code = envelope.get("code")?.as_str()?;
+    let params = envelope.get("params").and_then(Value::as_object)
+        .map(|p| p.iter().map(|(k, v)| (k.clone(), param_text(v))).collect()).unwrap_or_default();
+    crate::i18n::tr_web(code, &params)
+}
+
+/// Parâmetro como o `fmtParam` do web: lista com `; `, envelope traduzido (sem frase, o `msg`), `{sessao, erro}` como `sessao: erro`.
+fn param_text(v: &Value) -> String {
+    match v {
+        Value::Array(items) => items.iter().map(param_text).collect::<Vec<_>>().join("; "),
+        Value::String(s) => s.clone(),
+        Value::Object(o) if o.get("code").is_some_and(Value::is_string) => envelope_text(v)
+            .or_else(|| o.get("msg").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_else(|| o["code"].as_str().unwrap_or_default().to_owned()),
+        Value::Object(o) if o.contains_key("sessao") && o.contains_key("erro") => format!("{}: {}", param_text(&o["sessao"]), param_text(&o["erro"])),
+        other => other.to_string(),
+    }
+}
+
+/// Aviso de uma resposta que deu certo: a frase traduzida; código sem frase fica com o texto do servidor.
+pub fn warning_text(warning: &Value) -> String {
+    match warning {
+        Value::String(text) => text.clone(),
+        _ => envelope_text(warning).or_else(|| warning.get("msg").and_then(Value::as_str).map(str::to_owned)).unwrap_or_else(|| warning.to_string()),
+    }
+}
+
 /// A chave da frase de um código da abertura ou da troca de vida da sessão, e a da família dele.
 fn session_life_key(code: &str) -> Option<(&str, Option<&'static str>)> {
     let family = [("lifecycle_", "session_lifecycle_failed"), ("relaunch_", "session_relaunch_failed"), ("heal_", "session_heal_failed")]
@@ -179,6 +217,7 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
             }
+            if let Some(message) = group_text(detail) { return Some(message); }
             // Par externo, botões dos mods, abertura de sessão e conta presa: a frase do web pelo código; o `detalhe`
             // de uma recusa e o rótulo do botão vêm nos parâmetros.
             if let Some(code) = fields.get("code").and_then(Value::as_str)
@@ -1089,6 +1128,40 @@ mod tests {
         assert!(message.contains("(costs_no_disk)"), "{message}");
         let info = failure_detail(Some(json!({"detail": {"code": "internal_info", "params": {}, "msg": "x — internal_info"}})), 503);
         assert_eq!(info, crate::i18n::tr_web("history_internal_info", &Default::default()).unwrap());
+    }
+
+    #[test]
+    fn group_errors_use_the_shared_phrase_with_lists_joined() {
+        for code in ["groups_need_rust_server", "erro_grupo_peer_nao_registrado", "erro_grupo_fusao_entre_donos", "erro_contrato_mudou", "erro_link_remoto"] {
+            let message = failure_detail(Some(json!({"detail": {"code": code, "params": {"servidor": "casa"}, "msg": "frase fixa do servidor"}})), 409);
+            assert_ne!(message, "frase fixa do servidor", "{code}");
+            assert!(!message.contains('{'), "{code}: {message}");
+        }
+        let warning = json!({"code": "erro_grupo_membro_nao_confirmado", "params": {"membros": ["casa::a", "casa::b"]}, "msg": "x"});
+        let text = group_text(&warning).unwrap();
+        assert!(text.contains("casa::a; casa::b"), "{text}");
+    }
+
+    #[test]
+    fn pairing_and_session_group_errors_use_the_phrase_of_the_ui_language() {
+        crate::i18n::english_in_this_thread(true);
+        let detail = |code: &str| failure_detail(Some(json!({"detail": {"code": code, "params": {}, "msg": "frase fixa do servidor"}})), 409);
+        assert_eq!(detail("erro_sessao_sem_grupo"), "session is not in a group");
+        for code in ["erro_pareamento_desfeito", "erro_sessao_nao_pareada", "erro_peer_nao_avisado", "erro_group_message_tempestade"] {
+            assert_ne!(detail(code), "frase fixa do servidor", "{code}");
+        }
+    }
+
+    #[test]
+    fn close_warning_translates_each_nested_reason_and_keeps_unknown_text() {
+        let need = crate::i18n::tr_web("groups_need_rust_server", &Default::default()).unwrap();
+        let warning = json!({"code": "erro_pareamento_saida_falhou", "msg": "aviso de saída falhou: s1: texto cru", "params": {"avisos": [
+            {"sessao": "s1", "erro": {"code": "groups_need_rust_server", "params": {}, "msg": "texto cru"}},
+            {"sessao": "s2", "erro": {"code": "codigo_sem_frase", "params": {}, "msg": "motivo do servidor"}}]}});
+        let text = warning_text(&warning);
+        assert!(text.contains(&format!("s1: {need}")), "{text}");
+        assert!(text.contains("s2: motivo do servidor") && !text.contains("texto cru"), "{text}");
+        assert_eq!(warning_text(&json!({"code": "codigo_sem_frase", "msg": "cru"})), "cru");
     }
 
     #[test]

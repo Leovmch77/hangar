@@ -21,13 +21,15 @@ import { textoProblema } from '../lib/problema';
   import BottomSheet from './BottomSheet.svelte';
   import HangarWorking from './icons/HangarWorking.svelte';
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
+  import GroupGlyph from './icons/GroupGlyph.svelte';
   import SessionSignals from './SessionSignals.svelte';
   import { navegadorPanel } from '../lib/navegadorPanel.svelte';
   import { workspaceSessionKey } from '../lib/workspaceCommands';
 
   interface Props {
     session: SessionInfo;
-    serverBadge?: { label: string; color: string } | null;
+    // Selo do grupo que atravessa máquinas: código do ticket ou quantas máquinas; toque abre o painel.
+    groupBadge?: { label: string; onOpen: () => void } | null;
     onClick: () => void;
     onDelete: () => void;
     onResume?: () => void;
@@ -53,7 +55,7 @@ import { textoProblema } from '../lib/problema';
     onOpenArbiter?: () => void;
   }
   let {
-    session, serverBadge = null, onClick, onDelete, onResume, onRename, onGit, onGroupDrag,
+    session, groupBadge = null, onClick, onDelete, onResume, onRename, onGit, onGroupDrag,
     selectMode = false, selected = false, onToggleSelect,
     showFolder = false, peers, onShare, onPairAccept, onBastao, onOpenArbiter,
   }: Props = $props();
@@ -574,7 +576,7 @@ import { textoProblema } from '../lib/problema';
           <span class="reply-text">{session.last_reply}</span>
         </span>
       {/if}
-      {#if !orq || serverBadge || branchShown || mostraPasta || loopChip || pendentes.length
+      {#if !orq || groupBadge || branchShown || mostraPasta || loopChip || pendentes.length
            || session.git_ahead || session.git_behind || session.git_added || session.git_removed}
         <span class="meta-line">
           {#if !orq}
@@ -584,8 +586,15 @@ import { textoProblema } from '../lib/problema';
               <span class="prov-chip"><ProviderGlyph provider={session.provider} size={12} />{providerName(session.provider)}</span>
             {/if}
           {/if}
-          {#if serverBadge}
-            <span class="srv" style="color: {serverBadge.color};">{serverBadge.label}</span>
+          {#if groupBadge}
+            <!-- keydown também para aqui: o Enter subiria até a linha e abriria o chat. -->
+            <button type="button" class="grp-selo" title={m.sessao_grupo_pareado({ label: groupBadge.label })}
+              aria-label={m.sessao_grupo_pareado({ label: groupBadge.label })}
+              onpointerdown={(e) => e.stopPropagation()}
+              onkeydown={(e) => e.stopPropagation()}
+              onclick={(e) => { e.stopPropagation(); groupBadge.onOpen(); }}>
+              <GroupGlyph size={11} /><span class="grp-selo-txt">{groupBadge.label}</span>
+            </button>
           {/if}
           {#if mostraPasta}
             <!-- Só a última pasta, com ícone no lugar do prefixo; caminho inteiro no title e no
@@ -1104,14 +1113,14 @@ import { textoProblema } from '../lib/problema';
   .status-sub.reply { display: flex; align-items: center; gap: 4px; color: var(--text-secondary); }
   .reply-mark { flex-shrink: 0; color: var(--text-muted); font-size: 8px; }
   .reply-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .srv {
-    font-weight: 600;
-    flex-shrink: 0;
-    max-width: 90px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .grp-selo {
+    display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; max-width: 120px;
+    background: none; border: 0; padding: 0; font: inherit; font-weight: 600; color: var(--accent);
+    cursor: pointer; min-height: 0; min-width: 0; position: relative;
   }
+  /* Alvo de toque maior que o selo, sem mexer na linha. */
+  .grp-selo::after { content: ''; position: absolute; inset: -10px -4px; }
+  .grp-selo-txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cwd {
     display: flex;
     min-width: 0;

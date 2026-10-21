@@ -305,6 +305,18 @@ def test_three_crashes_in_a_minute_hand_the_public_port_to_python(
     assert relog                                    # o diário voltou a ouvir o uvicorn
 
 
+def test_child_crash_unpoints_the_groups_bridge(fake_bin, tmp_path, monkeypatch, relog):
+    """BRG-07: queda do filho apaga endereço e segredo da ponte de grupos antes de qualquer outro pedido."""
+    from app import groups_bridge
+    seen = []
+    monkeypatch.setattr(diag, "registrar", lambda evento, nivel="ok", **campos: seen.append((evento, groups_bridge._config)))
+    _run_until_takeover(fake_bin, tmp_path, monkeypatch, crash=True)
+    up = [cfg for ev, cfg in seen if ev in ("hangar_server.de_pe", "hangar_server.voltou")]
+    down = [cfg for ev, cfg in seen if ev == "hangar_server.caiu"]
+    assert up and all(cfg is not None for cfg in up)
+    assert down and all(cfg is None for cfg in down)
+
+
 def test_rust_back_after_give_up_takes_the_public_port_again(
         fake_bin, tmp_path, monkeypatch, events, relog):
     monkeypatch.setenv("FAKE_MODE", "cai_ate")
@@ -740,7 +752,7 @@ def test_watcher_failure_puts_the_cause_in_the_diary(monkeypatch, events):
 def test_protocol_is_the_same_number_on_both_sides():
     lib = (Path(__file__).resolve().parents[2] / "crates/hangar-server/src/lib.rs").read_text()
     rust = int(re.search(r"pub const INTERNAL_PROTOCOL: u32 = (\d+);", lib).group(1))
-    assert rust == rust_server.RUST_SERVER_PROTOCOL == 85
+    assert rust == rust_server.RUST_SERVER_PROTOCOL == 86
 
 
 def _child_env(monkeypatch, tmp_path, host, port):

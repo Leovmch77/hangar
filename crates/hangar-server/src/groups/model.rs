@@ -28,6 +28,23 @@ pub struct Sidecar {
 #[serde(deny_unknown_fields)]
 pub struct Member { pub server: String, pub name: String, #[serde(default)] pub provider: String }
 
+impl Member {
+    pub fn new(server: &str, name: &str, provider: &str) -> Member { Member { server: server.into(), name: name.into(), provider: provider.into() } }
+
+    /// `srv::nome` vira membro de `srv`; nome cru é de `me`.
+    pub fn parse(me: &str, raw: &str) -> Member {
+        match raw.split_once("::") { Some((srv, name)) => Member::new(srv, name, ""), None => Member::new(me, raw, "") }
+    }
+
+    /// Como aparece para a máquina `me`: nome cru se é dela, `srv::nome` se não.
+    pub fn view(&self, me: &str) -> String { if self.server == me { self.name.clone() } else { self.key() } }
+
+    pub fn key(&self) -> String { format!("{}::{}", self.server, self.name) }
+
+    /// Mesma sessão, sem olhar o provedor.
+    pub fn same(&self, other: &Member) -> bool { self.server == other.server && self.name == other.name }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupRecord {
@@ -38,7 +55,15 @@ pub struct GroupRecord {
     #[serde(default)]
     pub task: String,
     pub members: Vec<Member>,
+    /// Pares de fora, só informativo: o par vale na máquina da ponta e nenhuma outra o grava.
+    #[serde(default)]
+    pub outside: Vec<OutsideRef>,
 }
+
+/// Membro de fora visto pela dona: `server` é a máquina onde o par foi feito.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutsideRef { pub server: String, pub address: String }
 
 impl Sidecar {
     /// `PairLink.get` (pair.py:75-94), regra movida de `links.rs::pair_of` sem mudança.
@@ -75,6 +100,9 @@ impl Sidecar {
         if let Some(parent) = &self.linked_by { body["linked_by"] = json!(parent); }
         body
     }
+
+    /// A dona do grupo entre máquinas; grupo comum é de `me`.
+    pub fn owner_or(&self, me: &str) -> String { self.fed.as_ref().map_or_else(|| me.to_owned(), |f| f.owner.clone()) }
 
     /// O pai só vale enquanto estiver em `peers`: sair do grupo desfaz o vínculo sem apagar o campo.
     pub fn linked_parent(&self) -> Option<&str> {

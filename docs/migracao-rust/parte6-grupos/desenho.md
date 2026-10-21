@@ -292,6 +292,8 @@ e `/internal/orq/group-phase` antes de dissolver grupo `orq` (falha = `unknown` 
 associação do time (`orq_context.associate`) passa a ser a operação de ponte `group.orq_associate`:
 o Rust toma o lock e chama `/internal/orq/associate`, que roda o corpo de hoje sem o `pair._LOCK`.
 Os arquivos `regras-*` continuam do Python; o Rust só funde e arquiva.
+*Superado em `plano-federacao.md` (Task 4): o Python manda os fatos do `orq` no `group.orq_associate`
+e o Rust associa (e move o `regras-*`) sob o lock; `/internal/orq/associate` não existe mais.*
 
 ### 4.8 Par externo
 

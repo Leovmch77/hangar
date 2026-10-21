@@ -182,3 +182,52 @@ fn peek_keeps_old_writer_unix_private_socket() {
     exercise_stream(old, peek);
     std::fs::remove_file(path).unwrap();
 }
+
+/// Um `Read` de PDF grande volta inteiro no eco do `--replay-user-messages`: a linha passa do teto e o
+/// cano precisa pulá-la e seguir lendo, senão a sessão fica em `working` para sempre.
+#[cfg(unix)]
+#[test]
+fn a_line_above_the_ceiling_is_skipped_and_the_next_lines_still_arrive() {
+    use std::io::{BufRead, Write};
+    use std::os::unix::net::UnixStream;
+    let dir = std::env::temp_dir().join(format!("hangar-cano-teto-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let (sock, log) = (dir.join("c.sock"), dir.join("cano.log"));
+    let big = 17 * 1024 * 1024;
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_hangar-cano"))
+        .arg("--escuta").arg(format!("unix:{}", sock.display())).args(["--token", "secret-test", "--log"]).arg(&log)
+        .args(["--", "python3", "-u", "-c", &format!(
+            "import sys\nsys.stdin.readline()\nsys.stdout.write('{{\"type\":\"user\",\"x\":\"' + 'x'*{big} + '\"}}\\n')\n\
+             sys.stdout.write('{{\"type\":\"result\",\"subtype\":\"success\"}}\\n')\nsys.stdout.flush()\nsys.stdin.readline()")])
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null()).spawn().unwrap();
+    let _child = FakeCano(child);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let stream = loop {
+        match UnixStream::connect(&sock) {
+            Ok(stream) => break stream,
+            Err(_) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(error) => panic!("cano não iniciou: {error}"),
+        }
+    };
+    stream.set_read_timeout(Some(READ_WAIT)).unwrap();
+    let mut stream = std::io::BufReader::new(stream);
+    stream.get_mut().write_all(b"secret-test\n").unwrap();
+    let mut line = String::new();
+    stream.read_line(&mut line).unwrap();
+    stream.get_mut().write_all(b"{\"type\":\"cano_input\",\"operation_id\":\"wire:1\",\"frame\":\"{\\\"type\\\":\\\"user\\\"}\"}\n").unwrap();
+    let mut outputs = Vec::new();
+    loop {
+        line.clear();
+        assert!(stream.read_line(&mut line).unwrap() > 0, "cano fechou sem entregar o result");
+        let value: Value = serde_json::from_str(&line).unwrap();
+        if value["type"] != "cano_output" { continue; }
+        let frame: Value = serde_json::from_str(value["frame"].as_str().unwrap()).unwrap();
+        outputs.push(frame["type"].as_str().unwrap().to_owned());
+        if frame["type"] == "result" { break; }
+    }
+    assert_eq!(outputs, ["result"], "a linha gigante não vai ao servidor, a seguinte vai");
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.contains("acima do teto") && text.contains(&(big + 22).to_string()), "{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

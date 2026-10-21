@@ -23,13 +23,14 @@ export function resolveDrop(
   hitChave: string | null,
   origemChave: ChaveSessao | null,
   rows: SessaoComServidor[],
+  identities: ReadonlyMap<string, string> = new Map(),
 ): DropDecision {
   const origem = origemChave
     ? (rows.find((r) => r.serverId === origemChave.serverId && r.name === origemChave.name) ?? null)
     : null;
   if (hitChave) {
     const alvo = rows.find((r) => dragChave(r) === hitChave) ?? null;
-    if (origem && alvo && canPair(origem, alvo).ok) return { kind: 'pair', chave: hitChave };
+    if (origem && alvo && canPair(origem, alvo, identities).ok) return { kind: 'pair', chave: hitChave };
     return { kind: 'none' };
   }
   if (origem && canLeave(origem)) return { kind: 'leave' };

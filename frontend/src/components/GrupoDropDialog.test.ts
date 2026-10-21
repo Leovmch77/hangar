@@ -8,7 +8,8 @@ import * as apiLib from '@hangar/core';
 import { withServer } from '../lib/auth';
 import type { AggSession } from '@hangar/core';
 
-const storeState = vi.hoisted(() => ({ rows: [] as unknown[], undo: vi.fn(), markLeavingPair: vi.fn(), anchored: [] as unknown[] }));
+const storeState = vi.hoisted(() => ({ rows: [] as unknown[], undo: vi.fn(), markLeavingPair: vi.fn(), anchored: [] as unknown[],
+  identities: new Map<string, string>() }));
 
 vi.mock('@hangar/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@hangar/core')>()),
@@ -24,7 +25,7 @@ vi.mock('../lib/auth', () => ({
 }));
 
 vi.mock('../lib/sessionsStore.svelte', () => ({
-  sessionsStore: { get rows() { return storeState.rows; }, markLeavingPair: storeState.markLeavingPair,
+  sessionsStore: { get rows() { return storeState.rows; }, get identities() { return storeState.identities; }, markLeavingPair: storeState.markLeavingPair,
     anchoredPairs: (serverId: string, name: string) => serverId === 'srv1' && name === 'hangar' ? storeState.anchored : [] },
 }));
 
@@ -70,6 +71,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   storeState.rows = [];
   storeState.anchored = [];
+  storeState.identities = new Map();
   storeState.markLeavingPair.mockReturnValue(storeState.undo);
   arrastarGrupo.cancelar();
 });
@@ -100,6 +102,45 @@ describe('GrupoDropDialog — modo agrupar', () => {
     expect(api.pairSession).toHaveBeenCalledWith('alvo', ['origem'], 'PM-1', false);
     // Sucesso sem warning fecha o diálogo (o pedido volta a null).
     expect(arrastarGrupo.pedido).toBeNull();
+    unmount(comp);
+  });
+
+  it('entre máquinas: pede ao servidor do ALVO com a origem qualificada pelo identificador dela', async () => {
+    storeState.rows = [
+      sess({ name: 'origem', serverId: 'srv2' }),
+      sess({ name: 'alvo', serverId: 'srv1' }),
+    ];
+    storeState.identities = new Map([['srv1', 'casa'], ['srv2', 'lab']]);
+    api.pairSession.mockResolvedValue({ ok: true, warning: null });
+    const comp = montar();
+
+    arrastarGrupo.comecar({ serverId: 'srv2', name: 'origem' });
+    arrastarGrupo.soltar('srv1::alvo');
+    await tick();
+    digitar('PM-2');
+    await tick();
+    clicarBotao(m.grupo_drop_confirmar());
+    await flush();
+
+    expect(withServer).toHaveBeenCalledWith('srv1', expect.any(Function));
+    expect(api.pairSession).toHaveBeenCalledWith('alvo', ['lab::origem'], 'PM-2', false);
+    unmount(comp);
+  });
+
+  it('entre máquinas sem identificador: recusa com a frase e não pede nada', async () => {
+    storeState.rows = [
+      sess({ name: 'origem', serverId: 'srv2' }),
+      sess({ name: 'alvo', serverId: 'srv1' }),
+    ];
+    storeState.identities = new Map([['srv1', 'casa']]);
+    const comp = montar();
+
+    arrastarGrupo.comecar({ serverId: 'srv2', name: 'origem' });
+    arrastarGrupo.soltar('srv1::alvo');
+    await tick();
+
+    expect(document.body.textContent).toContain(m.grupo_recusa_sem_identificador());
+    expect(api.pairSession).not.toHaveBeenCalled();
     unmount(comp);
   });
 

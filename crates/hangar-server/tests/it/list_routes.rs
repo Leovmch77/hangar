@@ -330,3 +330,41 @@ async fn history_comes_from_the_rust_discovery() {
     assert_eq!(srv.python.hits_to("/internal/sessions/s0/reopen"), 0);
     assert_eq!(srv.python.info_calls(), 0);
 }
+
+fn write_fed_sidecar(home: &std::path::Path, owner: &str) {
+    let pair = home.join("home/.claude/.hangar-pair");
+    std::fs::create_dir_all(&pair).unwrap();
+    let sidecar = json!({"peers": ["s0"], "task": "T", "gid": "g1", "fed": {"owner": owner, "local": false, "version": 1}});
+    std::fs::write(pair.join("s1.json"), sidecar.to_string()).unwrap();
+}
+
+/// A máquina dona do grupo vem do `fed.owner` do sidecar; sem grupo entre máquinas, o campo não vai.
+#[tokio::test(flavor = "multi_thread")]
+async fn row_carries_pair_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    write_fed_sidecar(dir.path(), "casa");
+    srv.list.invalidate();
+    let (status, body) = get(srv.addr, OWNER).await;
+    assert_eq!(status, 200);
+    let row = |n: &str| body.as_array().unwrap().iter().find(|r| r["name"] == n).unwrap().clone();
+    assert_eq!(row("s1")["pair_owner"], "casa");
+    assert!(row("s0").get("pair_owner").is_none(), "sem `fed`, sem campo: {}", row("s0"));
+}
+
+/// Só a dona muda: sem `pair_owner` na assinatura a lista ficava com a máquina velha.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_reemits_when_only_the_owner_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    write_fed_sidecar(dir.path(), "casa");
+    let mut es = open(srv.addr).await;
+    let mut next = async || -> Value {
+        tokio::time::timeout(Duration::from_millis(3500), next_named(&mut es, "sessions")).await
+            .map(|ev| serde_json::from_str(&ev.data).unwrap()).expect("a lista não reemitiu")
+    };
+    let mut rows = next().await;
+    while rows[1]["pair_owner"] != "casa" { rows = next().await; }
+    write_fed_sidecar(dir.path(), "lab");
+    assert_eq!(next().await[1]["pair_owner"], "lab");
+}

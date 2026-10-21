@@ -154,28 +154,6 @@ def test_casar_viva_exato_e_glob():
     assert op.casar_viva(op.Papel("x", "", "", "", "", ""), sess) is None
 
 
-def test_leave_apaga_regras_junto_com_grupo():
-    pair.join("a", "b", "t")
-    gid = pair.PairLink("a").get()["gid"]
-    (pair._pair_dir() / f"grupo-{gid}.md").write_text("g")
-    op.regras_path(gid).write_text("r")
-    pair.leave("a")
-    assert not (pair._pair_dir() / f"grupo-{gid}.md").exists()
-    assert not op.regras_path(gid).exists()
-
-
-def test_merge_funde_regras_e_apaga_o_orfao():
-    pair.join("a", "b", "t")
-    pair.join("c", "d", "t")
-    ga, gc = pair.PairLink("a").get()["gid"], pair.PairLink("c").get()["gid"]
-    op.regras_path(ga).write_text("regras A")
-    op.regras_path(gc).write_text("regras C")
-    pair.join("a", "c", "t")
-    vivo = pair.PairLink("a").get()["gid"]
-    perdedor = gc if vivo == ga else ga
-    assert not op.regras_path(perdedor).exists()
-    texto = op.regras_path(vivo).read_text()
-    assert "regras A" in texto and "regras C" in texto
 
 
 def test_session_mode_preserves_omission_and_explicit_terminal():

@@ -8,7 +8,6 @@ from app.auth import require_auth
 from app.config import settings
 from app import pair, tmux
 from app import registry as registry_mod
-from app.registry import SessionRegistry
 import app.api as api_mod
 
 
@@ -23,7 +22,6 @@ def _pair_dir_isolado(tmp_path, monkeypatch):
     # registry.list() varre pareamento (Task 8) a cada chamada, inclusive dentro de rotas exercitadas
     # via TestClient — sem isto a suite varria o .hangar-pair REAL de quem roda (achado do review).
     monkeypatch.setattr(pair.settings, "projects_dir", tmp_path / "projects")
-    monkeypatch.setattr(SessionRegistry, "_pair_ausencias", {})
     # api.py registra este gancho no import (dispara thread real de _drain_session, que chama
     # registry.list() de novo) — sem neutraliza-lo aqui, um sweep achando ausente de verdade nesta
     # suite dispararia essa thread fora da janela isolada (achado do review de Task 8).
@@ -394,26 +392,6 @@ def test_broadcast_rejects_slash_commands(api_client):
         r = api_client.post("/api/broadcast", json={"names": ["a"], "text": "/clear"}, headers=_h())
     assert r.status_code == 400
     sp.assert_not_called()
-
-
-def test_group_message_delivers_to_peers_not_self(api_client):
-    # hangar-send --group: entrega "[grupo: me] ..." a CADA companheiro, nunca à própria sessão.
-    with patch("app.api.PairLink.get", return_value={"peers": ["b", "c"], "task": "", "gid": "g1"}), \
-         patch("app.api.terminal.send_prompt", return_value="sent") as sp, \
-         patch("app.pqueue.PromptQueue.append"):
-        r = api_client.post("/api/sessions/a/group-message", json={"text": "terminei"}, headers=_h())
-    assert r.status_code == 200
-    body = r.json()
-    assert body["peers"] == ["b", "c"] and body["warning"] is None
-    sent_to = [c.args[0] for c in sp.call_args_list]
-    assert sorted(sent_to) == ["b", "c"]  # nunca "a"
-    assert all(c.args[1] == "[grupo: a] terminei" for c in sp.call_args_list)
-
-
-def test_group_message_404_when_not_in_group(api_client):
-    with patch("app.api.PairLink.get", return_value=None):
-        r = api_client.post("/api/sessions/a/group-message", json={"text": "oi"}, headers=_h())
-    assert r.status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -2132,24 +2110,6 @@ def test_broadcast_uses_send_thread(api_client, monkeypatch):
     assert calls.count("_send_one") == 2
 
 
-def test_group_message_uses_send_thread(api_client, monkeypatch):
-    from app import api as api_mod
-    calls = []
-
-    async def spy(fn, *a):
-        calls.append(fn.__name__)
-        if fn is api_mod._session_exists:
-            return True
-        return {"ok": True, "delivered": True}
-
-    monkeypatch.setattr(api_mod, "_send_thread", spy)
-    monkeypatch.setattr(api_mod, "_provider_of", lambda n: "claude")
-    monkeypatch.setattr(api_mod.PairLink, "get", lambda self: {"peers": ["peer1"]})
-    r = api_client.post("/api/sessions/lider/group-message", json={"text": "marco"}, headers=_h())
-    assert r.status_code == 200
-    assert "_send_one" in calls
-
-
 # ---------------------------------------------------------------------------
 # Modelo + nivel de raciocinio do Pi — GET/POST /pi/model(s)
 # ---------------------------------------------------------------------------
@@ -2808,447 +2768,30 @@ def test_texto_do_fallback_nao_diz_que_falhou():
     assert api_mod._pi_answer_fallback_text({"kind": "option", "labels": []}) == ""
 
 
-# ---------------------------------------------------------------------------
-# Round 2 do parecer task 11: warnings estruturados, unpair sem 500, envio dinamico envelopado
-# ---------------------------------------------------------------------------
-
-def test_pair_warning_parcial_carrega_avisos_estruturados(api_client):
-    # B1: falha parcial do aviso -> warning com params.avisos = [{sessao, erro}] (o front monta a
-    # lista traduzida a partir dela; sem o param o template renderizaria "aviso falhou em: " vazio).
-    async def fake_deliver(name, text):
-        if name == "voce":
-            return {"code": "erro_fila_nao_digitada", "params": {"erro": "No space"},
-                    "msg": "fila indisponivel e prompt nao foi digitado: No space"}
-        return None
-    with patch("app.api.registry.list",
-              return_value=[SessionInfo(name="me", cwd="/p"), SessionInfo(name="voce", cwd="/p")]), \
-         patch("app.api.pair.join_group", return_value=(["me", "voce"], {"me": None, "voce": None})), \
-         patch("app.api.PairLink.get", return_value={"peers": ["voce"], "task": "", "gid": "g1"}), \
-         patch("app.api._deliver", side_effect=fake_deliver):
-        r = api_client.post("/api/sessions/me/pair", headers=_h(),
-                            json={"peers": ["voce"], "task": "t"})
-    assert r.status_code == 200
-    w = r.json()["warning"]
-    assert w["code"] == "erro_pareamento_aviso_parcial"
-    assert w["params"]["avisos"] == [{
-        "sessao": "voce",
-        "erro": {"code": "erro_fila_nao_digitada", "params": {"erro": "No space"},
-                 "msg": "fila indisponivel e prompt nao foi digitado: No space"},
-    }]
-
-
-def test_pair_desfaz_o_grupo_quando_ninguem_e_avisado(api_client):
-    # O caminho que produziu um 502 real em 08/09/2026: o composer de duas sessões recém-abertas
-    # não pôde ser lido, `_deliver` falhou nas DUAS, e o grupo tinha de ser revertido — grupo
-    # fantasma (badge sem ninguém saber que está pareado) é pior que pareamento nenhum. A cobertura
-    # existente só olhava a falha PARCIAL, que devolve 200 com warning; esta é a total.
-    snap = {"me": None, "voce": None}
-    restaurados = []
-    async def falha_em_todos(name, text):
-        return {"code": "erro_fila_nao_digitada", "params": {}, "msg": "composer ilegivel"}
-    with patch("app.api.registry.list",
-              return_value=[SessionInfo(name="me", cwd="/p"), SessionInfo(name="voce", cwd="/p")]), \
-         patch("app.api.pair.join_group", return_value=(["me", "voce"], snap)), \
-         patch("app.api.PairLink.get", return_value={"peers": ["voce"], "task": "", "gid": "g1"}), \
-         patch("app.api.pair.restore", side_effect=lambda s: restaurados.append(s)), \
-         patch("app.api._deliver", side_effect=falha_em_todos):
-        r = api_client.post("/api/sessions/me/pair", headers=_h(),
-                            json={"peers": ["voce"], "task": "t"})
-    assert r.status_code == 502
-    assert r.json()["detail"]["code"] == "erro_pareamento_desfeito"
-    # O snapshot restaurado é o MESMO que o join devolveu: sem isso o rollback "funciona" gravando
-    # um estado inventado, e o teste passaria com o grupo meio desfeito.
-    assert restaurados == [snap]
-
-
-def test_pair_mistura_cross_server_vem_com_envelope_traduzivel(api_client):
-    # PairMixError saía como `HTTPException(400, str(e))` cru, ao lado de um irmão (TaskConflito) já
-    # migrado: o celular mostrava texto do backend em vez da frase no idioma do app.
-    with patch("app.api.registry.list",
-              return_value=[SessionInfo(name="me", cwd="/p"), SessionInfo(name="voce", cwd="/p")]), \
-         patch("app.api.pair.join_group", side_effect=pair.PairMixError("ja pareada cross-server")):
-        r = api_client.post("/api/sessions/me/pair", headers=_h(),
-                            json={"peers": ["voce"], "task": "t"})
-    assert r.status_code == 400
-    assert r.json()["detail"]["code"] == "erro_pareamento_mistura_cross"
-
-
-def test_pair_cross_server_feliz_registra_os_dois_lados(api_client, monkeypatch):
-    # O handshake /pair→/pair-remote não tinha teste de rota nenhum: só a unidade `join_group` com
-    # peer remoto. Aqui o endpoint inteiro, com o peer mockado no lugar da outra máquina.
-    from app import api as api_mod
-    monkeypatch.setattr(api_mod.settings, "server_id", "srv-a")
-    chamadas = []
-    with patch("app.api.registry.list", return_value=[SessionInfo(name="me", cwd="/p")]), \
-         patch("app.api.peers.is_remote", side_effect=lambda p: p.startswith("srv-b::")), \
-         patch("app.api.peers.split_addr", return_value=("srv-b", "x")), \
-         patch("app.api.pair.join_group", return_value=(["me", "srv-b::x"], {"me": None})), \
-         patch("app.api.PairLink.get", return_value={"peers": ["srv-b::x"], "task": "t", "gid": "g1"}), \
-         patch("app.api.peers.call", side_effect=lambda *a, **k: chamadas.append(a) or {}), \
-         patch("app.api._deliver", return_value=None):
-        r = api_client.post("/api/sessions/me/pair", headers=_h(),
-                            json={"peers": ["srv-b::x"], "task": "t"})
-    assert r.status_code == 200 and r.json()["warning"] is None
-    # O endereço de resposta que vai pro outro lado é `<server_id>::<sessao>` — sem ele o peer não
-    # sabe pra quem responder, e o recado de volta cai num nome que não existe lá.
-    assert chamadas and chamadas[0][2] == "/api/sessions/x/pair-remote"
-
-
-def test_pair_cross_server_desfaz_deste_lado_quando_o_peer_recusa(api_client, monkeypatch):
-    # Peer rejeitou (não é falha de rede): desfaz aqui e NÃO tenta limpar lá — o outro lado não
-    # chegou a comitar. O 502 tem de vir com envelope, não com texto cru.
-    from app import api as api_mod
-    from app import peers as peers_mod
-    monkeypatch.setattr(api_mod.settings, "server_id", "srv-a")
-    snap = {"me": None}
-    restaurados, chamadas = [], []
-    def call(srv, metodo, rota, corpo=None):
-        chamadas.append(rota)
-        raise peers_mod.PeerError("sessão não encontrada lá", transport=False)
-    with patch("app.api.registry.list", return_value=[SessionInfo(name="me", cwd="/p")]), \
-         patch("app.api.peers.is_remote", side_effect=lambda p: p.startswith("srv-b::")), \
-         patch("app.api.peers.split_addr", return_value=("srv-b", "x")), \
-         patch("app.api.pair.join_group", return_value=(["me", "srv-b::x"], snap)), \
-         patch("app.api.PairLink.get", return_value={"peers": ["srv-b::x"], "task": "t", "gid": "g1"}), \
-         patch("app.api.pair.restore", side_effect=lambda s: restaurados.append(s)), \
-         patch("app.api.peers.call", side_effect=call):
-        r = api_client.post("/api/sessions/me/pair", headers=_h(),
-                            json={"peers": ["srv-b::x"], "task": "t"})
-    assert r.status_code == 502
-    assert r.json()["detail"]["code"] == "erro_pareamento_rejeitado"
-    assert restaurados == [snap]
-    # Rejeição não é rede: o unpair-remote de garantia é só do ramo `transport=True`.
-    assert [c for c in chamadas if "unpair-remote" in c] == []
-
-
-def test_pair_warning_none_quando_todos_avisados(api_client):
-    # B1: sem falha -> warning None (array vazio nunca chega ao formatador do front).
-    with patch("app.api.registry.list",
-              return_value=[SessionInfo(name="me", cwd="/p"), SessionInfo(name="voce", cwd="/p")]), \
-         patch("app.api.pair.join_group", return_value=(["me", "voce"], {"me": None, "voce": None})), \
-         patch("app.api.PairLink.get", return_value={"peers": ["voce"], "task": "", "gid": "g1"}), \
-         patch("app.api._deliver", return_value=None):
-        r = api_client.post("/api/sessions/me/pair", headers=_h(),
-                            json={"peers": ["voce"], "task": "t"})
-    assert r.status_code == 200
-    assert r.json()["warning"] is None
-
-
-# ---------------------------------------------------------------------------
-# Task 2: protocolo completo só pro recém-chegado
-# ---------------------------------------------------------------------------
-
-def test_pair_protocolo_so_pro_novato_veterano_nao_e_acordado(api_client):
-    # 'd' entra num grupo (a,b): d recebe o protocolo; a e b nada (consultam o grupo quando precisarem).
-    entregues = {}
-    async def fake_deliver(name, text):
-        entregues[name] = text
-        return None
-    snap = {"a": {"peers": ["b"], "task": "t", "gid": "g1"},
-            "b": {"peers": ["a"], "task": "t", "gid": "g1"},
-            "d": None}
-    with patch("app.api.registry.list",
-               return_value=[SessionInfo(name=n, cwd="/p") for n in ("a", "b", "d")]), \
-         patch("app.api.pair.join_group", return_value=(["a", "b", "d"], snap)), \
-         patch("app.api.PairLink.get", return_value={"peers": ["a", "b"], "task": "t", "gid": "g1"}), \
-         patch("app.api._deliver", side_effect=fake_deliver):
-        r = api_client.post("/api/sessions/d/pair", headers=_h(), json={"peers": ["a"], "task": ""})
-    assert r.status_code == 200
-    assert list(entregues) == ["d"]
-    assert entregues["d"].startswith("[painel: grupo de trabalho] Você, 'd', está num grupo de trabalho")
-
-
-def test_pair_sem_avisar_membros_so_o_novato_recebe(api_client):
-    # O vigia junta ao grupo quem ficou de fora: a linha "entrou no seu grupo" acordaria cada veterano.
-    entregues = {}
-    async def fake_deliver(name, text):
-        entregues[name] = text
-        return None
-    snap = {"a": {"peers": ["b"], "task": "t", "gid": "g1"},
-            "b": {"peers": ["a"], "task": "t", "gid": "g1"},
-            "d": None}
-    with patch("app.api.registry.list",
-               return_value=[SessionInfo(name=n, cwd="/p") for n in ("a", "b", "d")]), \
-         patch("app.api.pair.join_group", return_value=(["a", "b", "d"], snap)), \
-         patch("app.api.PairLink.get", return_value={"peers": ["b", "d"], "task": "t", "gid": "g1"}), \
-         patch("app.api._deliver", side_effect=fake_deliver):
-        r = api_client.post("/api/sessions/a/pair", headers=_h(),
-                            json={"peer": "d", "task": "t", "notify_members": False})
-    assert r.status_code == 200, r.text
-    assert list(entregues) == ["d"]
-    assert entregues["d"].startswith("[painel: grupo de trabalho] Você, 'd', está num grupo de trabalho")
-
-
-def test_pair_repetido_sem_mudanca_nao_avisa_ninguem(api_client):
-    entregues = []
-    async def fake_deliver(name, text):
-        entregues.append(name)
-        return None
-    snap = {"a": {"peers": ["b"], "task": "t", "gid": "g1"},
-            "b": {"peers": ["a"], "task": "t", "gid": "g1"}}
-    with patch("app.api.registry.list",
-               return_value=[SessionInfo(name=n, cwd="/p") for n in ("a", "b")]), \
-         patch("app.api.pair.join_group", return_value=(["a", "b"], snap)), \
-         patch("app.api.PairLink.get", return_value={"peers": ["b"], "task": "t", "gid": "g1"}), \
-         patch("app.api._deliver", side_effect=fake_deliver):
-        r = api_client.post("/api/sessions/a/pair", headers=_h(), json={"peers": ["b"], "task": ""})
-    assert r.status_code == 200
-    assert entregues == []
-    assert r.json()["warning"] is None
-
-
-def test_pair_de_orquestracao_nao_avisa_ninguem(api_client):
-    # Cada sessão de Task que entra acordava o grupo inteiro; o kick-off já traz o protocolo.
-    entregues = []
-    async def fake_deliver(name, text):
-        entregues.append(name)
-        return None
-    snap = {"a": {"peers": ["b"], "task": "t", "gid": "g1", "orq": True},
-            "b": {"peers": ["a"], "task": "t", "gid": "g1", "orq": True},
-            "d": None}
-    with patch("app.api.registry.list",
-               return_value=[SessionInfo(name=n, cwd="/p") for n in ("a", "b", "d")]), \
-         patch("app.api.pair.join_group", return_value=(["a", "b", "d"], snap)) as join, \
-         patch("app.api.PairLink.get", return_value={"peers": ["b", "d"], "task": "t", "gid": "g1", "orq": True}), \
-         patch("app.api._deliver", side_effect=fake_deliver):
-        r = api_client.post("/api/sessions/a/pair", headers=_h(), json={"peer": "d", "task": "t", "orq": True})
-    assert r.status_code == 200, r.text
-    assert entregues == []
-    assert join.call_args.kwargs["orq"] is True
-
-
-def test_pair_merge_de_dois_grupos_nao_avisa_ninguem(api_client):
-    entregues = {}
-    async def fake_deliver(name, text):
-        entregues[name] = text
-        return None
-    snap = {"a": {"peers": ["b"], "task": "t", "gid": "g1"},
-            "b": {"peers": ["a"], "task": "t", "gid": "g1"},
-            "c": {"peers": ["d"], "task": "", "gid": "g2"},
-            "d": {"peers": ["c"], "task": "", "gid": "g2"}}
-    with patch("app.api.registry.list",
-               return_value=[SessionInfo(name=n, cwd="/p") for n in "abcd"]), \
-         patch("app.api.pair.join_group", return_value=(["a", "b", "c", "d"], snap)), \
-         patch("app.api.PairLink.get", return_value={"peers": ["b", "c", "d"], "task": "t", "gid": "g1"}), \
-         patch("app.api._deliver", side_effect=fake_deliver):
-        r = api_client.post("/api/sessions/a/pair", headers=_h(), json={"peers": ["c"], "task": ""})
-    assert r.status_code == 200
-    assert entregues == {}
-
-
-# ---------------------------------------------------------------------------
-# Task 3: tarefa do grupo protegida contra sobrescrita
-# ---------------------------------------------------------------------------
-
-def test_pair_409_quando_tarefa_diferente_sem_replace(api_client):
-    from app import pair as pair_mod
-    with patch("app.api.registry.list",
-               return_value=[SessionInfo(name="me", cwd="/p"), SessionInfo(name="voce", cwd="/p")]), \
-         patch("app.api.pair.join_group", side_effect=pair_mod.TaskConflito("PM-1")):
-        r = api_client.post("/api/sessions/me/pair", headers=_h(), json={"peers": ["voce"], "task": "PM-2"})
-    assert r.status_code == 409
-    assert r.json()["detail"]["code"] == "erro_pareamento_tarefa_existente"
-    assert r.json()["detail"]["params"]["existente"] == "PM-1"
-
-
-def test_group_message_warning_carrega_avisos(api_client):
-    # B1: group-message com falha em TODOS os peers -> warning com a lista estruturada.
-    from app import api as api_mod
-    async def fake_thread(*a):
-        if a[0] is api_mod._session_exists:
-            return True
-        return {"ok": False, "error": {"code": "erro_envio_falhou", "params": {"erro": "rede"},
-                                       "msg": "falha ao enviar: rede"}}
-    with patch("app.api.PairLink.get", return_value={"peers": ["b", "c"], "task": "", "gid": "g1"}), \
-         patch("app.api._send_thread", side_effect=fake_thread):
-        r = api_client.post("/api/sessions/a/group-message", json={"text": "oi"}, headers=_h())
-    assert r.status_code == 200
-    w = r.json()["warning"]
-    assert w["code"] == "erro_pareamento_grupo_falha"
-    assert w["params"]["avisos"] == [
-        {"sessao": "b", "erro": {"code": "erro_envio_falhou", "params": {"erro": "rede"},
-                                 "msg": "falha ao enviar: rede"}},
-        {"sessao": "c", "erro": {"code": "erro_envio_falhou", "params": {"erro": "rede"},
-                                 "msg": "falha ao enviar: rede"}},
-    ]
-
-
-# ---------------------------------------------------------------------------
-# Task 5: guardas do --group (prefixo e limite por gid)
-# ---------------------------------------------------------------------------
-
-def test_group_message_recusa_reencaminhar_grupo_ou_de(api_client):
-    with patch("app.api.PairLink.get", return_value={"peers": ["b"], "task": "", "gid": "g1"}), \
-         patch("app.api.terminal.send_prompt") as sp:
-        for txt in ("[grupo: b] terminei", "  [de: b] ok"):
-            r = api_client.post("/api/sessions/a/group-message", json={"text": txt}, headers=_h())
-            assert r.status_code == 400
-            assert r.json()["detail"]["code"] == "erro_group_message_resposta"
-    sp.assert_not_called()
-
-
-def test_group_message_429_acima_de_5_por_minuto_no_mesmo_gid(api_client, monkeypatch):
-    from app import api as api_mod
-    monkeypatch.setattr(api_mod, "_group_envios", {})
-    with patch("app.api.PairLink.get", return_value={"peers": ["b"], "task": "", "gid": "g9"}), \
-         patch("app.api.terminal.send_prompt", return_value="sent"), \
-         patch("app.pqueue.PromptQueue.append"):
-        codes = [api_client.post("/api/sessions/a/group-message", json={"text": f"m{i}"}, headers=_h()).status_code
-                 for i in range(6)]
-    assert codes == [200] * 5 + [429]
-
-
-def test_group_estourou_esquece_fora_da_janela(monkeypatch):
-    from app import api as api_mod
-    monkeypatch.setattr(api_mod, "_group_envios", {})
-    for i in range(5):
-        assert api_mod._group_estourou("g", 1000.0 + i) is False
-    assert api_mod._group_estourou("g", 1005.0) is True
-    assert api_mod._group_estourou("g", 1000.0 + api_mod._GROUP_JANELA_S + 6) is False
-
-
-# ---------------------------------------------------------------------------
-# Task 6: --group respeita o caminho nativo
-# ---------------------------------------------------------------------------
-
-def test_group_message_nao_pula_ninguem_quando_remetente_e_nativo(api_client):
-    # `remetente_nativo` não tira ninguém da entrega: `pulados` fica vazio e cada membro passa
-    # pela escada do backend (aqui, sem sessão headless nem socket, todos caem no tmux).
-    with patch("app.api.PairLink.get", return_value={"peers": ["b", "c"], "task": "", "gid": "g1"}), \
-         patch("app.api.terminal.send_prompt", return_value="sent") as sp, \
-         patch("app.pqueue.PromptQueue.append"):
-        r = api_client.post("/api/sessions/a/group-message",
-                            json={"text": "terminei", "remetente_nativo": True}, headers=_h())
-    assert r.status_code == 200
-    assert r.json()["pulados"] == []
-    assert sorted(c.args[0] for c in sp.call_args_list) == ["b", "c"]
-
-
-def test_group_message_forcar_tmux_entrega_a_todos(api_client):
-    with patch("app.api.PairLink.get", return_value={"peers": ["b", "c"], "task": "", "gid": "g1"}), \
-         patch("app.registry.inbox_socket_of", return_value="/run/x.sock"), \
-         patch("app.api.terminal.send_prompt", return_value="sent") as sp, \
-         patch("app.pqueue.PromptQueue.append"):
-        r = api_client.post("/api/sessions/a/group-message",
-                            json={"text": "terminei", "remetente_nativo": True, "forcar_tmux": True}, headers=_h())
-    assert r.json()["pulados"] == []
-    assert sorted(c.args[0] for c in sp.call_args_list) == ["b", "c"]
-
-
-def test_group_message_remetente_sem_socket_nao_pula_ninguem(api_client):
-    with patch("app.api.PairLink.get", return_value={"peers": ["b"], "task": "", "gid": "g1"}), \
-         patch("app.registry.inbox_socket_of", return_value="/run/b.sock") as iso, \
-         patch("app.api.terminal.send_prompt", return_value="sent") as sp, \
-         patch("app.pqueue.PromptQueue.append"):
-        r = api_client.post("/api/sessions/a/group-message", json={"text": "oi"}, headers=_h())
-    assert r.json()["pulados"] == []
-    iso.assert_not_called()
-    sp.assert_called_once()
-
-
-def test_kill_nao_avisa_companheiros_que_ficaram(api_client):
-    # Recado para quem saiu volta "sessão não encontrada"; o aviso custava um turno em cada membro.
-    entregues = {}
-    async def fake_deliver(name, text):
-        entregues[name] = text
-        return None
-    with patch("app.api.PairLink.get", return_value={"peers": ["b", "c"], "task": "", "gid": "g1"}), \
-         patch("app.api.registry.kill") as kill, \
-         patch("app.api._deliver", side_effect=fake_deliver):
+def test_kill_nao_avisa_ninguem_do_grupo(api_client):
+    # A saída do grupo e os avisos são do Rust, depois do fechamento; aqui só o kill.
+    with patch("app.api.registry.kill", return_value=[]) as kill:
         r = api_client.delete("/api/sessions/a", headers=_h())
     assert r.status_code == 200 and r.json() == {"ok": True, "warning": None}
     kill.assert_called_once_with("a", closed_by_rust=False)
-    assert entregues == {}
 
 
 def test_kill_guarda_o_nome_para_o_arquivo(api_client, monkeypatch, tmp_path):
     from app import closed_names
     monkeypatch.setattr(closed_names, "_path_override", tmp_path / "closed.json")
     jsonl = tmp_path / f"{_SID}.jsonl"
-    with patch("app.api.PairLink.get", return_value=None), \
-         patch("app.api.registry.list", return_value=[SessionInfo(name="auditoria-migracao", cwd="/p", jsonl=str(jsonl))]), \
+    with patch("app.api.registry.list", return_value=[SessionInfo(name="auditoria-migracao", cwd="/p", jsonl=str(jsonl))]), \
          patch("app.api.registry.kill"):
         r = api_client.delete("/api/sessions/auditoria-migracao", headers=_h())
     assert r.status_code == 200
     assert closed_names.names() == {os.path.realpath(jsonl): "auditoria-migracao"}
 
 
-def test_kill_sem_grupo_nao_avisa(api_client):
-    with patch("app.api.PairLink.get", return_value=None), \
-         patch("app.api.registry.kill"), \
-         patch("app.api._deliver") as dl:
-        r = api_client.delete("/api/sessions/a", headers=_h())
-    assert r.status_code == 200
-    dl.assert_not_called()
-
-
-def test_kill_que_falha_nao_avisa_ninguem(api_client):
+def test_kill_que_falha_responde_500(api_client):
     from app.registry import KillFailed
-    with patch("app.api.PairLink.get", return_value={"peers": ["b"], "task": "", "gid": "g1"}), \
-         patch("app.api.registry.kill", side_effect=KillFailed("a")), \
-         patch("app.api._deliver") as dl:
+    with patch("app.api.registry.kill", side_effect=KillFailed("a")):
         r = api_client.delete("/api/sessions/a", headers=_h())
     assert r.status_code == 500
-    dl.assert_not_called()
-
-
-def test_kill_com_par_remoto_chama_unpair_remote(api_client, monkeypatch):
-    from app import api as api_mod
-    monkeypatch.setattr(api_mod.settings, "server_id", "srv-a")
-    with patch("app.api.PairLink.get", return_value={"peers": ["srv-b::x"], "task": "", "gid": "g1"}), \
-         patch("app.api.registry.kill"), \
-         patch("app.api.peers.call") as call, \
-         patch("app.api._deliver") as dl:
-        r = api_client.delete("/api/sessions/a", headers=_h())
-    assert r.status_code == 200
-    call.assert_called_once_with("srv-b", "POST", "/api/sessions/x/unpair-remote", {"peer": "srv-a::a"})
-    dl.assert_not_called()
-
-
-def test_unpair_warning_estruturado_sem_server_id(api_client, monkeypatch):
-    # B2: peer remoto com CP_SERVER_ID vazio -> item {sessao, erro} (antes era string solta e o
-    # x['sessao'] seguinte virava TypeError -> 500). O sair do grupo continua 200 com warning.
-    from app import api as api_mod
-    monkeypatch.setattr(api_mod.settings, "server_id", "")
-    with patch("app.api.pair.leave", return_value=["srv-a::x"]), \
-         patch("app.api.peers.is_remote", return_value=True), \
-         patch("app.api._deliver", return_value=None):
-        r = api_client.delete("/api/sessions/me/pair", headers=_h())
-    assert r.status_code == 200
-    w = r.json()["warning"]
-    assert w["code"] == "erro_pareamento_saida_falhou"
-    # O item vira envelope aninhado: o front traduz pelo code (a string crua em pt misturaria
-    # idiomas na linha em ingles — parecer c0fc8a84).
-    item = w["params"]["avisos"][0]
-    assert item["sessao"] == "srv-a::x"
-    assert item["erro"]["code"] == "erro_pareamento_server_id_ausente"
-    assert "CP_SERVER_ID" in item["erro"]["msg"]
-
-
-def test_unpair_peer_error_serializa_causa_textual(api_client, monkeypatch):
-    # B2: PeerError entra como str(ex) no aviso — o objeto serializaria {"transport": ...} e a
-    # UI perderia o motivo. Os dois transportes: a causa textual tem que sobreviver.
-    from app import api as api_mod
-    from app import peers as peers_mod
-    monkeypatch.setattr(api_mod.settings, "server_id", "srv-a")
-    for transport in (True, False):
-        with patch("app.api.pair.leave", return_value=["srv-b::x"]), \
-             patch("app.api.peers.is_remote", return_value=True), \
-             patch("app.api.peers.split_addr", return_value=("srv-b", "x")), \
-             patch("app.api.peers.call",
-                   side_effect=peers_mod.PeerError("rede caiu", transport=transport)), \
-             patch("app.api._deliver", return_value=None):
-            r = api_client.delete("/api/sessions/me/pair", headers=_h())
-        assert r.status_code == 200, transport
-        w = r.json()["warning"]
-        assert w["params"]["avisos"][0]["sessao"] == "srv-b::x"
-        # Envelope, como no aviso LOCAL (que sempre mandou dict): o remoto era o único que saía
-        # como string crua. A intenção original do caso continua sendo cobrada — o que não pode é
-        # o PeerError virar {"transport": ...} e a causa sumir; aqui ela está no `msg`.
-        env = w["params"]["avisos"][0]["erro"]
-        assert env["code"] == "erro_peer_nao_avisado", transport
-        assert "rede caiu" in env["msg"], transport
-        assert env["params"]["peer"] == "srv-b::x", transport
 
 
 def test_input_value_error_do_send_vira_envelope(api_client):

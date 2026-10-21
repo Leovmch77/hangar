@@ -1,0 +1,215 @@
+{
+  "note": "Casos do modelo global de grupos, lidos por pairGroups.test.ts/pairDrop.test.ts e pelo #[cfg(test)] de desktop-native/src/app/grouping.rs. `server` = chave da máquina no app; `identities` = máquina do app -> identificador (/api/peers/identificador); `invite` = máquina de convite.",
+  "defaultIdentities": { "srv-a": "casa", "srv-b": "lab", "srv-c": "pc3" },
+  "groups": [
+    {
+      "name": "dois servidores, mesma dona",
+      "rows": [
+        { "server": "srv-a", "name": "x", "pair_gid": "g1", "pair_owner": "casa", "pair_peers": ["lab::y"], "pair_task": "  ABC-1 tela " },
+        { "server": "srv-a", "name": "z" },
+        { "server": "srv-b", "name": "y", "pair_gid": "g1", "pair_owner": "casa", "pair_peers": ["casa::x"] }
+      ],
+      "groups": [
+        { "key": "fed:casa/g1", "label": "ABC-1 tela", "members": [
+          { "kind": "here", "server": "srv-a", "name": "x" },
+          { "kind": "here", "server": "srv-b", "name": "y" }
+        ] }
+      ]
+    },
+    {
+      "name": "donas diferentes com o mesmo gid, e máquina desconectada",
+      "rows": [
+        { "server": "srv-a", "name": "x", "pair_gid": "g1", "pair_owner": "casa", "pair_peers": ["lab::y"] },
+        { "server": "srv-b", "name": "w", "pair_gid": "g1", "pair_owner": "lab", "pair_peers": ["pc9::k"] },
+        { "server": "srv-b", "name": "y", "pair_gid": "g1", "pair_owner": "casa", "pair_peers": ["casa::x"] }
+      ],
+      "groups": [
+        { "key": "fed:casa/g1", "label": "x, y", "members": [
+          { "kind": "here", "server": "srv-a", "name": "x" },
+          { "kind": "here", "server": "srv-b", "name": "y" }
+        ] },
+        { "key": "fed:lab/g1", "label": "w", "members": [
+          { "kind": "here", "server": "srv-b", "name": "w" },
+          { "kind": "missing", "server_id": "pc9", "name": "k" }
+        ] }
+      ]
+    },
+    {
+      "name": "grupo de uma máquina só fica na chave dela",
+      "rows": [
+        { "server": "srv-a", "name": "front", "pair_gid": "g", "pair_peers": ["back"] },
+        { "server": "srv-a", "name": "back", "pair_gid": "g", "pair_peers": ["front"], "pair_task": "PM-9" },
+        { "server": "srv-b", "name": "front", "pair_gid": "g", "pair_peers": ["back"] }
+      ],
+      "groups": [
+        { "key": "local:srv-a/g", "label": "PM-9", "members": [
+          { "kind": "here", "server": "srv-a", "name": "front" },
+          { "kind": "here", "server": "srv-a", "name": "back" }
+        ] },
+        { "key": "local:srv-b/g", "label": "front", "members": [
+          { "kind": "here", "server": "srv-b", "name": "front" }
+        ] }
+      ]
+    },
+    {
+      "name": "identidade ausente: junta pela dona, sem adivinhar quem falta",
+      "identities": { "srv-a": "casa" },
+      "rows": [
+        { "server": "srv-a", "name": "x", "pair_gid": "g1", "pair_owner": "casa", "pair_peers": ["lab::y"] },
+        { "server": "srv-a", "name": "q", "pair_gid": "g2", "pair_owner": "casa", "pair_peers": ["pc9::k"] },
+        { "server": "srv-b", "name": "y", "pair_gid": "g1", "pair_owner": "casa", "pair_peers": ["casa::x"] }
+      ],
+      "groups": [
+        { "key": "fed:casa/g1", "label": "x, y", "members": [
+          { "kind": "here", "server": "srv-a", "name": "x" },
+          { "kind": "here", "server": "srv-b", "name": "y" }
+        ] },
+        { "key": "fed:casa/g2", "label": "q", "members": [
+          { "kind": "here", "server": "srv-a", "name": "q" }
+        ] }
+      ]
+    },
+    {
+      "name": "identidade repetida: par antigo não se junta",
+      "identities": { "srv-a": "casa", "srv-b": "casa" },
+      "rows": [
+        { "server": "srv-a", "name": "x", "pair_gid": "ga", "pair_peers": ["casa::y"] },
+        { "server": "srv-b", "name": "y", "pair_gid": "gb", "pair_peers": ["casa::x"] }
+      ],
+      "groups": [
+        { "key": "local:srv-a/ga", "label": "x", "members": [{ "kind": "here", "server": "srv-a", "name": "x" }] },
+        { "key": "local:srv-b/gb", "label": "y", "members": [{ "kind": "here", "server": "srv-b", "name": "y" }] }
+      ]
+    },
+    {
+      "name": "par 1:1 antigo recíproco continua juntado",
+      "rows": [
+        { "server": "srv-a", "name": "x", "pair_gid": "ga", "pair_peers": ["lab::y"], "pair_task": " " },
+        { "server": "srv-a", "name": "z", "pair_gid": "gz", "pair_peers": ["lab::nope"] },
+        { "server": "srv-b", "name": "y", "pair_gid": "gb", "pair_peers": ["casa::x"], "pair_task": "  VM  " }
+      ],
+      "groups": [
+        { "key": "remote:[\"srv-a::x\",\"srv-b::y\"]", "label": "VM", "members": [
+          { "kind": "here", "server": "srv-a", "name": "x" },
+          { "kind": "here", "server": "srv-b", "name": "y" }
+        ] },
+        { "key": "local:srv-a/gz", "label": "z", "members": [{ "kind": "here", "server": "srv-a", "name": "z" }] }
+      ]
+    },
+    {
+      "name": "par antigo: chave em ordem de ponto de código (bytes UTF-8), com acento e emoji fora do BMP",
+      "identities": { "srv-ａ": "casa", "srv-😀": "lab" },
+      "rows": [
+        { "server": "srv-😀", "name": "🚀", "pair_gid": "gb", "pair_peers": ["casa::joão"] },
+        { "server": "srv-ａ", "name": "joão", "pair_gid": "ga", "pair_peers": ["lab::🚀"] }
+      ],
+      "groups": [
+        { "key": "remote:[\"srv-ａ::joão\",\"srv-😀::🚀\"]", "label": "🚀, joão", "members": [
+          { "kind": "here", "server": "srv-😀", "name": "🚀" },
+          { "kind": "here", "server": "srv-ａ", "name": "joão" }
+        ] }
+      ]
+    },
+    {
+      "name": "par antigo com sessão duplicada no destino não se junta",
+      "rows": [
+        { "server": "srv-a", "name": "x", "pair_gid": "ga", "pair_peers": ["lab::y"] },
+        { "server": "srv-b", "name": "y", "pair_gid": "gb", "pair_peers": ["casa::x"] },
+        { "server": "srv-b", "name": "y", "pair_gid": "gb", "pair_peers": ["casa::x"] }
+      ],
+      "groups": [
+        { "key": "local:srv-a/ga", "label": "x", "members": [{ "kind": "here", "server": "srv-a", "name": "x" }] },
+        { "key": "local:srv-b/gb", "label": "y, y", "members": [
+          { "kind": "here", "server": "srv-b", "name": "y" },
+          { "kind": "here", "server": "srv-b", "name": "y" }
+        ] }
+      ]
+    },
+    {
+      "name": "membro de fora",
+      "rows": [
+        { "server": "srv-a", "name": "x", "pair_gid": "g1", "pair_owner": "casa", "pair_peers": ["lab::y", "ana::Y"],
+          "pair_externals": [{ "alias": "ana", "owner": "Ana", "session": "Y", "address": "https://ana.ts.net:8443", "level": "view", "pending": false }] },
+        { "server": "srv-b", "name": "y", "pair_gid": "g1", "pair_owner": "casa", "pair_peers": ["casa::x", "ana::Y"] }
+      ],
+      "groups": [
+        { "key": "fed:casa/g1", "label": "x, y", "members": [
+          { "kind": "here", "server": "srv-a", "name": "x" },
+          { "kind": "here", "server": "srv-b", "name": "y" },
+          { "kind": "outside", "alias": "ana", "session": "Y" }
+        ] }
+      ]
+    },
+    {
+      "name": "same_name_two_servers",
+      "rows": [
+        { "server": "srv-a", "name": "a", "pair_gid": "g1", "pair_owner": "casa", "pair_peers": ["lab::a"] },
+        { "server": "srv-b", "name": "a", "pair_gid": "g1", "pair_owner": "casa", "pair_peers": ["casa::a"] }
+      ],
+      "groups": [
+        { "key": "fed:casa/g1", "label": "a, a", "members": [
+          { "kind": "here", "server": "srv-a", "name": "a" },
+          { "kind": "here", "server": "srv-b", "name": "a" }
+        ] }
+      ]
+    }
+  ],
+  "canPair": [
+    { "name": "sobre si mesma", "origin": { "server": "srv-a", "name": "x" }, "target": { "server": "srv-a", "name": "x" }, "result": "same" },
+    { "name": "mesmo nome noutra máquina", "origin": { "server": "srv-a", "name": "x" }, "target": { "server": "srv-b", "name": "x" }, "result": "ok" },
+    { "name": "orq na origem", "origin": { "server": "srv-a", "name": "o", "provider": "orq" }, "target": { "server": "srv-a", "name": "b" }, "result": "orq" },
+    { "name": "orq no alvo", "origin": { "server": "srv-a", "name": "a" }, "target": { "server": "srv-a", "name": "o", "provider": "orq" }, "result": "orq" },
+    { "name": "morto", "origin": { "server": "srv-a", "name": "a" }, "target": { "server": "srv-b", "name": "b", "state": "dead" }, "result": "dead" },
+    { "name": "morto vem antes do convite", "origin": { "server": "srv-a", "name": "a", "invite": true }, "target": { "server": "srv-a", "name": "b", "state": "dead" }, "result": "dead" },
+    { "name": "orq vem antes do morto", "origin": { "server": "srv-a", "name": "o", "provider": "orq" }, "target": { "server": "srv-a", "name": "b", "state": "dead" }, "result": "orq" },
+    { "name": "convite vem antes do mesmo grupo",
+      "origin": { "server": "srv-c", "name": "a", "invite": true, "pair_gid": "g", "pair_peers": ["b"] },
+      "target": { "server": "srv-c", "name": "b", "invite": true, "pair_gid": "g", "pair_peers": ["a"] }, "result": "invite" },
+    { "name": "convite na origem", "origin": { "server": "srv-c", "name": "a", "invite": true }, "target": { "server": "srv-a", "name": "b" }, "result": "invite" },
+    { "name": "convite no alvo", "origin": { "server": "srv-a", "name": "a" }, "target": { "server": "srv-c", "name": "b", "invite": true }, "result": "invite" },
+    { "name": "mesmo grupo entre máquinas",
+      "origin": { "server": "srv-a", "name": "x", "pair_gid": "g1", "pair_owner": "casa", "pair_peers": ["lab::y"] },
+      "target": { "server": "srv-b", "name": "y", "pair_gid": "g1", "pair_owner": "casa", "pair_peers": ["casa::x"] }, "result": "same_group" },
+    { "name": "mesmo grupo vem antes da identidade", "identities": {},
+      "origin": { "server": "srv-a", "name": "x", "pair_gid": "g1", "pair_owner": "casa", "pair_peers": ["lab::y"] },
+      "target": { "server": "srv-b", "name": "y", "pair_gid": "g1", "pair_owner": "casa", "pair_peers": ["casa::x"] }, "result": "same_group" },
+    { "name": "mesmo grupo local",
+      "origin": { "server": "srv-a", "name": "front", "pair_gid": "g", "pair_peers": ["back"] },
+      "target": { "server": "srv-a", "name": "back", "pair_gid": "g", "pair_peers": ["front"] }, "result": "same_group" },
+    { "name": "mesmo par antigo",
+      "origin": { "server": "srv-a", "name": "x", "pair_gid": "ga", "pair_peers": ["lab::y"] },
+      "target": { "server": "srv-b", "name": "y", "pair_gid": "gb", "pair_peers": ["casa::x"] }, "result": "same_group" },
+    { "name": "mesmo gid local em máquinas diferentes são donas diferentes",
+      "origin": { "server": "srv-a", "name": "front", "pair_gid": "g", "pair_peers": ["back"] },
+      "target": { "server": "srv-b", "name": "back", "pair_gid": "g", "pair_peers": ["front"] }, "result": "other_owner" },
+    { "name": "sem identificador entre máquinas", "identities": { "srv-a": "casa" },
+      "origin": { "server": "srv-a", "name": "x" }, "target": { "server": "srv-b", "name": "y" }, "result": "no_identity" },
+    { "name": "identificador repetido entre máquinas", "identities": { "srv-a": "casa", "srv-b": "casa" },
+      "origin": { "server": "srv-a", "name": "x" }, "target": { "server": "srv-b", "name": "y" }, "result": "no_identity" },
+    { "name": "identificador vazio entre máquinas", "identities": { "srv-a": "casa", "srv-b": "" },
+      "origin": { "server": "srv-a", "name": "x" }, "target": { "server": "srv-b", "name": "y" }, "result": "no_identity" },
+    { "name": "mesma máquina dispensa identificador", "identities": {},
+      "origin": { "server": "srv-a", "name": "x", "pair_gid": "g3", "pair_peers": ["w"] },
+      "target": { "server": "srv-a", "name": "v", "pair_gid": "g4", "pair_peers": ["u"] }, "result": "ok" },
+    { "name": "grupo local e grupo de outra dona sem identificador", "identities": {},
+      "origin": { "server": "srv-a", "name": "x", "pair_gid": "g3", "pair_peers": ["w"] },
+      "target": { "server": "srv-a", "name": "v", "pair_gid": "g1", "pair_owner": "lab", "pair_peers": ["lab::k"] }, "result": "no_identity" },
+    { "name": "grupo local e grupo de outra dona",
+      "origin": { "server": "srv-a", "name": "x", "pair_gid": "g3", "pair_peers": ["w"] },
+      "target": { "server": "srv-a", "name": "v", "pair_gid": "g1", "pair_owner": "lab", "pair_peers": ["lab::k"] }, "result": "other_owner" },
+    { "name": "donas diferentes",
+      "origin": { "server": "srv-a", "name": "x", "pair_gid": "g1", "pair_owner": "casa", "pair_peers": ["lab::y"] },
+      "target": { "server": "srv-b", "name": "w", "pair_gid": "g2", "pair_owner": "lab", "pair_peers": ["pc3::k"] }, "result": "other_owner" },
+    { "name": "grupo local se funde ao grupo da mesma dona",
+      "origin": { "server": "srv-a", "name": "v", "pair_gid": "g4", "pair_peers": ["u"] },
+      "target": { "server": "srv-b", "name": "y", "pair_gid": "g1", "pair_owner": "casa", "pair_peers": ["casa::x"] }, "result": "ok" },
+    { "name": "solta de outra máquina entra no grupo",
+      "origin": { "server": "srv-c", "name": "s" },
+      "target": { "server": "srv-a", "name": "x", "pair_gid": "g1", "pair_owner": "casa", "pair_peers": ["lab::y"] }, "result": "ok" },
+    { "name": "membro de fora não impede",
+      "origin": { "server": "srv-b", "name": "s" },
+      "target": { "server": "srv-a", "name": "x", "pair_gid": "g1", "pair_peers": ["ana::Y"],
+        "pair_externals": [{ "alias": "ana", "owner": "Ana", "session": "Y", "address": "https://ana.ts.net:8443", "level": "view", "pending": false }] },
+      "result": "ok" }
+  ]
+}

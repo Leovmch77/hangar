@@ -28,7 +28,8 @@ Mostrar algo que você montou ao usuário (desenho, mock de tela, comparação, 
 html_render, sem esperar pedido; imagem por caminho só para print real de tela. \
 Ver ou testar uma página: browser_open e depois browser (um verbo) ou browser_batch (vários já conhecidos); \
 tela desconhecida com várias ações: browser_goal, quando a sessão tem o Jev. \
-Falar com outra sessão: sessions, send, group, pair; abrir ou fechar: new_session, close_session; parar o turno de uma filha ligada: interrupt.";
+Falar com outra sessão: sessions, send, group, pair; abrir ou fechar: new_session, close_session; parar o turno de uma filha ligada: interrupt; \
+ler ou gravar o contrato do grupo: contract.";
 
 static CATALOG: LazyLock<Vec<Tool>> = LazyLock::new(|| {
     serde_json::from_str(include_str!("catalog.json")).expect("catalog.json é o catálogo do MCP")
