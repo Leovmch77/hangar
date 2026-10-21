@@ -249,7 +249,10 @@ async fn join_external(app: &AppState, name: &str, peer: &str) -> Result<(), Ref
     let harness = providers(app, &wanted).await.map_err(|failed| (StatusCode::SERVICE_UNAVAILABLE, failed))?
         .into_iter().filter(|(n, _)| n == name).collect();
     match groups.external_link(name, peer, harness, outside_addresses(app)).await {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            if let Ok(Some(side)) = groups.link(name).await { crate::groups::federation::outside_changed(app, &side, peer, true).await; }
+            Ok(())
+        }
         Err(GroupError::Refused(r)) => Err(link_refused(&r)),
         Err(e) => {
             tracing::warn!(code = "external_pair_group_failed", session = name, error = %e, "par externo: o grupo não foi gravado");
@@ -273,8 +276,8 @@ async fn link_refusal(app: &AppState, name: &str) -> Result<(), Refusal> {
 
 /// O aviso de par à sessão daqui; `Err` = o texto da falha (`_erro_texto`).
 async fn notify_paired(app: &AppState, me: &str, peer: &str, owner: &str) -> Result<(), String> {
-    let args = crate::groups::deliver::ProtocolArgs { me: me.into(), peer: peer.into(), owner: owner.into(), ..Default::default() };
-    let text = crate::groups::deliver::protocol_text(app, "external", &args).await;
+    let args = crate::groups::text::TextArgs { me: me.into(), peer: peer.into(), owner: owner.into(), ..Default::default() };
+    let text = crate::groups::text::protocol_text(crate::groups::text::Kind::External, &args);
     let sent = match text { Ok(text) => deliver_text(app, me, &text).await, Err(e) => Err(e) };
     sent.map_err(|e| e.get("msg").map_or_else(|| py_str(&e), py_str))
 }
@@ -620,8 +623,10 @@ async fn unlink_all(app: &AppState, address: &str) -> bool {
     // Um `external_unlink` já limpa o grupo inteiro: um por gid basta.
     let mut groups_done = std::collections::HashSet::new();
     for (stem, sidecar) in all.into_iter().filter(|(_, s)| s.peers.iter().any(|p| p == address)) {
-        if !sidecar.gid.is_empty() && !groups_done.insert(sidecar.gid) { continue }
-        ok &= guarded("tirar o par do grupo", groups.external_unlink(&stem, address).await);
+        if !sidecar.gid.is_empty() && !groups_done.insert(sidecar.gid.clone()) { continue }
+        let done = guarded("tirar o par do grupo", groups.external_unlink(&stem, address).await);
+        if done { crate::groups::federation::outside_changed(app, &sidecar, address, false).await; }
+        ok &= done;
     }
     ok
 }
@@ -650,10 +655,12 @@ pub async fn session_died(app: Arc<AppState>, share: Arc<ShareState>, remote: Ar
 /// tenta de novo com o token que ainda vale.
 async fn teardown(app: &AppState, share: &ShareState, rec: &ExternalPair, notify: bool) -> Result<(), Refusal> {
     let Some(groups) = &app.groups else { return Err(groups_unavailable("groups_unavailable")) };
+    let side = groups.link(&rec.local_session).await.ok().flatten();
     if let Err(e) = groups.external_unlink(&rec.local_session, &rec.address()).await {
         tracing::warn!(code = "external_pair_unlink_failed", session = %rec.local_session, error = %e, "par externo: o grupo não foi desfeito");
         return Err(groups_unavailable("groups_store_failed"));
     }
+    if let Some(side) = side { crate::groups::federation::outside_changed(app, &side, &rec.address(), false).await; }
     drop_record(share, &rec.share_id);
     if notify {
         let text = format!("[painel: par externo encerrado] '{}' saiu do pareamento. Volte a operar independente.", rec.address());
@@ -793,14 +800,73 @@ fn pair_of(share: &ShareState, caller: Option<&Caller>, session: Option<&str>) -
     }
 }
 
+/// Aviso em entrega (`Pending`: quem chega depois espera o `rx` fechar) ou já entregue.
+enum Seen {
+    Pending { id: u64, rx: tokio::sync::watch::Receiver<()> },
+    Done(std::time::Instant),
+}
+
 /// O mesmo aviso de grupo chega por cada par que a outra máquina tem conosco; só o primeiro
-/// entregue entra. Chave → hora da entrega.
+/// entregue entra.
 // ponytail: mapa do processo podado pela janela da tempestade, como o `storm`.
-fn seen_notices() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, std::time::Instant>> {
+fn seen_notices() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, Seen>> {
     use std::collections::HashMap;
     use std::sync::{LazyLock, Mutex};
-    static SEEN: LazyLock<Mutex<HashMap<String, std::time::Instant>>> = LazyLock::new(Mutex::default);
+    static SEEN: LazyLock<Mutex<HashMap<String, Seen>>> = LazyLock::new(Mutex::default);
     SEEN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Chave do aviso entregue: o destino (máquina `me` e sessão) e o `notice`, nunca quem mandou. O
+/// mesmo aviso vindo por duas máquinas do outro dono, ou pelo par e pela dona do grupo, entra uma vez.
+pub(crate) fn notice_key(me: &str, notice: &str, session: &str) -> String { format!("{me}\n{notice}\n{session}") }
+
+/// Reserva do aviso para uma entrega: `None` = já entregue dentro da janela da tempestade. Em
+/// entrega por outra chegada: espera ela acabar; entregou = `None`, falhou = reserva aqui. Checar e
+/// reservar sob a mesma trava impede que duas chegadas simultâneas entreguem. Quem chama limita a espera.
+pub(crate) async fn notice_claim(key: String) -> Option<NoticeClaim> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    loop {
+        let mut rx = {
+            let mut seen = seen_notices();
+            seen.retain(|_, s| !matches!(s, Seen::Done(t) if t.elapsed() >= STORM_WINDOW));
+            match seen.get(&key) {
+                Some(Seen::Done(_)) => return None,
+                Some(Seen::Pending { rx, .. }) => rx.clone(),
+                None => {
+                    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let (tx, rx) = tokio::sync::watch::channel(());
+                    seen.insert(key.clone(), Seen::Pending { id, rx });
+                    return Some(NoticeClaim { key: Some(key), id, _tx: tx });
+                }
+            }
+        };
+        // Fecha quando a reserva é firmada ou solta (o `tx` cai junto); o laço relê o estado.
+        let _ = rx.changed().await;
+    }
+}
+
+/// Solta a reserva ao sair sem `delivered()` (falha, prazo estourado, future abandonado): o reenvio
+/// entra. Só mexe na entrada se ela ainda for desta reserva.
+pub(crate) struct NoticeClaim { key: Option<String>, id: u64, _tx: tokio::sync::watch::Sender<()> }
+
+impl NoticeClaim {
+    pub(crate) fn delivered(mut self) {
+        let Some(k) = self.key.take() else { return };
+        let mut seen = seen_notices();
+        if matches!(seen.get(&k), Some(Seen::Pending { id, .. }) if *id == self.id) {
+            seen.insert(k, Seen::Done(std::time::Instant::now()));
+        }
+    }
+}
+
+impl Drop for NoticeClaim {
+    fn drop(&mut self) {
+        let Some(k) = self.key.take() else { return };
+        let mut seen = seen_notices();
+        if matches!(seen.get(&k), Some(Seen::Pending { id, .. }) if *id == self.id) {
+            seen.remove(&k);
+        }
+    }
 }
 
 async fn pair_message(State(st): St, caller: Option<Extension<Caller>>, bytes: Bytes) -> Response {
@@ -833,29 +899,34 @@ async fn pair_message(State(st): St, caller: Option<Extension<Caller>>, bytes: B
         }
     };
     // Máquina pelo registro (carimbado pelo token), sessão pelo `from` validado; nunca do texto.
-    let text = format!("[de fora: {}::{}] {}", rec.alias, from.as_deref().unwrap_or(&rec.peer_session), pairs::sanitize_message(&v[0]));
+    let who = format!("{}::{}", rec.alias, from.as_deref().unwrap_or(&rec.peer_session));
+    let clean = pairs::sanitize_message(&v[0]);
+    let text = format!("[de fora: {who}] {clean}");
     if map.get("group").and_then(Value::as_bool) == Some(true) {
-        // Um salto: só os locais do grupo do par recebem; nada volta a sair desta máquina.
+        // Um salto na fronteira: aqui recebem os locais do grupo do par; nada volta a sair a outro par de fora.
         let mut last = (StatusCode::OK, json!({"ok": true}));
         let mut delivered = false;
         let notice = map.get("notice").and_then(Value::as_str).filter(|n| !n.is_empty() && n.len() <= 64);
-        if notice.is_some() { seen_notices().retain(|_, t| t.elapsed() < STORM_WINDOW); }
+        let me = server_id(&st.app);
         for session in &locals {
-            let key = notice.map(|n| format!("{}\n{n}\n{session}", rec.peer_address));
-            // A entrega de antes pode vencer enquanto as outras sessões recebem: a hora vale aqui.
-            if key.as_deref().is_some_and(|k| seen_notices().get(k).is_some_and(|t| t.elapsed() < STORM_WINDOW)) {
-                delivered = true;
-                continue;
-            }
+            let claim = match notice {
+                Some(n) => match notice_claim(notice_key(&me, n, session)).await {
+                    None => { delivered = true; continue; }
+                    c => c,
+                },
+                None => None,
+            };
             let (status, reply) = write_input(&st.app, session, &text, true).await;
             if status.is_success() {
                 delivered = true;
-                if let Some(k) = key { seen_notices().insert(k, std::time::Instant::now()); }
+                if let Some(c) = claim { c.delivered(); }
             } else {
                 tracing::warn!(code = "external_pair_group_notice_failed", session = %session, status = status.as_u16(), "par externo: aviso de grupo de fora não entregue");
                 last = (status, reply);
             }
         }
+        // Grupo entre máquinas: a dona leva às outras máquinas do dono, nunca a outro par de fora.
+        crate::groups::fed_notice::relay_outside(st.app.clone(), pair.session.clone(), who, clean, notice.unwrap_or_default().to_owned());
         return if delivered { json_response(StatusCode::OK, json!({"ok": true})) } else { json_response(last.0, last.1) };
     }
     // `to` = a sessão daqui que a resposta 1:1 nomeia; sem ele, a de `session` se for do grupo.
@@ -887,4 +958,25 @@ pub fn guest_pair_router(state: Arc<PairState>) -> Router {
         .route("/api/pair/message", post(pair_message))
         .route("/api/pair", delete(pair_leave))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Entrada trocada por outra reserva (poda): soltar ou firmar a antiga não mexe na nova.
+    #[tokio::test]
+    async fn old_claim_never_touches_a_newer_one() {
+        let k = "teste\nold-claim\ns".to_owned();
+        let still_new = || matches!(seen_notices().get(&k), Some(Seen::Pending { .. }));
+        for firm in [false, true] {
+            let old = notice_claim(k.clone()).await.unwrap();
+            seen_notices().remove(&k); // a poda
+            let new = notice_claim(k.clone()).await.unwrap();
+            if firm { old.delivered() } else { drop(old) }
+            assert!(still_new(), "firm={firm}: a reserva nova segue valendo");
+            drop(new);
+            assert!(seen_notices().get(&k).is_none());
+        }
+    }
 }

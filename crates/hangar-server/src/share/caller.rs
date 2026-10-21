@@ -71,7 +71,7 @@ const GLOBAL_ROUTES: &[(&str, &str)] = &[
 const GLOBAL_PREFIXES: &[(&str, &str)] = &[("GET", "/api/tts/audio/")];
 // Alcançam outra sessão do dono ou abrem janela na tela dele; `share` deixaria o convidado
 // criar e revogar convites.
-const BLOCKED: &[&str] = &["pair", "pair-remote", "unpair-remote", "group-message", "then", "orq", "bastao",
+const BLOCKED: &[&str] = &["pair", "group", "pair-remote", "unpair-remote", "group-message", "then", "orq", "bastao",
     "open-terminal", "open-editor", "nav", "share", "pair-invite", "pair-accept", "pair-access"];
 // Leituras do chat do nativo: quem só vê a sessão pareada não alcança arquivo, terminal nem git.
 const PAIR_READ: &[&str] = &["", "events", "history", "commands", "plan-preview", "subagents", "uploads",

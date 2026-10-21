@@ -124,13 +124,15 @@ impl Hangar {
         let sessions = self.tray_sessions(key);
         let remote = (!self.is_active_key(key)).then_some(key);
         let mut rows = Vec::new();
-        for row in grouping::cluster(&sessions) {
+        // A bandeja é uma coluna por máquina: o bloco aqui tem só os membros desta.
+        let column: Vec<grouping::Row> = sessions.iter().map(|&session| grouping::Row { server: key, session, invite }).collect();
+        for row in grouping::cluster(&[column], &self.identities()).into_iter().flatten() {
             match row {
-                grouping::ListRow::Header { gid, label, members } => rows.push(self.render_pair_header(&gid, &label, &members, remote, window, cx)),
-                grouping::ListRow::Session(s) if !self.pair_collapsed(s, remote) => rows.push(self.render_machine_session(s, key, invite, window, cx)),
-                grouping::ListRow::External { gid, pair } if !self.sidebar.is_collapsed(&grouping::pair_key(&gid, remote)) =>
+                grouping::ListRow::Header { key: block, gid, label, members } => rows.push(self.render_pair_header(&block, &gid, &label, &members, window, cx)),
+                grouping::ListRow::Session { block: Some(b), .. } | grouping::ListRow::External { block: b, .. } if self.sidebar.is_collapsed(&b) => {}
+                grouping::ListRow::Session { row, .. } => rows.push(self.render_machine_session(row.session, key, invite, window, cx)),
+                grouping::ListRow::External { gid, pair, .. } =>
                     rows.push(self.render_external_pair_row(&gid, &pair.owner, &pair.session, &pair.alias, remote, window, cx)),
-                _ => {}
             }
         }
         let empty = sessions.is_empty();

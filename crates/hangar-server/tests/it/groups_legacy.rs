@@ -30,6 +30,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const NAMES: [&str; 4] = ["s0", "s1", "s2", "s3"];
+/// Passos do golden que passavam pelo iniciador `pair_cross`, que saiu.
+const REPLACED: [&str; 5] = ["cross_with_local", "cross_unknown_server", "cross_refused", "cross_network_down", "cross_pair"];
 
 struct Machine { addr: SocketAddr, python: Arc<fake::Fake>, pair: PathBuf, share: Arc<hangar_server::share::ShareState> }
 
@@ -178,6 +180,17 @@ async fn cross_routes_answer_like_python() {
     for step in common::golden("group_cross_routes.json").as_array().unwrap() {
         let name = step["name"].as_str().unwrap();
         let at = machines[step["at"].as_str().unwrap()];
+        // O iniciador do par 1:1 saiu: pedido novo vira grupo entre máquinas (`groups_federation`).
+        // O par que `cross_pair` criava é semeado, para os passos seguintes do receptor antigo.
+        if REPLACED.contains(&name) {
+            if name == "cross_pair" {
+                std::fs::create_dir_all(&casa.pair).unwrap();
+                std::fs::create_dir_all(&lab.pair).unwrap();
+                std::fs::write(casa.pair.join("s0.json"), json!({"peers": ["lab::s1"], "task": "t1", "gid": "c0c0c0c0", "harness": {}}).to_string()).unwrap();
+                std::fs::write(lab.pair.join("s1.json"), json!({"peers": ["casa::s0"], "task": "t1", "gid": "c1c1c1c1", "harness": {}}).to_string()).unwrap();
+            }
+            continue;
+        }
         if let Some(seed) = step.get("seed").and_then(Value::as_object) {
             std::fs::create_dir_all(&at.pair).unwrap();
             for (n, sidecar) in seed { std::fs::write(at.pair.join(format!("{n}.json")), sidecar.to_string()).unwrap(); }
@@ -190,8 +203,15 @@ async fn cross_routes_answer_like_python() {
         let (status, body) = call(at.addr, step["method"].as_str().unwrap(), step["path"].as_str().unwrap(), step.get("body")).await;
         if let Some(m) = failing { m.python.set_input_reply(None); }
         if step["python_only"] == true {
-            assert_eq!((status, body), (200, json!("from-python")), "{name}: o corpo que o FastAPI recusa vai a ele");
+            // I-1A: o 422 é do Rust, com código, sem repasse.
+            assert_eq!((status, body["detail"]["code"].clone()), (422, json!("erro_corpo_invalido")), "{name}");
             continue;
+        }
+        // Diferença decidida: o texto da recusa `Mix` diz o que vale hoje (o par 1:1 antigo), não o do Python.
+        let mut body = body;
+        if body["detail"]["code"] == "erro_pareamento_mistura_cross" {
+            assert!(body["detail"]["msg"].as_str().unwrap().starts_with("sessão em par 1:1 antigo"), "{name}: {body}");
+            body["detail"]["msg"] = step["response"]["detail"]["msg"].clone();
         }
         assert_eq!((status as u64, common::canon(&mask_network(&body))), (step["status"].as_u64().unwrap(), common::canon(&step["response"])), "{name}");
         let mut delivered: Vec<String> = before.iter().flat_map(|(k, b)| {
@@ -200,7 +220,14 @@ async fn cross_routes_answer_like_python() {
         }).collect();
         delivered.sort();
         assert_eq!(json!(delivered), step["delivered"], "{name}: quem recebeu recado");
-        assert_eq!(Value::Array(calls.lock().unwrap().clone()), step["calls"], "{name}: o que saiu para outra máquina");
+        let mut sent = calls.lock().unwrap().clone();
+        // I-8B: antes da recusa de mistura, o Rust tenta converter o par antigo; lab não conhece casa
+        // no peers.json dela, recusa, e o par segue 1:1 com a resposta de sempre.
+        if name == "cross_local_mix" {
+            assert!(sent.iter().any(|c| c["body"]["convert_from_legacy"].is_string()), "{name}: a conversão foi tentada");
+            sent.retain(|c| c["path"] != "/api/sessions/s1/group" && !c["body"]["convert_from_legacy"].is_string());
+        }
+        assert_eq!(Value::Array(sent), step["calls"], "{name}: o que saiu para outra máquina");
     }
     // O par desfeito dos dois lados; o par direto de `lab` (s3 ↔ casa::s2) continua lá.
     assert!(!casa.pair.join("s0.json").exists() && !lab.pair.join("s1.json").exists());
@@ -254,24 +281,6 @@ async fn restore_failed_in_diary(m: &Machine) {
     fake::wait_until(move || python.diag().iter().any(|d| d["evento"] == "rust.groups_restore_failed")).await;
 }
 
-/// Quem inicia e não desfaz o lado daqui quando o outro não confirma: o 500 do Python, nunca "desfeito".
-#[tokio::test(flavor = "multi_thread")]
-async fn pair_cross_whose_undo_fails_is_500() {
-    let dir = tempfile::tempdir().unwrap();
-    let casa = machine(dir.path(), "casa").await;
-    let off = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let off_addr = off.local_addr().unwrap();
-    peers_json(dir.path(), off_addr, off_addr);
-    let addr = casa.addr;
-    let asked = tokio::spawn(async move { call(addr, "POST", "s0/pair", Some(&json!({"peers": ["off::x"]}))).await });
-    let (sock, _) = off.accept().await.unwrap();
-    assert!(casa.pair.join("s0.json").is_file(), "o lado daqui grava antes de chamar o outro");
-    break_undo(&casa, "s0");
-    drop((sock, off));
-    assert_eq!(asked.await.unwrap(), (500, json!("Internal Server Error")));
-    restore_failed_in_diary(&casa).await;
-}
-
 /// Quem recebe e não avisa a sessão nem desfaz: o 500 do Python, nunca "pareamento desfeito".
 #[tokio::test(flavor = "multi_thread")]
 async fn pair_remote_whose_undo_fails_is_500() {
@@ -289,4 +298,16 @@ async fn pair_remote_whose_undo_fails_is_500() {
     casa.python.release.notify_one();
     assert_eq!(asked.await.unwrap(), (500, json!("Internal Server Error")));
     restore_failed_in_diary(&casa).await;
+}
+
+/// BRG-13/BRG-35: a linha do orquestrador não entra em par vindo de outra máquina; nada é gravado.
+#[tokio::test(flavor = "multi_thread")]
+async fn pair_remote_refuses_the_orchestrator() {
+    let dir = tempfile::tempdir().unwrap();
+    let casa = machine(dir.path(), "casa").await;
+    casa.python.set_internal("orq/is-orchestrator", StatusCode::OK, json!({"names": ["s2"]}));
+    let (status, body) = call(casa.addr, "POST", "s2/pair-remote", Some(&json!({"initiator": "lab::s1"}))).await;
+    assert_eq!((status, body["detail"]["code"].clone()), (409, json!("erro_sessao_orq")));
+    assert!(!casa.pair.join("s2.json").exists());
+    assert_eq!(inputs(&casa), [0, 0, 0, 0]);
 }

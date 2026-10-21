@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -41,7 +42,7 @@ _EXTENSOES_POR_CLI = {
     "omp": tuple(nome for nome in _EXTENSOES_PI if nome not in ("claude-todo", "fullscreen-tui")),
 }
 _HOOKS_CLAUDE = ("state_hook.py", "askq_capture.py", "preview_hook.py", "subagent_hook.py",
-                 "pair_hook.py", "nav_hook.py")
+                 "pair-context", "nav_hook.py")
 
 _versoes: dict[str, tuple[float, str | None]] = {}
 
@@ -404,9 +405,23 @@ def _hooks_claude(dir_conta: Path) -> dict:
         return _item("hooks", None, "config_ilegivel")
     texto = json.dumps(hooks)
     faltam = [h for h in _HOOKS_CLAUDE if h not in texto]
+    # O comando do grupo chama um binário: com ele sumido o hook não roda (e falha calado, `|| exit 0`).
+    grupo = [x.get("command") for blocos in (hooks.values() if isinstance(hooks, dict) else []) if isinstance(blocos, list)
+             for b in blocos if isinstance(b, dict) for x in (b.get("hooks") or [])
+             if isinstance(x, dict) and "pair-context" in str(x.get("command"))]
+    if grupo and not any(_executavel_existe(c) for c in grupo):
+        faltam.append("pair-context")
     if faltam:
         return _item("hooks", False, "faltam", "hooks-claude", lista=", ".join(faltam))
     return _item("hooks", True, "hooks_ok", n=len(_HOOKS_CLAUDE))
+
+
+def _executavel_existe(comando: str) -> bool:
+    try:
+        partes = shlex.split(comando)
+    except ValueError:
+        return False
+    return bool(partes) and Path(partes[0]).is_file()
 
 
 def _contas_claude() -> dict:

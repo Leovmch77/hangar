@@ -1,11 +1,10 @@
 """Resolução de servidores peer + chamadas outbound pro backend do outro server. peers.json
 (backend/peers.json, gitignored — MESMO arquivo que o hangar-send lê) mapeia server_id ->
-{base_url, token}. Só o pareamento cross-server usa isto; recado 1:1 e --list seguem no hangar-send
-(bash). Sem httpx no hot path: urllib da stdlib (mesmo padrão de transcribe.py), chamado numa thread
-pelo caller async — os POSTs de pareamento são ação de usuário, não hot path.
+{base_url, token}. Grupos entre máquinas são do servidor Rust; aqui o peers.json segue lido para
+recados, lista e criação noutra máquina. Sem httpx no hot path: urllib da stdlib (mesmo padrão de
+transcribe.py), chamado numa thread pelo caller async — os POSTs são ação de usuário, não hot path.
 
-ponytail: só o que o pareamento precisa — resolver base/token e um POST/DELETE com erro claro.
-Grupo cross-server de N não existe (o pareamento cross-server é 1:1); quando existir, isto não muda."""
+ponytail: só resolver base/token e um POST/DELETE com erro claro."""
 import hashlib
 import http.client
 import json

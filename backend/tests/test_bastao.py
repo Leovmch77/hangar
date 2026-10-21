@@ -267,9 +267,13 @@ def test_transcript_inexistente_nao_levanta(tmp_path):
 # par e grupo
 # ---------------------------------------------------------------------------
 
-def test_par_ativo_aparece_com_o_aviso_de_que_nao_e_reatado(tmp_path):
+def _par_origem_parceira():
     from app import pair
-    pair.join("origem", "parceira", "ABC-1234")
+    (pair._pair_dir() / "origem.json").write_text(json.dumps({"peers": ["parceira"], "task": "ABC-1234", "gid": "g1"}))
+
+
+def test_par_ativo_aparece_com_o_aviso_de_que_nao_e_reatado(tmp_path):
+    _par_origem_parceira()
     md = bastao.montar(str(FIX / "jsonl_samples.jsonl"), None, "claude", "origem")
     bloco = md.split("## Grupo e par", 1)[1].split("## ", 1)[0]
     assert "`parceira`" in bloco and "ABC-1234" in bloco
@@ -286,12 +290,23 @@ def test_com_contrato_o_dossie_diz_quem_ganha_na_divergencia(tmp_path):
     agiu sobre uma FRASE do dossiê que não valia mais (uma delas quase escreveu no checkout que o
     usuário estava usando). O dossiê descreve o que a origem estava fazendo; o contrato descreve o
     que ainda vale — e quem herda precisa saber qual dos dois manda ANTES de agir."""
-    from app import pair
-    pair.join("origem", "parceira", "ABC-1234")
+    _par_origem_parceira()
     md = bastao.montar(str(FIX / "jsonl_samples.jsonl"), None, "claude", "origem")
     bloco = md.split("## Grupo e par", 1)[1].split("## ", 1)[0]
     assert "Contrato do grupo" in bloco
     assert "vale o contrato" in bloco
+
+
+def test_bastao_cites_remote_owner_contract(tmp_path):
+    """Grupo entre máquinas com a dona em outra máquina: o arquivo não existe aqui; o dossiê aponta a
+    máquina dona e o comando que lê por ela."""
+    from app import pair
+    (pair._pair_dir() / "origem.json").write_text(json.dumps(
+        {"peers": ["casa::parceira"], "task": "", "gid": "g1", "fed": {"owner": "casa", "local": False, "version": 1}}))
+    md = bastao.montar(str(FIX / "jsonl_samples.jsonl"), None, "claude", "origem")
+    bloco = md.split("## Grupo e par", 1)[1].split("## ", 1)[0]
+    assert "na máquina `casa`" in bloco and "hangar-send --contrato" in bloco
+    assert "grupo-g1.md" not in bloco
 
 
 def test_as_secoes_de_citacao_dizem_no_titulo_que_sao_citacao(tmp_path):

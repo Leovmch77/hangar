@@ -10,7 +10,8 @@ use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
-use serde_json::json;
+use axum::body::Body;
+use serde_json::{Value, json};
 
 use crate::routes::AppState;
 
@@ -120,6 +121,8 @@ pub async fn codex(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
 /// Marca do `DELETE` que o Rust já encerrou e repassa: o valor é o segredo interno, e o Python, ao vê-la,
 /// limpa só as lojas dele, sem voltar ao Rust.
 pub const RUST_CLOSED: &str = "x-hangar-rust-closed";
+/// Marca do `DELETE` que o Rust só repassa e cuja saída do grupo ele faz depois; o valor é o segredo interno.
+pub const RUST_LEAVES: &str = "x-hangar-rust-leaves";
 /// Transcript (percent-encoded) da sessão que o Rust encerrou, junto da marca.
 pub const CLOSED_TRANSCRIPT: &str = "x-hangar-closed-transcript";
 
@@ -132,6 +135,7 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
     // Só o próprio Rust põe a marca: a que vier de fora sai antes de qualquer decisão.
     req.headers_mut().remove(RUST_CLOSED);
     req.headers_mut().remove(CLOSED_TRANSCRIPT);
+    req.headers_mut().remove(RUST_LEAVES);
     let name = super::session_name(req.uri().path());
     // Sem vigia (sem as pastas da lista), `kill_codex_terminal` é `None`.
     // Fechada de propósito não volta no próximo reboot, de qualquer agente.
@@ -150,7 +154,13 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
         codex => codex,
     };
     match closed {
-        None => return crate::routes::pass(&st, req, &fwd).await,
+        // Quem fecha é o Python; a saída do grupo é daqui, depois do fechamento que deu certo (BRG-25).
+        None => {
+            // Marca com o segredo: o Python não pede a saída pela ponte, que seria ida e volta.
+            if let Ok(mark) = axum::http::HeaderValue::from_str(&st.cfg.internal_secret) { req.headers_mut().insert(RUST_LEAVES, mark); }
+            let response = crate::routes::pass(&st, req, &fwd).await;
+            return leave_after_forward(&st, &name, response).await;
+        }
         Some(Err(error)) => {
             let mut response = match super::busy_refusal(&error) {
                 Some((status, body)) => super::json_response(status, body),
@@ -167,13 +177,7 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
             }
         }
     }
-    if let Some(groups) = st.groups.clone() {
-        match crate::groups::exit::leave_and_notify(&st, &groups, &name).await {
-            Ok((_, warnings)) if !warnings.is_empty() => tracing::warn!(session = %name, avisos = warnings.len(), "aviso de saída do grupo falhou ao encerrar"),
-            Err(error) => tracing::warn!(session = %name, error = %error, "saída do grupo falhou ao encerrar a sessão"),
-            _ => {}
-        }
-    }
+    let leave = match st.groups.clone() { Some(groups) => leave_warnings(&st, &groups, &name).await, None => Vec::new() };
     // Convites e par da sessão são do Rust: o Python marcado não volta a pedir a revogação.
     if let Some(share) = st.share.clone() {
         match share.store.revoke_session(&name, None) {
@@ -194,10 +198,56 @@ pub async fn delete(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectI
                 "msg": "Sessão encerrada, mas convites, atalhos e caches dela não foram limpos."});
             let mut response = super::json_response(StatusCode::OK, json!({"ok": true, "warning": warning}));
             crate::routes::cors(req.headers(), response.headers_mut());
-            return response;
+            return with_warnings(&name, response, leave).await;
         }
     }
-    crate::routes::pass(&st, req, &fwd).await
+    let response = crate::routes::pass(&st, req, &fwd).await;
+    with_warnings(&name, response, leave).await
+}
+
+/// Fechamento feito pelo Python (sessão sem entrada aqui: Pi, omp, Kimi): sai do grupo depois do
+/// sucesso, e a falha do aviso vai no `warning` da resposta: a sessão some da lista e ninguém mais a veria.
+async fn leave_after_forward(st: &AppState, name: &str, response: Response) -> Response {
+    let Some(groups) = st.groups.clone() else { return response };
+    if !response.status().is_success() { return response; }
+    let errs = leave_warnings(st, &groups, name).await;
+    with_warnings(name, response, errs).await
+}
+
+/// Sai do grupo; os avisos que não saíram e a falha da própria saída viram `{sessao, erro}`.
+async fn leave_warnings(st: &AppState, groups: &crate::groups::service::GroupService, name: &str) -> Vec<Value> {
+    match crate::groups::exit::leave_and_notify(st, groups, name).await {
+        Ok((_, warnings)) => warnings,
+        Err(error) => {
+            tracing::warn!(session = %name, error = %error, "saída do grupo falhou ao encerrar a sessão");
+            let code = crate::groups::bridge::group_failed(error).code;
+            vec![json!({"sessao": name, "erro": {"code": "erro_grupo_indisponivel", "params": {"detalhe": code},
+                "msg": "os grupos estão indisponíveis agora"}})]
+        }
+    }
+}
+
+/// Os avisos de saída no `warning` da resposta do fechamento; corpo que não é objeto JSON vira `{"ok": true}`.
+async fn with_warnings(name: &str, response: Response, errs: Vec<Value>) -> Response {
+    if errs.is_empty() { return response; }
+    let (mut parts, body) = response.into_parts();
+    let read = axum::body::to_bytes(body, 1 << 20).await.ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    let mut value = read.filter(Value::is_object).unwrap_or_else(|| {
+        tracing::warn!(session = %name, avisos = errs.len(), "corpo do fechamento ilegível; a resposta leva só os avisos de saída");
+        json!({"ok": true})
+    });
+    let current = value.get("warning").filter(|w| !w.is_null()).cloned();
+    value["warning"] = with_leave_warning(current, name, errs);
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    parts.headers.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/json"));
+    Response::from_parts(parts, Body::from(value.to_string()))
+}
+
+/// O `warning` do `kill_session` do Python: os avisos de saída, com o aviso que já havia no fim.
+fn with_leave_warning(current: Option<Value>, name: &str, mut errs: Vec<Value>) -> Value {
+    if let Some(current) = current { errs.push(json!({"sessao": name, "erro": current})); }
+    let text = crate::groups::routes::failures_text(&errs);
+    json!({"code": "erro_pareamento_saida_falhou", "params": {"avisos": errs}, "msg": format!("aviso de saída falhou: {text}")})
 }
 
 /// As rotas que o Rust atende para o Codex dele; outra cai no Python (421).
@@ -240,6 +290,17 @@ fn close_line(name: &str, headers: &axum::http::HeaderMap, peer: SocketAddr) -> 
 
 #[cfg(test)]
 mod close_tests {
+    /// O aviso que o `kill_session` montava com os avisos da ponte: o de convite que já havia vai no fim.
+    #[test]
+    fn leave_warning_keeps_the_python_warning_last() {
+        use serde_json::json;
+        let err = json!({"sessao": "lab::x", "erro": {"code": "erro_peer_nao_avisado", "params": {}, "msg": "lab inacessível"}});
+        let share = json!({"code": "erro_x", "params": {}, "msg": "convite"});
+        let warning = super::with_leave_warning(Some(share.clone()), "s0", vec![err.clone()]);
+        assert_eq!(warning, json!({"code": "erro_pareamento_saida_falhou", "params": {"avisos": [err, {"sessao": "s0", "erro": share}]},
+            "msg": "aviso de saída falhou: lab::x: lab inacessível; s0: convite"}));
+    }
+
     /// O fechamento pelo dono vai ao diário com o cliente e a origem.
     #[test]
     fn the_owner_close_names_the_client_and_the_origin() {

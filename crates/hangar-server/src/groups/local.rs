@@ -76,8 +76,9 @@ pub fn plan_join(read: &dyn Fn(&str) -> Option<Sidecar>, input: &JoinInput, fres
     let infos: Vec<_> = names.iter().map(|n| members_of(read, n)).collect();
     let members = dedup(infos.iter().flat_map(|(ms, _, _)| ms.iter().cloned()));
 
-    // Par entre máquinas próprias é 1:1 (uma sessão local + um remoto): a união nunca arrasta um
-    // remoto que não passou pelo handshake para dentro de um grupo. Membro de fora é membro comum.
+    // Remoto de máquina própria aqui só é o par 1:1 antigo (uma sessão local + um remoto): a união
+    // nunca o arrasta para dentro de um grupo; grupo entre máquinas passa pela federação. Membro de
+    // fora é membro comum.
     let outsiders = members.iter().filter(|m| is_remote(m) && (input.outside)(m)).count();
     let own = members.iter().filter(|m| is_remote(m)).count() - outsiders;
     let locals = members.len() - own - outsiders;
@@ -115,9 +116,12 @@ pub fn plan_join(read: &dyn Fn(&str) -> Option<Sidecar>, input: &JoinInput, fres
 
     let writes = members.iter().filter(|m| !is_remote(m)).map(|m| {
         let peers = members.iter().filter(|p| *p != m).cloned().collect();
+        let old = before.get(m).cloned().flatten();
         let linked_by = if input.linked && input.others.contains(m) { Some(input.name.to_owned()) }
-            else { before.get(m).cloned().flatten().and_then(|s| s.linked_by) };
-        (m.clone(), Sidecar { peers, task: Some(task.clone()), gid: gid.clone(), harness: harness.clone(), orq, fed: None, linked_by })
+            else { old.as_ref().and_then(|s| s.linked_by.clone()) };
+        // Grupo entre máquinas vai pela dona (`federation.rs`); aqui o `fed` só não se perde.
+        let fed = old.and_then(|s| s.fed);
+        (m.clone(), Sidecar { peers, task: Some(task.clone()), gid: gid.clone(), harness: harness.clone(), orq, fed, linked_by })
     }).collect();
     Ok(JoinPlan { members, gid, new_gid, task, orq, merged, writes, before })
 }
@@ -168,11 +172,11 @@ pub fn plan_rename(read: &dyn Fn(&str) -> Option<Sidecar>, old: &str, new: &str)
 }
 
 /// Por que o grupo de `link` não recebe um par de fora: `orq` (o árbitro sozinho tem aviso próprio),
-/// ou par com máquina própria (1:1).
+/// ou par antigo 1:1 com máquina própria. Grupo entre máquinas (`fed`) aceita: a dona fica sabendo.
 pub fn external_link_refusal(link: Option<&Sidecar>, outside: &dyn Fn(&str) -> bool) -> Option<JoinRefusal> {
     let link = link?;
     if link.orq { return Some(if link.peers.is_empty() { JoinRefusal::Orq } else { JoinRefusal::OrqOutside }); }
-    link.peers.iter().any(|p| is_remote(p) && !outside(p)).then_some(JoinRefusal::Mix)
+    (link.fed.is_none() && link.peers.iter().any(|p| is_remote(p) && !outside(p))).then_some(JoinRefusal::Mix)
 }
 
 /// Par com sessão de outra pessoa: o endereço entra no sidecar de cada membro local do grupo de

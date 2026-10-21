@@ -14,7 +14,6 @@ from starlette.websockets import WebSocket
 
 from app import pair, termsock
 from app import registry as registry_mod
-from app.registry import SessionRegistry
 
 from tmux_teste import matar_servidor, matar_sessao, novo_socket
 from app.config import settings
@@ -27,7 +26,6 @@ def _pair_dir_isolado(tmp_path, monkeypatch):
     # registry.list() varre pareamento (Task 8) a cada chamada; este arquivo chama SessionRegistry().list()
     # direto (sem isolar projects_dir) — sem isto varria o .hangar-pair REAL (achado do review).
     monkeypatch.setattr(pair.settings, "projects_dir", tmp_path / "projects")
-    monkeypatch.setattr(SessionRegistry, "_pair_ausencias", {})
 
 
 # Diretorio de trabalho dos shells escondidos deste arquivo. Era "/tmp" cru: no Windows esse caminho

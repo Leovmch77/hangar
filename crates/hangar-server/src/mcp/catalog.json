@@ -17,7 +17,7 @@
  },
  {
   "name": "sessions",
-  "description": "Lista as sessões vivas nesta máquina (nome, estado, cwd, provider). `voce: true` marca esta sessão; mesmo `grupo` = mesmo grupo de trabalho. Equivale a `hangar-send --list` sem os servidores remotos.",
+  "description": "Lista as sessões vivas nesta máquina (nome, estado, cwd, provider). `voce: true` marca esta sessão; mesmo `grupo` = mesmo grupo de trabalho. `membros` são os outros do grupo, com `servidor::sessao` para quem está em outra máquina; `dona` é a máquina que guarda um grupo entre máquinas. Equivale a `hangar-send --list` sem os servidores remotos.",
   "inputSchema": {
    "properties": {},
    "title": "sessionsArguments",
@@ -75,7 +75,7 @@
  },
  {
   "name": "group",
-  "description": "Aviso pro grupo de pareamento desta sessão, como `hangar-send --group <msg>`: chega como `[grupo: <você>]` nos demais. Marco, não conversa: NUNCA responda um `[grupo: …]` com isto. O backend escolhe o transporte pra cada membro. Uma frase direta, sem saudação: cada membro paga o texto como prompt. `sessao`: só para a assistente de voz, que não é sessão: a sessão em nome de quem agir; quem é sessão age sempre como ela mesma.",
+  "description": "Aviso pro grupo de pareamento desta sessão, como `hangar-send --group <msg>`: chega como `[grupo: <você>]` nos demais, em todas as máquinas do grupo. Marco, não conversa: NUNCA responda um `[grupo: …]` com isto. O backend escolhe o transporte pra cada membro. Uma frase direta, sem saudação: cada membro paga o texto como prompt. `sessao`: só para a assistente de voz, que não é sessão: a sessão em nome de quem agir; quem é sessão age sempre como ela mesma.",
   "inputSchema": {
    "properties": {
     "texto": {
@@ -107,7 +107,7 @@
  },
  {
   "name": "pair",
-  "description": "Pareia esta sessão com outra pra uma tarefa, como `hangar-send --pair <sessao> <tarefa>`: registra no app e injeta o protocolo nos dois lados. `alvo` aceita `servidor::sessao`. `tarefa` é o título do grupo na lista: chave + assunto numa linha (ex: `ABC-1234 Tela de login`); o combinado vai por `send`. Só quando o usuário pedir pareamento. `orq`: grupo de orquestração (skill orquestrar), como `--pair --orq`; com `alvo` vazio o grupo tem só esta sessão. `sessao`: só para a assistente de voz, que não é sessão: a sessão em nome de quem agir; quem é sessão age sempre como ela mesma.",
+  "description": "Pareia esta sessão com outra pra uma tarefa, como `hangar-send --pair <sessao> <tarefa>`: registra no app e injeta o protocolo em quem estava sem grupo. `alvo` aceita `servidor::sessao`: o grupo passa a juntar as duas máquinas, e quem já estava num grupo leva o grupo junto. `tarefa` é o título do grupo na lista: chave + assunto numa linha (ex: `ABC-1234 Tela de login`); o combinado vai por `send`. Só quando o usuário pedir pareamento. `orq`: grupo de orquestração (skill orquestrar), como `--pair --orq`; com `alvo` vazio o grupo tem só esta sessão. `sessao`: só para a assistente de voz, que não é sessão: a sessão em nome de quem agir; quem é sessão age sempre como ela mesma.",
   "inputSchema": {
    "properties": {
     "alvo": {
@@ -486,6 +486,50 @@
   "outputSchema": {
    "additionalProperties": true,
    "title": "interruptDictOutput",
+   "type": "object"
+  }
+ },
+ {
+  "name": "contract",
+  "description": "Lê ou grava o contrato do grupo desta sessão (as decisões que o grupo consulta), como `hangar-send --contrato`. Vale para grupo desta máquina e para grupo entre máquinas. Sem `conteudo`, lê: volta `content`, `mtime` e `owner` (a máquina que guarda o arquivo; `path` só vem preenchido nela). Com `conteudo`, grava o texto inteiro no lugar do atual e volta o `mtime` novo; passe o `mtime` da sua última leitura (nulo só cria, quando o contrato ainda não existe). `erro_contrato_mudou` (409) = alguém gravou depois da sua leitura: leia de novo, junte e grave. `sessao`: só para a assistente de voz, que não é sessão: a sessão em nome de quem agir; quem é sessão age sempre como ela mesma.",
+  "inputSchema": {
+   "properties": {
+    "conteudo": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Conteudo"
+    },
+    "mtime": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Mtime"
+    },
+    "sessao": {
+     "default": "",
+     "title": "Sessao",
+     "type": "string"
+    }
+   },
+   "title": "contractArguments",
+   "type": "object"
+  },
+  "outputSchema": {
+   "additionalProperties": true,
+   "title": "contractDictOutput",
    "type": "object"
   }
  },

@@ -296,19 +296,21 @@ export function railLabel(name: string, grupo?: string | null): [string, string]
   return [parts[0].slice(0, RAIL_MAX), parts.slice(1).join('-').slice(0, RAIL_MAX)];
 }
 
-export function clusterByPair<T extends PairFields>(sessions: T[]): PairRow<T>[] {
+// `keyOf` junta gids diferentes num cluster só (o par antigo entre máquinas tem um gid de cada lado).
+export function clusterByPair<T extends PairFields>(sessions: T[], keyOf: (s: T) => string | null = (s) => s.pair_gid ?? null): PairRow<T>[] {
   // Pré-agrupa por gid numa passada (O(n)) — evita o filter-dentro-do-loop O(n²), já que roda
   // inline no {#each} a cada render.
   const byGid = new Map<string, T[]>();
   for (const s of sessions) {
-    if (!s.pair_gid) continue;
-    const arr = byGid.get(s.pair_gid);
-    if (arr) arr.push(s); else byGid.set(s.pair_gid, [s]);
+    const gid = keyOf(s);
+    if (!gid) continue;
+    const arr = byGid.get(gid);
+    if (arr) arr.push(s); else byGid.set(gid, [s]);
   }
   const out: PairRow<T>[] = [];
   const emitted = new Set<string>();
   for (const s of sessions) {
-    const gid = s.pair_gid ?? null;
+    const gid = keyOf(s);
     if (!gid) { out.push({ kind: 'session', session: s, gid: null }); continue; }
     if (emitted.has(gid)) continue;               // membro já entrou no cluster do 1º
     emitted.add(gid);

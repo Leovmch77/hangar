@@ -274,6 +274,24 @@ mod guard_tests {
         let text = String::from_utf8(output.lock().unwrap().clone()).unwrap();
         assert!(text.contains("code=frame_json"),"{text}");
     }
+
+    /// Linha acima do teto não deixa a sessão parada em `working`: o canal de eventos fecha e o ator
+    /// registra a queda (`cano_closed`).
+    #[tokio::test]
+    async fn a_cano_line_above_the_ceiling_closes_the_events_channel() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let capture = Capture(output.clone());
+        let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false).with_writer(move||capture.clone()).finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let (ours,mut theirs) = tokio::io::duplex(64 * 1024);
+        let snapshot = CanoSnapshot { kind:"cano_snapshot".into(),versao:2,pid:1,init:None,aberto:true,pendentes:vec![],
+            ultimo_result:None,rate_limit:None,stderr_tail:vec![],saiu:None,inflight:json!({}) };
+        let mut tasks = CanoConnection { snapshot,stream:BufReader::new(Box::new(ours)) }.start(1,4);
+        tokio::spawn(async move { let _ = theirs.write_all(&vec![b'x'; MAX_ENVELOPE + 2]).await; theirs });
+        assert!(tokio::time::timeout(Duration::from_secs(10),tasks.events.recv()).await.unwrap().is_none());
+        let text = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("code=frame_limit"),"{text}");
+    }
 }
 
 /// Quanto o `open` espera o cano lançado começar a escutar, como o Python antigo antes de matá-lo.

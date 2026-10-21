@@ -581,13 +581,12 @@ def _grupo_e_par(nome: str) -> list[str]:
         out.append("- Pareada com: " + ", ".join(f"`{p}`" for p in link["peers"]))
         if link.get("task"):
             out.append(f"- Rótulo do grupo: `{_uma_linha(link['task'], 120)}`")
-    if nome:
-        contrato = pair.contract_path_for(nome)
-        if contrato:
-            out.append(f"- Contrato do grupo (leia antes de agir): `{contrato}`")
-            # Quem herda precisa saber qual dos dois manda ANTES de agir: o dossiê descreve o que a
-            # origem estava fazendo, o contrato descreve o que ainda vale.
-            out.append("- **Onde o resumo divergir do contrato, vale o contrato.**")
+    if nome and (contrato := pair.contract_path_for(nome)):
+        dona = (link or {}).get("dona")  # grupo entre máquinas: o arquivo mora na dona
+        out.append("- Contrato do grupo (leia antes de agir): " + (f"na máquina `{dona}` (`hangar-send --contrato`)" if dona else f"`{contrato}`"))
+        # Quem herda precisa saber qual dos dois manda ANTES de agir: o dossiê descreve o que a
+        # origem estava fazendo, o contrato descreve o que ainda vale.
+        out.append("- **Onde o resumo divergir do contrato, vale o contrato.**")
     if gid:
         regras = orq_papeis.regras_path(gid)
         texto, _mtime = orq_md.ler_arquivo(regras)

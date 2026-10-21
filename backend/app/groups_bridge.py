@@ -1,6 +1,6 @@
-"""Ponte privada dos grupos: no modo `rust`/`pending` só o Rust grava `.hangar-pair`. Registry, par
-externo, MCP e as rotas que chegam pelas portas do Python pedem aqui; o Python só lê o arquivo."""
-import asyncio
+"""Ponte privada dos grupos: só o Rust grava `.hangar-pair`. O que chega às portas do Python (rotas
+da 8768, fechamento pelo Connect, renomear, associar o `orq`) pede aqui, num sentido; o Python só
+lê o arquivo."""
 import http.client
 import json
 import logging
@@ -9,10 +9,6 @@ import urllib.request
 
 _log = logging.getLogger("hangar.groups")
 _config: tuple[str, str] | None = None
-# Com o Rust esperado, os grupos são dele desde o início: antes da primeira saúde ele já atende
-# `/pair` e varre, e o Python escrevendo ali seria o segundo escritor. Só a saúde com
-# `groups: false` devolve ao Python; desistir do Rust já leva o modo a `python`.
-_capable = True
 _MAX_RESPONSE = 4 * 1024 * 1024
 # A rota `/pair` entre máquinas pode esperar a outra máquina (16 s), a limpeza dela e a entrega.
 _TIMEOUT = 90
@@ -20,7 +16,7 @@ _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 class GroupsBridgeError(RuntimeError):
-    """Falha da ponte com código (`groups_bridge_off`, `groups_runtime_starting`, o código do Rust)."""
+    """Falha da ponte com código (`groups_bridge_off`, o código do Rust)."""
     def __init__(self, code: str, detail: str = ""):
         super().__init__(f"{code}: {detail}" if detail else code)
         self.code, self.detail = code, detail
@@ -31,22 +27,20 @@ def configure(address: str | None, secret: str | None) -> None:
     _config = (address, secret) if address and secret else None
 
 
-def set_capable(capable: bool) -> None:
-    global _capable
-    _capable = capable
-
-
 def rust_owns_groups() -> bool:
+    """Fora do modo `python` os grupos são do Rust; no `python` não há dono nem reserva."""
     from app import runtime_coordinator
     owner = runtime_coordinator.current()
-    return owner is not None and owner.mode != "python" and _capable
+    return owner is not None and owner.mode != "python"
 
 
 def _await_rust() -> None:
-    """No `pending` espera o desfecho até `PENDING_WAIT_S`; depois disso, ou na reserva, é erro."""
+    """O servidor limpa as pontes antes de (re)subir o Rust: no `pending` espera o desfecho até
+    `PENDING_WAIT_S`; desfecho `python` não chama a ponte."""
     from app import runtime_coordinator
     owner = runtime_coordinator.current()
-    if owner is not None and owner.mode == "pending" and not runtime_coordinator._mode_bypass.get():
+    if owner is not None and (owner.mode == "pending" or getattr(owner, "_settling", False)) \
+            and not runtime_coordinator._mode_bypass.get():
         from app.runtime_adapter import run_sync
         try:
             run_sync(owner.await_mode, owner.loop)
@@ -54,18 +48,12 @@ def _await_rust() -> None:
             raise GroupsBridgeError("groups_runtime_starting") from e
         except RuntimeError as e:
             raise GroupsBridgeError("groups_wait_on_loop") from e
-    if owner is None or owner.mode == "python":
+    if owner is not None and owner.mode == "python":
         raise GroupsBridgeError("groups_runtime_python")
 
 
 def call(op: str, **args) -> dict:
-    """Bloqueia (nunca no laço: o Rust chama de volta as rotas internas do Python)."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        pass
-    else:
-        raise GroupsBridgeError("groups_wait_on_loop")
+    """Bloqueia: quem está no laço chama por `to_thread`."""
     _await_rust()
     config = _config
     if config is None:

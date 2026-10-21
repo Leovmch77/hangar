@@ -11,6 +11,8 @@ import { Icon } from '../../ui/Icon';
 import { superficie } from '../../theme/superficie';
 import { SPACE } from '../../theme/scale';
 import { useWorktreeStatus } from '../worktrees/worktreeStatus';
+import { groupBadge } from '../pair/groupPairs';
+import { GroupGlyph } from '../pair/GroupGlyph';
 import * as m from '../../paraglide/messages';
 
 // LOOP_TONE_COLOR do core é CSS var (`var(--accent)`) — não serve em RN; o tom vira `Chip tone`.
@@ -41,7 +43,8 @@ export type PairAction =
   | { kind: 'accept' }
   | { kind: 'leave' }
   | { kind: 'undo'; pair: PairExternal }
-  | { kind: 'release'; pair: PairExternal };
+  | { kind: 'release'; pair: PairExternal }
+  | { kind: 'group' };
 
 interface Props {
   session: AggSession;
@@ -58,13 +61,17 @@ interface Props {
   onWorktree?: (s: AggSession, path: string) => void;
   // Ausente em servidor de convite: lá a pessoa é convidada, não dona do par.
   onPair?: (s: AggSession, action: PairAction) => void;
+  // Selo do grupo entre máquinas pelo modelo global (`groupBadges` da lista), em valores soltos para o memo; ausente =
+  // grupo de uma máquina só.
+  crossBadgeText?: string | null;
+  crossBadgeMachines?: number;
 }
 
 // O iOS já vibra ao abrir o menu de contexto; o PopupMenu do Android não.
 const vibrarAoAbrir =
   Platform.OS === 'android' ? () => void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {}) : undefined;
 
-export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor, compact = false, selected, onPress, onGit, onExcluir, onRenomear, onResume, onWorktree, onPair }: Props) {
+export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor, compact = false, selected, onPress, onGit, onExcluir, onRenomear, onResume, onWorktree, onPair, crossBadgeText, crossBadgeMachines }: Props) {
   const { theme } = useUnistyles();
   // O orquestrador não se renomeia nem se fecha: o backend recusa, então a linha nem oferece.
   const orq = isOrq(s);
@@ -106,13 +113,21 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
     else if (nome === 'leave') onPair?.(s, { kind: 'leave' });
     else if (nome === 'pair-invite') onPair?.(s, { kind: 'invite' });
     else if (nome === 'pair-accept') onPair?.(s, { kind: 'accept' });
+    else if (nome === 'group') onPair?.(s, { kind: 'group' });
     else if (nome.startsWith('undo:')) {
       const pair = pares[Number(nome.slice(5))];
       if (pair) onPair?.(s, { kind: 'undo', pair });
     }
   };
   // Renomear/Git/Excluir moram no toque longo, gesto que o leitor de tela não alcança. Aqui elas viram ações do rotor/menu de acessibilidade da própria linha.
-  const acoesA11y = useMemo(() => acoesMenu.map((a) => ({ name: a.id, label: a.title })), [acoesMenu]);
+  const badge = groupBadge(s, crossBadgeMachines ? { text: crossBadgeText ?? null, machines: crossBadgeMachines } : undefined);
+  const badgeText = badge ? (badge.text ?? m.grupo_selo_maquinas({ n: badge.machines })) : null;
+  // O selo abre o painel do grupo; no leitor de tela vira ação da linha.
+  const groupTitle = badge && onPair && !fora ? m.par_grupo_titulo({ n: (s.pair_peers?.length ?? 0) + 1 }) : null;
+  const acoesA11y = useMemo(
+    () => [...acoesMenu.map((a) => ({ name: a.id, label: a.title })), ...(groupTitle ? [{ name: 'group', label: groupTitle }] : [])],
+    [acoesMenu, groupTitle],
+  );
   const pendentes = pares.filter((p) => p.pending);
   const untracked = s.tracked === false;
   const cwd = cwdParts(s.cwd);
@@ -120,9 +135,6 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
   const pendingQuestions = s.pending_questions ?? 0;
   const reply = s.state === 'idle' ? s.last_reply : null;
   const sub = s.question ?? (s.state === 'working' ? s.label : reply) ?? null;
-  const peers = s.pair_peers ?? [];
-  // o rótulo do grupo (ex.: o ticket) diz mais que o nome do par; sem ele, o par ou o tamanho
-  const pairLabel = peers.length ? (s.pair_task ?? (peers.length === 1 ? peers[0] : String(peers.length + 1))) : null;
   const engineLabel = !orq && s.provider === 'claude' ? s.engine : null;
   const providerLabel = orq ? null : [providerName(s.provider), engineLabel].filter(Boolean).join(', ');
   const account = accountChip(s.conta);
@@ -134,7 +146,6 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
   const meta = [
     s.cwd && cwd.base !== s.name && cwd.base !== wtNome ? cwd.base : null,
     branchWt ? null : s.branch,
-    pairLabel,
   ].filter((p): p is string => !!p);
   // Zero não desenha: a ausência de seta é "está em dia", como no PWA.
   const gitAhead = s.git_ahead || 0;
@@ -187,7 +198,7 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
       // estado e a pergunta sumiriam do leitor de tela.
       // Máquina e projeto entram mesmo quando a tela os esconde (lista agrupada, pasta = nome):
       // é o que distingue duas conversas de mesmo nome no leitor de tela.
-      accessibilityLabel={`${s.name}${s.headless === true ? `, ${m.criar_modo_exec_headless()}` : ''}${fora ? `, ${m.pair_from_owner({ dono: fora.owner })}${s.guest_kind === 'share' ? '' : `, ${m.pair_level_view()}`}` : ''}, ${rotuloEstado(s.state)}${s.limited ? `, ${s.limit_reset ? m.sessao_limite_volta({ n: s.limit_reset }) : m.sessao_limite()}` : ''}${pendingQuestions > 0 ? `, ${m.ask_perguntas()}: ${pendingQuestions}` : ''}${sub ? `, ${sub}` : ''}${providerLabel ? `, ${providerLabel}` : ''}${account ? `, ${m.sessao_conta({ n: account.name })}` : ''}, ${s.serverLabel}${s.cwd ? `, ${cwd.base}` : ''}${s.branch ? `, ${s.branch}` : ''}${gitAhead || gitBehind ? `, ${m.git_sync_titulo({ ahead: gitAhead, behind: gitBehind })}` : ''}${selected ? `, ${m.switcher_atual()}` : ''}`}
+      accessibilityLabel={`${s.name}${s.headless === true ? `, ${m.criar_modo_exec_headless()}` : ''}${fora ? `, ${m.pair_from_owner({ dono: fora.owner })}${s.guest_kind === 'share' ? '' : `, ${m.pair_level_view()}`}` : ''}, ${rotuloEstado(s.state)}${s.limited ? `, ${s.limit_reset ? m.sessao_limite_volta({ n: s.limit_reset }) : m.sessao_limite()}` : ''}${pendingQuestions > 0 ? `, ${m.ask_perguntas()}: ${pendingQuestions}` : ''}${sub ? `, ${sub}` : ''}${badgeText ? `, ${badgeText}` : ''}${providerLabel ? `, ${providerLabel}` : ''}${account ? `, ${m.sessao_conta({ n: account.name })}` : ''}, ${s.serverLabel}${s.cwd ? `, ${cwd.base}` : ''}${s.branch ? `, ${s.branch}` : ''}${gitAhead || gitBehind ? `, ${m.git_sync_titulo({ ahead: gitAhead, behind: gitBehind })}` : ''}${selected ? `, ${m.switcher_atual()}` : ''}`}
       accessibilityActions={acoesA11y}
       onAccessibilityAction={({ nativeEvent }) => {
         acao(nativeEvent.actionName);
@@ -217,7 +228,7 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
             {sub}
           </Text>
         ) : null}
-        {meta.length || engineLabel || mostrarServidor || branchWt || account || temGit ? (
+        {meta.length || engineLabel || mostrarServidor || branchWt || account || temGit || badgeText ? (
           <View style={styles.metaRow}>
             {mostrarServidor ? <>
               <View style={styles.serverIcon} accessibilityElementsHidden importantForAccessibility="no">
@@ -233,8 +244,21 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
               </View>
             ) : null}
             {meta.length ? <Text style={[styles.meta, styles.metaRest, { color: muted }]} numberOfLines={1}>{engineLabel ? ' · ' : ''}{meta.join(' · ')}</Text> : null}
+            {badgeText ? (
+              <Pressable
+                onPress={groupTitle ? () => onPair?.(s, { kind: 'group' }) : undefined}
+                disabled={!groupTitle}
+                hitSlop={{ top: 8, bottom: 13, left: 6, right: 6 }}
+                style={[styles.badge, (meta.length > 0 || !!engineLabel || mostrarServidor) && styles.badgeAfter, { borderColor: theme.tokens.border.subtle }]}
+                accessibilityElementsHidden
+                importantForAccessibility="no-hide-descendants"
+              >
+                <GroupGlyph size={12} color={muted} />
+                <Text style={[styles.meta, styles.metaRest, { color: muted }]} numberOfLines={1}>{badgeText}</Text>
+              </Pressable>
+            ) : null}
             {branchWt ? <>
-              {meta.length || engineLabel ? <Text style={[styles.meta, styles.metaSeparator, { color: muted }]}>{' · '}</Text> : null}
+              {meta.length || engineLabel || badgeText ? <Text style={[styles.meta, styles.metaSeparator, { color: muted }]}>{' · '}</Text> : null}
               <Icon name="GitBranch" size={SPACE[3]} color={muted} />
               <Text style={[styles.meta, styles.metaRest, styles.branchWt, { color: muted }]} numberOfLines={1}>{branchWt}</Text>
             </> : null}
@@ -313,6 +337,8 @@ const styles = StyleSheet.create((theme) => ({
   engineText: { fontWeight: theme.base.weight.semibold, flexShrink: 0 },
   metaRest: { flexShrink: 1 },
   metaSeparator: { flexShrink: 0 },
+  badgeAfter: { marginLeft: theme.base.space[1] },
+  badge: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[0.5], minWidth: 0, flexShrink: 1, paddingHorizontal: theme.base.space[1], borderWidth: 1, borderRadius: theme.base.radius.full },
   meta: { fontSize: theme.base.text.xs, lineHeight: 18 },
   metaTxt: { fontSize: theme.base.text.xs },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[1], marginTop: theme.base.space[1] },

@@ -23,7 +23,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   import GroupGlyph from './icons/GroupGlyph.svelte';
   import SessionSignals from './SessionSignals.svelte';
   import type { SessionInfo, AggSession, Provider, SessionOpeningExtras, WorktreeChoice } from '@hangar/core';
-  import { cwdParts, rotuloEstado, stateColors, countAwaiting, railLabel, fmtWhen, relativeTime, latestAssistantEvent, untrackedReason, providerTag, isOrq } from '@hangar/core';
+  import { cwdParts, rotuloEstado, stateColors, countAwaiting, railLabel, fmtWhen, relativeTime, latestAssistantEvent, untrackedReason, providerTag, isOrq, clusterByPair } from '@hangar/core';
   import { arrastarGrupo, mensagemRecusa } from '../lib/arrastarGrupo.svelte';
   import { createDragToGroup, dragChave } from '../lib/dragToGroup';
   import { updateBadge } from '../lib/badge';
@@ -36,7 +36,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   import { navMode } from '../lib/navMode.svelte';
   import { ctxPanel } from '../lib/ctxPanel.svelte';
   import { navegadorPanel } from '../lib/navegadorPanel.svelte';
-  import { createSessionListModel, groupItems, pairCodigo, pairResto, type Group } from '../lib/sessionListModel.svelte';
+  import { createSessionListModel, pairCodigo, pairResto, type Group } from '../lib/sessionListModel.svelte';
 
   const DEFAULT_BRANCHES = new Set(['main', 'master']);
 
@@ -565,14 +565,13 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     const offline = sessionsStore.byServer.filter(b => b.error && !b.server.inviteEnded);
     const offlineIds = new Set(offline.map(b => b.server.id));
     const key = (s: AggSession) => `${s.serverId}::${s.name}`;
-    const paired = new Set(model.groups.filter(g => g.pair).flatMap(g => g.sessions.map(key)));
     const visible = new Set(model.flatRows.map(key));
-    const onlineGroups = model.groups.map(g => g.pair ? g : {
+    const onlineGroups = model.groups.map(g => ({
       ...g, sessions: g.sessions.filter(s => !offlineIds.has(s.serverId)),
-    }).filter(g => !g.error && g.sessions.length > 0);
+    })).filter(g => !g.error && g.sessions.length > 0);
     const offlineGroups: Group[] = offline.map(b => ({
       id: b.server.id, label: b.server.label, color: serverColor(b.server.id), error: b.error,
-      sessions: b.sessions.filter(s => visible.has(key(s)) && !paired.has(key(s))),
+      sessions: b.sessions.filter(s => visible.has(key(s))),
     }));
     return { onlineGroups, offlineGroups };
   });
@@ -757,7 +756,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
         </div>
       {/if}
       {#if !expanded || !model.collapsed.has(g.id)}
-      {#each groupItems(g) as item (item.kind === 'header' ? `ph:${item.gid}` : `${item.session.serverId}::${item.session.name}`)}
+      {#each clusterByPair(g.sessions) as item (item.kind === 'header' ? `ph:${item.gid}` : `${item.session.serverId}::${item.session.name}`)}
         {#if item.kind === 'header'}
           {#if expanded}
           <!-- Cluster de pareamento (Opção C): sub-header colapsável do grupo, dentro do servidor.
@@ -934,12 +933,6 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                       </span>
                     {/if}
                   </span>
-                  {#if g.pair}
-                    <span class="pair-server" style:color={s.serverColor}>
-                      {sessionsStore.byServer.find(b => b.server.id === s.serverId)?.error === 'offline'
-                        ? m.lista_servidor_offline({ label: s.serverLabel }) : s.serverLabel}
-                    </span>
-                  {/if}
                   {#if s.state === 'idle' && s.last_reply}
                     <span class="status-sub reply" title={s.last_reply}>
                       <span class="reply-mark" aria-hidden="true">◆</span>
@@ -1697,7 +1690,6 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   .pair-head-resto {
     font-weight: 400; color: var(--text-muted);
   }
-  .pair-server { font-size: var(--text-xs); overflow-wrap: anywhere; }
   .pair-head .grp-await, .pair-head .grp-count { margin-left: auto; }
   .pair-head .grp-await + .grp-count { margin-left: 0; }
   @media (hover: hover) { .pair-head:hover { color: var(--text-primary); } }

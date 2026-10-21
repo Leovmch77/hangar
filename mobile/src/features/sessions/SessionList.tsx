@@ -9,6 +9,8 @@ import {
   deleteSession,
   effectiveGroupBy,
   formataErro,
+  groupBadges,
+  groupGlobal,
   renameSession,
   setPairAccess,
   resumeSession,
@@ -25,10 +27,12 @@ import { Icon } from '../../ui/Icon';
 import { toast } from '../../ui/Toast';
 import { SessionRow, type PairAction } from './SessionRow';
 import { buildSessionSections, sessionGroupKey, type SessionSection } from './sessionSections';
-import { SessionSectionCard, SessionSectionHeader } from './SessionSection';
+import { GroupBlockHeader, SessionSectionCard, SessionSectionHeader } from './SessionSection';
 import { PairInviteSheet, type PairTarget } from '../pair/PairInviteSheet';
 import { PairAcceptSheet, type PairAcceptTarget } from '../pair/PairAcceptSheet';
 import { leaveExternal } from '../pair/leaveExternal';
+import { pickKey } from '../pair/groupPairs';
+import { useIdentities } from '../pair/identities';
 import { ConversationList } from './ConversationList';
 import { RenameSheet } from './RenameSheet';
 import { WorktreeSheet } from '../worktrees/WorktreeSheet';
@@ -37,6 +41,7 @@ import { superficie } from '../../theme/superficie';
 
 // Erro LANÇADO pelo apiFetch — já vem com mensagem pronta. O `formataErro` é pro envelope do
 // corpo da resposta (o `warning` do excluir), e aplicado a um Error devolve o código cru.
+const NO_SERVERS: Server[] = [];
 const mensagemDe = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 // O formulário remonta a home ao trocar de máquina; a memória pertence à vista, não à gaveta.
@@ -76,6 +81,11 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
   }, []);
   const activeId = useServers((s) => s.activeId);
   const byServer = useSessions((s) => s.byServer);
+  // Grupo entre máquinas na lista: só então se lê o identificador de cada máquina, como a PWA.
+  const crossMachine = useMemo(() => rows.some((r) => r.pair_owner || r.pair_peers?.some((p) => p.includes('::'))), [rows]);
+  const { identities } = useIdentities(crossMachine ? servers : NO_SERVERS);
+  const crossBadges = useMemo(() => groupBadges(rows, identities), [rows, identities]);
+  const pairGroups = useMemo(() => groupGlobal(rows, identities), [rows, identities]);
   const [filtro, setFiltro] = useState('');
   const insets = useSafeAreaInsets();
   // chave `modo:id`: trocar o Agrupar por não herda o recolhido de um grupo de outro tipo
@@ -203,7 +213,9 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
     const server = own(s.outside?.localServerId ?? s.serverId);
     if (!server) { toast.erro(m.servidor_nao_existe()); return; }
     const sair = (alias: string, session: string) => leaveExternal(alias, session, server);
-    if (a.kind === 'invite') {
+    if (a.kind === 'group') {
+      router.push(`/s/${s.serverId}/${s.name}/pair` as never);
+    } else if (a.kind === 'invite') {
       setConvite({ server, name: s.name, members: (s.pair_peers ?? []).filter((p) => !p.includes('::')) });
     } else if (a.kind === 'accept') {
       setAceite({ server, name: s.name, sessions: useSessions.getState().rows.filter((r) => r.serverId === server.id) });
@@ -228,7 +240,7 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
         } },
       ]);
     }
-  }, []);
+  }, [router]);
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
@@ -242,7 +254,7 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
   const busca = filtro.trim().toLowerCase();
   // Filtrar + ordenar + agrupar a lista inteira a cada render é caro, e arrastar um slider de
   // material re-renderiza todo mundo que lê o tema — inclusive esta tela.
-  const sections = useMemo(() => buildSessionSections(rows, modo, busca, recolhidos), [rows, busca, modo, recolhidos]);
+  const sections = useMemo(() => buildSessionSections(rows, modo, busca, recolhidos, undefined, pairGroups), [rows, busca, modo, recolhidos, pairGroups]);
   const variosServidores = servers.length > 1;
 
   // Sessão que entra ou sai do topo desliza para o lugar novo em vez de pular. A chave ignora a
@@ -461,11 +473,12 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
         renderSectionHeader={({ section }) => <SessionSectionHeader section={section} onToggle={alternarGrupo} />}
         renderItem={({ item, section, index }) => (
           <SessionSectionCard index={index} total={section.data.length}>
+            {section.heads.has(pickKey(item.serverId, item.name)) ? <GroupBlockHeader head={section.heads.get(pickKey(item.serverId, item.name))!} /> : null}
             <SessionRow
               session={item}
               compact={home}
-              // No topo as linhas vêm de máquinas diferentes, então dizem de qual são.
-              mostrarServidor={todos.length > 1 && (modo !== 'server' || section.id.startsWith('state:'))}
+              // No topo as linhas vêm de máquinas diferentes, então dizem de qual são; no bloco do grupo, a de outra máquina também.
+              mostrarServidor={todos.length > 1 && (modo !== 'server' || section.id.startsWith('state:') || item.serverId !== section.id)}
               onPress={abrir}
               onGit={abrirGit}
               onExcluir={excluir}
@@ -473,6 +486,8 @@ export function SessionList({ onClose, onOpenServers, onNewConversation = onClos
               onResume={retomar}
               onWorktree={proprios.has(item.serverId) ? abrirWorktree : undefined}
               onPair={proprios.has(item.serverId) || item.outside ? fazerPar : undefined}
+              crossBadgeText={crossBadges.get(pickKey(item.serverId, item.name))?.text}
+              crossBadgeMachines={crossBadges.get(pickKey(item.serverId, item.name))?.machines}
             />
           </SessionSectionCard>
         )}

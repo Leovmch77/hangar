@@ -29,7 +29,7 @@ vi.mock('react-native-enriched-markdown', () => ({
 vi.mock('../../chat/AssistantBubble', () => ({ mkMarkdownStyle: () => ({}) }));
 vi.mock('../../paraglide/messages', () => Object.fromEntries(
   ('par_conversa_titulo par_sem_historico comum_carregando par_vazio_trocas par_parear_titulo par_passam_hint forward_nenhuma_viva par_parear_aria par_tarefa_placeholder par_pareando par_parear_nomes par_escolha_varias '
-    + 'par_grupo_titulo par_membros_hint par_abrir_conversa_de par_adicionar_sessao par_vazio_fora_grupo par_adicionar_aria par_adicionando par_adicionar_nomes par_escolha_sessoes par_saindo par_sair_grupo '
+    + 'par_grupo_titulo par_membros_hint par_abrir_conversa_de par_adicionar_sessao par_vazio_fora_grupo par_adicionar_aria par_adicionando par_adicionar_nomes par_escolha_sessoes par_saindo par_sair_grupo worktree_esta_sessao '
     + 'forward_nao_listou par_contrato_falhou par_contrato_titulo par_falhou_pareamento par_falhou_saida comandos_confirmar comum_cancelar comum_confirmar compare_servidor_nao_encontrado comum_voltar')
     .split(' ').map((key) => [key, () => key]),
 ));
@@ -131,10 +131,12 @@ it('mantém GET e pareamento no servidor da rota quando outro está ativo', asyn
   const { container } = await renderPair();
   await act(async () => container.querySelector<HTMLButtonElement>('[role="checkbox"]')!.click());
   await act(async () => button(container, 'par_parear_nomes').click());
-  expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+  // O identificador de cada máquina é lido para as candidatas de outras máquinas.
+  const calls = fetchMock.mock.calls.filter(([url]) => !String(url).endsWith('/api/peers/identificador'));
+  expect(calls.map(([url]) => String(url))).toEqual([
     'http://a.local/api/sessions', 'http://a.local/api/sessions/a/pair',
   ]);
-  expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: 'POST', headers: { Authorization: 'Bearer token-a' }, body: '{"peers":["b"],"task":"","replace_task":false}' });
+  expect(calls[1][1]).toMatchObject({ method: 'POST', headers: { Authorization: 'Bearer token-a' }, body: '{"peers":["b"],"task":"","replace_task":false}' });
   expect(navigation.back).toHaveBeenCalledOnce();
 });
 

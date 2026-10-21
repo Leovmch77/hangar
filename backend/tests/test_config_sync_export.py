@@ -45,6 +45,17 @@ def test_what_must_stay_never_leaves_and_chosen_secrets_go(ana):
         assert chosen in blob, chosen
 
 
+def test_pair_context_hook_is_hangar_and_never_travels(ana):
+    """O `hangar-server pair-context` do SessionStart é do Hangar (binário, não `.py`): fica no destino."""
+    path = Path(ana.claude) / "settings.json"
+    settings = json.loads(path.read_text())
+    settings["hooks"]["SessionStart"] = [{"hooks": [{"type": "command", "command":
+                                                     f'"{ana.home}/.hangar/bin/hangar-server" pair-context "{ana.claude}/.hangar-pair" || true'}]}]
+    path.write_text(json.dumps(settings))
+    data = config_sync.export_bundle(ana, ["claude_hooks"]).items["claude_hooks"]
+    assert "SessionStart" not in data["hooks"]
+
+
 def test_hooks_drop_hangar_entries_and_carry_referenced_files(ana):
     data = config_sync.export_bundle(ana, ["claude_hooks"]).items["claude_hooks"]
     commands = [h["command"] for g in data["hooks"]["PreToolUse"] for h in g["hooks"]]

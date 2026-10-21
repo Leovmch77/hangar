@@ -99,6 +99,7 @@ export interface SessionInfo {
   pair_peers?: string[] | null; // grupo de trabalho ativo: os OUTROS membros (2 sessões = lista de 1)
   pair_gid?: string | null;     // id estável do grupo (cluster da lista agrupa por ele)
   pair_task?: string | null;    // rótulo do grupo (ex: ABC-1234) pro header do cluster
+  pair_owner?: string | null;   // identificador da máquina dona do grupo entre máquinas; ausente = grupo de uma máquina só
   linked_by?: string | null;    // sessão que abriu esta como filha ligada (está em pair_peers)
   // Linha do orquestrador sem LLM: nome da sessão do árbitro atual, para onde o botão
   // "Falar com o árbitro" leva. null enquanto o árbitro não está registrado.

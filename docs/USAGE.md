@@ -1042,7 +1042,10 @@ hangar-send --list                    # sessões vivas (nome, estado, harness, c
 hangar-send api-fix "mensagem"        # manda prompt pra outra sessão (fila se ocupada)
 hangar-send casa::api-fix "mensagem"  # idem, numa sessão de outro servidor
 hangar-send --pair api-fix "tarefa"   # pareia ESTA sessão com outra num grupo de trabalho
-hangar-send --group "terminei"        # aviso de marco pro grupo todo (unidirecional, só local)
+hangar-send --pair casa::api "tarefa" # idem com sessão de outra máquina: o grupo junta as duas
+hangar-send --group "terminei"        # aviso de marco pro grupo todo, em todas as máquinas dele
+hangar-send --contrato                # lê o contrato do grupo (de qualquer máquina do grupo)
+hangar-send --contrato --gravar c.md --mtime <valor>  # grava; o mtime vem da leitura
 hangar-send --close api-fix           # fecha OUTRA sessão desta máquina
 hangar-send --aceitar-par <link>      # pareia com a sessão de outra pessoa (link …ts.net:8443/par/…)
 hangar-send --new front ~/repo/front  # cria sessão nova gerenciada pelo app (visível na UI)
@@ -1071,7 +1074,7 @@ symlinka as skills do repo (`skills/*`) em `~/.claude/skills/` e registra o MCP 
 **MCP `hangar`:** o mesmo `hangar-send` e o `hangar-preview` como ferramentas tipadas, sem shell.
 O instalador o registra no Claude Code (`~/.claude.json` de cada conta) e no Codex (`config.toml`
 de cada `CODEX_HOME`); o token não entra no ambiente da sessão. Ferramentas: `who_am_i`,
-`sessions`, `send`, `group`, `pair`, `unpair`, `new_session`, `close_session`, `browser_open`,
+`sessions`, `send`, `group`, `pair`, `unpair`, `contract`, `new_session`, `close_session`, `browser_open`,
 `browser`, `browser_batch` e `html_render` (mostra uma página HTML dentro da conversa). O que não
 tem ferramenta (`--aceitar-par`, `hangar-preview objetivo`…) continua no CLI. Sessão aberta
 antes do registro, Pi, omp e Kimi usam só o CLI.
@@ -1081,6 +1084,16 @@ conversa do par + contrato compartilhado em markdown) e injeta o protocolo de
 colaboração em cada membro — cada sessão mexe só no próprio repo, recados 1:1 por
 iniciativa própria dentro da tarefa, push/merge continuam com o usuário. Pareando
 N sessões uma a uma os grupos se fundem num só.
+
+**Grupo entre máquinas:** parear com `servidor::sessao` (máquinas do `backend/peers.json`, com
+`CP_SERVER_ID` em cada uma) junta sessões de várias máquinas num grupo só. A máquina onde o grupo
+nasceu é a **dona**: guarda a lista de membros e o contrato. Avisos de grupo chegam a todas as
+máquinas; quem está em outra máquina aparece como `servidor::sessao` e lê ou grava o contrato
+pela dona (`hangar-send --contrato` ou a ferramenta `contract`). Máquina desligada recebe a saída
+e a troca de nome de membros quando volta; o aviso de grupo não espera e a resposta diz quem
+ficou sem ele. A sessão de outra pessoa pareada com uma das suas máquinas entra no grupo, mas só
+alcança as sessões daquela máquina. Um par antigo entre duas máquinas vira grupo sozinho quando
+as duas estão atualizadas.
 
 **Skill `orquestrar`:** conduz um trabalho, em um ou vários repositórios, com revisão
 independente. Só roda quando você pede ("orquestra", "monta o time"). Junto com você, o

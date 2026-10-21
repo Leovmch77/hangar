@@ -6,13 +6,12 @@
 // fica montada o tempo todo segurando 1 retain — não há fecha-e-reabre de streams. Se um dia nenhum
 // consumidor ficar permanentemente montado, considerar um keep-alive com delay no release.
 import * as m from '../paraglide/messages';
-import type { EventSourceLike } from '@hangar/core';
-import { openSessionsStream, registrarDiag, novoReqDiag, checkInviteForServer, decidirRota, esquecerRota, rotaDecidida } from '@hangar/core';
+import type { EventSourceLike, SessionInfo } from '@hangar/core';
+import { GROUP_IDENTITY_RETRY_MS, readGroupIdentity, openSessionsStream, registrarDiag, novoReqDiag, checkInviteForServer, decidirRota, esquecerRota, rotaDecidida } from '@hangar/core';
 import { getActiveId, listServers, onServersChanged, setEphemeralServers, type Server } from './auth';
 import { attachGuest, createExternalPairSync, listExternalPairs, reconcilePairEntries, type ExternalPair } from '@hangar/core';
 import { navPelaLista } from './navPelaLista';
 import { forgetServer, setLiveTerminals } from './hangarTerminals.svelte';
-import { getIdentificador } from './peers';
 import { ouvirFechamentoNav, podarNavMortos } from './navegadorPanel.svelte';
 import { aggregateSessions, epocasDeRecriacao, jsonlDaSessao, sweepHidden, type Slot, type Aggregate, type Epocas } from '@hangar/core';
 import { hasOpenChat } from './sessionServer';
@@ -21,6 +20,20 @@ import { avisarSemArmazem, definirArmazem, definirProtegido, definirSemPrazo, es
 function createSessionsStore() {
   let servers = $state<Server[]>([]);
   let identities = $state.raw<ReadonlyMap<string, string>>(new Map());
+  // Leitura do identificador por máquina com conexão aberta: em voo ou falhou (vazio conta como falha).
+  let identityStatus = $state.raw<ReadonlyMap<string, 'reading' | 'failed'>>(new Map());
+  const setIdentityStatus = (id: string, status: 'reading' | 'failed' | null) => {
+    if ((identityStatus.get(id) ?? null) === status) return;
+    const next = new Map(identityStatus);
+    if (status) next.set(id, status); else next.delete(id);
+    identityStatus = next;
+  };
+  // Agrupar entre máquinas precisa do identificador de cada uma antes de haver par `srv::`.
+  let identitiesWanted = false;
+  // Basta uma linha de qualquer máquina com grupo entre máquinas para todas precisarem do identificador.
+  // Por máquina, recalculado só no quadro dela.
+  const slotsNeedingIdentity = new Set<string>();
+  const identityLoaders = new Map<string, () => void>();
   // $state.raw: agg é SUBSTITUÍDO inteiro a cada recompute e nunca mutado — o proxy profundo do
   // $state só custava, e embrulhar as rows em proxy quebrava a identidade que o memo do
   // aggregateSessions preserva (rows de servidor que não emitiu = mesmo objeto -> keyed each das
@@ -158,9 +171,10 @@ function createSessionsStore() {
     for (const id of identities.keys()) {
       if (!list.some(s => s.id === id)) { const next = new Map(identities); next.delete(id); identities = next; }
     }
+    for (const id of identityStatus.keys()) if (!list.some(s => s.id === id)) setIdentityStatus(id, null);
     for (const [id, es] of streams) {
       if (!list.some((s) => s.id === id)) {
-        es.close(); streams.delete(id); slots.delete(id); ultimoSinal.delete(id); forgetServer(id);
+        es.close(); streams.delete(id); slots.delete(id); slotsNeedingIdentity.delete(id); identityLoaders.delete(id); ultimoSinal.delete(id); forgetServer(id);
         clearTimeout(watchdogs.get(id)); watchdogs.delete(id);
         clearTimeout(primeiros.get(id)); primeiros.delete(id);
         clearTimeout(retryTimers.get(id)); retryTimers.delete(id);
@@ -176,6 +190,7 @@ function createSessionsStore() {
         clearTimeout(watchdogs.get(s.id)); watchdogs.delete(s.id);
         clearTimeout(primeiros.get(s.id)); primeiros.delete(s.id);
         slots.set(s.id, { sessions: [], error: m.convite_encerrado() });
+        slotsNeedingIdentity.delete(s.id);
         forgetServer(s.id);
         continue;
       }
@@ -198,23 +213,29 @@ function createSessionsStore() {
       const isCurrent = () => !leavingPage && refs > 0 && streams.get(s.id) === es;
       let identityRequested = false;
       let identityRetryAt = 0;
-      let identityNeeded = false;
       const loadIdentity = () => {
         if (s.invite) return;   // servidor de convite não responde /api/peers/identificador
-        if (!isCurrent() || !identityNeeded || identityRequested || Date.now() < identityRetryAt) return;
+        if (!isCurrent() || !(slotsNeedingIdentity.size || identitiesWanted) || identityRequested || Date.now() < identityRetryAt) return;
         identityRequested = true;
-        void getIdentificador(s).then(({ identificador }) => {
-          if (!isCurrent() || !identificador) return;
+        setIdentityStatus(s.id, 'reading');
+        // Resposta de conexão já fechada só limpa a leitura se nenhuma conexão nova assumiu a máquina.
+        const stale = () => { if (!streams.has(s.id)) setIdentityStatus(s.id, null); };
+        void readGroupIdentity(s).then((identificador) => {
+          if (!isCurrent()) return stale();
+          setIdentityStatus(s.id, null);
           identities = new Map(identities).set(s.id, identificador);
         }).catch((error: unknown) => {
-          if (!isCurrent()) return;
+          if (!isCurrent()) return stale();
           identityRequested = false;
-          identityRetryAt = Date.now() + 30_000;
+          identityRetryAt = Date.now() + GROUP_IDENTITY_RETRY_MS;
+          setIdentityStatus(s.id, 'failed');
           registrarDiag({ evento: 'lista.identificador_falhou', nivel: 'aviso',
             codigo: error instanceof Error ? error.name : 'erro' }, s.baseUrl);
         });
       };
+      identityLoaders.set(s.id, loadIdentity);
       if (identities.has(s.id)) { const next = new Map(identities); next.delete(s.id); identities = next; }
+      setIdentityStatus(s.id, null);
       const tentativa = (tentativas.get(s.id) ?? 0) + 1;
       tentativas.set(s.id, tentativa);
       registrarDiag({ evento: 'lista.abrir', tela: 'lista', req, tentativa }, s.baseUrl);
@@ -329,9 +350,12 @@ function createSessionsStore() {
           if (!Array.isArray(sessions)) throw new Error('sessions frame must be an array');
           slots.set(s.id, { sessions, error: null });
           if (!s.invite) notePairs();
-          identityNeeded = sessions.some((session: { pair_peers?: string[] }) =>
-            session.pair_peers?.some(peer => peer.includes('::')));
-          loadIdentity();
+          if ((sessions as SessionInfo[]).some((session) => session.pair_owner || session.pair_peers?.some((peer) => peer.includes('::')))) {
+            slotsNeedingIdentity.add(s.id);
+          } else {
+            slotsNeedingIdentity.delete(s.id);
+          }
+          if (slotsNeedingIdentity.size) for (const load of identityLoaders.values()) load();
           const caiuEm = quedas.get(s.id);
           if (primeiroValido || caiuEm !== undefined) {
             registrarDiag({ evento: caiuEm === undefined ? 'lista.conectou' : 'lista.voltou',
@@ -489,10 +513,13 @@ function createSessionsStore() {
     // voltaria exibindo a latência de outra época, que ninguém mais vai corrigir.
     latencias = new Map();
     identities = new Map();
+    identitiesWanted = false;
+    identityLoaders.clear();
     // As entradas temporárias ficam no auth: o chat de uma sessão de fora segue com a lista fechada.
     pairSync.reset();
     pairLeft = null;
     slots.clear();
+    slotsNeedingIdentity.clear();
     quedas.clear(); tentativas.clear();
     // Parar não é sumiço: sem isto, o próximo retain() (o próprio DesktopShell, ao remontar)
     // veria todo nome "voltar" e subiria a época de todas as sessões — remontando chats vivos.
@@ -513,6 +540,13 @@ function createSessionsStore() {
     get loading() { return agg.loading; },
     get servers() { return servers; },
     get identities() { return identities; },
+    /** Máquina com conexão aberta cujo identificador está em leitura (`reading`) ou não veio (`failed`). */
+    get identityStatus() { return identityStatus; },
+    /** Lê o identificador de toda máquina conectada (arrastar ou painel do grupo), uma vez por conexão. */
+    requestIdentities() {
+      identitiesWanted = true;
+      for (const load of identityLoaders.values()) load();
+    },
     /** Último par que sumiu da lista sem ter sido desfeito aqui: "<dono> saiu do pareamento". */
     get pairLeft() { return pairLeft; },
     /** O aviso de `pairLeft` uma vez só, mesmo com a lista remontando; lê `pairLeft`, então acorda um `$effect`. */
