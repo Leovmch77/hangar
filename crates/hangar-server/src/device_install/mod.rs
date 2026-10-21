@@ -14,6 +14,10 @@ use serde::{Serialize, Serializer, ser::SerializeMap};
 
 pub use device::UsbLink;
 
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DeviceInfo {
     pub udid: String,

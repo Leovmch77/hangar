@@ -40,7 +40,6 @@ async fn ipa_server(sha: Option<&str>) -> Pinned {
     let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
     Pinned {
         url: leak(format!("http://{addr}/SideStore.ipa")),
-        version: "test",
         sha256: leak(sha.map_or_else(|| sha256(IPA), str::to_owned)),
         size: IPA.len() as u64,
     }

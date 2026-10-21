@@ -12,15 +12,15 @@ use zeroize::Zeroizing;
 
 use super::apple::{AppleSigner, AskCode, CodeReply, Login, SignRequest, anisette_servers};
 use super::device::create_private_dir;
-use super::{DeviceError, DeviceLink};
+use super::{DeviceError, DeviceLink, lock};
 
 /// O SideStore que foi provado no iPad, numa cópia nossa: o asset `nightly` do GitHub é
 /// sobrescrito a cada build. Atualizar: baixar o nightly novo, provar no aparelho, subir o IPA na
 /// release `sidestore-pinned` deste repositório e trocar aqui versão, sha256 e tamanho juntos.
+/// Versão: `0.7.0-20261016.1506+d97ec133`.
 /// SideStore é AGPL-3.0 (fonte no commit `d97ec133` de github.com/SideStore/SideStore).
 pub const SIDESTORE_IPA: Pinned = Pinned {
     url: "https://github.com/jeffer1312/hangar/releases/download/sidestore-pinned/SideStore.ipa",
-    version: "0.7.0-20261016.1506+d97ec133",
     sha256: "b6855f5a055e3068e136f2bafb97d6da1cbea188a7d1778dd26d3d8d8a4caad2",
     size: 31_137_643,
 };
@@ -39,7 +39,6 @@ static SIGNING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 #[derive(Clone, Copy, Debug)]
 pub struct Pinned {
     pub url: &'static str,
-    pub version: &'static str,
     pub sha256: &'static str,
     pub size: u64,
 }
@@ -133,10 +132,6 @@ impl Job {
     fn running(&self) -> bool {
         !matches!(lock(&self.progress).stage, Stage::Done | Stage::Failed)
     }
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Pedido de início; a senha nunca sai daqui a não ser para o login.

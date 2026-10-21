@@ -8,6 +8,7 @@ use futures_util::future::BoxFuture;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
+use super::lock;
 use super::job::{
     ANISETTE_UNREACHABLE, APPID_LIMIT, APPLE_BUSY, CERT_LIMIT, DISCONNECTED, Failure, LOGIN_REFUSED, SIGN_FAILED,
 };
@@ -200,10 +201,6 @@ impl AppleSession for FakeSession {
     }
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 pub use real::IsideloadSigner;
 
 mod real {
@@ -244,7 +241,7 @@ mod real {
                         .map_err(|e| Attempt::Down(e.to_string()))?;
                     match account.login(password_ref, two_factor(ask_ref.clone())).await {
                         Ok(()) => Ok(account),
-                        Err(e) if text(&e).to_lowercase().contains("anisette") => Err(Attempt::Down(text(&e))),
+                        Err(e) if e.to_string().to_lowercase().contains("anisette") => Err(Attempt::Down(e.to_string())),
                         Err(e) => Err(Attempt::Fatal(login_failure(&e))),
                     }
                 })
@@ -326,10 +323,6 @@ mod real {
             .join("; ")
     }
 
-    fn text(e: &Report) -> String {
-        e.to_string()
-    }
-
     fn developer_code(e: &Report) -> Option<(i64, String)> {
         e.iter_reports().find_map(|n| match n.downcast_current_context::<SideloadError>()? {
             SideloadError::DeveloperError(code, msg) | SideloadError::AuthWithMessage(code, msg) => Some((*code, msg.clone())),
@@ -338,7 +331,7 @@ mod real {
     }
 
     pub(super) fn login_failure(e: &Report) -> Failure {
-        let t = text(e);
+        let t = e.to_string();
         if busy(&t) {
             return Failure::with(APPLE_BUSY, t);
         }
@@ -346,7 +339,7 @@ mod real {
     }
 
     pub(super) fn sign_failure(e: &Report) -> Failure {
-        let t = text(e);
+        let t = e.to_string();
         if busy(&t) {
             return Failure::with(APPLE_BUSY, t);
         }

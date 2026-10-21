@@ -155,11 +155,14 @@ pub(super) fn after_sections(phase: Phase) -> &'static [GuideSection] {
     if phase == Phase::Done { &IOS_AFTER } else { &[] }
 }
 
+/// Código sem frase própria (ou erro que o servidor nem mandou).
+fn unknown_error(code: &str) -> String { tr("devices_err_unknown").replace("{code}", code) }
+
 /// A frase do código com o que fazer; o detalhe do servidor (certificados, motivo da Apple) vai junto.
 pub(super) fn error_message(error: &DeviceError) -> String {
     let key = format!("devices_err_{}", error.code);
     let text = tr(&key);
-    let text = if text == key { tr("devices_err_unknown").replace("{code}", &error.code) } else { text };
+    let text = if text == key { unknown_error(&error.code) } else { text };
     match error.detail.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
         Some(detail) => format!("{text} ({detail})"),
         None => text,
@@ -511,7 +514,7 @@ impl Hangar {
         match phase {
             Phase::Done => body.child(note(tr("devices_done"), theme::success_text())),
             Phase::Failed => {
-                let error = job.error().map(error_message).unwrap_or_else(|| tr("devices_err_unknown").replace("{code}", "failed"));
+                let error = job.error().map(error_message).unwrap_or_else(|| unknown_error("failed"));
                 body.child(div().id("devices-job-error").role(Role::Alert).child(note(error, theme::danger())))
                     .child(div().px_4().pb(px(16.)).flex().child(Button::new("devices-retry").outline().small().icon(IconName::RotateCcw)
                         .label(tr("devices_retry")).on_click(cx.listener(|this, _, _, cx| this.restart_device_install(cx)))))
