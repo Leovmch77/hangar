@@ -232,7 +232,9 @@ let reduzirTransparencia = false;
 let tabletTextScale = 1;
 
 export function setTabletTextScale(on: boolean): void {
-  tabletTextScale = on ? 19 / 17 : 1;
+  const scale = on ? 19 / 17 : 1;
+  if (scale === tabletTextScale) return;
+  tabletTextScale = scale;
   reaplicarMaterial();
 }
 AccessibilityInfo.isReduceTransparencyEnabled()

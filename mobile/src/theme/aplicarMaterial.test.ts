@@ -3,11 +3,38 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // vi.hoisted: a fábrica do vi.mock sobe pro topo do arquivo e não enxerga const de módulo.
 const { updateTheme } = vi.hoisted(() => ({ updateTheme: vi.fn() }));
 vi.mock('react-native-unistyles', async (orig) => ({ ...(await orig<object>()), UnistylesRuntime: { updateTheme } }));
+vi.mock('react-native-mmkv', () => ({
+  createMMKV: () => ({
+    getString: () => undefined,
+    getNumber: () => undefined,
+    getBoolean: () => undefined,
+    set: vi.fn(),
+    remove: vi.fn(),
+  }),
+}));
 
 import { aplicarMaterial, CONVERSA_PADRAO } from './aplicarMaterial';
+import { setTabletTextScale } from '../stores/aparencia';
 
 describe('aplicarMaterial', () => {
   beforeEach(() => updateTheme.mockClear());
+
+  it('só reaplica o tema quando a escala do tablet muda', () => {
+    try {
+      setTabletTextScale(false);
+      expect(updateTheme).not.toHaveBeenCalled();
+      setTabletTextScale(true);
+      expect(updateTheme).toHaveBeenCalledTimes(2);
+      expect(updateTheme.mock.calls[0][1]({}).conversa.texto).toBeCloseTo(1.1176470588);
+      setTabletTextScale(true);
+      expect(updateTheme).toHaveBeenCalledTimes(2);
+      setTabletTextScale(false);
+      expect(updateTheme).toHaveBeenCalledTimes(4);
+      expect(updateTheme.mock.calls[2][1]({}).conversa.texto).toBe(1);
+    } finally {
+      setTabletTextScale(false);
+    }
+  });
 
   it('multiplica o texto escolhido pelo usuário pela escala do tablet sem acumular', () => {
     const conversa = { ...CONVERSA_PADRAO, texto: 1.1 };
