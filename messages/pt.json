@@ -1177,6 +1177,7 @@
   "canvas_ocultos_n": "Ocultos ({n})",
   "fwd_enviado": "enviado",
   "sessao_grupo_pareado": "Grupo pareado: {label}",
+  "tab_group_children": "{n} sessões abertas por ela",
   "lista_broadcast_falha": "falha: {nomes}",
   "sessao_stash_falhou": "stash falhou",
   "ctx_usado_de_total": "{usado} de {total}",
