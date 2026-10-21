@@ -170,11 +170,19 @@ impl RuntimeEngine {
     pub fn with_live(mut self,live:LiveSender) -> Self { self.live = Some(live); self }
     /// Esperas da religação ao mesmo cano; por padrão `RECONNECT_WAITS`, `RECONNECT_WAITS_PENDING` e `DELIVERY_STALL`.
     pub fn with_reconnect_waits(mut self,normal:Vec<Duration>,pending:Vec<Duration>,stall:Duration) -> Self {
-        self.reconnect_waits = super::cano_reconnect::ReconnectWaits { normal,pending,stall,check:self.reconnect_waits.check }; self
+        self.reconnect_waits = super::cano_reconnect::ReconnectWaits { normal,pending,stall,..self.reconnect_waits }; self
     }
     /// Intervalo da conferência da vida do cano durante a religação (`CANO_CHECK` por padrão).
     pub fn with_cano_check(mut self,every:Duration) -> Self { self.reconnect_waits.check = every; self }
     pub fn with_cano_birth(mut self,birth:Option<f64>) -> Self { self.cano_birth = birth; self }
+    /// Silêncio do cano, com o transcript já no fim do turno, que dá a saída dele como perdida (`OUTPUT_LOST` por padrão).
+    pub fn with_output_lost(mut self,after:Duration) -> Self { self.reconnect_waits.output_lost = after; self }
+    /// Claude sem terminal com turno aberto: o transcript é conferido contra o fim dele.
+    fn turn_watch(&self) -> bool { matches!(&self.core,Core::Claude(core) if core.turn_watch()) }
+    fn output_lost(&self) -> bool { matches!(&self.core,Core::Claude(core) if core.deaf()) }
+    fn active_input(&self) -> Option<String> { match &self.core { Core::Claude(core)=>core.active_input().map(str::to_owned),Core::Codex(_)=>None } }
+    fn heard(&mut self) -> Vec<Effect> { match &mut self.core { Core::Claude(core)=>core.heard(),Core::Codex(_)=>Vec::new() } }
+    fn transcript_turn_end(&mut self) -> Vec<Effect> { match &mut self.core { Core::Claude(core)=>core.transcript_turn_end(),Core::Codex(_)=>Vec::new() } }
     pub(super) fn with_lifecycle(mut self,lifecycle:Option<std::sync::Weak<super::gateway::RuntimeRegistry>>)->Self {self.lifecycle=lifecycle;self}
     fn advance_claude_generation(&mut self,generation:u64)->Result<(),RuntimeError> {
         match &mut self.core {Core::Claude(core)=>core.advance_generation(generation),Core::Codex(_)=>Err(failure("lifecycle_provider"))}
@@ -640,6 +648,8 @@ enum Job {
     DrainFinished(Result<RuntimeReply,RuntimeError>),
     Confirmed { response:Option<oneshot::Sender<Result<Value,RuntimeError>>>,result:Result<(Vec<String>,usize,Option<f64>),RuntimeError> },
     Steered { id:String,result:Result<Vec<String>,RuntimeError> },
+    /// Conferência do fim do turno no transcript. `since`: a última saída do cano quando ela começou.
+    TurnCheck { since:f64,result:Result<Option<f64>,RuntimeError> },
     NativeInput { id:String,result:Result<Value,RuntimeError> },
     /// `persisted`: o que o disco tem depois da gravação (None = nem a leitura respondeu).
     Reserved { operation_id:String,reservation:ReservedAsyncAnswer,result:Result<(),RuntimeError>,persisted:Option<bool> },
@@ -794,6 +804,12 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
     let mut stall_due:Option<f64> = None;
     let mut stall_shown = false;
     let mut stall_dirty = false;
+    // Claude sem terminal: última linha da CLI pelo cano (relógio do ator) e a conferência do fim do turno no
+    // transcript, para quando o cano para de repassar a saída e o `result` nunca chega.
+    let mut last_output = clock(start).monotonic_s;
+    let mut turn_checking = false;
+    let mut turn_check_after = 0.0_f64;
+    let mut output_lost_reported = false;
     // Operações cujo quadro foi entregue ao transporte desta época: na queda, só estas podem ter saído.
     let mut handed:BTreeSet<String> = BTreeSet::new();
     let mut effects:VecDeque<Effect> = VecDeque::new();
@@ -1389,7 +1405,10 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                 Job::Drained {generation:target.generation,result}
             });
         }
-        let deadline = engine.deadline().into_iter().chain(respawn.next_at).chain(reconnect.next_at.filter(|_|respawn.task.is_none())).chain(cano_check_at.filter(|_|respawn.task.is_none())).chain(stall_due.filter(|_|!stall_shown)).chain(sid_retry.as_ref().map(|(_,at)|*at)).chain(roots.values().filter(|root|root.result.is_none() && !root.timed_out).map(|root|root.deadline))
+        // Antes de a saída do cano ser dada como perdida, só depois do silêncio dele; depois, a cada `TURN_POLL`.
+        let turn_check_due = (adoption.is_none() && io_open && !turn_checking && engine.turn_watch()).then(|| if engine.output_lost() { turn_check_after }
+            else { (last_output + engine.reconnect_waits.output_lost.as_secs_f64()).max(turn_check_after) });
+        let deadline = engine.deadline().into_iter().chain(turn_check_due).chain(respawn.next_at).chain(reconnect.next_at.filter(|_|respawn.task.is_none())).chain(cano_check_at.filter(|_|respawn.task.is_none())).chain(stall_due.filter(|_|!stall_shown)).chain(sid_retry.as_ref().map(|(_,at)|*at)).chain(roots.values().filter(|root|root.result.is_none() && !root.timed_out).map(|root|root.deadline))
             .min_by(f64::total_cmp).map(|seconds|start + Duration::from_secs_f64(seconds.max(0.0)))
             .unwrap_or_else(||Instant::now()+Duration::from_secs(3600));
         tokio::select! {
@@ -1595,11 +1614,15 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                 };
                 match event {
                     // Erro de UMA mensagem segue (como o leitor Python); só o erro de leitura encerra.
-                    Some(IoEvent::Line(line)) => match engine.apply(EngineInput::Line(line),clock(start)) {
-                        Ok(next)=>effects.extend(next),
-                        Err(failure)=>if crate::warn_limit::allow(Some(&target.key),"cli_line") {
-                            tracing::warn!(key=%target.key,session=%target.name,reason=%failure.message,"mensagem da CLI ignorada");
-                        },
+                    Some(IoEvent::Line(line)) => {
+                        last_output = clock(start).monotonic_s;
+                        effects.extend(engine.heard());
+                        match engine.apply(EngineInput::Line(line),clock(start)) {
+                            Ok(next)=>effects.extend(next),
+                            Err(failure)=>if crate::warn_limit::allow(Some(&target.key),"cli_line") {
+                                tracing::warn!(key=%target.key,session=%target.name,reason=%failure.message,"mensagem da CLI ignorada");
+                            },
+                        }
                     },
                     Some(event @ (IoEvent::WriteAck { .. } | IoEvent::WriteGuardAck { .. })) => {
                         let (operation_id,outcome,guard_error) = match event {
@@ -1806,6 +1829,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                         io_open = true;
                         reconnect.connected();
                         (cano_lost,cano_check_at,stall_due) = (false,None,None);
+                        last_output = clock(start).monotonic_s;
                         tracing::info!(key=%target.key,session=%target.name,provider=%target.provider,"sessão sem terminal religada ao mesmo cano");
                         effects.extend(engine.reattach(snapshot)?);
                         // O Codex abre a mesma thread de novo na conexão nova (o `initialize` repetido é sucesso). O Claude
@@ -2210,6 +2234,34 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                             jobs.spawn(async move { Job::Confirmed { response:None,result:job.await } });
                         }
                     }
+                    Job::TurnCheck { since,result } => {
+                        turn_checking = false;
+                        let sample = clock(start);
+                        let now = sample.monotonic_s;
+                        let lost = engine.output_lost();
+                        let after = engine.reconnect_waits.output_lost.as_secs_f64();
+                        // Antes da saída perdida, o silêncio conta também do fim do turno: o `result` sai logo depois dele.
+                        let quiet = |ended:f64|lost || since == last_output && sample.epoch_s - ended >= after;
+                        match result {
+                            // Sem terminal o Claude grava o fim do turno no transcript antes do `result`: com o cano mudo
+                            // depois dele, o `result` não vem mais e o turno termina pelo transcript.
+                            Ok(Some(ended)) if engine.turn_watch() && quiet(ended) => {
+                                if !lost && !std::mem::replace(&mut output_lost_reported,true) {
+                                    tracing::warn!(key=%target.key,session=%target.name,"o cano não repassa a saída do Claude; o fim dos turnos vem do transcript");
+                                    effects.push_back(Effect::Diag { event:DiagEvent::CanoOutputLost,code:"cano_output_lost".into() });
+                                }
+                                effects.extend(engine.transcript_turn_end());
+                            }
+                            Ok(Some(ended)) if !lost => turn_check_after = now + (after - (sample.epoch_s - ended)).clamp(TURN_POLL.as_secs_f64(),after),
+                            Ok(_) => turn_check_after = now + if lost { TURN_POLL.as_secs_f64() } else { after },
+                            Err(failure) => {
+                                if crate::warn_limit::allow(Some(&target.key),"turn_check") {
+                                    tracing::warn!(key=%target.key,session=%target.name,code=%failure.code,"fim do turno no transcript não conferido");
+                                }
+                                turn_check_after = now + engine.reconnect_waits.output_lost.as_secs_f64();
+                            }
+                        }
+                    }
                     Job::Steered { id,result } => {
                         let (disposition,payload) = match result {
                             Ok(ids)=>(Disposition::Accepted,json!({"ids":ids})),
@@ -2296,6 +2348,13 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                     }
                 }
                 effects.extend(engine.apply(EngineInput::Tick,sample)?);
+                if turn_check_due.is_some_and(|due|sample.monotonic_s >= due) {
+                    turn_checking = true;
+                    let view = engine.view();
+                    let job = transcript_turn_ended(queue.clone(),receipt.clone(),transcript_of(&target,&view),receipt_conversation(&target,&view),engine.active_input(),sample.epoch_s);
+                    let since = last_output;
+                    jobs.spawn(async move { Job::TurnCheck { since,result:job.await } });
+                }
                 for (id,pending) in &mut roots {
                     if pending.result.is_none() && !pending.timed_out && sample.monotonic_s >= pending.deadline {
                         pending.timed_out = true;
@@ -2450,6 +2509,40 @@ async fn confirm_inputs(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<Recei
     Ok((confirmed,legacy,outcome["next_due"].as_f64()))
 }
 
+/// Com a saída do cano perdida, o transcript é relido neste intervalo enquanto houver turno aberto.
+const TURN_POLL:Duration = Duration::from_millis(250);
+
+/// O transcript termina no fim de um turno que já consumiu toda entrada entregue: a entrada ativa (`active`)
+/// e toda outra despachada estão provadas nele, e nenhuma mensagem da pessoa veio depois do fim. `Some` com o
+/// instante do fim (o carimbo da linha; sem ele, `now`).
+async fn transcript_turn_ended(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<ReceiptIndex>>,path:std::path::PathBuf,conversation:Option<String>,
+    active:Option<String>,now:f64) -> Result<Option<f64>,RuntimeError> {
+    let scanner = receipt.clone();
+    let ended = tokio::task::spawn_blocking(move || {
+        let mut receipt = scanner.lock().map_err(|_|failure("receipt_panic"))?;
+        if let Some(conversation) = conversation { receipt.rebind(&conversation); }
+        receipt.scan(&path).map_err(io_failure)?;
+        Ok::<_,RuntimeError>(receipt.turn_ended())
+    }).await.map_err(|_|failure("receipt_job"))??;
+    let Some(stamp) = ended else { return Ok(None) };
+    // Lida depois do transcript: entrada que chegou a ele depois da leitura ainda aparece aqui sem prova.
+    let state = queue.snapshot().await.map_err(io_failure)?;
+    // A operação pode seguir `accepted` com a linha da fila já confirmada: vale qualquer das duas provas.
+    let proved = |id:&str|state.operations.get(id).is_some_and(|op|op.status == Status::Confirmed
+        || op.entry_id.as_deref().is_some_and(|entry|state.rows.iter().any(|row|row["id"] == entry && row["confirmed"] == true)));
+    let consumed = active.as_deref().is_none_or(proved) && unproved_inputs(&state).is_empty() && super::queue::legacy_rows(&state).is_empty();
+    Ok(consumed.then(||stamp.unwrap_or(now)))
+}
+
+/// Entradas despachadas (com cursor) ainda sem a linha delas provada no transcript.
+fn unproved_inputs(state:&super::queue::State) -> Vec<(String,String,super::receipt::DispatchCursor)> {
+    let confirmed_rows:BTreeSet<&str> = state.rows.iter().filter(|r|r["confirmed"] == true).filter_map(|r|r["id"].as_str()).collect();
+    state.operations.iter()
+        .filter(|(_,op)|op.status != Status::Confirmed && matches!(op.payload["kind"].as_str(),Some("input" | "steer" | "dispatch_async_answer")))
+        .filter_map(|(id,op)|Some((id.clone(),op.entry_id.clone()?,serde_json::from_value(op.dispatch_cursor.clone()).ok()?)))
+        .filter(|(_,entry,_)|!confirmed_rows.contains(entry.as_str())).collect()
+}
+
 /// Marcador desta vista e se ele muda o arquivo: entrar ou sair da espera, a queda (`dead`) e a saída dela
 /// (a vida nova volta a `idle`; sem isto o `dead` ficava gravado para sempre).
 fn state_marker<'a>(last:&str,view:&'a Value) -> (&'a str,bool) {
@@ -2539,11 +2632,7 @@ async fn prove_inputs(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<Receipt
     // Conversa trocada pela TUI: cursores e leitura da anterior não provam entrega na nova.
     if let Some(conversation) = conversation { receipt.lock().map_err(|_|failure("receipt_panic"))?.rebind(&conversation); }
     let mut state = queue.snapshot().await.map_err(io_failure)?;
-    let confirmed_rows:std::collections::BTreeSet<&str> = state.rows.iter().filter(|r|r["confirmed"] == true).filter_map(|r|r["id"].as_str()).collect();
-    let candidates:Vec<(String,String,super::receipt::DispatchCursor)> = state.operations.iter()
-        .filter(|(_,op)|op.status != Status::Confirmed && matches!(op.payload["kind"].as_str(),Some("input" | "steer" | "dispatch_async_answer")))
-        .filter_map(|(id,op)|Some((id.clone(),op.entry_id.clone()?,serde_json::from_value(op.dispatch_cursor.clone()).ok()?)))
-        .filter(|(_,entry,_)|!confirmed_rows.contains(entry.as_str())).collect();
+    let candidates = unproved_inputs(&state);
     let mut confirmed = Vec::new();
     if candidates.is_empty() && super::queue::legacy_rows(&state).is_empty() { return Ok((confirmed,0)); }
     let scanner = receipt.clone(); let transcript = path.clone();

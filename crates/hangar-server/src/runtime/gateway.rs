@@ -1032,8 +1032,11 @@ impl RuntimeRegistry {
     pub fn with_permissions(mut self,store:Arc<std::sync::Mutex<crate::state::permission::PermissionMemory>>)->Self {self.permissions=Some(store);self}
     pub fn with_respawn_base(mut self,base:Duration) -> Self { self.respawn_base = base; self }
     pub fn with_reconnect_waits(mut self,normal:Vec<Duration>,pending:Vec<Duration>,stall:Duration) -> Self {
-        self.reconnect_waits = super::cano_reconnect::ReconnectWaits { normal,pending,stall,check:self.reconnect_waits.check }; self
+        self.reconnect_waits = super::cano_reconnect::ReconnectWaits { normal,pending,stall,..self.reconnect_waits }; self
     }
+    /// Só testes: o silêncio do cano que dá a saída dele como perdida (`OUTPUT_LOST`).
+    #[doc(hidden)]
+    pub fn with_output_lost(mut self,after:Duration) -> Self { self.reconnect_waits.output_lost = after; self }
     /// Só testes: a caixa dos recados nativos numa pasta própria, fora do `cc-socks` da máquina.
     #[doc(hidden)]
     pub fn with_native_inbox_dir(mut self,dir:std::path::PathBuf) -> Self { self.native=super::native_message::Inbox::in_dir(dir); self }
@@ -1427,7 +1430,7 @@ impl RuntimeRegistry {
         if let Some(mods) = &self.mods { engine = engine.with_mods(mods.clone()); }
         engine = engine.with_live(self.live_sender(&target.name)).with_lifecycle(self.self_ref.get().cloned())
             .with_cano_birth(adopted_birth).with_reconnect_waits(self.reconnect_waits.normal.clone(),self.reconnect_waits.pending.clone(),self.reconnect_waits.stall)
-            .with_cano_check(self.reconnect_waits.check);
+            .with_cano_check(self.reconnect_waits.check).with_output_lost(self.reconnect_waits.output_lost);
         // Dono único dos pedidos dos apps até o `close` (S9). Só o Claude tem superfície. Registrado antes
         // de a tarefa do ator existir: a primeira faixa publicada já encontra a sessão no `Mods`.
         // A vida no `Mods` é única no servidor; o processo é a chave durável mais o cano, que o renomear mantém.

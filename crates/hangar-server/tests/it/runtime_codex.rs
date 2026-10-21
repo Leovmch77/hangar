@@ -2577,3 +2577,53 @@ fn upstream_throttle_is_not_the_usage_limit() {
     assert!(usage_limits(&effects).is_empty());
     assert_ne!(engine.view()["problema"],"codex_limite_uso");
 }
+
+// --- Esc logo depois da mensagem (Codex sem terminal): o turno sai da vista nos três desfechos ---
+
+fn idle_thread(id:&Value) -> Value { json!({"id":id,"result":{"thread":{"id":"thread-1","status":{"type":"idle"},"turns":[]}}}) }
+
+#[test]
+fn stop_right_after_the_message_ends_the_turn_when_the_app_server_reports_it_interrupted() {
+    let mut engine = engine();
+    let start = frames(&engine.command(command(OperationKind::Input,json!({"text":"1"})),clock(11.0)).unwrap())[0].clone();
+    line(&mut engine,json!({"id":start["id"],"result":{"turn":{"id":"turn-1","status":"inProgress"}}}),11.1);
+    assert_eq!(engine.view()["state"],"working");
+    let stop = frames(&engine.command(RuntimeCommand { operation_id:"stop".into(),kind:OperationKind::Interrupt,payload:json!({}) },clock(11.2)).unwrap())[0].clone();
+    assert_eq!(stop["method"],"turn/interrupt");
+    line(&mut engine,json!({"id":stop["id"],"result":{}}),11.3);
+    line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"interrupted","items":[]}}}),11.4);
+    assert_eq!(engine.view()["state"],"idle");
+}
+
+#[test]
+fn stop_before_the_turn_start_reply_finds_the_turn_and_ends_it() {
+    let mut engine = engine();
+    let start = frames(&engine.command(command(OperationKind::Input,json!({"text":"1"})),clock(11.0)).unwrap())[0].clone();
+    // Sem o id do turno ainda: o Parar lê a thread para achá-lo.
+    let read = frames(&engine.command(RuntimeCommand { operation_id:"stop".into(),kind:OperationKind::Interrupt,payload:json!({}) },clock(11.1)).unwrap())[0].clone();
+    assert_eq!(read["method"],"thread/read");
+    let found = line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1","status":{"type":"active","activeFlags":[]},
+        "turns":[{"id":"turn-1","status":"inProgress","items":[]}]}}}),11.2);
+    let stop = frames(&found).into_iter().find(|frame|frame["method"] == "turn/interrupt").expect("o Parar vai ao turno achado");
+    assert_eq!(stop["params"]["turnId"],"turn-1");
+    line(&mut engine,json!({"id":start["id"],"result":{"turn":{"id":"turn-1","status":"inProgress"}}}),11.3);
+    line(&mut engine,json!({"id":stop["id"],"result":{}}),11.4);
+    line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"interrupted","items":[]}}}),11.5);
+    assert_eq!(engine.view()["state"],"idle");
+}
+
+#[test]
+fn stop_whose_turn_completed_is_lost_leaves_working_through_the_silent_turn_probe() {
+    let mut engine = engine();
+    let start = frames(&engine.command(command(OperationKind::Input,json!({"text":"1"})),clock(11.0)).unwrap())[0].clone();
+    line(&mut engine,json!({"id":start["id"],"result":{"turn":{"id":"turn-1","status":"inProgress"}}}),11.1);
+    let stop = frames(&engine.command(RuntimeCommand { operation_id:"stop".into(),kind:OperationKind::Interrupt,payload:json!({}) },clock(11.2)).unwrap())[0].clone();
+    line(&mut engine,json!({"id":stop["id"],"result":{}}),11.3);
+    // O `turn/completed` se perde: nada mais chega do app-server.
+    assert_eq!(engine.view()["state"],"working");
+    assert!(frames(&engine.apply(EngineInput::Tick,clock(60.0)).unwrap()).is_empty(),"antes de 60 s parado, nada");
+    let probe = frames(&engine.apply(EngineInput::Tick,clock(71.5)).unwrap()).into_iter().find(|frame|frame["method"] == "thread/read")
+        .expect("o turno calado é conferido");
+    line(&mut engine,idle_thread(&probe["id"]),71.6);
+    assert_eq!(engine.view()["state"],"idle");
+}

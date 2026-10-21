@@ -13,14 +13,17 @@ pub const RECONNECT_WAITS_PENDING:[u64;4] = [0,1,3,10];
 pub const DELIVERY_STALL:Duration = Duration::from_secs(60);
 /// A vida do cano é conferida neste intervalo, fora das tentativas: a morte aparece sem esperar a próxima.
 pub const CANO_CHECK:Duration = Duration::from_secs(5);
+/// Turno aberto com o fim já no transcript e o cano sem saída há mais que isto: a saída dele está perdida, e o
+/// fim dos turnos desta vida passa a vir do transcript.
+pub const OUTPUT_LOST:Duration = Duration::from_secs(60);
 
 #[derive(Clone,Debug)]
-pub struct ReconnectWaits { pub normal:Vec<Duration>, pub pending:Vec<Duration>, pub stall:Duration, pub check:Duration }
+pub struct ReconnectWaits { pub normal:Vec<Duration>, pub pending:Vec<Duration>, pub stall:Duration, pub check:Duration, pub output_lost:Duration }
 
 impl Default for ReconnectWaits {
     fn default() -> Self {
         Self { normal:RECONNECT_WAITS.map(Duration::from_secs).to_vec(),pending:RECONNECT_WAITS_PENDING.map(Duration::from_secs).to_vec(),
-            stall:DELIVERY_STALL,check:CANO_CHECK }
+            stall:DELIVERY_STALL,check:CANO_CHECK,output_lost:OUTPUT_LOST }
     }
 }
 

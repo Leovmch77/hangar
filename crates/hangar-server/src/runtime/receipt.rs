@@ -54,6 +54,8 @@ pub struct ReceiptIndex {
     scan_offset: u64,
     /// Conversa do `session_meta` do rollout: o Codex não grava a conversa em cada linha.
     meta_conversation: Option<String>,
+    /// Claude: início e carimbo da última linha de fim de turno (`assistant` com `end_turn`, `stop_hook_summary`).
+    turn_end: Option<(u64,Option<f64>)>,
 }
 
 fn anchor(data: &[u8]) -> String {
@@ -98,7 +100,14 @@ fn identity(file: &File) -> io::Result<String> {
 
 impl ReceiptIndex {
     pub fn new(provider: &str, conversation: &str) -> Self {
-        Self { provider:provider.into(),conversation:conversation.into(),identity:None,tail:Vec::new(),occurrences:Vec::new(),scan_offset:0,meta_conversation:None }
+        Self { provider:provider.into(),conversation:conversation.into(),identity:None,tail:Vec::new(),occurrences:Vec::new(),scan_offset:0,meta_conversation:None,turn_end:None }
+    }
+
+    /// O transcript lido termina num fim de turno (nenhuma mensagem da pessoa depois da última linha de fim):
+    /// `Some` com o carimbo dessa linha, quando ela o tem.
+    pub fn turn_ended(&self) -> Option<Option<f64>> {
+        let (end,stamp) = self.turn_end?;
+        self.occurrences.last().is_none_or(|last|last.offset < end).then_some(stamp)
     }
 
     /// Troca de conversa (a TUI adotou outra thread): o que foi lido e os cursores antigos não provam nada nela.
@@ -133,7 +142,7 @@ impl ReceiptIndex {
         let mut file = match opened {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                self.tail.clear(); self.identity = None; self.occurrences.clear(); self.scan_offset = 0; self.meta_conversation = None;
+                self.tail.clear(); self.identity = None; self.occurrences.clear(); self.scan_offset = 0; self.meta_conversation = None; self.turn_end = None;
                 return Ok(&self.occurrences);
             }
             Err(error) => return Err(error),
@@ -141,7 +150,7 @@ impl ReceiptIndex {
         let id = identity(&file)?;
         let unchanged = self.identity.as_deref() == Some(id.as_str())
             && bytes_before(&mut file,self.scan_offset)?.is_some_and(|tail|tail == self.tail);
-        if !unchanged { self.occurrences.clear(); self.scan_offset = 0; self.meta_conversation = None; }
+        if !unchanged { self.occurrences.clear(); self.scan_offset = 0; self.meta_conversation = None; self.turn_end = None; }
         file.seek(SeekFrom::Start(self.scan_offset))?;
         let mut reader = io::BufReader::with_capacity(1 << 16,&mut file);
         let mut parser = crate::transcript::LineParser::new(crate::transcript::Provider::Codex);
@@ -161,6 +170,9 @@ impl ReceiptIndex {
                 (parser.feed(&raw,start).into_iter().filter(|e|e.kind == hangar_api::chat::ChatKind::UserMsg)
                     .filter_map(|e|e.text).collect::<Vec<_>>().join("\n"),"user")
             } else {
+                let ends = obj["isSidechain"] != true && (obj["type"] == "assistant" && obj["message"]["stop_reason"] == "end_turn"
+                    || obj["type"] == "system" && obj["subtype"] == "stop_hook_summary");
+                if ends { self.turn_end = Some((start,obj["timestamp"].as_str().and_then(crate::transcript::ts_of_iso))); continue; }
                 match obj["type"].as_str() {
                     Some("user") => (content_text(&obj["message"]["content"]),"user"),
                     // `remove` (absorbed_mid_turn): a CLI tirou a mensagem da fila interna porque o turno a consumiu.
