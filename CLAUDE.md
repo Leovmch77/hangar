@@ -572,8 +572,15 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   `desktop-native/src/app/server_config.rs`, `destinoDoJev` em `shell/jev_objetivo.cjs` (só o CLI
   fora de sessão) e `jev_destination` de `runtime/codex_launch.rs` (ambiente do Codex que o Rust
   lança). Precedência única: runtime-config acima do ambiente. O modelo auxiliar (texto e
-  imagem) também é um só, `jev_aux_*`, lido pelo navegador e pelo Computer Use. Evidência em
-  [plataforma.md](docs/decisoes/plataforma.md#uma-configuração-do-jev-para-os-quatro-usos).
+  imagem) também é um só, `jev_aux_*`, lido pelo navegador e pelo Computer Use. O hangar-preview
+  manda o print ao Jev só quando a decisão sem ele sai fraca (o `confere`, só na faixa de dúvida); o
+  Computer Use manda em todo passo; o print vai ao provedor do Jev sem exceção. Pelo OpenRouter a
+  imagem só vale como parte `image_url` no `state` (o `assets` da Typesafe é ignorado calado); o
+  formato segue o `tipo` do `destinoDoJev` e, no `hangar-computer-control`, o
+  `url.contains("openrouter.ai")` de `crates/hcc-laco/src/jev.rs`, cópia que muda junto com a regra
+  do destino. Evidência em
+  [plataforma.md](docs/decisoes/plataforma.md#uma-configuração-do-jev-para-os-quatro-usos) e
+  [plataforma.md](docs/decisoes/plataforma.md#jev-vê-o-print-21102026).
 - **Hangar Connect entra por `127.0.0.1:8768`, e nada que chega por ela é local.** O
   `ConnectPortGate` troca o cliente por `192.0.2.1` antes de qualquer checagem; nunca decidir
   "local" por cabeçalho. Cookie de login só autoriza `GET`/`HEAD` e, em https, só o

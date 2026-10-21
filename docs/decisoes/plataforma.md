@@ -863,6 +863,65 @@ tinha a TypeSafe fixa.
   de cliente em `access.api-keys` (a raiz `api-keys` passou a ser dos provedores); o leitor aceita os
   dois formatos.
 
+## Jev vê o print (21/10/2026)
+
+Decisão do Jefferson, depois da medição abaixo: o Computer Use manda o print da tela ao Jev em todo
+passo; o hangar-preview (`objetivo`/`confere`) manda só quando a decisão sem ele sai fraca. O modelo
+auxiliar (`jev_aux_*`) continua de reserva nos dois.
+
+- **O OpenRouter aceita a imagem só como `image_url` no `state`.** Pelo `/api/alpha/decisions`, a parte
+  `{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}` dentro do `state` chega ao Jev
+  (com prints reais do Computer Use, 9 de 9 perguntas cegas certas, ~0,8 s e US$ 0,00025 por chamada
+  com dois prints 1280×720; o `input_tokens` sobe ~2.800 por print). O mapa `assets` da API direta da
+  Typesafe é ignorado sem erro (200, mesma resposta), e o Jev decide no chute. Prova de que a imagem
+  chegou é o `input_tokens`, nunca a resposta parecer certa. Na Typesafe direta vai `state.tela =
+  "img-<uuid>"`, `assets` no topo e o cabeçalho `TypeSafe-Danger-Zone-Images: true`, sem prova ao vivo
+  (sem chave). Limites da Typesafe: 280 a 1568 por lado (a faixa de área documentada é a mesma conta);
+  fora disso o passo segue sem imagem (`fora_do_limite`). O nativo reduz o print com `shot --max 1568`;
+  o Electron ignora o `--max`.
+- **Por que cada lugar ficou com uma regra.** No Computer Use o print troca chamadas caras ao auxiliar
+  por decisões do Jev; no hangar-preview o auxiliar quase nunca entra (a árvore de acessibilidade já
+  basta) e o print em todo passo só somou tempo, sem mudar nenhum resultado.
+
+  | Computer Use (bateria, 21 execuções) | Antes | Print em todo passo | Print só na dúvida |
+  |---|---|---|---|
+  | Acertos | 16/21 (76%) | 17/21 (81%) | 17/21 (81%) |
+  | Mediana por objetivo | 20,4 s | 13,5 s | 28,7 s |
+  | Auxiliar | 71× (445 s) | 63× (284 s) | 78× (465 s) |
+  | Jev | 139× (58 s) | 150× (109 s) | 174× (132 s) |
+
+  Uma rodada de cada; a do "só na dúvida" teve indício de máquina mais carregada (calculadora em 12 s
+  contra 5 s, sem auxiliar).
+
+  | hangar-preview (5 casos) | Antes | Print em todo passo | Print só na dúvida |
+  |---|---|---|---|
+  | 1 Wikipedia: pesquisar e abrir o artigo | ok · 9,5 s | ok · 13,2 s | ok · 8,2 s |
+  | 2 GitHub: abrir releases | ok · 4,2 s | ok · 13,1 s | ok · 4,7 s |
+  | 3 `confere` verdadeiro | 0,97 · 1,7 s | 0,98 · 1,6 s | 0,98 · 1,6 s |
+  | 4 `confere` falso | 0,03 · 1,3 s | 0,01 · 1,5 s | 0,02 · 1,4 s |
+  | 5 modal (`SCROLL_DOWN` repetido) | falha · 3,9 s | falha · 4,4 s | falha · 4,1 s |
+
+  Com "só na dúvida", nenhum passo dos 5 casos teve dúvida: nenhum print foi tirado.
+- **Dúvida no hangar-preview** = o `decidir` parou por `operacao indecisa`, sem alvo confiável, página
+  que não confirma a conclusão ou `BLOCKED` fraco (e a conclusão fraca na página sem elementos). Aí o
+  laço tira um print (teto de 5 s; navegador que não compõe quadro desliga a captura pelo resto da
+  execução) e refaz a mesma pergunta com a imagem e a pergunta `bloqueado`; ainda fraca, vai ao
+  auxiliar. O `confere` refaz com o print quando a probabilidade cai em `CONFERE_DOUBT_RANGE` (0,25 a
+  0,75). Pedido com imagem recusado refaz sem ela e desliga a imagem pelo resto da execução. O
+  trajeto registra `imagem` (`nao_precisou`, `enviada`, `falhou`, `desligada`, `fora_do_limite`,
+  `sem_print`), `motivo` e `bloqueado`.
+- **O `box` saiu.** A resposta `box` do Jev (bordas do elemento em fração do print) foi medida para
+  corrigir o clique do auxiliar numa janela sem controles: em 39 cliques o auxiliar acertou 35, e o
+  `box` tirou 19 deles do alvo sem corrigir nenhum.
+- **Limites sem amostra.** `THRESHOLDS_WITH_SCREENSHOT` (hangar-preview) nasceu igual aos limites de
+  hoje mais `bloqueado: 0,5`, e `CONFERE_DOUBT_RANGE` em 0,25 a 0,75. Sem nenhum passo em dúvida nos
+  casos medidos, não houve amostra para calibrar; os valores ficam os iniciais até haver.
+- **Fluxo de dados.** O print vai ao provedor do Jev configurado (OpenRouter ou Typesafe) sempre que o
+  laço decide mandá-lo, sem exceção por segredo ou por alvo: decisão do usuário. O Jev já recebia por
+  texto o que está na árvore, e o auxiliar já recebia o print nos casos de reserva. No hangar-preview o
+  PNG temporário fica numa pasta 0700 do processo e é apagado depois da leitura; o base64 nunca vai ao
+  trajeto nem ao log.
+
 ## Triagem de recados da orquestrar-auto: Jev ligado, regex só anotando
 
 Na `orquestrar-auto` o `orq notify` sem `[aviso]`/`[decisao]` passa por uma triagem que pode

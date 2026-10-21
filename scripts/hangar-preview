@@ -19,7 +19,8 @@
 //   hangar-preview network                 últimas respostas de rede
 //   hangar-preview text                    texto visível da página (innerText)
 //   hangar-preview url                     URL atual do navegador desta sessão
-//   hangar-preview shot [arquivo.png]      screenshot (default ~/.hangar/nav/shots/<sessao>/<epoch ms>.png)
+//   hangar-preview shot [arquivo.png] [--max <px>]  screenshot (default ~/.hangar/nav/shots/<sessao>/<epoch ms>.png);
+//                                          --max reduz até o maior lado caber em px (só no app nativo)
 //   hangar-preview folha                   junta numa grade os shots sem nome tirados desde a última folha
 //   hangar-preview tab list                lista as abas (* = ativa)
 //   hangar-preview tab new <url>           abre outra aba com a url e torna ativa
@@ -126,7 +127,8 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
   text                    texto visível da página (innerText), sem árvore
   url                     URL atual
   shot [arquivo.png]      screenshot (default ~/.hangar/nav/shots/<sessao>/<epoch ms>.png)
-  folha                   junta numa grade (6 por folha) os shots sem nome desde a última folha
+    --max <px>            reduz até o maior lado caber em px (só no app nativo; o Electron ignora)
+  folha                  junta numa grade (6 por folha) os shots sem nome desde a última folha
   abas (só no Electron; o app nativo tem um navegador por sessão e recusa tab e --aba):
   tab list                lista as abas (* = ativa)
   tab new <url>           abre outra aba com a url e torna ativa
@@ -148,7 +150,9 @@ Identidade: sidecar da sessão no modo sem terminal; tmux no modo com terminal.
                           um com o rótulo da página. Campo não coberto cai no LLM pequeno
                           (modelo auxiliar do Jev: JEV_AUX_BASE_URL/_API_KEY/_MODELO/_ESFORCO,
                           ou JEV_TEXTO_CMD)
-  confere <estado>        o Jev diz se a tela já mostra o estado (sai 0 = sim); use antes do shot
+  confere <estado>        o Jev diz se a tela já mostra o estado (sai 0 = sim); use antes do shot.
+                          Em dúvida, pergunta de novo mandando o print da página ao Jev
+                          (objetivo faz o mesmo no passo em que a decisão sai fraca)
   --cdp <url>             os verbos de página (e objetivo/confere) numa página FORA do app, pelo CDP dela;
                           só loopback (ex.: http://127.0.0.1:9222 de um túnel). Env HANGAR_PREVIEW_CDP.
                           Precisa do app desktop aberto nesta máquina; open não vale (use goto)
