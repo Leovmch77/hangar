@@ -15,26 +15,10 @@ import { InfoNotice } from '../../src/features/config/InfoNotice';
 import { useSettingsColors } from '../../src/features/config/colors';
 import { Icon, type IconName } from '../../src/ui/Icon';
 import { useServers } from '../../src/stores/servers';
+import { ShortcutIcon, GLYPHS, NATIVE_LABEL, NATIVE_ICON } from '../../src/features/shortcuts/ShortcutIcon';
 import * as m from '../../src/paraglide/messages';
 
 const NATIVES: ShortcutInternalAction[] = ['terminal', 'modo', 'navegador', 'anexos', 'rodar', 'externo'];
-const NATIVE_LABEL: Record<ShortcutInternalAction, () => string> = {
-  terminal: m.native_shortcuts_native_terminal,
-  modo: m.native_shortcuts_native_modo,
-  navegador: m.native_shortcuts_native_navegador,
-  anexos: m.native_shortcuts_native_anexos,
-  rodar: m.native_shortcuts_native_rodar,
-  externo: m.native_shortcuts_native_externo,
-};
-const NATIVE_ICON: Record<ShortcutInternalAction, string> = {
-  terminal: 'glifo:terminal', modo: 'glifo:git', navegador: 'glifo:globe', anexos: 'glifo:folder', rodar: 'glifo:play',
-  externo: 'glifo:terminal',
-};
-const GLYPHS: [string, IconName][] = [
-  ['bolt', 'Zap'], ['play', 'Play'], ['rocket', 'Rocket'], ['gear', 'Settings'], ['git', 'GitBranch'],
-  ['chat', 'MessageCircle'], ['star', 'Star'], ['folder', 'Folder'], ['key', 'Key'], ['terminal', 'SquareTerminal'],
-  ['globe', 'Globe'], ['robot', 'Bot'],
-];
 const LABEL_MAX = 24;
 const EMOJI_MAX = 4;
 const IMPORT_MAX_BYTES = 4 * 1024 * 1024;
@@ -63,16 +47,6 @@ type ImportDraft = { data: unknown; preview: ShortcutImportResult; fields: Secre
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const newId = () => `a-${Date.now().toString(36)}-${Math.floor(Math.random() * 36 ** 4).toString(36)}`;
 const isScript = (id: string) => id.startsWith('script:');
-
-function glyphIcon(name: string): IconName {
-  return GLYPHS.find(([g]) => g === name)?.[1] ?? 'Zap';
-}
-
-function ShortcutIcon({ icon, size, color }: { icon?: string; size: number; color: string }) {
-  const emoji = icon?.startsWith('emoji:') ? icon.slice(6).trim() : '';
-  if (emoji) return <Text style={{ fontSize: size, lineHeight: size + 4 }}>{emoji}</Text>;
-  return <Icon name={glyphIcon(icon?.startsWith('glifo:') ? icon.slice(6) : 'bolt')} size={size} color={color} />;
-}
 
 function formFor(item: Item | null): Form {
   const icon = typeof item?.icon === 'string' ? item.icon : undefined;
