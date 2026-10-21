@@ -1,0 +1,31 @@
+{
+  "classify": [
+    { "nome": "publicado", "estado_get": { "atualizacao_disponivel": true }, "esperado": "iniciar" },
+    { "nome": "em-dia", "estado_get": { "versoes": { "repo": "abc", "backend": "abc" } }, "esperado": "em_dia" },
+    { "nome": "dirty-nao-pede-reinicio", "estado_get": { "versoes": { "repo": "abc-dirty", "backend": "abc" } }, "esperado": "em_dia" },
+    { "nome": "disco-a-frente", "estado_get": { "versoes": { "repo": "novo", "backend": "velho-dirty" } }, "esperado": "iniciar" },
+    { "nome": "branch", "estado_get": { "atualizacao_disponivel": true, "pre_voo": { "branch_de_trabalho": true, "branch": "feature", "alvo": "main", "sujo": 1 }, "estado": { "fase": "rodando" } }, "esperado": "travado:branch" },
+    { "nome": "sujo", "estado_get": { "atualizacao_disponivel": true, "pre_voo": { "sujo": 1 } }, "esperado": "travado:mudancas" },
+    { "nome": "ahead", "estado_get": { "atualizacao_disponivel": true, "pre_voo": { "ahead": 1 }, "estado": { "fase": "rodando" } }, "esperado": "travado:mudancas" },
+    { "nome": "divergiu", "estado_get": { "atualizacao_disponivel": true, "pre_voo": { "divergiu": true } }, "esperado": "travado:mudancas" },
+    { "nome": "rodando", "estado_get": { "atualizacao_disponivel": true, "pre_voo": { "pode": false }, "estado": { "fase": "rodando" } }, "esperado": "travado:rodando" },
+    { "nome": "falta", "estado_get": { "atualizacao_disponivel": true, "pre_voo": { "pode": false, "faltando": ["git"] } }, "esperado": "travado:falta" },
+    { "nome": "sem-atraso-nao-bloqueia", "estado_get": { "atualizacao_disponivel": false, "pre_voo": { "branch_de_trabalho": true } }, "esperado": "em_dia" }
+  ],
+  "follow": [
+    { "nome": "rodando", "estado": { "fase": "rodando", "passo": 4, "total": 8, "texto": "fixture-step" }, "base_ts": "2026-10-21T10:00:00Z", "esperado": "rodando" },
+    { "nome": "sem-estado", "estado": {}, "base_ts": null, "esperado": "esperando" },
+    { "nome": "desfecho-velho", "estado": { "fase": "pronto", "ok": true, "ts": "2026-10-21T10:00:00Z" }, "base_ts": "2026-10-21T10:00:00Z", "esperado": "esperando" },
+    { "nome": "anterior", "estado": { "fase": "pronto", "ok": false, "ts": "2026-10-21T09:00:00Z" }, "base_ts": "2026-10-21T10:00:00Z", "esperado": "esperando" },
+    { "nome": "atualizado", "estado": { "fase": "pronto", "ok": true, "pid": 999, "ts": "2026-10-21T10:00:01Z", "avisos": ["fixture-warning"] }, "base_ts": "2026-10-21T10:00:00Z", "esperado": "atualizado" },
+    { "nome": "manual", "estado": { "fase": "pronto", "ok": true, "reiniciar_manual": true, "ts": "2026-10-21T10:00:01Z" }, "base_ts": "2026-10-21T10:00:00Z", "esperado": "atualizado_manual" },
+    { "nome": "falhou", "estado": { "fase": "pronto", "ok": false, "erro": "fixture-error", "ts": "2026-10-21T10:00:01Z" }, "base_ts": "2026-10-21T10:00:00Z", "esperado": "falhou" },
+    { "nome": "ok-ausente", "estado": { "fase": "pronto", "ts": "2026-10-21T10:00:01Z" }, "base_ts": "2026-10-21T10:00:00Z", "esperado": "falhou" },
+    { "nome": "sem-base", "estado": { "fase": "pronto", "ok": true }, "base_ts": null, "esperado": "atualizado" },
+    { "nome": "sem-ts-com-base", "estado": { "fase": "pronto", "ok": true }, "base_ts": "2026-10-21T10:00:00Z", "esperado": "esperando" },
+    { "nome": "fuso-equivalente", "estado": { "fase": "pronto", "ok": true, "ts": "2026-10-21T07:00:00-03:00" }, "base_ts": "2026-10-21T10:00:00Z", "esperado": "esperando" },
+    { "nome": "microssegundo-posterior", "estado": { "fase": "pronto", "ok": true, "ts": "2026-10-21T10:00:00.000002Z" }, "base_ts": "2026-10-21T10:00:00.000001Z", "esperado": "atualizado" },
+    { "nome": "ts-ilegivel-igual", "estado": { "fase": "pronto", "ok": true, "ts": "old" }, "base_ts": "old", "esperado": "esperando" },
+    { "nome": "ts-ilegivel-diferente", "estado": { "fase": "pronto", "ok": true, "ts": "new" }, "base_ts": "old", "esperado": "atualizado" }
+  ]
+}

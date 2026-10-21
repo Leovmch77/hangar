@@ -242,8 +242,8 @@ async function throwForServer(res: Response, server: Server): Promise<never> {
   throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
 }
 
-async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await apiFetchRes(path, init);
+async function apiFetch<T>(path: string, init?: RequestInit, fetcher?: typeof fetch): Promise<T> {
+  const res = await apiFetchRes(path, init, undefined, false, true, fetcher);
   await ensureOk(res);
   return res.json() as Promise<T>;
 }
@@ -261,7 +261,7 @@ async function sessionFetch<T>(server: Server | null | undefined, path: string, 
 // quem precisa do STATUS ou de um header — hoje o histórico condicional (304 + ETag), que não tem
 // corpo pra desserializar e cujo status não é erro. O diário e o rastreio de "sem rede/voltou"
 // ficam aqui: um fetch escrito à mão sairia do registro sem ninguém notar.
-async function apiFetchRes(path: string, init?: RequestInit, server?: Server, probe = false, countsOutage = true): Promise<Response> {
+async function apiFetchRes(path: string, init?: RequestInit, server?: Server, probe = false, countsOutage = true, fetcher: typeof fetch = fetch): Promise<Response> {
   const destino = server?.baseUrl ?? apiEnv().getBaseUrl();
   const base = server ? baseOf(server) : destino;
   // Servidor de convite só atende a sessão compartilhada e as rotas do chat: o resto nem sai
@@ -286,7 +286,7 @@ async function apiFetchRes(path: string, init?: RequestInit, server?: Server, pr
   }
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await fetcher(url, {
       // O navegador guarda o 410 do convite antigo e o devolveria ao convite novo do mesmo dono.
       ...(convite ? { cache: 'no-store' as const } : {}),
       ...init,
@@ -382,7 +382,7 @@ const SESSION_FILE_TIMEOUT_MS = 60_000;
 
 // O erro leva o `code` e o `envelope` do servidor, como o do `apiFetch`: quem decide pela recusa
 // (nome em uso, conversa já aberta) decide pelo código, não pelo texto.
-async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit, prazoMs = 8000): Promise<T> {
+async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit, prazoMs = 8000, probe = false, fetcher?: typeof fetch): Promise<T> {
   let res: Response;
   // Prazo por PADRAO. Esta funcao fala com OUTRO servidor, e servidor offline atras de VPN nao
   // recusa a conexao — o socket fica pendurado e a promessa nunca resolve (o comentario do
@@ -391,7 +391,7 @@ async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit,
   // Antes do spread do `init`: quem precisar de outro prazo (ou de nenhum) passa o proprio sinal.
   const teto = AbortSignal.timeout(prazoMs);
   try {
-    res = await apiFetchRes(path, { signal: teto, ...init }, s);
+    res = await apiFetchRes(path, { signal: teto, ...init }, s, probe, true, fetcher);
   } catch (e) {
     // "signal timed out" (o texto que o navegador poe no TimeoutError) nao diz nada pra quem le a
     // tela. O WebKit ainda entrega o estouro como AbortError "Fetch is aborted": e o NOSSO teto
@@ -2144,9 +2144,9 @@ export function getConfig(): Promise<ConfigServidor> {
  * com a foto do último fetch automático, que roda a cada 30min. Só para clique: o polling da tela
  * bate neste endpoint a cada 2s.
  */
-export function getAtualizacao(procurar = false): Promise<Atualizacao> {
+export function getAtualizacao(procurar = false, fetcher?: typeof fetch): Promise<Atualizacao> {
   return apiFetch(`/api/atualizacao${procurar ? '?procurar=1' : ''}`,
-                  { signal: AbortSignal.timeout(procurar ? 120000 : 20000) });
+                  { signal: AbortSignal.timeout(procurar ? 120000 : 20000) }, fetcher);
 }
 
 /** Tela temporária "Migração para Rust": quem atende cada área, versões e consumo. */
@@ -2169,8 +2169,8 @@ export function matchesRestartResult(state: AtualizacaoEstado, started: { pid: n
 }
 
 /** Lança a atualização. Devolve na hora — ela roda fora do processo do backend, que vai reiniciar. */
-export function iniciarAtualizacao(): Promise<{ ok: boolean; pid: number }> {
-  return apiFetch('/api/atualizacao/iniciar', { method: 'POST' }).then(confirmUpdateStarted);
+export function iniciarAtualizacao(fetcher?: typeof fetch): Promise<{ ok: boolean; pid: number }> {
+  return apiFetch('/api/atualizacao/iniciar', { method: 'POST' }, fetcher).then(confirmUpdateStarted);
 }
 
 /** Reinicia o servidor sem atualizar nada (disco já à frente do processo). 409 fora do systemd. */
@@ -2179,8 +2179,14 @@ export function reiniciarServidor(): Promise<{ ok: boolean; pid: number; request
 }
 
 /** Estado da atualização/reinício no servidor que a tela está editando. */
-export function getAtualizacaoEm(s: Server | null): Promise<Atualizacao> {
-  return s ? apiFetchForServer(s, '/api/atualizacao') : getAtualizacao();
+export function getAtualizacaoEm(s: Server | null, procurar = false, fetcher?: typeof fetch): Promise<Atualizacao> {
+  // O acompanhamento é explícito: a espera da lista não pode esconder a volta do servidor.
+  return s ? apiFetchForServer(s, `/api/atualizacao${procurar ? '?procurar=1' : ''}`, undefined, procurar ? 120000 : 20000, true, fetcher)
+           : getAtualizacao(procurar, fetcher);
+}
+
+export function getIdentificadorEm(s: Server, fetcher?: typeof fetch): Promise<{ identificador: string; lan_url?: string }> {
+  return apiFetchForServer(s, '/api/peers/identificador', undefined, 8000, true, fetcher);
 }
 
 /** O mesmo reinício, no servidor que a tela está editando (que pode não ser o ativo). */
@@ -2189,8 +2195,8 @@ export function reiniciarServidorEm(s: Server | null): Promise<{ ok: boolean; pi
 }
 
 /** A mesma atualização, no servidor que a tela está editando (que pode não ser o ativo). */
-export function iniciarAtualizacaoEm(s: Server | null): Promise<{ ok: boolean; pid: number }> {
-  return s ? apiFetchForServer(s, '/api/atualizacao/iniciar', { method: 'POST' }).then(confirmUpdateStarted) : iniciarAtualizacao();
+export function iniciarAtualizacaoEm(s: Server | null, fetcher?: typeof fetch): Promise<{ ok: boolean; pid: number }> {
+  return s ? apiFetchForServer(s, '/api/atualizacao/iniciar', { method: 'POST' }, 8000, true, fetcher).then(confirmUpdateStarted) : iniciarAtualizacao(fetcher);
 }
 
 /**
