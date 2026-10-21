@@ -281,7 +281,13 @@ def _to_expo(session_name: str, body_fn, title_suffix_fn, list_view: bool) -> No
         return {locale: fn(locale) for locale in ("pt", "en")}
     title = text(title_suffix_fn) if title_suffix_fn is not None else {"pt": session_name, "en": session_name}
     # A ponte bloqueia até 5 s: nem o laço nem o Web Push esperam por ela.
-    _expo_pool.submit(push_expo_bridge.send, session_name, title, text(body_fn), list_view)
+    _expo_pool.submit(push_expo_bridge.send, session_name, title, text(body_fn), list_view).add_done_callback(_log_expo_failure)
+
+
+def _log_expo_failure(f) -> None:
+    """O Future do pool engole a exceção que a thread solta mandaria ao excepthook."""
+    if (e := f.exception()) is not None:
+        _log.warning("push expo quebrou: %s", type(e).__name__, exc_info=e)
 
 
 def notify_awaiting(session_name: str, body: str | None = None) -> None:

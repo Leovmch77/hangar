@@ -4,6 +4,7 @@ import json
 import logging
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
@@ -35,6 +36,7 @@ def join_expo(monkeypatch):
 
     def tracked(*args):
         spawned.append(submit(*args))
+        return spawned[-1]
     monkeypatch.setattr(push._expo_pool, "submit", tracked)
 
     def join():
@@ -136,6 +138,21 @@ def test_rust_down_logs_warning_without_raising(caplog, join_expo):
         push.notify_dead("s")
         join_expo()
     assert "push expo falhou" in caplog.text
+
+
+def test_unexpected_send_error_is_logged(caplog, monkeypatch, join_expo):
+    push_expo_bridge.configure("127.0.0.1:1", "sek")
+    monkeypatch.setattr(push_expo_bridge, "send", lambda *a: (_ for _ in ()).throw(TypeError("x")))
+    with caplog.at_level(logging.WARNING, logger="hangar.push"):
+        push.notify_dead("s")
+        with pytest.raises(TypeError):
+            join_expo()
+        # O callback roda na thread do pool logo depois de o Future acordar quem espera.
+        for _ in range(100):
+            if "quebrou" in caplog.text:
+                break
+            time.sleep(0.02)
+    assert "push expo quebrou: TypeError" in caplog.text
 
 
 def test_python_mode_does_not_call(rust, monkeypatch, join_expo):
