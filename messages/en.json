@@ -9051,5 +9051,11 @@
   "tablet_bar_rail": "Collapsed left",
   "tablet_bar_bottom": "Bottom",
   "tablet_bar_top": "Top",
-  "tablet_new_session": "New session"
+  "tablet_new_session": "New session",
+  "tablet_tab_context": "Context",
+  "tablet_tab_files": "Files",
+  "tablet_tab_background": "Background",
+  "tablet_tab_git": "Git",
+  "tablet_context_empty": "No context data",
+  "tablet_actions": "Actions"
 }

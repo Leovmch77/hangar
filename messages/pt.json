@@ -9051,5 +9051,11 @@
   "tablet_bar_rail": "Esquerda recolhida",
   "tablet_bar_bottom": "Embaixo",
   "tablet_bar_top": "Em cima",
-  "tablet_new_session": "Nova sessão"
+  "tablet_new_session": "Nova sessão",
+  "tablet_tab_context": "Contexto",
+  "tablet_tab_files": "Arquivos",
+  "tablet_tab_background": "Em 2º plano",
+  "tablet_tab_git": "Git",
+  "tablet_context_empty": "Sem dados de contexto",
+  "tablet_actions": "Ações"
 }
