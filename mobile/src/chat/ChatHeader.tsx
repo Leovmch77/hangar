@@ -28,6 +28,8 @@ export function ChatHeader({
   onTitlePress,
   onHome,
   chipLoop,
+  header = 'phone',
+  onTogglePanel,
 }: {
   name: string;
   state: State | null;
@@ -37,6 +39,8 @@ export function ChatHeader({
   onMore: () => void;
   onTitlePress: () => void;
   chipLoop?: React.ReactNode;
+  header?: 'phone' | 'tablet';
+  onTogglePanel?: () => void;
 }) {
   const { theme } = useUnistyles();
   // Destino lido da rota e da lista: quem monta o cabeçalho não precisa repassar máquina e pasta.
@@ -57,10 +61,10 @@ export function ChatHeader({
   return (
     <View style={styles.wrap}>
       <View style={styles.bar}>
-        <EdgeButton onPress={onBack} hitSlop={8} style={styles.back} accessibilityLabel={m.chat_voltar_sessoes()}>
+        {header === 'phone' ? <EdgeButton onPress={onBack} hitSlop={8} style={styles.back} accessibilityLabel={m.chat_voltar_sessoes()}>
           <Icon name="ChevronLeft" size={22} color={theme.tokens.text.primary} />
-        </EdgeButton>
-        {onHome ? (
+        </EdgeButton> : null}
+        {header === 'phone' && onHome ? (
           <EdgeButton onPress={onHome} hitSlop={8} style={styles.back} accessibilityLabel={m.chat_ir_inicio()}>
             <Icon name="House" size={19} color={theme.tokens.text.primary} />
           </EdgeButton>
@@ -103,6 +107,12 @@ export function ChatHeader({
           </View>
         </Pressable>
         {serverId ? <LiveVoiceChatButton serverId={serverId} name={name} /> : null}
+        {header === 'tablet' ? (
+          <Pressable onPress={onTogglePanel} hitSlop={8} style={styles.more}
+                     accessibilityRole="button" accessibilityLabel={m.ctx_painel_titulo()}>
+            <Icon name="PanelRight" size={18} color={theme.tokens.text.secondary} />
+          </Pressable>
+        ) : null}
         <Pressable
           onPress={onMore}
           hitSlop={8}
@@ -113,7 +123,7 @@ export function ChatHeader({
           <Icon name="Ellipsis" size={18} color={theme.tokens.text.secondary} />
         </Pressable>
       </View>
-      {chipLoop ? <View style={[styles.chips, onHome && styles.chipsHome]}>{chipLoop}</View> : null}
+      {chipLoop ? <View style={[styles.chips, header === 'phone' && onHome && styles.chipsHome]}>{chipLoop}</View> : null}
     </View>
   );
 }
