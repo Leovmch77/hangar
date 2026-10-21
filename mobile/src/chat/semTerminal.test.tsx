@@ -130,7 +130,7 @@ vi.mock('./LoopChip', () => ({ LoopChip: () => null }));
 vi.mock('./TuiPill', () => ({ TuiPill: () => null }));
 vi.mock('./RecarregarPill', () => ({ RecarregarPill: () => null }));
 vi.mock('./PendingPlan', () => ({ PendingPlan: () => null }));
-vi.mock('./SessionProblem', () => ({ SessionProblem: () => null }));
+vi.mock('./SessionProblem', async (original) => ({ ...(await original<typeof import('./SessionProblem')>()), SessionProblem: () => null }));
 vi.mock('./SessionPickerSheet', () => ({ SessionPickerSheet: () => null }));
 vi.mock('../features/create/CreateSessionSheet', () => ({ CreateSessionSheet: ({ onClose, layout }: { onClose?: () => void; layout?: string }) =>
   createElement('div', { 'data-create': layout }, createElement('button', { 'aria-label': 'comum_cancelar', onClick: onClose })) }));
