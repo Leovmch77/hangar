@@ -155,7 +155,19 @@ jobs:
       - name: Publica na mobile-latest
         run: |
           # Run mais antigo que chega por último não pode sobrescrever o publicado por um mais novo.
-          if published=$(gh release download mobile-latest --pattern sidestore-source.json --repo "$GITHUB_REPOSITORY" -O - 2>/dev/null); then
+          if ! assets=$(gh release view mobile-latest --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>&1); then
+            if grep -qi 'release not found' <<<"$assets"; then
+              assets=""
+            else
+              echo "::error::Não foi possível consultar a release mobile-latest: $assets"
+              exit 1
+            fi
+          fi
+          if grep -qx sidestore-source.json <<<"$assets"; then
+            if ! published=$(gh release download mobile-latest --pattern sidestore-source.json --repo "$GITHUB_REPOSITORY" -O -); then
+              echo "::error::Falha ao baixar o sidestore-source.json publicado; não dá para conferir a versão."
+              exit 1
+            fi
             if published_run=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).apps[0].versions[0].buildVersion))' "$published" 2>/dev/null) \
                && [[ "$published_run" =~ ^[0-9]+$ ]]; then
               if (( published_run > GITHUB_RUN_NUMBER )); then
@@ -163,7 +175,8 @@ jobs:
                 exit 0
               fi
             else
-              echo "::warning::sidestore-source.json publicado ilegível; será sobrescrito."
+              echo "::error::sidestore-source.json publicado ilegível ou sem buildVersion numérico."
+              exit 1
             fi
           fi
           mv out/hangar-release.ipa out/hangar.ipa
