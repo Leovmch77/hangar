@@ -167,27 +167,29 @@ impl HeadlessSource for Runtime {
 }
 
 /// Sessão sem terminal: com o runtime de pé, o estado vem do retrato dele (pela chave da sessão),
-/// sem `list_runtime_absent`; retrato com erro marca a linha `list_runtime_unavailable`, que é diagnóstico
-/// e não sai na lista.
+/// sem `list_runtime_absent`; erro durável do ator aparece na linha como `runtime_falhou`, como no chat; o
+/// retrato que não veio marca `list_runtime_unavailable`, que é diagnóstico e não sai na lista.
 #[tokio::test(flavor = "multi_thread")]
 async fn headless_rows_take_the_runtime_state() {
     let dir = tempfile::tempdir().unwrap();
     let srv = server(dir.path(), 0).await;
     let hl = dir.path().join("home/.hangar/claude-headless");
     std::fs::create_dir_all(&hl).unwrap();
-    for (name, key) in [("h0", "kh0"), ("h1", "kh1")] {
+    for (name, key) in [("h0", "kh0"), ("h1", "kh1"), ("h2", "kh2")] {
         std::fs::write(hl.join(format!("{name}.json")), json!({"name": name, "session_id": format!("sid-{name}"),
             "cwd": dir.path(), "key": key}).to_string()).unwrap();
     }
     srv.list.set_runtime(Arc::new(Runtime(BTreeMap::from([
         ("kh0".into(), json!({"view": {"alive": true, "public_state": {"state": "working", "label": "pensando"}}})),
-        ("kh1".into(), json!({"error": "runtime_closed"})),
+        ("kh1".into(), json!({"error": "queue_io"})),
+        ("kh2".into(), json!({"error": "runtime_live_unavailable"})),
     ]))));
     let (status, body) = get(srv.addr, OWNER).await;
     assert_eq!(status, 200);
     let row = |n: &str| body.as_array().unwrap().iter().find(|r| r["name"] == n).unwrap().clone();
     assert_eq!((row("h0")["state"].clone(), row("h0")["problema"].clone()), (json!("working"), Value::Null));
-    assert_eq!(row("h1")["problema"], Value::Null);
+    assert_eq!(row("h1")["problema"], "runtime_falhou");
+    assert_eq!(row("h2")["problema"], Value::Null);
 }
 
 /// Marcador escrito sai na lista sem esperar o tique de 1,5 s, e sem uma descoberta por escrita.

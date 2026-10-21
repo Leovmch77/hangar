@@ -788,6 +788,31 @@ mod tests {
                    (Some("working"), Some("runtime_falhou"), Some("queue_io: fila recusou: x")));
     }
 
+    /// Vínculo do runtime sem prova (entrada fora do registro): erro durável do ator desta conversa sai como falha
+    /// real, com o código verdadeiro; o de outra conversa não sai.
+    #[tokio::test]
+    async fn own_conversation_actor_error_shows_and_another_conversations_does_not() {
+        for (conversation, shown) in [("sid", true), ("outra", false)] {
+            let f = claude_fixture();
+            let py = fake_python().await;
+            let registry = Arc::new(crate::runtime::gateway::RuntimeRegistry::new(py.addr, "test".into(), format!("feed-own-{conversation}")));
+            let binding = crate::interactions::InteractionBinding { key: "k".into(), conversation: conversation.into(), generation: 1 };
+            let (_tx, live_rx) = channel(Some(LiveState { binding: Some(binding), public_state: json!({"session": "s"}),
+                error: Some(("queue_io".into(), "fila recusou".into())), ..Default::default() }));
+            let mut rx = f.lease.hub.tx.subscribe();
+            let mut feed = RuntimeFeed::new(&f.lease.hub, Some(live_rx), f.published.clone(), None).with_registry(Some(registry));
+            assert!(feed.round().await);
+            let got = collect(&mut rx, Duration::from_millis(20)).await;
+            let states = of(&got, "state");
+            if shown {
+                assert_eq!((states[0].2["problema"].as_str(), states[0].2["problema_detalhe"].as_str()),
+                    (Some("runtime_falhou"), Some("queue_io: fila recusou")), "{got:?}");
+            } else {
+                assert!(states.is_empty(), "erro de outra conversa não sai: {got:?}");
+            }
+        }
+    }
+
     /// A vista do ator que não é um estado não vira `idle` inventado: nada sai e o motivo vai ao diário.
     #[tokio::test(start_paused = true)]
     async fn invalid_actor_view_publishes_no_invented_state() {

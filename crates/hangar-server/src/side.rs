@@ -911,7 +911,9 @@ impl Hub {
         let mut value: serde_json::Value = serde_json::from_str(data).ok()?;
         // P1: com a pergunta aberta, fatos que não identificam a interação são bloqueio (o card não responde) e saem
         // com o código da lista; a causa fica no diário.
+        // Cartão com ID (seletor ou formulário) responde: aí os fatos caídos ficam só no diário.
         let unidentified = value["state"] == "awaiting_input" && value["problema"] == crate::state::facts::UNAVAILABLE
+            && value["interaction_id"].is_null() && value["codex_question"]["interaction_id"].is_null()
             && value["problema_detalhe"].as_str().is_some_and(crate::list::bridge::interaction_unidentified);
         if unidentified {
             crate::problem_gate::report_hidden(&self.ctx.diag, &self.name, crate::state::facts::UNAVAILABLE, value["problema_detalhe"].as_str());
@@ -2754,6 +2756,19 @@ mod tests {
         assert_eq!(problem("awaiting_input", "runtime_binding"), "interacao_indisponivel");
         assert!(problem("idle", "askq_pane_mismatch").is_null(), "fora da espera: diário");
         assert!(problem("awaiting_input", "state_files_timeout").is_null(), "fatos velhos por outra causa: diário");
+        // Cartão identificado (seletor ou formulário com ID) responde: os fatos do plugin caídos ficam no diário.
+        let identified = |extra: serde_json::Value| -> serde_json::Value {
+            let mut data = serde_json::json!({"state":"awaiting_input","problema":"state_facts_unavailable","problema_detalhe":"plugin_store_unavailable"});
+            data.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            assert!(lease.hub.publish_own("state", &data.to_string()));
+            let frames: String = lease.hub.cache.lock().unwrap().replay().iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect();
+            let state: serde_json::Value = frames.split("\n\n").find(|f| f.starts_with("event: state")).and_then(|f| f.split_once("data: "))
+                .map(|(_, data)| serde_json::from_str(data.trim()).unwrap()).unwrap_or_default();
+            state["problema"].clone()
+        };
+        assert!(identified(serde_json::json!({"interaction_id":"sel-1"})).is_null(), "seletor com ID");
+        assert!(identified(serde_json::json!({"codex_question":{"interaction_id":"form-1","questions":[]}})).is_null(), "formulário com ID");
+        assert_eq!(identified(serde_json::json!({"interaction_id":null,"codex_question":null})), "interacao_indisponivel", "sem ID nenhum");
     }
 
     /// Com o prazo, o que sai quando ele vence é o código traduzido, nunca o `state_facts_unavailable` original.

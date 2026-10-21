@@ -922,11 +922,19 @@ impl Engine {
     }
     /// Problema que o ator conhece e o motor não (a religação desistiu, o processo não subiu).
     pub fn set_problem(&mut self,code:&str,detail:Option<String>) -> Vec<Effect> {
-        self.state.problema = Some(code.into());
-        self.state.problema_detalhe = detail.map(|detail|detail.chars().take(300).collect());
+        self.put_problem(code,detail.map(|detail|detail.chars().take(300).collect()));
         let mut effects = Vec::new();
         self.changed(&mut effects,false);
         effects
+    }
+
+    /// Diagnóstico do motor (controle caído, sem conexão, versão) não tapa código de tela (limite de uso, sem
+    /// login), que o portão da saída mostraria; o de tela sempre entra.
+    fn put_problem(&mut self,code:&str,detail:Option<String>) {
+        let screen = self.state.problema.as_deref().is_some_and(|current|!crate::problem_gate::diagnostic(current,""));
+        if screen && crate::problem_gate::diagnostic(code,"") { return; }
+        self.state.problema = Some(code.into());
+        self.state.problema_detalhe = detail;
     }
 
     /// Apaga só o problema `code`: o de outra origem que entrou depois fica.
@@ -987,8 +995,7 @@ impl Engine {
         }
         for entry in uncertain { self.set_reservation(&entry,ReservationState::Uncertain); }
         if !self.headless {
-            self.state.problema = Some(super::codex_terminal::CONTROL_LOST.into());
-            self.state.problema_detalhe = Some(detail.chars().take(300).collect());
+            self.put_problem(super::codex_terminal::CONTROL_LOST,Some(detail.chars().take(300).collect()));
         }
         self.changed(&mut effects,false);
         effects
@@ -1876,8 +1883,7 @@ impl Engine {
                 match hangar_codex::version::from_user_agent(&response.user_agent) {
                     Some(installed) if hangar_codex::version::differs(installed) => {
                         effects.push(Effect::Diag { event:DiagEvent::CodexVersion,code:hangar_codex::version::diag_code(installed) });
-                        self.state.problema = Some("codex_versao_nao_conferida".into());
-                        self.state.problema_detalhe = Some(format!("instalado {installed}, conferido {}",hangar_codex::version::CHECKED));
+                        self.put_problem("codex_versao_nao_conferida",Some(format!("instalado {installed}, conferido {}",hangar_codex::version::CHECKED)));
                     }
                     Some(installed) if hangar_codex::version::readable(installed) => {}
                     // Sem versão legível o aviso não tem com o que comparar, mas a falta fica no diário.
@@ -2330,9 +2336,9 @@ impl Engine {
             }
             N::Error(n) => {
                 if !n.will_retry && n.error.codex_error_info.as_ref().and_then(error_info) == Some("usageLimitExceeded") { self.usage_limited = true; }
-                self.state.problema = Some(n.error.codex_error_info.as_ref().and_then(error_class)
-                    .unwrap_or(if n.will_retry { "codex_sem_conexao" } else { "headless_turno_erro" }).into());
-                self.state.problema_detalhe = error_detail(&n.error);
+                let code = n.error.codex_error_info.as_ref().and_then(error_class)
+                    .unwrap_or(if n.will_retry { "codex_sem_conexao" } else { "headless_turno_erro" });
+                self.put_problem(code,error_detail(&n.error));
             }
             N::HookCompleted(n) if n.run.event_name == "userPromptSubmit" && ["blocked","stopped"].contains(&n.run.status.as_str()) => {
                 let source = n.run.source_path.as_deref().unwrap_or("hook");
