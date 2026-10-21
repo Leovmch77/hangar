@@ -1233,7 +1233,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     try { localStorage.setItem(recargaKey, '1'); } catch { /* sem storage: vale só nesta aba */ }
   }
   // Codex preso tentando falar com o provedor, ou mensagem presa com a sessão sem terminal surda
-  // (Reabrir da bolha): o turno nunca fecha, então reinicia trabalhando.
+  // (Reabrir do painel "Na fila"): o turno nunca fecha, então reinicia trabalhando.
   async function reiniciarCodex() {
     if (recarregando) return;
     recarregando = true;
@@ -3664,7 +3664,6 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       onOpenSession={abrirRemetente}
       onOpenOrq={() => (orqOpen = true)}
       onDescartarFila={descartarFila}
-      onReabrirPresa={soLeituraPar ? undefined : reiniciarCodex}
       hiddenQueued={queuePanelShown ? (ev) => hiddenByQueuePanel(ev, queueList) : undefined}
     />
   {/if}
@@ -3870,7 +3869,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
           {#if queuePanelShown}
             <QueuePanel panel={queueList} editingId={queueEdit?.entryId ?? null} busy={queueBusy}
                         onEdit={startQueueEdit} onCancelEdit={cancelQueueEdit}
-                        onSteer={steerQueued} onRemove={removeQueued} onReorder={reorderQueued} />
+                        onSteer={steerQueued} onRemove={removeQueued} onReorder={reorderQueued}
+                        stalled={stateEvent?.problema === 'headless_delivery_stalled'}
+                        onReopen={soLeituraPar ? undefined : reiniciarCodex} />
           {/if}
         {/snippet}
       </Composer>

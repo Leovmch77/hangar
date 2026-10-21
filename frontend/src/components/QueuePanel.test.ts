@@ -82,6 +82,32 @@ describe('QueuePanel', () => {
     expect(target.querySelector('.qp-row button:not(.qp-text)')).toBeNull();
     unmount(comp);
   });
+  it('entrega parada: o aviso aparece no painel e o Reabrir fica travado até o pedido voltar', async () => {
+    let soltar!: () => void;
+    const onReopen = vi.fn(() => new Promise<void>((r) => { soltar = r; }));
+    const { target, comp } = montar({ stalled: true, onReopen });
+    const botao = () => [...target.querySelectorAll<HTMLButtonElement>('button')]
+      .find((b) => b.textContent?.trim() === m.reabrir_sessao_presa());
+    expect(target.textContent).toContain(m.problema_headless_delivery_stalled());
+    botao()!.click(); await tick();
+    expect(onReopen).toHaveBeenCalledOnce();
+    expect(botao()!.disabled).toBe(true);
+    botao()!.click();
+    expect(onReopen).toHaveBeenCalledOnce();
+    soltar(); await new Promise((r) => setTimeout(r, 0));
+    expect(botao()!.disabled).toBe(false);
+    unmount(comp);
+  });
+  it('sem o aviso não há Reabrir; quem só lê vê o aviso sem o botão', () => {
+    const semAviso = montar({ stalled: false, onReopen: vi.fn() });
+    expect(semAviso.target.textContent).not.toContain(m.problema_headless_delivery_stalled());
+    expect(semAviso.target.textContent).not.toContain(m.reabrir_sessao_presa());
+    unmount(semAviso.comp);
+    const leitura = montar({ stalled: true });
+    expect(leitura.target.textContent).toContain(m.problema_headless_delivery_stalled());
+    expect(leitura.target.textContent).not.toContain(m.reabrir_sessao_presa());
+    unmount(leitura.comp);
+  });
   it('sem entradas o painel não existe', () => {
     const { target, comp } = montar({ panel: { actions: true, entries: [] } });
     expect(target.querySelector('.qp')).toBeNull();

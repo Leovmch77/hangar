@@ -105,9 +105,6 @@
     // Botao "descartar" da bolha que o backend desistiu de entregar: tira a entrada da fila
     // duravel (id CRU, sem o prefixo "queued-"). Ausente (Archive) = so o aviso.
     onDescartarFila?: (entryId: string) => void;
-    /** Reabre a sessão cuja mensagem ficou presa (`headless_delivery_stalled`); a promessa diz
-     *  quando o pedido acabou. Ausente = só o aviso. */
-    onReabrirPresa?: () => Promise<void>;
     // Tap no chip "de: X" de recado peer -> abre o chat da sessao remetente. Ausente = chip estatico.
     onOpenSession?: (name: string) => void;
     // Botao do cartao de orquestracao -> abre o modal de papeis. Ausente (Archive) = cartao sem acao.
@@ -128,14 +125,8 @@
     events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, previewVivo = false, pensamento = '', ferramenta = null, onSelectOption, onSubmitSelected, onCancel, agentesRodando = [], onAbrirAgente = undefined,
     askOpen = false, askPayload = null, askActive = false, onAnswer, onAskClose, onFimDoLocal,
     imageUrl, swapIds, codex = false, headless = false, plan = null, footer,
-    onForward, onRunCommand, onOpenSession, onOpenOrq, onDescartarFila, onReabrirPresa, ancora = 0, focoId = null, pluginServers = [], hiddenQueued
+    onForward, onRunCommand, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0, focoId = null, pluginServers = [], hiddenQueued
   }: Props = $props();
-  let reabrindo = $state(false);
-  async function reabrirPresa() {
-    if (!onReabrirPresa || reabrindo) return;
-    reabrindo = true;
-    try { await onReabrirPresa(); } finally { reabrindo = false; }
-  }
   const sessionServer = useSessionServer();
   // Anexo enviado que não é foto (`📎 arquivo:`): card de download, servido pela rota de uploads.
   const anexos = (files: string[]): FileRef[] => files.map((f) => ({
@@ -697,14 +688,6 @@
                 <p role="status">{m.msg_entrega_sem_prova()}</p>
                 {#if onDescartarFila}
                   <button type="button" class="queued-descartar" onclick={() => onDescartarFila(ev.id.slice('queued-'.length))}>{m.msg_descartar_perdida()}</button>
-                {/if}
-              </div>
-            {:else if stateEvent?.problema === 'headless_delivery_stalled' && !ev.queued_delivered && ev.id.startsWith('queued-')}
-              <!-- Processo vivo e surdo: o servidor não reabre sozinho, quem decide é a pessoa. -->
-              <div class="queued-perdida">
-                <p role="status">{m.problema_headless_delivery_stalled()}</p>
-                {#if onReabrirPresa}
-                  <button type="button" class="queued-descartar" disabled={reabrindo} onclick={reabrirPresa}>{m.reabrir_sessao_presa()}</button>
                 {/if}
               </div>
             {/if}
