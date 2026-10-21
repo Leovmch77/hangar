@@ -28,6 +28,7 @@ cada sistema.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import logging
 import os
@@ -39,6 +40,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.request
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -82,6 +84,7 @@ ETAPAS = (
     ("passos",     "Aplicando o que a versão pede"),
     ("instalar",   "Instalando dependências"),
     ("reiniciar",  "Reiniciando o servidor"),
+    ("nativo",     "Atualizando o app desta máquina"),
 )
 # O reinício avulso (código já no disco) tem duas etapas próprias: numerar com a lista de cima
 # mostraria "4 de 5" numa operação que só tem duas.
@@ -195,6 +198,9 @@ def estado_para_tela() -> dict:
         return atual
     if _restarted_into_target(atual):
         _log.info("atualizacao concluida pelo backend novo: o motor %s morreu no reinicio que pediu", dono)
+        reason = ("a atualizacao foi concluida pelo servidor novo" if atual.get("etapa") == "reiniciar"
+                  else "o processo que o atualizava nao existe mais")
+        _avisar(f"app nativo nao atualizou: {reason}")
         _dist_velho_apagar()
         _escrever(fase="pronto", ok=True, texto="Atualizado")
         _soltar_a_vez()
@@ -224,7 +230,8 @@ def _restarted_into_target(atual: dict) -> bool:
     recusa unidade transiente), o motor mora no cgroup do backend e o restart o leva junto."""
     backend = atual.get("backend_pid")
     para = atual.get("commit_para")
-    if atual.get("etapa") != "reiniciar" or not isinstance(backend, int) or backend == os.getpid() or not para:
+    if (atual.get("etapa") not in ("reiniciar", "nativo") or not isinstance(backend, int)
+            or backend == os.getpid() or not para):
         return False
     try:
         return _git("rev-parse", "HEAD", timeout=30).stdout.strip() == para
@@ -1008,6 +1015,54 @@ def _renovar_chromium(agora: float | None = None) -> None:
         _log.warning("install-chromium.sh: %s", _cauda(p, 4))
 
 
+def _instalar_nativo(alvo: str, porta: int) -> None:
+    """Atualiza só o app já instalado e compatível com o servidor que ficou no ar."""
+    if alvo != "main":
+        return
+    marker = Path.home() / ".hangar" / "native" / "release.json"
+    if not marker.is_file():
+        return
+    try:
+        installed = json.loads(marker.read_text(encoding="utf-8"))
+        if not isinstance(installed, dict):
+            raise ValueError("marca do app nativo nao e um objeto")
+        if installed.get("sem_build"):
+            return
+        release = os.environ.get("HANGAR_NATIVE_UPDATE_URL") or f"{rust_release.RELEASES_URL}/native-latest"
+        manifest = json.loads(rust_release._get(f"{release.rstrip('/')}/native-latest.json", 30))
+        if not isinstance(manifest, dict):
+            raise ValueError("manifesto do app nativo nao e um objeto")
+        required = manifest.get("requires_api", 1)
+        request = urllib.request.Request(f"http://127.0.0.1:{porta}/api/client-api",
+                                        headers={"Authorization": f"Bearer {config.settings.auth_token}"})
+        try:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                contract = json.load(response)
+            api = contract.get("api") if isinstance(contract, dict) else None
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+            api = 1
+        if type(required) is not int or required < 1 or type(api) is not int or api < 1:
+            raise ValueError("contrato de API do app ou do servidor desconhecido")
+    except (OSError, ValueError, http.client.HTTPException) as e:
+        diag.registrar("atualizacao.nativo", "aviso", codigo="contrato_ilegivel", **diag.erro_campos(e))
+        return
+    if required > api:
+        diag.registrar("atualizacao.nativo", codigo="api_insuficiente", requires_api=required, api=api)
+        return
+
+    command = (["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                str(REPO / "scripts" / "install-native.ps1")] if _E_WINDOWS
+               else [str(REPO / "scripts" / "install-native.sh")])
+    try:
+        result = _rodar(command, cwd=REPO, timeout=900)
+    except (OSError, subprocess.SubprocessError) as e:
+        result = subprocess.CompletedProcess(command, 1, "", str(e))
+    if result.returncode != 0:
+        _avisar(f"app nativo nao atualizou: {_motivo_da_falha(result)}")
+
+
 def _stop_windows_front() -> None:
     """Derruba o `vite preview` da tarefa `hangar-frontend` antes do `npm ci`.
 
@@ -1217,6 +1272,8 @@ def _executar(porta: int) -> dict:
             return _voltar(de, f"o servidor nao reiniciou: o processo na porta e o mesmo de antes (pid {pid_antes})",
                            pre["topologia"], porta, branch=pre.get("branch", ""))
 
+    _etapa("nativo")
+    _instalar_nativo(destino, porta)
     _dist_velho_apagar()
     _escrever(fase="pronto", ok=True, texto="Atualizado")
     return estado()
