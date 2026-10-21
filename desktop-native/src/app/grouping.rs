@@ -168,6 +168,17 @@ pub(super) fn qualified(from: &str, to: &str, name: &str, ids: &HashMap<String, 
     identity_of(from, ids).map(|id| format!("{id}::{name}"))
 }
 
+/// Endereço de membro escrito do ponto de vista da máquina `from` (a lista dela) passado para o de `to`: o que é de `to`
+/// perde o prefixo, o que era sem prefixo (de `from`) ganha o de `from`.
+pub(super) fn rebased(from: &str, to: &str, address: &str, ids: &HashMap<String, String>) -> String {
+    if from == to { return address.to_owned(); }
+    match address.split_once("::") {
+        Some((id, name)) if identity_of(to, ids) == Some(id) => name.to_owned(),
+        Some(_) => address.to_owned(),
+        None => qualified(from, to, address, ids).unwrap_or_else(|| address.to_owned()),
+    }
+}
+
 /// Cabeçalho do grupo: "tarefa ↔ máquina::sessão" para os membros de máquinas sem conexão aqui e "apelido::sessão (dono)"
 /// para cada par de fora.
 pub(super) fn pair_header_label(label: &str, elsewhere: &[String], pairs: &[PairExternalEntry]) -> String {
@@ -818,11 +829,16 @@ impl Hangar {
             AskMode::Join { origin, target } => {
                 let (o, t) = (self.target_session(origin), self.target_session(target));
                 let ids = self.identities();
-                // Agrupar funde os grupos inteiros: todos os afetados, não só os dois; o alvo de outra máquina com o identificador dela.
+                // Agrupar funde os grupos inteiros: todos os afetados, não só os dois. Cada lista escreve os membros do
+                // ponto de vista da máquina dela; aqui todos saem do desta, com o identificador só nos de outra máquina.
+                let here = self.active_key();
                 let mut names: Vec<String> = Vec::new();
-                for (s, own) in [(o, origin.name.clone()), (t, qualified(&target.server, &origin.server, &target.name, &ids).unwrap_or(target.name.clone()))] {
+                for (s, side) in [(o, origin), (t, target)] {
                     let Some(s) = s else { continue };
-                    for name in std::iter::once(&own).chain(s.peers()) { if !names.contains(name) { names.push(name.clone()); } }
+                    for name in std::iter::once(&side.name).chain(s.peers()) {
+                        let name = rebased(&side.server, &here, name, &ids);
+                        if !names.contains(&name) { names.push(name); }
+                    }
                 }
                 v.affected = names;
                 // Com a chamada em voo fica o que se via no clique.
@@ -1185,6 +1201,16 @@ mod tests {
         assert_eq!(qualified("a", "a", "x", &ids).as_deref(), Some("x"));
         assert_eq!(qualified("a", "b", "x", &ids).as_deref(), Some("casa::x"));
         assert_eq!(qualified("c", "b", "x", &ids), None, "identificador vazio não se adivinha");
+    }
+
+    #[test]
+    fn members_listed_by_another_machine_are_named_from_this_one() {
+        // "a" é esta máquina (casa); a lista de "b" (lab) escreve as sessões daqui com prefixo e as dela sem.
+        let ids = HashMap::from([("a".to_owned(), "casa".to_owned()), ("b".to_owned(), "lab".to_owned())]);
+        assert_eq!(super::rebased("b", "a", "casa::coordenadora", &ids), "coordenadora");
+        assert_eq!(super::rebased("b", "a", "revisor", &ids), "lab::revisor");
+        assert_eq!(super::rebased("b", "a", "oficina::outra", &ids), "oficina::outra");
+        assert_eq!(super::rebased("a", "a", "x", &ids), "x");
     }
 
     #[test]

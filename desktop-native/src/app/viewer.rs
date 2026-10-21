@@ -3,6 +3,7 @@
 //! à miniatura que abriu o visor.
 use super::*;
 use super::machines::enter_to_focused;
+use gpui_kit::{LineCap, PathBuilder, PathStyle, StrokeOptions};
 
 /// Teto do zoom, o mesmo do visor do Zeron.
 const MAX_SCALE: f32 = 32.;
@@ -17,6 +18,93 @@ const CHROME_W: f32 = 34.;
 /// Menor palco: a faixa de cima precisa caber nome, zoom, Abrir e Salvar.
 const MIN_W: f32 = 480.;
 const MIN_H: f32 = 160.;
+
+/// Cores das marcações (a primeira é a laranja das notas de print) e espessuras da caneta, em pixels da tela.
+const PEN_COLORS: [u32; 4] = [0xea580c, 0xe11d48, 0x2563eb, 0x16a34a];
+const PEN_WIDTHS: [f32; 3] = [3., 6., 12.];
+/// Borda do retângulo, em pixels da tela.
+const RECT_WIDTH: f32 = 3.;
+/// Medidas da nota em pixels da tela: respiro, círculo do número, vão, letra e linha.
+const NOTE_PAD: (f32, f32) = (10., 7.);
+const NOTE_DOT: f32 = 18.;
+const NOTE_GAP: f32 = 7.;
+const NOTE_FONT: f32 = 12.;
+const NOTE_LINE: f32 = 16.;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Tool { Pen, Rect, Note }
+
+/// Uma marcação, em pixels da imagem mostrada: acompanha o zoom e o arrasto. Espessura e tamanho da nota são os da
+/// tela na hora em que nasceram, guardados em pixels da imagem.
+#[derive(Clone, Debug, PartialEq)]
+enum Mark {
+    Pen { color: u32, width: f32, points: Vec<(f32, f32)> },
+    Rect { color: u32, width: f32, from: (f32, f32), to: (f32, f32) },
+    /// `unit`: pixels da imagem por pixel da tela quando a nota nasceu; `size`: a caixa medida na tela, em pixels da imagem.
+    Note { color: u32, number: usize, at: (f32, f32), text: String, unit: f32, size: Option<(f32, f32)> },
+}
+
+fn hex(color: u32) -> String { format!("#{color:06x}") }
+
+fn escape(text: &str) -> String { text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;") }
+
+/// As marcações como SVG do tamanho da original; `k` leva os pixels da mostrada aos da original.
+fn marks_svg(marks: &[Mark], size: (u32, u32), k: f32) -> String {
+    let mut body = String::new();
+    for mark in marks {
+        match mark {
+            Mark::Pen { color, width, points } => {
+                let pts: Vec<String> = points.iter().map(|(x, y)| format!("{x},{y}")).collect();
+                // Um clique sem arrastar ainda deixa um ponto.
+                let pts = if pts.len() == 1 { format!("{0} {0}", pts[0]) } else { pts.join(" ") };
+                body.push_str(&format!(r#"<polyline points="{pts}" fill="none" stroke="{}" stroke-width="{width}" stroke-linecap="round" stroke-linejoin="round"/>"#, hex(*color)));
+            }
+            Mark::Rect { color, width, from, to } => {
+                let (x, y, w, h) = (from.0.min(to.0), from.1.min(to.1), (to.0 - from.0).abs(), (to.1 - from.1).abs());
+                body.push_str(&format!(r#"<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{}" fill="none" stroke="{}" stroke-width="{width}"/>"#, width * 2., hex(*color)));
+            }
+            Mark::Note { color, number, at, text, unit: u, size } => {
+                let Some((w, h)) = size else { continue };
+                let (dot_x, dot_y) = (at.0 + NOTE_PAD.0 * u + NOTE_DOT * u / 2., at.1 + NOTE_PAD.1 * u + NOTE_DOT * u / 2.);
+                body.push_str(&format!(r#"<rect x="{}" y="{}" width="{w}" height="{h}" rx="{}" fill="{}"/>"#, at.0, at.1, 6. * u, hex(*color)));
+                body.push_str(&format!(r##"<circle cx="{dot_x}" cy="{dot_y}" r="{}" fill="#ffffff"/>"##, NOTE_DOT * u / 2.));
+                body.push_str(&format!(r#"<text x="{dot_x}" y="{}" font-family="Geist" font-weight="700" font-size="{}" text-anchor="middle" fill="{}">{number}</text>"#,
+                    dot_y + 4. * u, 11. * u, hex(*color)));
+                body.push_str(&format!(r##"<text x="{}" y="{}" font-family="Geist" font-weight="600" font-size="{}" fill="#ffffff">{}</text>"##,
+                    at.0 + (NOTE_PAD.0 + NOTE_DOT + NOTE_GAP) * u, at.1 + NOTE_PAD.1 * u + (NOTE_LINE - 4.) * u + 1. * u, NOTE_FONT * u, escape(text)));
+            }
+        }
+    }
+    format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}"><g transform="scale({k})">{body}</g></svg>"#, size.0, size.1)
+}
+
+/// Grava as marcações na imagem original, em PNG. `shown` é o tamanho da mostrada, que pode vir reduzida da original.
+fn burn(bytes: &[u8], shown: (f32, f32), marks: &[Mark]) -> Option<Vec<u8>> {
+    let mut image = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let (w, h) = image.dimensions();
+    let mut options = resvg::usvg::Options::default();
+    // A fonte do app, embutida: o texto da nota sai igual em qualquer máquina.
+    options.fontdb_mut().load_font_data(include_bytes!("../../assets/fonts/Geist-SemiBold.ttf").to_vec());
+    options.fontdb_mut().load_font_data(include_bytes!("../../assets/fonts/Geist-Bold.ttf").to_vec());
+    let tree = resvg::usvg::Tree::from_str(&marks_svg(marks, (w, h), w as f32 / shown.0), &options).ok()?;
+    let mut layer = resvg::tiny_skia::Pixmap::new(w, h)?;
+    resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut layer.as_mut());
+    // A camada vem com alfa pré-multiplicado: por cima da original é `cor + fundo × (1 − alfa)`.
+    for (dst, src) in image.pixels_mut().zip(layer.data().chunks_exact(4)) {
+        let rest = 255 - src[3] as u32;
+        for c in 0..3 { dst[c] = (src[c] as u32 + dst[c] as u32 * rest / 255).min(255) as u8; }
+        dst[3] = (src[3] as u32 + dst[3] as u32 * rest / 255).min(255) as u8;
+    }
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgba8(image).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).ok()?;
+    Some(out)
+}
+
+/// Nome da cópia riscada: o da original com "-riscado", sempre PNG.
+fn burned_name(name: &str) -> String {
+    let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+    format!("{stem}-riscado.png")
+}
 
 /// Onde a imagem está no palco: pixels da tela por pixel da imagem e o canto de cima à esquerda.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,6 +181,19 @@ pub(super) struct Viewer {
     held: Option<(f32, f32)>,
     view: Option<View>,
     drag: Option<(Point<Pixels>, View)>,
+    /// Caneta ligada: o arrasto risca em vez de mover a imagem.
+    pen: bool,
+    pen_color: usize,
+    pen_width: usize,
+    tool: Tool,
+    marks: Vec<Mark>,
+    /// Traço ou retângulo sendo arrastado.
+    drawing: Option<Mark>,
+    /// Nota sendo escrita: o índice dela em `marks` e o campo.
+    editing: Option<(usize, Entity<InputState>)>,
+    /// Cópia riscada sendo gravada ou anexada.
+    burning: bool,
+    problem: Option<String>,
 }
 
 /// Nome com que a imagem é salva, o mesmo que a conversa mostra embaixo da miniatura.
@@ -182,6 +283,169 @@ impl Viewer {
         if let Shown::Image(image) = std::mem::replace(&mut self.shown, Shown::Loading) { cx.drop_image(image, Some(window)); }
         self.view = None;
         self.drag = None;
+        // Os traços são da imagem que saiu.
+        self.marks.clear();
+        self.drawing = None;
+        self.editing = None;
+        self.problem = None;
+    }
+
+    /// Ponto da tela em pixels da imagem mostrada.
+    fn image_point(&self, at: Point<Pixels>) -> Option<(f32, f32)> {
+        let (stage, view) = (self.stage?, self.view?);
+        let local = at - stage.origin;
+        Some(((f32::from(local.x) - view.x) / view.scale, (f32::from(local.y) - view.y) / view.scale))
+    }
+
+    /// Traço ou retângulo arrastado entra na lista; retângulo sem área (um clique) não.
+    fn commit_drawing(&mut self) {
+        match self.drawing.take() {
+            Some(Mark::Rect { from, to, .. }) if (to.0 - from.0).abs() < 2. || (to.1 - from.1).abs() < 2. => {}
+            Some(mark) => self.marks.push(mark),
+            None => {}
+        }
+    }
+
+    /// As notas por cima da imagem, no tamanho em que nasceram vezes o zoom; a em edição mostra o campo. A caixa medida
+    /// volta para a marcação: é ela que o PNG grava.
+    fn render_notes(&self, view: View, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let entity = cx.entity();
+        self.marks.iter().enumerate().filter_map(|(i, mark)| {
+            let Mark::Note { color, number, at, text, unit, size } = mark else { return None };
+            let z = unit * view.scale;
+            let editing = self.editing.as_ref().filter(|(at, _)| *at == i).map(|(_, input)| input.clone());
+            let (entity, known) = (entity.clone(), *size);
+            let measure = canvas(move |bounds, window, cx| {
+                let size = (f32::from(bounds.size.width) / view.scale, f32::from(bounds.size.height) / view.scale);
+                if known.is_some_and(|k| (k.0 - size.0).abs() < 0.5 && (k.1 - size.1).abs() < 0.5) { return; }
+                let entity = entity.clone();
+                window.defer(cx, move |_, cx| entity.update(cx, |this, cx| {
+                    if let Some(Mark::Note { size: slot, .. }) = this.marks.get_mut(i) { *slot = Some(size); cx.notify(); }
+                }));
+            }, |_, _, _, _| {}).absolute().size_full();
+            Some(div().absolute().left(px(view.x + at.0 * view.scale)).top(px(view.y + at.1 * view.scale))
+                .flex().items_start().gap(px(NOTE_GAP * z)).px(px(NOTE_PAD.0 * z)).py(px(NOTE_PAD.1 * z)).rounded(px(6. * z))
+                .bg(Hsla::from(rgb(*color))).text_color(Hsla::from(rgb(0xffffff))).text_size(px(NOTE_FONT * z)).line_height(px(NOTE_LINE * z))
+                .font_weight(FontWeight::SEMIBOLD).whitespace_nowrap()
+                // Clicar na nota (ou no campo dela) não cria outra embaixo.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(measure)
+                .child(div().flex_shrink_0().size(px(NOTE_DOT * z)).rounded_full().bg(Hsla::from(rgb(0xffffff))).flex().items_center().justify_center()
+                    .text_color(Hsla::from(rgb(*color))).text_size(px(11. * z)).font_weight(FontWeight::BOLD).child(number.to_string()))
+                .map(|el| match editing {
+                    Some(input) => el.child(div().w(px(220. * z)).child(Input::new(&input).appearance(false).small())),
+                    None => el.child(text.clone()),
+                })
+                .into_any_element())
+        }).collect()
+    }
+
+    /// Tira a última marcação; a nota que some leva junto o campo dela.
+    fn undo(&mut self, cx: &mut Context<Self>) {
+        if self.marks.pop().is_none() { return; }
+        if self.editing.as_ref().is_some_and(|(at, _)| *at >= self.marks.len()) { self.editing = None; }
+        cx.notify();
+    }
+
+    /// Nota em edição vira texto; vazia, some.
+    fn finish_note(&mut self, cx: &mut Context<Self>) {
+        let Some((at, input)) = self.editing.take() else { return };
+        let value = input.read(cx).value().trim().to_owned();
+        if value.is_empty() {
+            if at < self.marks.len() { self.marks.remove(at); }
+        } else if let Some(Mark::Note { text, size, .. }) = self.marks.get_mut(at) {
+            *text = value;
+            // A caixa muda com o texto final: o próximo quadro mede de novo.
+            *size = None;
+        }
+        cx.notify();
+    }
+
+    /// Nota nova onde a pessoa clicou, com o próximo número, já com o campo para digitar.
+    fn start_note(&mut self, at: (f32, f32), view: View, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_note(cx);
+        let number = self.marks.iter().filter(|m| matches!(m, Mark::Note { .. })).count() + 1;
+        self.marks.push(Mark::Note { color: PEN_COLORS[self.pen_color], number, at, text: String::new(), unit: 1. / view.scale, size: None });
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(tr("viewer_note_placeholder")));
+        input.update(cx, |input, cx| input.focus(window, cx));
+        // O Blur de um campo antigo chega depois da nota nova nascer: só o campo da nota em edição fecha a nota.
+        cx.subscribe_in(&input, window, |this, input, event: &InputEvent, _, cx| match event {
+            InputEvent::PressEnter { .. } | InputEvent::Blur if this.editing.as_ref().is_some_and(|(_, own)| own == input) => this.finish_note(cx),
+            _ => cx.notify(),
+        }).detach();
+        self.editing = Some((self.marks.len() - 1, input));
+        cx.notify();
+    }
+
+    /// Lê a original, grava os traços e entrega o PNG a `done`, na janela.
+    fn burned(&mut self, window: &mut Window, cx: &mut Context<Self>,
+        done: impl FnOnce(&mut Self, Vec<u8>, String, &mut Window, &mut Context<Self>) + 'static) {
+        self.burn_when_measured(0, window, cx, done);
+    }
+
+    /// A caixa da nota é medida na tela depois de desenhada: espera alguns quadros até todas terem a medida do texto final.
+    fn burn_when_measured(&mut self, tries: u8, window: &mut Window, cx: &mut Context<Self>,
+        done: impl FnOnce(&mut Self, Vec<u8>, String, &mut Window, &mut Context<Self>) + 'static) {
+        self.finish_note(cx);
+        let unmeasured = self.marks.iter().any(|m| matches!(m, Mark::Note { size: None, .. }));
+        if unmeasured && tries < 10 {
+            cx.on_next_frame(window, move |this, window, cx| this.burn_when_measured(tries + 1, window, cx, done));
+            cx.notify();
+            return;
+        }
+        let Some(shown) = self.image_size() else { return };
+        if self.marks.is_empty() || self.burning { return; }
+        self.burning = true;
+        self.problem = None;
+        let (api, name, source, uploads, marks) = (self.api.clone(), self.key.name.clone(), self.sources[self.index].clone(),
+            self.uploads.clone(), self.marks.clone());
+        let file = burned_name(&source_name(&source));
+        let job = self.runtime.spawn(async move {
+            let bytes = uploads.fetch(&api, &name, &source).await.map_err(|error| Hangar::fetch_failure(&error))?;
+            tokio::task::spawn_blocking(move || burn(&bytes, shown, &marks)).await.ok().flatten().ok_or_else(|| tr("media_unreadable"))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = job.await.unwrap_or_else(|_| Err(tr("invalid_response")));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.burning = false;
+                match result {
+                    Ok(bytes) => done(this, bytes, file, window, cx),
+                    Err(error) => this.problem = Some(tr("viewer_burn_failed").replace("{reason}", &error)),
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    /// A cópia riscada entra como anexo no campo da conversa aberta, como um print colado; o visor fecha.
+    fn send_burned(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.burned(window, cx, |this, bytes, file, window, cx| {
+            let attached = this.hangar.update(cx, |hangar, cx| {
+                let key = hangar.composer_key().ok_or_else(|| tr("viewer_send_no_field"))?;
+                let result = hangar.add_attachment(&key, file, bytes);
+                cx.notify();
+                result
+            }).unwrap_or_else(|_| Err(tr("invalid_response")));
+            match attached {
+                Ok(()) => window.close_dialog(cx),
+                Err(error) => this.problem = Some(error),
+            }
+        });
+    }
+
+    /// Salvar com traços grava a cópia riscada onde a pessoa escolher; a original não muda.
+    fn save_burned(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.burned(window, cx, |_, bytes, file, _, cx| {
+            let prompt = cx.prompt_for_new_path(&downloads_folder(), Some(&file));
+            cx.spawn(async move |this, cx| {
+                let Ok(Ok(Some(path))) = prompt.await else { return };
+                let written = cx.background_executor().spawn(async move { std::fs::write(&path, bytes) }).await;
+                let _ = this.update(cx, |this, cx| {
+                    if written.is_err() { this.problem = Some(tr("save_failed")); cx.notify(); }
+                });
+            }).detach();
+        });
     }
 
     /// ←/→ andam pelas imagens da mensagem e dão a volta nas pontas.
@@ -209,6 +473,13 @@ impl Viewer {
     fn set_stage(&mut self, bounds: Bounds<Pixels>) { self.stage = Some(bounds); }
 
     fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Ctrl+Z (Cmd+Z no Mac) tira o último traço.
+        // Com a nota em edição, o Ctrl+Z é do campo de texto.
+        if event.keystroke.modifiers.secondary() && event.keystroke.key == "z" && self.editing.is_none() {
+            self.undo(cx);
+            cx.stop_propagation();
+            return;
+        }
         match event.keystroke.key.as_str() {
             "left" => self.step(false, window, cx),
             "right" => self.step(true, window, cx),
@@ -258,10 +529,74 @@ impl Render for Viewer {
                     .tooltip(tr("viewer_fit")).on_click(cx.listener(|this, _, _, cx| this.fit(cx)))))
                 .child(Button::new("viewer-zoom-in").ghost().small().icon(IconName::Plus).tooltip(tr("viewer_zoom_in")).disabled(!has_image)
                     .on_click(cx.listener(|this, _, _, cx| this.zoom_at(None, STEP, cx)))))
+            .child(Button::new("viewer-pen").ghost().small().icon(IconName::Pencil).label(tr("viewer_pen")).selected(self.pen)
+                .disabled(!has_image).tooltip(tr("viewer_pen_tip"))
+                .on_click(cx.listener(|this, _, _, cx| { this.pen = !this.pen; this.drag = None; cx.notify(); })))
             .when(openable, |el| el.child(Button::new("viewer-open").ghost().small().icon(IconName::ExternalLink).label(tr("open"))
                 .on_click(cx.listener(|this, _, _, cx| this.keep(true, cx)))))
-            .child(Button::new("viewer-save").ghost().small().icon(IconName::Download).label(tr("save"))
-                .on_click(cx.listener(|this, _, _, cx| this.keep(false, cx))));
+            // Com traços, Salvar grava a cópia riscada; sem eles, a original como antes.
+            .child(Button::new("viewer-save").ghost().small().icon(IconName::Download).label(tr("save")).loading(self.burning)
+                .on_click(cx.listener(|this, _, window, cx| if this.marks.is_empty() { this.keep(false, cx) } else { this.save_burned(window, cx) })));
+
+        let tools = self.pen.then(|| {
+            let kinds = [(Tool::Pen, IconName::Pencil, "viewer_tool_pen"), (Tool::Rect, IconName::Square, "viewer_tool_rect"),
+                (Tool::Note, IconName::MessageSquare, "viewer_tool_note")].into_iter().map(|(tool, icon, label)| {
+                Button::new(SharedString::from(format!("viewer-tool-{label}"))).ghost().xsmall().icon(icon).label(tr(label)).selected(self.tool == tool)
+                    .on_click(cx.listener(move |this, _, _, cx| { this.finish_note(cx); this.tool = tool; cx.notify(); }))
+            }).collect::<Vec<_>>();
+            let swatches = PEN_COLORS.iter().enumerate().map(|(i, &color)| {
+                let on = i == self.pen_color;
+                div().id(SharedString::from(format!("viewer-pen-color-{i}"))).size(px(18.)).rounded_full().cursor_pointer()
+                    .bg(Hsla::from(rgb(color))).border_2().border_color(if on { theme::text() } else { transparent_black() })
+                    .role(Role::Button).aria_selected(on).aria_label(format!("{} {}", tr("viewer_pen_color"), i + 1))
+                    .on_click(cx.listener(move |this, _, _, cx| { this.pen_color = i; cx.notify(); }))
+            }).collect::<Vec<_>>();
+            let widths = [tr("viewer_pen_thin"), tr("viewer_pen_medium"), tr("viewer_pen_thick")].into_iter().enumerate().map(|(i, label)| {
+                Button::new(SharedString::from(format!("viewer-pen-width-{i}"))).ghost().xsmall().label(label).selected(i == self.pen_width)
+                    .on_click(cx.listener(move |this, _, _, cx| { this.pen_width = i; cx.notify(); }))
+            }).collect::<Vec<_>>();
+            let drawn = !self.marks.is_empty();
+            let sep = || div().w(px(1.)).h(px(16.)).bg(theme::border_strong());
+            // Quebra em duas linhas na imagem estreita: o diálogo tem a largura dela.
+            div().flex().flex_wrap().items_center().gap_2().text_xs().text_color(theme::muted())
+                .children(kinds).child(sep())
+                .child(tr("viewer_pen_color")).children(swatches)
+                // A espessura é só da caneta; retângulo e nota têm a deles.
+                .when(self.tool == Tool::Pen, |el| el.child(sep()).child(tr("viewer_pen_width")).children(widths))
+                .child(sep())
+                .child(Button::new("viewer-pen-undo").ghost().xsmall().label(tr("viewer_pen_undo")).disabled(!drawn)
+                    .on_click(cx.listener(|this, _, _, cx| this.undo(cx))))
+                .child(Button::new("viewer-pen-clear").ghost().xsmall().label(tr("viewer_pen_clear")).disabled(!drawn)
+                    .on_click(cx.listener(|this, _, _, cx| { this.editing = None; this.marks.clear(); cx.notify(); })))
+                .children(self.problem.clone().map(|problem| div().min_w_0().truncate().text_color(theme::warning()).child(problem)))
+                .child(div().flex_1())
+                .child(Button::new("viewer-pen-send").primary().small().label(tr("viewer_pen_send")).disabled(!drawn).loading(self.burning)
+                    .on_click(cx.listener(|this, _, window, cx| this.send_burned(window, cx))))
+        });
+        // Traços e retângulos desenhados por cima da imagem, na posição e no zoom atuais; as notas são caixas, logo abaixo.
+        let lines: Vec<Mark> = self.marks.iter().chain(self.drawing.iter()).filter(|m| !matches!(m, Mark::Note { .. })).cloned().collect();
+        let painted = self.view;
+        let ink = canvas(|_, _, _| (), move |bounds, _, window, _| {
+            let Some(view) = painted else { return };
+            let at = |(x, y): (f32, f32)| point(bounds.origin.x + px(view.x + x * view.scale), bounds.origin.y + px(view.y + y * view.scale));
+            for mark in &lines {
+                let (color, width, points) = match mark {
+                    Mark::Pen { color, width, points } => (*color, *width, points.clone()),
+                    Mark::Rect { color, width, from, to } => (*color, *width, vec![*from, (to.0, from.1), *to, (from.0, to.1), *from]),
+                    Mark::Note { .. } => continue,
+                };
+                let Some(&first) = points.first() else { continue };
+                let width = (width * view.scale).max(1.);
+                let options = StrokeOptions::default().with_line_width(width).with_line_cap(LineCap::Round);
+                let mut path = PathBuilder::stroke(px(width)).with_style(PathStyle::Stroke(options));
+                path.move_to(at(first));
+                // Um clique sem arrastar ainda deixa um ponto.
+                if points.len() == 1 { path.line_to(at((first.0 + 0.01, first.1))); }
+                for &p in &points[1..] { path.line_to(at(p)); }
+                if let Ok(path) = path.build() { window.paint_path(path, Hsla::from(rgb(color))); }
+            }
+        }).absolute().size_full();
+        let notes = self.view.map(|view| self.render_notes(view, cx)).unwrap_or_default();
 
         let entity = cx.entity();
         let body = match (&self.shown, self.view) {
@@ -282,7 +617,8 @@ impl Render for Viewer {
                     .on_click(cx.listener(move |this: &mut Self, _, window, cx| this.step(forward, window, cx)))))
         };
         let stage = div().id("viewer-stage").relative().w(px(stage_w)).h(px(stage_h)).overflow_hidden().rounded_md().bg(theme::inset())
-            .when(zoomed, |el| el.cursor(if self.drag.is_some() { CursorStyle::ClosedHand } else { CursorStyle::OpenHand }))
+            .when(self.pen, |el| el.cursor(CursorStyle::Crosshair))
+            .when(zoomed && !self.pen, |el| el.cursor(if self.drag.is_some() { CursorStyle::ClosedHand } else { CursorStyle::OpenHand }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
                 let Some(stage) = this.stage else { return };
                 let dy = f32::from(event.delta.pixel_delta(window.line_height()).y);
@@ -292,9 +628,33 @@ impl Render for Viewer {
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, cx| {
                 window.focus(&this.focus, cx);
+                if this.pen {
+                    let Some((at, view)) = this.image_point(event.position).zip(this.view) else { return };
+                    let color = PEN_COLORS[this.pen_color];
+                    // Espessuras são as da tela agora: guardadas em pixels da imagem, a marcação engrossa com o zoom.
+                    match this.tool {
+                        Tool::Pen => { this.finish_note(cx); this.drawing = Some(Mark::Pen { color, width: PEN_WIDTHS[this.pen_width] / view.scale, points: vec![at] }); }
+                        Tool::Rect => { this.finish_note(cx); this.drawing = Some(Mark::Rect { color, width: RECT_WIDTH / view.scale, from: at, to: at }); }
+                        Tool::Note => this.start_note(at, view, window, cx),
+                    }
+                    cx.notify();
+                    return;
+                }
                 if let Some(view) = this.view { this.drag = Some((event.position, view)); cx.notify(); }
             }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if this.drawing.is_some() {
+                    if event.pressed_button != Some(MouseButton::Left) { this.commit_drawing(); }
+                    else if let Some(at) = this.image_point(event.position) {
+                        match this.drawing.as_mut() {
+                            Some(Mark::Pen { points, .. }) => points.push(at),
+                            Some(Mark::Rect { to, .. }) => *to = at,
+                            _ => {}
+                        }
+                    }
+                    cx.notify();
+                    return;
+                }
                 let Some((start, view)) = this.drag else { return };
                 if event.pressed_button != Some(MouseButton::Left) { this.drag = None; cx.notify(); return; }
                 let (Some(image), Some(stage)) = (this.image_size(), this.stage_size()) else { return };
@@ -302,7 +662,11 @@ impl Render for Viewer {
                 let next = clamp(View { x: view.x + f32::from(moved.x), y: view.y + f32::from(moved.y), ..view }, image, stage);
                 if this.view != Some(next) { this.view = Some(next); cx.notify(); }
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| { this.drag = None; cx.notify(); }))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                this.drag = None;
+                this.commit_drawing();
+                cx.notify();
+            }))
             // A medida chega no meio do desenho, onde `notify` não pede quadro novo: aplicada depois dele, o reencaixe
             // aparece sem esperar o próximo movimento do mouse.
             .child(canvas(move |bounds, window, cx| {
@@ -311,12 +675,14 @@ impl Render for Viewer {
                 window.defer(cx, move |_, cx| entity.update(cx, |this, _| this.set_stage(bounds)));
             }, |_, _, _, _| {}).absolute().size_full())
             .child(body)
+            .child(ink)
+            .children(notes)
             .when(total > 1, |el| el
                 .child(edge("viewer-previous", IconName::ChevronLeft, tr("viewer_previous"), false))
                 .child(edge("viewer-next", IconName::ChevronRight, tr("viewer_next"), true)));
 
         div().id("viewer").track_focus(&self.focus).key_context("Viewer").on_key_down(cx.listener(Self::on_key))
-            .flex().flex_col().gap_3().child(header).child(stage)
+            .flex().flex_col().gap_3().child(header).children(tools).child(stage)
     }
 }
 
@@ -335,6 +701,8 @@ impl Hangar {
             Viewer {
                 hangar, api, uploads, runtime, full, key, sources, index, shown: Shown::Loading, seq: 0, _load: Task::ready(()), fetching: None,
                 focus: cx.focus_handle(), stage: None, limit: None, held: None, view: None, drag: None,
+                pen: false, pen_color: 0, pen_width: 1, tool: Tool::Rect, marks: Vec::new(), drawing: None, editing: None,
+                burning: false, problem: None,
             }
         });
         viewer.update(cx, |viewer, cx| viewer.load(window, cx));
@@ -386,6 +754,21 @@ mod tests {
         assert!((before.0 - after.0).abs() < 0.01 && (before.1 - after.1).abs() < 0.01);
         assert_eq!(zoom(zoomed, image, stage, anchor, 0.01), start);
         assert_eq!(zoom(start, image, stage, anchor, 1e6).scale, MAX_SCALE);
+    }
+
+    #[test]
+    fn burn_paints_the_stroke_scaled_to_the_original() {
+        // Original 20×20 mostrada reduzida a 10×10: o traço no meio da mostrada cai no meio da original.
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(20, 20, image::Rgba([0, 0, 0, 255])))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let pen = super::Mark::Pen { color: 0xff0000, width: 2., points: vec![(2., 5.), (8., 5.)] };
+        let rect = super::Mark::Rect { color: 0x00ff00, width: 1., from: (1., 1.), to: (9., 3.) };
+        let out = image::load_from_memory(&super::burn(&png, (10., 10.), &[pen, rect]).unwrap()).unwrap().to_rgba8();
+        assert_eq!(out.get_pixel(10, 10), &image::Rgba([255, 0, 0, 255]));
+        assert_eq!(out.get_pixel(10, 2)[1], 255, "a borda de cima do retângulo, verde");
+        assert_eq!(out.get_pixel(10, 4), &image::Rgba([0, 0, 0, 255]), "dentro do retângulo não pinta");
+        assert_eq!(super::burned_name("colado-6.png"), "colado-6-riscado.png");
     }
 
     #[test]

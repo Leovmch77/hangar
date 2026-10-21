@@ -59,7 +59,11 @@ impl Hangar {
                 .min_w(px(13.)).h(px(13.)).px(px(2.)).rounded_full().bg(theme::warning()).text_color(theme::chrome())
                 .text_size(px(9.)).font_weight(FontWeight::BOLD).flex().items_center().justify_center()
                 .child(if attention > 99 { "99+".to_owned() } else { attention.to_string() })));
-        let button = Button::new("machines-tray-toggle").ghost().size(px(28.)).rounded(px(6.)).child(icon)
+        // O total de sessões de todas as máquinas, o mesmo do "Todas as sessões" da barra lateral.
+        let total: usize = self.machine_lists(cx).iter().map(|m| m.layout.total).sum();
+        let button = Button::new("machines-tray-toggle").ghost().h(px(28.)).px(px(6.)).rounded(px(6.))
+            .child(div().flex().items_center().gap(px(6.)).child(icon)
+                .child(div().font_family(theme::MONO).text_size(px(11.)).text_color(theme::faint()).child(total.to_string())))
             .selected(self.machines_tray.open).tooltip(tip.clone()).accessibility_label(tip)
             .on_click(cx.listener(|this, _, window, cx| {
                 let opening = !this.machines_tray.open;
@@ -111,6 +115,22 @@ impl Hangar {
                         this.apply_appearance(appearance::Appearance { show_remote_tabs: *on, ..appearance::get() }, true, cx);
                         this.redraw(panes::Area::Nav, cx);
                     }))))
+            // As mesmas opções da barra de abas da tela de Aparência, à mão de quem olha as abas.
+            .child(div().flex().items_center().gap_2()
+                .child(div().flex_1().min_w_0().text_xs().whitespace_normal().child(tr("settings_tab_preview")))
+                .child(Switch::new("machines-tray-tab-preview").checked(appearance::get().tab_preview)
+                    .accessibility_label(tr("settings_tab_preview"))
+                    .on_click(cx.listener(|this, on: &bool, _, cx| {
+                        this.apply_appearance(appearance::Appearance { tab_preview: *on, ..appearance::get() }, true, cx);
+                    }))))
+            .child(div().flex().items_center().gap_2()
+                .child(div().flex_1().min_w_0().text_xs().whitespace_normal().child(tr("settings_tabs_detail")))
+                .child(super::settings::segments("machines-tray-tabs-detail", &[tr("settings_sidebar_compact"), tr("settings_tabs_full")],
+                    appearance::get().tabs_full as usize, 2, false, String::new(),
+                    |this: &mut Hangar, index, _: &mut Window, cx| {
+                        this.apply_appearance(appearance::Appearance { tabs_full: index == 1, ..appearance::get() }, true, cx);
+                        this.redraw(panes::Area::Nav, cx);
+                    }, cx)))
             .child(div().id("machines-tray-columns").relative().w_full().min_w_0().overflow_x_scroll()
                 .flex().items_start().gap(px(12.)).children(columns))
             .child(div().pt_2().border_t_1().border_color(theme::border()).text_xs().text_color(theme::muted())
@@ -136,11 +156,19 @@ impl Hangar {
             }
         }
         let empty = sessions.is_empty();
+        // Quantas trabalham e quantas esperam a pessoa, ao lado do nome; zero não aparece.
+        let working = sessions.iter().filter(|s| s.display_state() == "working").count();
+        let waiting = sessions.iter().filter(|s| s.display_state() == "awaiting_input").count();
+        let tally = |n: usize, key: &str, color: Hsla| (n > 0).then(|| div().flex_shrink_0().text_size(px(10.5)).text_color(color)
+            .child(tr_shared(key, &[("n", &n.to_string())])));
         div().id(SharedString::from(format!("machines-tray-machine-{key}"))).w(px(228.)).flex_shrink_0().flex().flex_col().gap_2()
             .role(Role::Group).aria_label(label.to_owned())
             .child(div().flex().items_center().gap(px(6.))
                 .child(div().size(px(6.)).rounded_full().bg(if online { theme::success() } else { theme::warning() }))
-                .child(div().flex_1().min_w_0().truncate().text_xs().font_weight(FontWeight::SEMIBOLD).child(label.to_owned()))
+                .child(div().min_w_0().truncate().text_xs().font_weight(FontWeight::SEMIBOLD).child(label.to_owned()))
+                .children(tally(working, "machines_tray_working", theme::accent()))
+                .children(tally(waiting, "machines_tray_waiting", theme::warning()))
+                .child(div().flex_1())
                 .when(invite, |el| el.child(div().text_size(px(10.)).text_color(theme::muted()).child(tr("invite_badge"))))
                 .child(div().text_xs().text_color(theme::faint()).child(sessions.len().to_string())))
             .child(div().id(SharedString::from(format!("machines-tray-list-{key}"))).relative().w_full().max_h(height).overflow_y_scroll()
@@ -177,7 +205,13 @@ impl Hangar {
             .child(chrome::provider_glyph(&session.provider, 14.))
             .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
                 .child(div().truncate().text_size(px(12.)).child(session.name.clone()))
-                .child(div().truncate().text_size(px(10.)).text_color(theme::muted()).child(tr(&format!("chip_{state}")))))
+                // O estado e, depois dele, a pasta (quando difere do nome), a branch e o ↑↓ de push e pull.
+                .child(div().min_w_0().overflow_hidden().flex().items_center().gap(px(5.)).text_size(px(10.)).text_color(theme::muted())
+                    .child(div().flex_shrink_0().child(tr(&format!("chip_{state}"))))
+                    .children(folder_name(session).filter(|f| *f != session.name).map(|f| div().min_w_0().truncate().child(format!("· {f}"))))
+                    .children(shown_branch(session).map(|b| div().min_w_0().truncate().child(format!("· ⑂ {b}"))))
+                    .children(session.git_ahead.filter(|n| *n > 0).map(|n| div().flex_shrink_0().text_color(theme::accent()).child(format!("↑{n}"))))
+                    .children(session.git_behind.filter(|n| *n > 0).map(|n| div().flex_shrink_0().text_color(theme::warning()).child(format!("↓{n}"))))))
             .when(readonly, |el| el.child(div().flex_shrink_0().text_size(px(9.)).text_color(theme::muted()).child(tr("machines_tray_read_only"))))
             .when(session.pending_questions > 0, |el| el.child(div().text_xs().text_color(theme::warning()).child(format!("? {}", session.pending_questions))))
             .child(chrome::icon_button(SharedString::from(format!("machines-tray-menu-{}", target.id())), IconName::Ellipsis,

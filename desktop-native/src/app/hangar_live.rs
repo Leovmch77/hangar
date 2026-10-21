@@ -64,7 +64,8 @@ pub(super) enum HangarCall { Focus, Restart, Close }
 
 /// Onde o chip mora: ao lado da marca (barra aberta e abas) ou um ponto no canto da marca (trilho).
 #[derive(Clone, Copy, PartialEq)]
-pub(super) enum Chip { Label, Dot }
+/// `Count` é a forma curta da faixa de abas: o ícone e o número, com a frase no tooltip.
+pub(super) enum Chip { Label, Dot, Count }
 
 impl Hangar {
     /// Cópia da lista viva da máquina `server` (a ativa vem do stream próprio; as outras, do `RemoteList`).
@@ -191,6 +192,13 @@ impl Hangar {
                 .selected(self.hangar_open).accessibility_label(label.clone()).tooltip(label.clone())
                 .child(div().flex().items_center().gap(px(8.)).child(div().size(px(7.)).rounded_full().bg(color))
                     .child(div().text_xs().whitespace_nowrap().child(label)))
+                .on_click(cx.listener(move |this, _, window, cx| toggle(this, window, cx))).into_any_element(),
+            Chip::Count => Button::new("hangar-chip").ghost()
+                .h(px(26.)).px(px(7.)).rounded_full().flex_shrink_0()
+                .selected(self.hangar_open).accessibility_label(label.clone()).tooltip(label)
+                .child(div().flex().items_center().gap(px(5.))
+                    .child(chrome::small_icon(IconName::SquareTerminal, 13., theme::muted()))
+                    .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color).child(items.len().to_string())))
                 .on_click(cx.listener(move |this, _, window, cx| toggle(this, window, cx))).into_any_element(),
         };
         Some(popup::anchor(div().relative().flex_shrink_0(), "hangar-chip").child(element).into_any_element())

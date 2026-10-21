@@ -33,6 +33,7 @@ pub(super) struct Open { key: SessionKey, ctl: Ctl, catalog: Option<Result<Value
 impl Open {
     /// Id do gatilho do painel, a pílula do controle.
     pub(super) fn anchor(&self) -> String { format!("ctl-{}", self.ctl.key()) }
+    pub(super) fn session(&self) -> &SessionKey { &self.key }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

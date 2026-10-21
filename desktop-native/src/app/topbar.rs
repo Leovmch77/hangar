@@ -172,6 +172,10 @@ impl Hangar {
             .on_click(|event, window, _| if event.click_count() == 2 && !cfg!(target_os = "windows") {
                 if cfg!(target_os = "macos") { window.titlebar_double_click() } else { window.zoom_window() }
             })
+            // Com abas não há barra lateral para levar a marca: ela fica no canto da barra de cima, como no topo da lateral.
+            .when(appearance::get().navigation.tabs(), |el| el.child(div().flex_shrink_0().pl(px(4.)).flex().items_center().gap_2()
+                .child(chrome::hangar_mark(20., theme::accent()))
+                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(tr("brand")))))
             .map(|el| {
                 let controls = div().flex().justify_end().gap(px(6.))
                     .children(cleanup.map(control))
