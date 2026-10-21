@@ -550,6 +550,8 @@ pub(in crate::app) struct NewSession {
     /// "+ conta": a linha do nome aberta; "Apagar": a confirmação na tela.
     asking: bool,
     confirming: bool,
+    /// O servidor recusou apagar porque a conta está presa: a confirmação vira a pergunta de liberar.
+    holders: Option<crate::api::AccountHolders>,
     /// Na confirmação de apagar: as conversas vão para a conta padrão (marcado ao abrir).
     keep_transcripts: bool,
     account_busy: bool,
@@ -646,7 +648,7 @@ impl NewSession {
             step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, account_touched: false, account_suggested: false, effort: String::new(), service_tier: None,
             permission: String::new(), saved_default: None, defaults_ready: false, default_saving: false, default_save_seq: 0, permission_touched: false, subagent: String::new(), engine: String::new(), engine_account: String::new(), engine_account_pick: None, model_pick: None, effort_pick: None,
             permission_pick: None, subagent_pick: None, engine_pick: None, engines: Remote::default(), jev: Remote::default(), jev_on: false,
-            more: false, omp, quotas: Remote::default(), reopen_config: None, reopen_default: false, asking: false, confirming: false, keep_transcripts: true, account_busy: false, account_seq: 0, account_name,
+            more: false, omp, quotas: Remote::default(), reopen_config: None, reopen_default: false, asking: false, confirming: false, holders: None, keep_transcripts: true, account_busy: false, account_seq: 0, account_name,
             notice: None, created_path: None, context_seq: 0, context_busy: false, context_on: None, context_want: None, context_error: None,
             archive: Remote::default(), want_resume: false, conversation: String::new(), before: None, preview: Remote::default(),
             preview_scroll: ScrollHandle::new(), resuming: false, baton, baton_by_model: false, baton_open: false,

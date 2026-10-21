@@ -138,22 +138,24 @@ async fn hidden_from_owner_not_listed() {
 
 /// Fatos que caem depois de uma resposta boa marcam as linhas; a lista continua servida.
 #[tokio::test(flavor = "multi_thread")]
-async fn facts_down_marks_rows_not_list() {
+async fn facts_down_keeps_the_list_without_a_row_warning() {
     let dir = tempfile::tempdir().unwrap();
     let srv = server(dir.path(), 1).await;
     let mut es = open(srv.addr).await;
     let ok: Value = serde_json::from_str(&next_named(&mut es, "sessions").await.data).unwrap();
     assert_eq!(ok[0]["problema"], Value::Null);
     *srv.python.list_facts.lock().unwrap() = (json!({"quebrado": true}), Duration::ZERO);
-    // Uma rodada que buscou os fatos antes da quebra ainda pode publicar: o que vale é a marca chegar
-    // sem a lista sumir no caminho.
+    // Passada a carência (três falhas seguidas), a rodada produz com os fatos velhos: a linha seria marcada
+    // `list_facts_unavailable`, que é diagnóstico e fica no diário.
+    let before = srv.python.list_facts_calls.load(std::sync::atomic::Ordering::SeqCst);
     tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            let rows: Value = serde_json::from_str(&next_named(&mut es, "sessions").await.data).unwrap();
-            assert_eq!(names(&rows), ["s0"], "a lista continua servida");
-            if rows[0]["problema"] == "list_facts_unavailable" { break; }
-        }
-    }).await.expect("a linha não foi marcada com os fatos fora");
+        while srv.python.list_facts_calls.load(std::sync::atomic::Ordering::SeqCst) < before + 4 { tokio::time::sleep(Duration::from_millis(50)).await; }
+    }).await.expect("o produtor parou de pedir os fatos");
+    assert!(srv.python.diag().iter().any(|d| d["evento"] == "rust.list_facts_unavailable"), "a falha dos fatos vai ao diário");
+    let (status, body) = get(srv.addr, OWNER).await;
+    assert_eq!(status, 200);
+    assert_eq!(names(&body), ["s0"], "a lista continua servida");
+    assert_eq!(body[0]["problema"], Value::Null, "sem aviso de diagnóstico na linha");
 }
 
 struct Runtime(BTreeMap<String, Value>);
@@ -165,26 +167,29 @@ impl HeadlessSource for Runtime {
 }
 
 /// Sessão sem terminal: com o runtime de pé, o estado vem do retrato dele (pela chave da sessão),
-/// sem `list_runtime_absent`; retrato com erro aparece na linha.
+/// sem `list_runtime_absent`; erro durável do ator aparece na linha como `runtime_falhou`, como no chat; o
+/// retrato que não veio marca `list_runtime_unavailable`, que é diagnóstico e não sai na lista.
 #[tokio::test(flavor = "multi_thread")]
 async fn headless_rows_take_the_runtime_state() {
     let dir = tempfile::tempdir().unwrap();
     let srv = server(dir.path(), 0).await;
     let hl = dir.path().join("home/.hangar/claude-headless");
     std::fs::create_dir_all(&hl).unwrap();
-    for (name, key) in [("h0", "kh0"), ("h1", "kh1")] {
+    for (name, key) in [("h0", "kh0"), ("h1", "kh1"), ("h2", "kh2")] {
         std::fs::write(hl.join(format!("{name}.json")), json!({"name": name, "session_id": format!("sid-{name}"),
             "cwd": dir.path(), "key": key}).to_string()).unwrap();
     }
     srv.list.set_runtime(Arc::new(Runtime(BTreeMap::from([
         ("kh0".into(), json!({"view": {"alive": true, "public_state": {"state": "working", "label": "pensando"}}})),
-        ("kh1".into(), json!({"error": "runtime_closed"})),
+        ("kh1".into(), json!({"error": "queue_io"})),
+        ("kh2".into(), json!({"error": "runtime_live_unavailable"})),
     ]))));
     let (status, body) = get(srv.addr, OWNER).await;
     assert_eq!(status, 200);
     let row = |n: &str| body.as_array().unwrap().iter().find(|r| r["name"] == n).unwrap().clone();
     assert_eq!((row("h0")["state"].clone(), row("h0")["problema"].clone()), (json!("working"), Value::Null));
-    assert_eq!(row("h1")["problema"], "list_runtime_unavailable");
+    assert_eq!(row("h1")["problema"], "runtime_falhou");
+    assert_eq!(row("h2")["problema"], Value::Null);
 }
 
 /// Marcador escrito sai na lista sem esperar o tique de 1,5 s, e sem uma descoberta por escrita.
@@ -324,4 +329,42 @@ async fn history_comes_from_the_rust_discovery() {
     assert_eq!(evs.iter().map(|e| e["text"].as_str().unwrap_or_default()).collect::<Vec<_>>(), ["linha 0"]);
     assert_eq!(srv.python.hits_to("/internal/sessions/s0/reopen"), 0);
     assert_eq!(srv.python.info_calls(), 0);
+}
+
+fn write_fed_sidecar(home: &std::path::Path, owner: &str) {
+    let pair = home.join("home/.claude/.hangar-pair");
+    std::fs::create_dir_all(&pair).unwrap();
+    let sidecar = json!({"peers": ["s0"], "task": "T", "gid": "g1", "fed": {"owner": owner, "local": false, "version": 1}});
+    std::fs::write(pair.join("s1.json"), sidecar.to_string()).unwrap();
+}
+
+/// A máquina dona do grupo vem do `fed.owner` do sidecar; sem grupo entre máquinas, o campo não vai.
+#[tokio::test(flavor = "multi_thread")]
+async fn row_carries_pair_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    write_fed_sidecar(dir.path(), "casa");
+    srv.list.invalidate();
+    let (status, body) = get(srv.addr, OWNER).await;
+    assert_eq!(status, 200);
+    let row = |n: &str| body.as_array().unwrap().iter().find(|r| r["name"] == n).unwrap().clone();
+    assert_eq!(row("s1")["pair_owner"], "casa");
+    assert!(row("s0").get("pair_owner").is_none(), "sem `fed`, sem campo: {}", row("s0"));
+}
+
+/// Só a dona muda: sem `pair_owner` na assinatura a lista ficava com a máquina velha.
+#[tokio::test(flavor = "multi_thread")]
+async fn list_reemits_when_only_the_owner_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = server(dir.path(), 2).await;
+    write_fed_sidecar(dir.path(), "casa");
+    let mut es = open(srv.addr).await;
+    let mut next = async || -> Value {
+        tokio::time::timeout(Duration::from_millis(3500), next_named(&mut es, "sessions")).await
+            .map(|ev| serde_json::from_str(&ev.data).unwrap()).expect("a lista não reemitiu")
+    };
+    let mut rows = next().await;
+    while rows[1]["pair_owner"] != "casa" { rows = next().await; }
+    write_fed_sidecar(dir.path(), "lab");
+    assert_eq!(next().await[1]["pair_owner"], "lab");
 }

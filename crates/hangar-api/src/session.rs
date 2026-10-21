@@ -133,6 +133,9 @@ pub struct SessionRow {
     pub pair_gid: Option<String>,
     #[serde(default)]
     pub pair_task: Option<String>,
+    /// `server_id` da máquina dona do grupo entre máquinas (`fed.owner`); só existe no Rust.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pair_owner: Option<String>,
     /// Sessão que abriu esta como filha ligada; só vale se ela ainda está no grupo (`pair_peers`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked_by: Option<String>,

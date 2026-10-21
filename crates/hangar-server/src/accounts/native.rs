@@ -429,7 +429,7 @@ impl AccountService {
                 let result = tokio::select! {
                     biased;
                     () = reader_cancelled(cancel) => None,
-                    result = tokio::time::timeout(Duration::from_secs(6), async {
+                    result = tokio::time::timeout(self.codex_auth_read_timeout, async {
                         native.initialize().await?;
                         native.read().await
                     }) => Some(result),

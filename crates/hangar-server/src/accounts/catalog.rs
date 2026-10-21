@@ -106,6 +106,10 @@ pub struct AccountService {
     pub codex_logins: super::codex_login::CodexLogins,
     pub device_logins: super::codex_device_login::DeviceLogins,
     pub codex_auth: super::native::AuthCache,
+    /// Quanto a lista espera a leitura de login do Codex antes de seguir sem ela.
+    pub codex_auth_deadline: std::time::Duration,
+    /// Teto da leitura em si (abrir o CLI, `initialize` e `account/read`); a lista desiste antes, no prazo acima.
+    pub codex_auth_read_timeout: std::time::Duration,
     pub codex_readers: super::native::NativeReaders,
     pub env: AccountEnvironment,
     pub locks: AccountLocks,
@@ -124,6 +128,8 @@ impl AccountService {
             codex_logins: Default::default(),
             device_logins: Default::default(),
             codex_auth: Default::default(),
+            codex_auth_deadline: super::credentials::CODEX_AUTH_DEADLINE,
+            codex_auth_read_timeout: std::time::Duration::from_secs(6),
             codex_readers: Default::default(),
             locks: AccountLocks::new(env.home.join(".hangar/account-locks")),
             preparations: Default::default(),

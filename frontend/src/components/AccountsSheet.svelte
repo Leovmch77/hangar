@@ -94,8 +94,9 @@
   const pathOf = (c: ContaCota) => c.id.slice('claude:'.length);
   const targetOf = (c: ContaCota) => targets?.find((t) => `claude:${t.path}` === c.id) ?? null;
   function exhausted(c: ContaCota): boolean { return !!exhaustedWindow(c) || !!targetOf(c)?.full; }
+  const noLogin = (c: ContaCota) => targetOf(c)?.login === false;
   function claudeTappable(c: ContaCota): boolean {
-    if (exhausted(c) || c.id === activeAccount) return false;
+    if (exhausted(c) || noLogin(c) || c.id === activeAccount) return false;
     if (pickOnly) return !!onPick;
     return !!onSwitch && !blocked && !!targetOf(c);
   }
@@ -143,6 +144,7 @@
         <span class="nome">{c.label}</span>
         {#if inUse}<span class="tag">{m.cota_conta_ativa()}</span>{/if}
         {#if dim}<span class="tag tag--cheio">{m.accounts_exhausted()}</span>{/if}
+        {#if noLogin(c)}<span class="tag tag--cheio">{m.conta_sem_login_rotulo()}</span>{/if}
         {#if c.velha && c.idade_s != null}<span class="idade">{m.cota_idade({ n: formatarIntervalo(c.idade_s) })}</span>{/if}
       </span>
       {@render bars(c)}

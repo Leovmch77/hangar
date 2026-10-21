@@ -35,7 +35,6 @@ def _pair_dir_isolado(tmp_path, monkeypatch):
     # teste isola o SessionRegistry com projects_dir=tmp_path proprio. Sem isto a suite varria o
     # .hangar-pair REAL de quem roda (achado do review de Task 8).
     monkeypatch.setattr(pair.settings, "projects_dir", tmp_path / "projects")
-    monkeypatch.setattr(SessionRegistry, "_pair_ausencias", {})
     # sem isto, um sweep que ache um ausente de verdade dispara uma thread real (_drain_session)
     # que chama registry.list() de novo, fora da janela desta fixture (achado do review de Task 8).
 
@@ -900,13 +899,11 @@ def test_kill_que_nao_mata_levanta_e_nao_apaga_estado_duravel(tmp_path, monkeypa
     monkeypatch.setattr(r, "list", lambda: [])
     monkeypatch.setattr(reg.tmux, "kill_session", lambda n: False)   # sobreviveu
     monkeypatch.setattr(r, "_forget", lambda n: limpou.append(("forget", n)))
-    monkeypatch.setattr(reg.SessionRegistry, "_clear_pair",
-                        staticmethod(lambda n: limpou.append(("pair", n))))
     monkeypatch.setattr(reg, "PromptQueue", lambda n: type(
         "Q", (), {"clear": lambda self: limpou.append(("fila", n))})())
     with pytest.raises(reg.KillFailed):
         r.kill("zz")
-    assert limpou == []          # nem cache, nem fila, nem pareamento
+    assert limpou == []          # nem cache, nem fila
 
 
 def test_kill_que_mata_de_fato_limpa_tudo(tmp_path, monkeypatch):
@@ -918,14 +915,12 @@ def test_kill_que_mata_de_fato_limpa_tudo(tmp_path, monkeypatch):
     monkeypatch.setattr(r, "list", lambda: [])
     monkeypatch.setattr(reg.tmux, "kill_session", lambda n: True)
     monkeypatch.setattr(r, "_forget", lambda n: limpou.append(("forget", n)))
-    monkeypatch.setattr(reg.SessionRegistry, "_clear_pair",
-                        staticmethod(lambda n: limpou.append(("pair", n))))
     monkeypatch.setattr(reg, "ThenLink", lambda n: type(
         "T", (), {"clear": lambda self: limpou.append(("then", n))})())
     monkeypatch.setattr(reg, "PromptQueue", lambda n: type(
         "Q", (), {"clear": lambda self: limpou.append(("fila", n))})())
-    r.kill("zz")
-    assert [k for k, _ in limpou] == ["forget", "fila", "then", "pair"]
+    assert r.kill("zz") == []
+    assert [k for k, _ in limpou] == ["forget", "fila", "then"]
 
 
 # --- recado nativo entre sessoes Claude: name_of_pid / inbox_socket_of -----------------------

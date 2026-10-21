@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Trava o que o hangar-send manda ao backend — o POST /api/sessions do `--new` e o POST /input do
-# recado com HANGAR_SEND_PAINEL=1 —, contra um backend FALSO que só grava o corpo. É shell, a suíte
+# Trava o que o hangar-send manda ao backend — o POST /api/sessions do `--new`, o POST /input do
+# recado com HANGAR_SEND_PAINEL=1 e o GET/PUT do `--contrato` —, contra um backend FALSO que só grava o corpo. É shell, a suíte
 # pytest não alcança; e o script de verdade é copiado (não colado aqui), pra o teste quebrar junto
 # com ele.
 #
@@ -40,12 +40,21 @@ class H(http.server.BaseHTTPRequestHandler):
         if self.path.startswith("/api/claude-configs"):
             self.wfile.write(b'[{"path":"/home/la/.claude","label":"default"}]')
             return
+        if self.path.endswith("/pair/contract"):
+            self.wfile.write('{"peers":["lab::s2"],"path":"","content":"decisão A\\n","owner":"lab","mtime":"111"}'.encode())
+            return
         self.wfile.write(b'{"claude":{"disponivel":true,"default":true},"codex":{"disponivel":true,"default":false}}')
     def do_POST(self):
         corpo = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         open(destino, "wb").write(corpo)
         self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
         self.wfile.write(b'{"avisos":["aviso-teste"],"provider":"claude","provider_source":"inherited"}')
+    def do_PUT(self):
+        corpo = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        open(destino, "wb").write(corpo)
+        open(destino + ".rota", "w").write(self.path)
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+        self.wfile.write(b'{"mtime":"222"}')
     def log_message(self, *a): pass
 http.server.HTTPServer(("127.0.0.1", porta), H).serve_forever()
 PY
@@ -138,6 +147,28 @@ checa "painel para outro servidor: código" '2' "$?"
 # 8. O --help documenta a variável (a ajuda é o cabeçalho do script).
 bash "$REPO/scripts/hangar-send" --help 2>/dev/null | grep -q HANGAR_SEND_PAINEL
 checa "--help menciona HANGAR_SEND_PAINEL" '0' "$?"
+
+# 9. --contrato: o conteúdo sai limpo no stdout (cabe num arquivo), o mtime e o comando de gravar no
+# stderr; --gravar manda o arquivo inteiro com o mtime da leitura, e sem --mtime só cria (null).
+sessao=(env CP_SESSION_KEY=k-criadora HANGAR_HEADLESS_DIR="$TMP/hl")
+lido=$("${sessao[@]}" bash "$TMP/scripts/hangar-send" --contrato 2>"$TMP/contrato.err")
+checa "--contrato: conteúdo no stdout" '"decisão A"' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$lido")"
+grep -q -- '--gravar <arquivo> --mtime 111' "$TMP/contrato.err"
+checa "--contrato: comando de gravar com o mtime" '0' "$?"
+printf 'decisão B\n' > "$TMP/novo.md"
+rm -f "$TMP/corpo.json"
+"${sessao[@]}" bash "$TMP/scripts/hangar-send" --contrato --gravar "$TMP/novo.md" --mtime 111 >/dev/null 2>&1
+checa "--gravar: código" '0' "$?"
+checa "--gravar: rota da sessão" '/api/sessions/criadora/pair/contract' "$(cat "$TMP/corpo.json.rota" 2>/dev/null)"
+checa "--gravar: conteúdo" '"decisão B\n"' "$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["content"], ensure_ascii=False))' "$TMP/corpo.json" 2>/dev/null)"
+checa "--gravar: mtime da leitura" '"111"' "$(campo mtime 2>/dev/null)"
+rm -f "$TMP/corpo.json"
+"${sessao[@]}" bash "$TMP/scripts/hangar-send" --contrato --gravar "$TMP/novo.md" >/dev/null 2>&1
+checa "--gravar sem --mtime: só cria" 'null' "$(campo mtime 2>/dev/null || echo 'nada enviado')"
+"${sessao[@]}" bash "$TMP/scripts/hangar-send" --contrato --mtime 111 >/dev/null 2>&1
+checa "--mtime sem --gravar: código" '2' "$?"
+bash "$REPO/scripts/hangar-send" --help 2>/dev/null | grep -q -- '--contrato'
+checa "--help menciona --contrato" '0' "$?"
 
 if [[ $falhas -gt 0 ]]; then echo "$falhas falha(s)"; exit 1; fi
 echo "tudo ok"

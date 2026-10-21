@@ -33,7 +33,6 @@ from app import (agentes_sync, atomico, atualizacoes, atualizar, closed_names, d
 from app import groups_bridge, internal_api, list_bridge, migration_status, share_bridge, update_channel
 from app.auth import require_auth, require_loopback
 from app.send_executor import send_thread as _send_thread
-from app.internal_pool import internal_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
 from app.bastao import montar as bastao_montar
 from app.fs import FsError, allowed_roots, list_roots, make_dir, scan_dir
@@ -108,14 +107,11 @@ from app.archive import (ArchiveEntry, ArchiveFolder, archive_cwd, archive_jsonl
                          list_conversations, list_folders, list_recent, tail_events)
 from app.search import SearchHit, search, extract_terms, search_terms, build_ask_prompt
 from app.askquestion import clear_pending_askq, read_pending_askq
-from app import pair
-from app import pair_texto
-from app import peers
 from app import alcance, credenciais, peers_api
 from app import config_sync_api
 from app import codex_contas as codex_accounts
 from app.codex_contas_login import CodexContasLogin
-from app.pair import PairLink, contract_path_for
+from app.pair import PairLink
 from app.hook_state import hook_state
 from app import push
 from app import stall_watch
@@ -287,8 +283,6 @@ async def _lifespan(app: FastAPI):
 
     prune_task.add_done_callback(_prune_done)
 
-    pair_sweep_task = asyncio.create_task(_pair_sweep_loop(), name="pair-sweep")
-
     # Boot-resume dos loops: flags em memoria (tick em voo) morrem no restart; o sidecar e a verdade.
     # Loop ACTIVE cuja sessao existe e esta idle -> reagenda o tick; sessao sumida -> failed.
     def _boot_resume_loops() -> None:
@@ -381,7 +375,6 @@ async def _lifespan(app: FastAPI):
         stall_task.cancel()
         loop_monitor_task.cancel()
         prune_task.cancel()
-        pair_sweep_task.cancel()
         await omp_sync.close()
         try:
             await task
@@ -438,13 +431,23 @@ async def _codex_rust_port(name: str, request: Request):
         # O painel da fila (`queue/...`) é do Rust também: o Python só repassa.
         rota = route.split("?")[0]
         # A pergunta lateral vai sempre: a rota do Rust decide provedor e sessão.
-        if reply is None and (rota == "btw" or (rota in {"input", "answer", "select", "select/submit", "permission-mode", "permission-modes", "model-effort"} or rota.startswith("queue/"))
+        if reply is None and (rota == "btw" or (rota in {"input", "answer", "select", "select/submit", "permission-mode", "permission-modes", "model-effort", "recarregar"} or rota.startswith("queue/"))
                 and getattr(await _cached_info(name), "provider", "claude") == "claude"):
-            # O fork sem terminal tem 180 s; o prazo padrão da ponte cortaria a resposta.
-            prazo = (200,) if rota == "btw" else ()
-            reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body, *prazo)
+            # O fork sem terminal tem 180 s e a reabertura espera o Claude subir por até 5 min; o prazo padrão da
+            # ponte cortaria a resposta. Quem pediu a recarga vai ao diário do Rust.
+            reload = rota == "recarregar"
+            prazo = (200,) if rota == "btw" else (360,) if reload else ()
+            who = {"headers": _who_asked(request)} if reload else {}
+            reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, route, request.method, body, *prazo, **who)
         if reply:
             raise _RustReply(*reply)
+
+
+def _who_asked(request: Request) -> dict:
+    """Cliente, pedido e origem de quem chegou pelo Connect, para o diário do Rust."""
+    origin = request.headers.get("x-forwarded-for") or (request.client.host if request.client else "")
+    return {key: value for key, value in (("user-agent", request.headers.get("user-agent")),
+            ("x-hangar-req", request.headers.get("x-hangar-req")), ("x-forwarded-for", origin)) if value}
 
 
 def _transfer_send_error(name: str) -> dict | None:
@@ -550,13 +553,10 @@ def _group_unavailable(code: str) -> HTTPException:
 
 
 @app.exception_handler(groups_bridge.GroupsBridgeError)
-@app.exception_handler(pair.GroupsOwnedByRust)
-async def _grupos_indisponiveis(request: Request, exc: Exception):
-    """Com o Rust dono dos grupos, ponte fora ou escrita esquecida no Python viram 503 com código,
-    nunca escrita calada nem 500 sem explicação."""
-    code = getattr(exc, "code", None) or "groups_owned_by_rust"
-    diag.registrar("grupos.indisponivel", "erro", codigo=code, detalhe=f"{request.method} {request.url.path}")
-    return JSONResponse(status_code=503, content={"detail": _group_unavailable(code).detail})
+async def _grupos_indisponiveis(request: Request, exc: groups_bridge.GroupsBridgeError):
+    """Ponte dos grupos fora vira 503 com código, nunca 500 sem explicação."""
+    diag.registrar("grupos.indisponivel", "erro", codigo=exc.code, detalhe=f"{request.method} {request.url.path}")
+    return JSONResponse(status_code=503, content={"detail": _group_unavailable(exc.code).detail})
 
 
 async def _repasse_ao_rust(request: Request, sem_rust: dict, destino: str, **repasse):
@@ -612,6 +612,27 @@ async def _jev_aux_pelo_rust(request: Request, call_next):
         return JSONResponse({"detail": "Not Found"}, status_code=404)
     return await _repasse_ao_rust(request, erro("erro_jev_aux_precisa_rust", "o servidor está sem o processo Rust; reinicie o Hangar"),
                                   "/__hangar_server/forwarded" if delivery else "/__hangar_server/jev/aux")
+
+
+@app.middleware("http")
+async def _grupos_pelo_rust(request: Request, call_next):
+    """Grupo entre máquinas: rotas só do Rust. Pelas portas do Python (Connect) tudo segue a ele, que
+    decide o que atende; o que não é dele volta com código, nunca o 404 cru que a outra máquina leria
+    como versão antiga."""
+    path = request.url.path
+    if not (path.startswith("/api/groups/") or (request.method == "GET" and path.startswith("/api/sessions/") and path.endswith("/group"))):
+        return await call_next(request)
+    if guest_of(request) is not None or guest_users.current.get() is not None:
+        return JSONResponse({"detail": erro("erro_fora_do_convite", "fora da sessao compartilhada")}, status_code=403)
+    resp = await _repasse_ao_rust(request, _groups_need_rust(), "/__hangar_server/forwarded")
+    # Recado a sessão que só o Python atende volta no corpo: sai dele e é entregue antes da resposta,
+    # num prazo, para quem não recebeu entrar na resposta como as falhas do Rust.
+    if b'"hangar_deliveries"' not in resp.body:
+        return resp
+    body = json.loads(resp.body)
+    failed = await _deliver_deferred(body.pop("hangar_deliveries"), _DEFERRED_WAIT)
+    _report_failed(body, failed, "grupos.entrega_adiada_falhou", ("failed", "pulados"))
+    return JSONResponse(body, status_code=resp.status_code)
 
 
 # Rotas de plano e o catálogo de plugins e skills: o dono é o Rust (`plans::routes`, `claude_customizations`).
@@ -1145,38 +1166,6 @@ def _guardar_snap(forcar: bool = False) -> list[SessionInfo]:
         infos = registry.list(newer_than=inicio_epoca) if forcar else registry.list()
         _list_snap["snap"] = (time.monotonic(), infos)
         return infos
-
-
-_PAIR_SWEEP_S = 2.0
-
-
-def _pair_sweep_list() -> list[SessionInfo]:
-    """No Rust, o retrato: a descoberta dele não traz as linhas de transferência nem as `orq`
-    (vêm dos fatos), e um nome fora dela seria dado como morto."""
-    return list_bridge.snapshot() if registry_mod.rust_owns_list() else _guardar_snap()
-
-
-async def _pair_sweep_loop() -> None:
-    """Pares mortos fora do app, fora da descoberta (`registry.sweep_pairs`). Lista que falha não
-    vira "ninguém vivo": a rodada não varre, e a falha vai ao diário uma vez por sequência."""
-    failing = None
-    while True:
-        # No modo Rust a varredura é dele; o laço segue vivo para a reserva Python assumir.
-        if groups_bridge.rust_owns_groups():
-            await asyncio.sleep(_PAIR_SWEEP_S)
-            continue
-        try:
-            await asyncio.to_thread(registry.sweep_pairs, _pair_sweep_list)
-            if failing is not None:
-                diag.registrar("pares.varredura_voltou", codigo=failing)
-            failing = None
-        except Exception as e:
-            code = getattr(e, "code", None) or type(e).__name__
-            if code != failing:
-                _log.warning("varredura de pares: lista indisponível (%s); os grupos ficam", code)
-                diag.registrar("pares.varredura_falhou", "aviso", codigo=code)
-            failing = code
-        await asyncio.sleep(_PAIR_SWEEP_S)
 
 
 def _invalidate_lists() -> None:
@@ -2213,25 +2202,129 @@ def _jsonl_of_session(name: str) -> str | None:
         return None
 
 
+# Teto da entrega adiada pela 8768: abaixo do prazo da dona (`DELIVER_WAIT`, 5 s), como o das sessões do Rust.
+_DEFERRED_WAIT = 3.0
+
+
+async def _deliver_deferred(deliveries, wait: float | None = None) -> list[dict]:
+    """Recados que o Rust devolveu por serem a sessões que só o Python atende; falhas como avisos.
+    Com `wait`, a sessão que não termina no prazo é abandonada e conta como falha."""
+    by_session: dict[str, list[str]] = {}
+    for d in deliveries or []:
+        by_session.setdefault(d["name"], []).append(d["text"])
+
+    # Sessões em paralelo; dentro de cada uma, na ordem em que o Rust devolveu.
+    async def one(name: str, texts: list[str]) -> list[dict]:
+        results = [await _enviar(name, text) for text in texts]
+        return [{"sessao": name, "erro": res.get("error") or erro("erro_envio_falhou_desconhecida", "falha desconhecida no envio")}
+                for res in results if not res.get("ok")]
+
+    async def bounded(name: str, texts: list[str]) -> list[dict]:
+        try:
+            return await asyncio.wait_for(one(name, texts), wait)
+        except TimeoutError:
+            return [{"sessao": name, "erro": erro("erro_envio_falhou", "não deu pra enviar: groups_notice_timeout", erro="groups_notice_timeout")}]
+    return [f for failed in await asyncio.gather(*(bounded(n, t) for n, t in by_session.items())) for f in failed]
+
+
+def _report_failed(body, failed: list[dict], event: str, lists: tuple[str, ...] = ()) -> None:
+    """Põe na resposta quem não recebeu o recado entregue pelo Python: na primeira lista de `lists`
+    que o corpo tiver (as das rotas entre máquinas, qualificadas como as do Rust) ou no `warning`.
+    Sem corpo onde caber, o diário."""
+    if not failed:
+        return
+    names = [f["sessao"] for f in failed]
+    diag.registrar(event, "aviso", falhas=len(failed), sessoes=",".join(names))
+    key = next((k for k in lists if isinstance(body, dict) and isinstance(body.get(k), list)), None)
+    if key:
+        body[key].extend(f"{settings.server_id}::{n}" for n in names)
+    elif isinstance(body, dict) and body.get("warning") is None:
+        body["warning"] = erro("erro_pareamento_aviso_parcial", "aviso falhou em: " + "; ".join(names), avisos=failed)
+    elif isinstance(body, dict) and isinstance(body["warning"], dict):
+        body["warning"].setdefault("params", {}).setdefault("avisos", []).extend(failed)
+    else:
+        diag.registrar("grupos.falha_sem_corpo", "erro", falhas=len(failed), sessoes=",".join(names))
+
+
+def _sidecar_state(name: str) -> str:
+    """`grouped`, `absent` (sem arquivo, ou válido sem grupo) ou `unreadable` (existe e não se lê)."""
+    link = PairLink(name)
+    if link.get() is not None:
+        return "grouped"
+    try:
+        data = json.loads(link.path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return "absent"
+    except (OSError, ValueError):
+        return "unreadable"
+    if not isinstance(data, dict) or not isinstance(data.get("peers", []), list):
+        return "unreadable"
+    return "absent"
+
+
+async def _rust_leave(name: str, phases: dict) -> list[dict]:
+    try:
+        out = await asyncio.to_thread(groups_bridge.call, "group.leave", name=name, phases=phases)
+    except groups_bridge.GroupsBridgeError as e:
+        _log.warning("kill(%s): o Rust não tirou a sessão do grupo: %s", name, e.code)
+        return [{"sessao": name, "erro": erro("erro_grupo_indisponivel", "os grupos estão indisponíveis agora", detalhe=e.code)}]
+    warnings = out.get("warnings") if isinstance(out.get("warnings"), list) else []
+    return [*warnings, *await _deliver_deferred(out.get("deliveries"))]
+
+
 @app.delete("/api/sessions/{name}", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def kill_session(name: str, by: str | None = None, request: Request = None):
     # 500 quando a sessao SOBREVIVE ao kill — mesmo padrao do /rename logo abaixo, que ja confere e
     # responde 404/500. Antes era {"ok": true} incondicional: o card sumia da UI e a sessao reaparecia
     # na varredura seguinte, sem fila e sem pareamento (ver SessionRegistry.kill).
-    # Os peers são lidos ANTES do kill: registry.kill -> _clear_pair já limpa o sidecar, e depois
-    # dele ninguém sabe quem ficou.
     await asyncio.to_thread(_recusa_orq, name)
     # Marca do Rust: ele já encerrou o Codex com terminal dele (e o grupo); aqui só as lojas daqui.
-    closed = bool(request and internal_api._secret) and secrets.compare_digest(request.headers.get("x-hangar-rust-closed", "").encode(), internal_api._secret.encode())
-    # No modo Rust a saída do grupo (dentro do kill) já avisa as outras máquinas e o par externo.
-    link = None if closed or groups_bridge.rust_owns_groups() else await asyncio.to_thread(lambda: PairLink(name).get())
-    # Fechada pelo Rust a sessão já saiu da lista: o transcript vem no cabeçalho dele.
+    marked = lambda h: bool(request and internal_api._secret) and secrets.compare_digest(request.headers.get(h, "").encode(), internal_api._secret.encode())
+    closed = marked("x-hangar-rust-closed")
+    bridged = None
+    # Entrou pelo Connect: o Claude aberto no Rust fecha lá, como o da 8765; 421 (`None`) segue aqui.
+    # Só Claude: com o Rust em `pending`, a ponte responderia 503 ao Pi/omp/Kimi, que fecham aqui.
+    port = (request.scope.get("server") or (None, None))[1] if request is not None else None
+    provider = None
+    if not closed and port == CONNECT_PORT and port != settings.port:
+        # Sem a lista o provedor fica desconhecido e fecha-se aqui: falhar o DELETE não fecharia nada.
+        try:
+            provider = getattr(await _cached_info(name), "provider", None)
+        except (list_bridge.ListBridgeError, tmux.MuxIndisponivel) as e:
+            _log.warning("kill(%s): provedor desconhecido sem a lista, fecha pelo Python: %s", name, e)
+            diag.registrar("sessao.fechar_sem_provedor", "erro", sessao=name, codigo=type(e).__name__)
+    if provider == "claude":
+        from app import runtime_coordinator
+        reply = await asyncio.to_thread(runtime_coordinator.rust_claude, name, "close", "POST", b"", headers=_who_asked(request))
+        if reply is not None:
+            if reply[0] >= 300:
+                raise _RustReply(*reply)
+            closed, bridged = True, json.loads(reply[1]).get("transcript") or ""
+    # Fechamento que não passou pelo Rust (Connect, convidado) e o do Claude pelo Connect, que o Rust
+    # encerrou sem sair do grupo: a saída vai pela ponte, com a fase do `orq` lida aqui antes, para o
+    # Rust não perguntar de volta.
+    skip_leave = (closed and bridged is None) or marked("x-hangar-rust-leaves")
+    # Sem sidecar não há grupo a deixar: a ponte nem é chamada. Ilegível não é ausente: sai pela ponte.
+    sidecar = "absent" if skip_leave else await asyncio.to_thread(_sidecar_state, name)
+    if sidecar == "unreadable":
+        diag.registrar("grupos.sidecar_ilegivel", "erro", sessao=name)
+    grouped = sidecar != "absent"
+    phases = (await asyncio.to_thread(_route_facts, name, None))["phases"] \
+        if grouped and groups_bridge.rust_owns_groups() else None
+    # Sem o Rust a saída do grupo não acontece: fechar segue, e a falta vai no aviso e no diário.
+    orphan = grouped and phases is None
+    # Fechada pelo Rust a sessão já saiu da lista: o transcript vem no cabeçalho ou na resposta dele.
     if closed:
-        jsonl = urllib.parse.unquote(request.headers.get("x-hangar-closed-transcript", "")) or None
+        jsonl = bridged or urllib.parse.unquote(request.headers.get("x-hangar-closed-transcript", "")) or None
     else:
         jsonl = await asyncio.to_thread(_jsonl_of_session, name)
     try:
         errs = await asyncio.to_thread(registry.kill, name, closed_by_rust=closed) or []
+        if phases is not None:
+            errs = [*errs, *await _rust_leave(name, phases)]
+        if orphan:
+            diag.registrar("grupos.saida_sem_rust", "erro", sessao=name, codigo="groups_need_rust_server")
+            errs = [*errs, {"sessao": name, "erro": _groups_need_rust()}]
     except KillFailed as e:
         raise HTTPException(500, e.detail or str(e)) from None
     finally:
@@ -2253,8 +2346,6 @@ async def kill_session(name: str, by: str | None = None, request: Request = None
     # pelo Rust, ele já revogou: perguntar de volta dentro da chamada dele prenderia o pool daqui.
     share_failed = None if closed else await asyncio.to_thread(share_bridge.revoke_session, name)
     warn = None
-    if link:
-        errs = await _avisar_saida(name, link["peers"])
     if errs:
         if share_failed:
             errs = [*errs, {"sessao": name, "erro": share_failed}]
@@ -2528,6 +2619,9 @@ def _rename_group_first(old: str, new: str) -> bool:
     """Modo Rust: o grupo muda de nome antes do tmux e do sidecar sem terminal; se o Rust falha, o
     rename nem começa. True = renomeado lá (quem falhar depois desfaz)."""
     if not groups_bridge.rust_owns_groups():
+        # Sem o Rust ninguém renomeia o grupo: a sessão agrupada não muda de nome.
+        if PairLink(old).get():
+            _require_rust_groups()
         return False
     try:
         groups_bridge.call("group.rename", old=old, new=new)
@@ -4151,43 +4245,100 @@ class PairBody(_StrictBody):
     orq: bool = False
 
 
-def _group_text(me: str, others: list[str], task: str, harness: dict[str, str]) -> str:
-    # Par remoto (srv::sessao): o contrato não sincroniza cross-server, então a linha dele some.
-    # contract_path_for devolve None em sidecar legado sem gid — str(None) viraria "None" no prompt.
-    cross = any(peers.is_remote(o) for o in others)
-    caminho = None if cross else contract_path_for(me)
-    return pair_texto.texto_grupo(me, others, task, str(caminho) if caminho else None, harness)
-
-
-async def _deliver(name: str, text: str) -> dict | None:
-    # Mesma esteira do /input (fila durável se ocupada), ramificada por provider.
-    # Devolve o envelope {code, params, msg} (ou string crua de erro tecnico ainda nao migrado)
-    # ou None — _send_one/_send_one_codex NUNCA levantam, reportam no dict; engolir isso fazia o
-    # pareamento dizer "ok" com o aviso jamais entregue.
-    res = await _enviar(name, text)
-    return None if res.get("ok") else (res.get("error")
-                                           or erro("erro_envio_falhou_desconhecida", "falha desconhecida no envio"))
-
-
-def _bridge_reply(out: dict):
-    """`{status, body}` de uma rota do Rust: erro vira HTTPException com o mesmo `detail`, porque o
-    MCP chama estas funções em processo e só entende exceção."""
-    status, body = out.get("status"), out.get("body")
+def _bridge_reply(out: dict) -> JSONResponse:
+    """`{status, body}` de uma rota do Rust, devolvido como veio."""
+    status = out.get("status")
     if type(status) is not int:
         raise _group_unavailable("groups_bridge_invalid")
-    if status >= 400:
-        raise HTTPException(status, detail=body["detail"] if isinstance(body, dict) and "detail" in body else body)
-    return body
+    return JSONResponse(out.get("body"), status_code=status)
+
+
+def _groups_need_rust() -> dict:
+    return erro("groups_need_rust_server", "os grupos precisam do servidor Rust, que não está rodando")
+
+
+def _require_rust_groups() -> None:
+    if not groups_bridge.rust_owns_groups():
+        raise HTTPException(503, detail=_groups_need_rust())
+
+
+def _route_facts(name: str, body: dict | None, route: str | None = None) -> dict:
+    """Fatos do `orq` que a rota de grupo usaria, lidos antes da ponte (I-5A): dentro dela o Rust não
+    pergunta ao Python. Orquestradores = execuções ativas, só nas rotas que recusam orquestrador
+    (`pair`, `pair-remote`); fase = gid `orq` dos nomes citados."""
+    from app.adapters.orq import runs
+    body = body or {}
+    names = [name, *(body.get("peers") or []), *([body["peer"]] if body.get("peer") else [])]
+    phases = {}
+    for n in names:
+        link = PairLink(n).get() or {} if "::" not in n else {}
+        if link.get("orq") and link.get("gid"):
+            phases[link["gid"]] = runs.group_phase(link["gid"])
+    orchestrators = [r["name"] for r in runs.active()] if route in ("pair", "pair-remote") else []
+    return {"orchestrators": orchestrators, "phases": phases}
+
+
+async def _route_after(out: dict) -> None:
+    """O que o Rust devolveu para o Python fazer depois da ponte, num sentido: entregar o recado a
+    sessão que só ele atende e promover o time do `orq`. Promoção que falha desfaz o grupo novo."""
+    failed = await _deliver_deferred(out.get("deliveries"))
+    notes: list[dict] = []
+    for post in out.get("post") or []:
+        undone: list = []
+        refused = post.get("op") == "promote" and await asyncio.to_thread(_promote_or_undo, post["name"], post["gid"], undone, notes)
+        failed += await _deliver_deferred(undone)
+        if refused:
+            out["status"], out["body"] = 409, {"detail": refused}
+            break
+    body = out.get("body")
+    for note in notes:
+        if isinstance(body, dict) and body.get("warning") is None:
+            body["warning"] = note
+        else:
+            failed.append({"sessao": note["params"]["sessao"], "erro": note})
+    _report_failed(body, failed, "grupos.entrega_pela_ponte")
+
+
+def _promote_or_undo(name: str, gid: str, deliveries: list, notes: list) -> dict | None:
+    """`orq_context.promote` (os arquivos do `orq` são do Python). Conflito ou falha de disco = o grupo
+    recém-criado sai, membro a membro, pela ponte; todos estavam soltos (grupo novo), então sair volta
+    ao que era. Os recados que a saída devolve vão para `deliveries`, entregues por quem chamou. Sem
+    identidade o grupo fica e o aviso vai para `notes`."""
+    from app import orq_context, orq_md
+    try:
+        orq_context.promote(name, gid)
+    except orq_context.IdentityUnavailable as e:
+        _log.warning("pair: sem identidade para promover o grupo %s", gid)
+        diag.registrar("grupos.promocao_sem_identidade", "aviso", sessao=name, detalhe=gid)
+        notes.append(erro("erro_orq_promocao_sem_identidade", f"o grupo ficou, mas o time não foi promovido: {e}",
+                          sessao=name, grupo=gid, detalhe=str(e)))
+    except (orq_context.PromotionConflict, orq_md.Conflito, OSError) as e:
+        link = PairLink(name).get() or {}
+        stayed = []
+        for member in [name, *(p for p in link.get("peers", []) if "::" not in p)]:
+            try:
+                out = groups_bridge.call("group.leave", name=member, phases={gid: "ended"})
+                deliveries.extend(out.get("deliveries") or [])
+            except groups_bridge.GroupsBridgeError as undo:
+                _log.warning("pair: o grupo %s não foi desfeito em %s: %s", gid, member, undo.code)
+                diag.registrar("grupos.promocao_desfeita_falhou", "erro", sessao=member, codigo=undo.code, detalhe=gid)
+                stayed.append(member)
+        return erro("erro_orq_arquivo_mudou", str(e), **({"nao_sairam": stayed} if stayed else {}))
+    return None
 
 
 async def _group_route(method: str, name: str, route: str, body: BaseModel | None = None):
-    """No modo Rust a rota de grupo é dele. Também chega aqui o que o Rust repassou (corpo que só o
-    FastAPI aceita): já validado, volta a ele normalizado, e a ponte nunca repassa de novo."""
+    """Grupos são do Rust; aqui chega só o que entrou pela 8768 e segue num sentido. Sem o Rust não
+    há reserva Python."""
+    _require_rust_groups()
+    data = body.model_dump() if body is not None else None
+    facts = await asyncio.to_thread(_route_facts, name, data, route)
     try:
         out = await asyncio.to_thread(groups_bridge.call, "group.route", method=method, name=name, route=route,
-                                      body=body.model_dump() if body is not None else None)
+                                      body=data, facts=facts)
     except groups_bridge.GroupsBridgeError as e:
         raise _group_unavailable(e.code) from None
+    await _route_after(out)
     return _bridge_reply(out)
 
 
@@ -4196,124 +4347,7 @@ async def pair_session(name: str, body: PairBody):
     """Junta `name` e peer(s) num GRUPO de trabalho (une os grupos existentes de todos) e injeta
     em CADA membro o prompt do grupo atualizado — a partir daí trocam recados via hangar-send por
     iniciativa própria, dentro do escopo da tarefa. Badge `pair_peers` aparece na lista."""
-    if groups_bridge.rust_owns_groups():
-        return await _group_route("POST", name, "pair", body)
-    others = [p for p in dict.fromkeys(body.peers or ([body.peer] if body.peer else [])) if p]
-    # Sem peer só o grupo de orquestração: o árbitro do `orquestrar-auto` precisa do gid antes do
-    # `orq init`, e o time só chega depois, aberto pelo orquestrador.
-    if not others and not body.orq:
-        raise HTTPException(400, detail=erro("erro_peer_nao_informado", "informe peer ou peers"))
-    if name in others:
-        raise HTTPException(400, detail=erro("erro_autopareamento", "não dá pra parear uma sessão com ela mesma"))
-    for n in (name, *others):
-        await asyncio.to_thread(_recusa_orq, n)
-    if any(peers.is_remote(o) for o in others):
-        # Cross-server é 1:1 puro (um peer remoto, sem misturar grupo local) — grupo cross-server de
-        # N fica pra fase 2. ponytail: 1:1 cobre "trabalhar junto entre máquinas"; N quando doer.
-        if len(others) != 1:
-            raise HTTPException(400, detail=erro("erro_pareamento_cross_1_1",
-                                             "pareamento cross-server é 1:1 por enquanto: um peer remoto, "
-                                             "sem misturar com grupo local"))
-        if not settings.server_id:
-            raise HTTPException(400, detail=erro("erro_pareamento_server_id_ausente",
-                                             "CP_SERVER_ID ausente no backend/.env — obrigatório pra "
-                                             "pareamento cross-server (é o endereço de resposta srv::sessao)"))
-        return await _pair_cross_server(name, others[0], body.task, body.replace_task)
-    harness = {s.name: s.provider for s in await asyncio.to_thread(registry.list)}
-    names = set(harness)
-    missing = [p for p in [name, *others] if p not in names]
-    if missing:
-        raise HTTPException(404, detail=erro("erro_sessao_nao_encontrada_detalhe", f"sessão não encontrada: {', '.join(missing)}", detalhe=", ".join(missing)))
-    # join_group: snapshot + join na MESMA seção crítica (em seções separadas, um join concorrente
-    # na janela entre elas entrava no grupo fora do snapshot e um rollback posterior não o
-    # reverteria). O snapshot volta pra cá pra desfazer se o aviso não chegar em ninguém.
-    try:
-        members, snap = await asyncio.to_thread(pair.join_group, name, others, body.task, substituir_task=body.replace_task, harness=harness, orq=body.orq)
-    except pair.PairMixError as e:
-        # Uma das sessões locais já está pareada cross-server (1:1) — não dá pra fundir em grupo local.
-        raise HTTPException(400, detail=erro("erro_pareamento_mistura_cross", str(e)))
-    except pair.TaskConflito as e:
-        raise HTTPException(409, detail=erro("erro_pareamento_tarefa_existente",
-                                             f"o grupo já tem tarefa: {e.existente!r} — repita com "
-                                             f"--substituir-tarefa pra trocar", existente=e.existente))
-    except (orq_context.PromotionConflict, orq_md.Conflito) as e:
-        raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou", str(e)))
-    link = await asyncio.to_thread(lambda: PairLink(name).get() or {})
-    task = link.get("task", body.task)
-    # Só quem estava SOLTO recebe o protocolo; veterano não é acordado (consulta o grupo quando
-    # precisar). O protocolo pós-/clear é do hook.
-    avisos = [(m, _group_text(m, [x for x in members if x != m], task, harness))
-              for m in ([] if link.get("orq") else members) if snap.get(m) is None]
-    errs = []
-    for m, texto in avisos:
-        e = await _deliver(m, texto)
-        if e:
-            errs.append({"sessao": m, "erro": e})
-    if avisos and len(errs) == len(avisos):
-        # NINGUÉM foi avisado -> grupo fantasma; restaura o estado anterior e reporta.
-        await asyncio.to_thread(pair.restore, snap)
-        raise HTTPException(502, detail=erro("erro_pareamento_desfeito",
-                            f"pareamento desfeito: falha ao avisar as sessões "
-                            f"({'; '.join(f"{x['sessao']}: {_erro_texto(x['erro'])}" for x in errs)})",
-                            avisos=errs))
-    return {"ok": True, "members": members, "gid": link.get("gid"),
-            "warning": erro("erro_pareamento_aviso_parcial",
-                            "aviso falhou em: " + "; ".join(
-                                f"{x['sessao']}: {_erro_texto(x['erro'])}" for x in errs),
-                            avisos=errs)
-            if errs else None}
-
-
-async def _pair_cross_server(name: str, peer: str, task: str, replace_task: bool) -> dict:
-    """Pareamento 1:1 entre máquinas. Registra o vínculo LOCAL (name.json peers=[srv::sessao];
-    sidecar do remoto vive na máquina dele) e chama o /pair-remote do backend peer pra registrar o
-    reverso + injetar o protocolo lá. Falha na chamada remota desfaz o vínculo local (mesmo racional
-    do 'grupo fantasma' do pair local). Transporte já provado pelo hangar-send cross-server (peers.json)."""
-    harness = {s.name: s.provider for s in await asyncio.to_thread(registry.list)}
-    if name not in harness:
-        raise HTTPException(404, detail=erro("erro_sessao_nao_encontrada_detalhe", f"sessão não encontrada: {name}", detalhe=name))
-    srv, sess = peers.split_addr(peer)
-    try:
-        members, snap = await asyncio.to_thread(pair.join_group, name, [peer], task, substituir_task=replace_task, harness=harness)
-    except pair.PairMixError as e:
-        # `name` já está num grupo local (ou já pareada cross-server): não dá pra cross-parear.
-        raise HTTPException(400, detail=erro("erro_pareamento_mistura_cross", str(e)))
-    except pair.TaskConflito as e:
-        raise HTTPException(409, detail=erro("erro_pareamento_tarefa_existente",
-                                             f"o grupo já tem tarefa: {e.existente!r} — repita com "
-                                             f"--substituir-tarefa pra trocar", existente=e.existente))
-    link = await asyncio.to_thread(lambda: PairLink(name).get() or {})
-    task = link.get("task", task)
-    initiator = f"{settings.server_id}::{name}"
-    try:
-        await asyncio.to_thread(
-            peers.call, srv, "POST", f"/api/sessions/{sess}/pair-remote",
-            {"initiator": initiator, "task": task})
-    except peers.PeerError as e:
-        await asyncio.to_thread(pair.restore, snap)
-        if e.transport:
-            # Rede caiu / resposta perdida: o /pair-remote PODE ter comitado no peer antes de a
-            # resposta se perder. Desfiz este lado; tento limpar o outro por garantia (best-effort —
-            # se o peer está mesmo inacessível isto também falha, e aí o usuário desapareia lá na mão).
-            try:
-                await asyncio.to_thread(peers.call, srv, "POST",
-                                        f"/api/sessions/{sess}/unpair-remote", {"peer": initiator})
-            except peers.PeerError:
-                pass
-            raise HTTPException(502, detail=erro("erro_pareamento_nao_confirmado",
-                                             f"pareamento NÃO confirmado (falha de rede com '{srv}'): desfeito "
-                                             f"deste lado; se o peer tiver ficado pareado, rode unpair lá. ({e})",
-                                             srv=srv, erro=str(e)))
-        raise HTTPException(502, detail=erro("erro_pareamento_rejeitado", f"pareamento desfeito (peer rejeitou): {e}", erro=str(e)))
-    # Reverso registrado. Injeta o protocolo NESTE lado; se este falhar (sessão morreu na janela), o
-    # vínculo já vale dos dois lados — só avisa, não desfaz (o par remoto já sabe).
-    warn = None
-    e = await _deliver(name, _group_text(name, [peer], task, harness))
-    if e:
-        warn = erro("erro_pareamento_aviso_local",
-                    f"vínculo criado, mas o aviso local falhou ({name}: {_erro_texto(e)}) — refaça o pair se precisar",
-                    sessao=name, erro=e)
-    return {"ok": True, "members": members, "warning": warn}
+    return await _group_route("POST", name, "pair", body)
 
 
 class PairRemoteBody(_StrictBody):
@@ -4327,27 +4361,7 @@ async def pair_remote(name: str, body: PairRemoteBody):
     remoto `body.initiator` (srv::nome) e injeta o protocolo. NÃO chama de volta (o iniciador já
     registrou o próprio lado — chamar de volta recursaria). Chamado só pelo backend do outro server
     via peers.call, autenticado pelo token do peers.json."""
-    if groups_bridge.rust_owns_groups():
-        return await _group_route("POST", name, "pair-remote", body)
-    if not peers.is_remote(body.initiator):
-        raise HTTPException(400, detail=erro("erro_initiator_invalido", "initiator precisa ser qualificado (srv::nome)"))
-    await asyncio.to_thread(_recusa_orq, name)
-    harness = {s.name: s.provider for s in await asyncio.to_thread(registry.list)}
-    if name not in harness:
-        raise HTTPException(404, detail=erro("erro_sessao_nao_encontrada_detalhe", f"sessão não encontrada: {name}", detalhe=name))
-    try:
-        # substituir_task=True: a task que chega aqui é a combinada do iniciador, sempre vence.
-        members, snap = await asyncio.to_thread(pair.join_group, name, [body.initiator], body.task, substituir_task=True, harness=harness)
-    except pair.PairMixError as e:
-        # `name` já está num grupo local aqui — não pode virar par cross-server de outra máquina.
-        raise HTTPException(409, detail=erro("erro_pareamento_mistura_cross", str(e)))
-    e = await _deliver(name, _group_text(name, [body.initiator], body.task, harness))
-    if e:
-        await asyncio.to_thread(pair.restore, snap)
-        raise HTTPException(502, detail=erro("erro_pareamento_aviso_falhou",
-                                    f"pareamento desfeito: falha ao avisar '{name}': {_erro_texto(e)}",
-                                    nome=name, erro=e))
-    return {"ok": True, "members": members}
+    return await _group_route("POST", name, "pair-remote", body)
 
 
 class UnpairRemoteBody(_StrictBody):
@@ -4358,38 +4372,7 @@ class UnpairRemoteBody(_StrictBody):
 async def unpair_remote(name: str, body: UnpairRemoteBody):
     """`name` (local) tinha um par remoto que saiu — remove o vínculo local e avisa. Idempotente
     (sair de quem não está pareado é no-op). Chamado pelo backend peer no unpair do outro lado."""
-    # Defesa: só dissolve se `name` está MESMO pareado com quem diz estar saindo. Sem isto, um
-    # /unpair-remote perdido, duplicado ou com peer errado dissolvia um pareamento legítimo de `name`
-    # e mandava aviso falso (era o vetor de dano cross-máquina do achado crítico do review).
-    if groups_bridge.rust_owns_groups():
-        return await _group_route("POST", name, "unpair-remote", body)
-    link = await asyncio.to_thread(lambda: PairLink(name).get())
-    if not link or body.peer not in (link.get("peers") or []):
-        return {"ok": True, "warning": None, "noop": f"'{name}' não está pareado com '{body.peer}'"}
-    ex = await asyncio.to_thread(pair.leave, name)
-    warn = None
-    if ex:
-        e = await _deliver(name, f"{pair_texto.PREFIXO} '{body.peer}' saiu do pareamento. "
-                                 "Volte a operar independente; use hangar-send só quando o usuário pedir.")
-        if e:
-            warn = erro("erro_pareamento_aviso_unpair", f"{name}: {_erro_texto(e)}",
-                        sessao=name, erro=e)
-    return {"ok": True, "warning": warn}
-
-
-# Anti-tempestade: o prompt manda nunca responder [grupo:] com --group, mas prompt é disciplina,
-# não trava. 5 avisos/min por grupo cobre "terminei" + "contrato atualizado" de N membros; um loop
-# N×N passa disso em segundos. ponytail: dict em memória, zera no restart — é o que basta.
-_GROUP_MAX_NA_JANELA = 5
-_GROUP_JANELA_S = 60
-_group_envios: dict[str, list[float]] = {}
-
-
-def _group_estourou(gid: str, agora: float) -> bool:
-    ts = [t for t in _group_envios.get(gid, []) if agora - t < _GROUP_JANELA_S]
-    ts.append(agora)
-    _group_envios[gid] = ts
-    return len(ts) > _GROUP_MAX_NA_JANELA
+    return await _group_route("POST", name, "unpair-remote", body)
 
 
 class GroupMsgBody(_StrictBody):
@@ -4407,40 +4390,7 @@ async def group_message(name: str, body: GroupMsgBody):
     tacada, como `[grupo: <name>]`. Unidirecional por contrato (o prompt instrui a NUNCA responder
     um [grupo:] com --group) — é o que impede o loop de N sessões se avisando em cascata.
     Slash-command fora (mesmo racional do /broadcast)."""
-    if groups_bridge.rust_owns_groups():
-        return await _group_route("POST", name, "group-message", body)
-    if body.text.lstrip().startswith("/"):
-        raise HTTPException(400, detail=erro("erro_group_message_slash", "group-message não suporta slash-commands"))
-    txt = body.text.lstrip()
-    if txt.startswith("[grupo:") or txt.startswith("[de:"):
-        raise HTTPException(400, detail=erro("erro_group_message_resposta",
-                                             "aviso de grupo não pode reencaminhar um [grupo:]/[de:] — responda 1:1"))
-    link = await asyncio.to_thread(lambda: PairLink(name).get())
-    membros = link.get("peers") if link else None
-    if not membros:
-        raise HTTPException(404, detail=erro("erro_sessao_sem_grupo", "sessão não está num grupo"))
-    if _group_estourou(link.get("gid") or name, time.time()):
-        raise HTTPException(429, detail=erro("erro_group_message_tempestade",
-                                             f"mais de {_GROUP_MAX_NA_JANELA} avisos de grupo em "
-                                             f"{_GROUP_JANELA_S}s — parece loop; espere ou responda 1:1",
-                                             max=_GROUP_MAX_NA_JANELA, janela=_GROUP_JANELA_S))
-    # `pulados` fica vazio de propósito: o backend entrega a cada membro pela escada do _send_one
-    # (socket nativo primeiro); nunca devolve o trabalho pro modelo fazer por SendMessage.
-    pulados: list[str] = []
-    text = f"[grupo: {name}] {body.text}"
-    results: dict[str, dict] = {}
-    for p in membros:
-        if not await _send_thread(_session_exists, p):
-            results[p] = {"ok": False, "error": erro("erro_sessao_inexistente", "sessão não encontrada"), "delivered": False}
-            continue
-        results[p] = await _enviar(p, text)
-    failed = [{"sessao": n, "erro": r.get("error")} for n, r in results.items() if not r.get("ok")]
-    return {"ok": True, "peers": membros, "pulados": pulados,
-            "warning": erro("erro_pareamento_grupo_falha",
-                            "falha em: " + "; ".join(
-                                f"{x['sessao']}: {_erro_texto(x['erro'])}" for x in failed),
-                            avisos=failed)
-            if failed else None}
+    return await _group_route("POST", name, "group-message", body)
 
 
 # ----------------------------------------------------------------- orquestração (política + papéis)
@@ -4713,23 +4663,11 @@ class OrqGroupBody(_StrictBody):
 
 @app.post("/api/sessions/{name}/orq/grupo", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def orq_group_set(name: str, body: OrqGroupBody):
-    """Associa o time da planejadora ao grupo real, inclusive com um árbitro novo."""
-    if groups_bridge.rust_owns_groups():
-        # O Rust segura o lock de grupo e chama `/internal/orq/associate`; a resposta é a dela.
-        try:
-            out = await asyncio.to_thread(groups_bridge.call, "group.orq_associate", name=name,
-                                          gid=body.gid, mtime=body.mtime)
-        except groups_bridge.GroupsBridgeError as e:
-            raise _group_unavailable(e.code) from None
-        return _bridge_reply(out)
-    return await _orq_associate(orq_context.associate, name, body.gid, body.mtime)
-
-
-async def _orq_associate(associate, name: str, gid: str, mtime: float) -> dict:
-    """Resposta e erros da associação, iguais na rota pública e na interna do Rust."""
+    """Associa o time da planejadora ao grupo real, inclusive com um árbitro novo. Os fatos do `orq`
+    vão no pedido e o Rust associa sob o lock de grupo, sem perguntar de volta."""
+    _require_rust_groups()
     try:
-        # O Rust chama pela rota interna segurando o lock de grupo: fora do pool padrão.
-        context = await internal_thread(associate, name, gid, mtime)
+        facts = await asyncio.to_thread(orq_context.associate_facts, name, body.gid)
     except orq_md.Conflito:
         raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou",
                                              "o time mudou desde a leitura — recarregue"))
@@ -4737,9 +4675,12 @@ async def _orq_associate(associate, name: str, gid: str, mtime: float) -> dict:
         raise HTTPException(409, detail=erro("erro_orq_celula_invalida", str(e)))
     except OSError as e:
         raise HTTPException(409, detail=erro("erro_orq_arquivo_mudou", str(e)))
-    return {"ok": True, "gid": context.gid, "grouped": context.grouped,
-            "session_prefix": context.session_prefix, "arquivo": str(context.path),
-            "mtime": (await internal_thread(orq_md.ler_arquivo, context.path))[1]}
+    try:
+        out = await asyncio.to_thread(groups_bridge.call, "group.orq_associate", name=name,
+                                      gid=body.gid, mtime=body.mtime, facts=facts)
+    except groups_bridge.GroupsBridgeError as e:
+        raise _group_unavailable(e.code) from None
+    return _bridge_reply(out)
 
 
 class ComecarBody(_StrictBody):
@@ -4808,65 +4749,18 @@ async def orq_papel_del(name: str, body: RemoverPapelBody):
 async def pair_contract(name: str):
     """Contrato compartilhado do GRUPO (markdown que os membros editam via fs; keyed pelo gid —
     estável quando membro entra/sai). 404 sem grupo; content vazio se ainda não existe."""
-    if groups_bridge.rust_owns_groups():
-        return await _group_route("GET", name, "contract")
-    return await asyncio.to_thread(_pair_contract_local, name)
+    return await _group_route("GET", name, "contract")
 
 
-def _pair_contract_local(name: str) -> dict:
-    p = contract_path_for(name)
-    if p is None:
-        raise HTTPException(404, detail=erro("erro_sessao_nao_pareada", "sessão não está pareada"))
-    link = PairLink(name).get() or {}
-    try:
-        content = p.read_text(encoding="utf-8")
-    except OSError:
-        content = ""
-    return {"peers": link.get("peers", []), "path": str(p), "content": content}
+class PairContractBody(_StrictBody):
+    content: str
+    mtime: str | None = None
 
 
-async def _end_external_pair(name: str, p: str) -> list[dict] | None:
-    """Desfaz o par externo de `name` no endereço `p` pelo Rust, dono do registro e do convite: ele
-    avisa o outro lado e apaga os dois. None = `p` não é par externo de `name`."""
-    try:
-        result = await asyncio.to_thread(share_bridge.call, "end_pair", local=name, address=p)
-    except share_bridge.ShareBridgeError as e:
-        if e.code == "share_bridge_off":
-            # Sem o Rust não há par externo vivo: segue como máquina própria.
-            return None
-        return [{"sessao": p, "erro": erro("erro_convite_nao_acompanhou",
-                                           f"o par externo com {p} não foi desfeito ({e.code})", peer=p)}]
-    return (result.get("errors") or []) if result.get("found") else None
-
-
-async def _avisar_saida(name: str, expeers: list[str]) -> list[dict]:
-    """Depois de `name` sair do grupo (o sidecar dele já foi limpo), desfaz o vínculo nos pares
-    REMOTOS via /unpair-remote, senão o sidecar de lá fica órfão. Uma esteira só pra unpair e kill."""
-    errs: list[dict] = []
-    for p in expeers:
-        if not peers.is_remote(p):
-            continue
-        externo = await _end_external_pair(name, p)
-        if externo is not None:
-            errs.extend(externo)
-            continue
-        if not settings.server_id:
-            errs.append({"sessao": p,
-                         "erro": erro("erro_pareamento_server_id_ausente",
-                                      "CP_SERVER_ID ausente no backend/.env — obrigatório pra "
-                                      "pareamento cross-server (é o endereço de resposta srv::sessao)")})
-            continue
-        srv, sess = peers.split_addr(p)
-        try:
-            await asyncio.to_thread(peers.call, srv, "POST",
-                                    f"/api/sessions/{sess}/unpair-remote",
-                                    {"peer": f"{settings.server_id}::{name}"})
-        except peers.PeerError as ex:
-            # Sidecar remoto fica órfão até alguém desparear lá. ponytail: sem fila de retry — single-user.
-            _log.warning("saida do grupo: peer remoto '%s' não avisado (sidecar de lá fica órfão): %s", p, ex)
-            errs.append({"sessao": p, "erro": erro("erro_peer_nao_avisado", str(ex), peer=p)})
-    # Locais não são avisados: recado para quem saiu volta "sessão não encontrada".
-    return errs
+@app.put("/api/sessions/{name}/pair/contract", dependencies=[Depends(require_auth)])
+async def pair_contract_put(name: str, body: PairContractBody):
+    """Grava o contrato com o `mtime` lido; o Rust decide, aqui só o repasse da 8768."""
+    return await _group_route("PUT", name, "contract", body)
 
 
 class GroupTaskSuggestionBody(_StrictBody):
@@ -4913,23 +4807,7 @@ async def unpair_session(name: str):
     """`name` SAI do grupo (os demais membros continuam entre si; grupo restante de 1 dissolve).
     Avisa quem saiu e quem ficou. Idempotente. Aviso que falhar NÃO refaz o vínculo (fora do grupo
     é o estado desejado) — só reporta no result."""
-    if groups_bridge.rust_owns_groups():
-        return await _group_route("DELETE", name, "pair")
-    await asyncio.to_thread(_recusa_orq, name)
-    expeers = await asyncio.to_thread(pair.leave, name)   # nome próprio: 'peers' é o módulo importado
-    if not expeers:
-        return {"ok": True, "warning": None}
-    errs = await _avisar_saida(name, expeers)
-    e = await _deliver(name, f"{pair_texto.PREFIXO} Você saiu do grupo de trabalho "
-                             f"({', '.join(expeers)}). Volte a operar independente; use hangar-send só "
-                             "quando o usuário pedir.")
-    if e:
-        errs.append({"sessao": name, "erro": e})
-    return {"ok": True, "warning": erro("erro_pareamento_saida_falhou",
-            "aviso de saída falhou: " + "; ".join(
-                f"{x['sessao']}: {_erro_texto(x['erro'])}" for x in errs),
-            avisos=errs)
-            if errs else None}
+    return await _group_route("DELETE", name, "pair")
 
 
 # Quanto esperar o picker sumir da tela depois do Escape, antes de digitar a resposta por texto.

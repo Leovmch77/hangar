@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: ready-for-human (decisões D1 e D2 tomadas; aguarda aprovação do plano e a escolha do modo de execução)
+Status: wontfix (Entrega 1a feita no PR #124; Tasks 9–21 substituídas por [`plano-federacao.md`](plano-federacao.md))
 
 **Goal:** com o Rust de pé, o `hangar-server` passa a ser o único que grava grupos (1a); um grupo
 pode ter N sessões em M máquinas com um `gid` e uma máquina dona (1b); o desktop nativo mostra cada
@@ -610,7 +610,7 @@ Status: ready-for-agent
     `/internal/orq/is-orchestrator {names}` → `{names}` (os que `orq_runs.find` acha: a recusa
     `_recusa_orq`, `api.py:4849-4853`).
   - `/internal/orq/associate {name, gid, mtime}` → contexto do `orq_context.associate` sem
-    `pair._LOCK` (usada pela ponte na Task 6).
+    `pair._LOCK` (usada pela ponte na Task 6). *Superado em `plano-federacao.md` (Task 4): rota removida.*
 
 - [x] **Step 1: Testes** — Rust: `deliver_text` numa sessão Claude com terminal falsa chega pelo
   caminho do Rust; numa sessão `codex` repassa ao Python falso com `{"text", "steer": false}`;
@@ -790,6 +790,9 @@ Status: ready-for-agent
 | `group.external_unlink` | `{local, address}` | `{}` (é o `restore` do par externo: o retrato antes do link é sempre "solto") |
 | `group.orq_associate` | `{name, gid, mtime}` | contexto, ou o erro da `/internal/orq/associate` |
 
+*Superado em `plano-federacao.md` (Task 4): `group.leave` leva `{name, phases}` e só o fechamento que
+não passou pelo Rust o usa; `group.orq_associate` leva `facts` e o Rust associa sem chamar o Python.*
+
   `groups_bridge.rust_owns_groups() -> bool` (modo `rust`/`pending` e saúde com `groups`);
   `groups_bridge.call(op, **args) -> dict` (no `pending` espera até `PENDING_WAIT_S`, depois
   `runtime_starting`, como as demais operações); `pair.GroupsOwnedByRust(RuntimeError)`.
@@ -842,6 +845,8 @@ segurando o lock (um `group.leave` concorrente espera).
   as funções em processo); `_pair_sweep_loop` não sobe; `orq_context.associate` → `group.orq_associate`.
   O corpo atual do `associate`, sem `pair._LOCK`, vira a função que a `/internal/orq/associate`
   chama. Subir o protocolo para o próximo número livre nos três lugares.
+  *Superado em `plano-federacao.md` (Task 4): `_clear_pair` não chama a ponte e a associação não
+  volta ao Python.*
 
 - [x] **Step 4: Rodar** os testes da Task e `--test proxy`. Esperado: PASS.
 
@@ -902,6 +907,9 @@ Status: ready-for-agent
   paridade).
 - [x] **Step 4: Rodar.** Esperado: PASS.
 - [x] **Step 5: Commit** — `git commit -m "fix(list): re-emit the session list when only the group changes"`
+
+> **Tasks 9–21 substituídas por [`plano-federacao.md`](plano-federacao.md) (19/10/2026).** O texto
+> abaixo fica como registro; não executar daqui.
 
 ### Task 9: Verificação manual com o dono (1a)
 

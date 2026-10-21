@@ -235,6 +235,20 @@ async fn shadow_never_demotes_and_tells_python() {
     }).await.expect("sem a sombra, o rebaixamento sai");
 }
 
+/// Fatos do Python que não vieram: a linha sai com o estado e sem o aviso "lista desatualizada", que é
+/// diagnóstico; sem o prazo, o que fosse de tela já sairia.
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_facts_never_reach_the_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bridge, python) = bridge_with_sessions(dir.path(), 1, ("idle", 60.0)).await;
+    python.list_facts.lock().unwrap().0 = json!("quebrado");
+    bridge.set_problem_hold(Duration::ZERO);
+    let p = bridge.produce(&Default::default()).await.unwrap();
+    assert!(!p.facts_ok, "os fatos não vieram");
+    assert_eq!(p.rows.len(), 1);
+    assert_eq!(p.rows[0].problema, None);
+}
+
 fn peak_rss_kb() -> u64 {
     std::fs::read_to_string("/proc/self/status").unwrap().lines()
         .find_map(|l| l.strip_prefix("VmHWM:")).and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok()).unwrap_or(0)

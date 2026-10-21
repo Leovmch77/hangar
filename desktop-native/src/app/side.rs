@@ -514,9 +514,9 @@ impl Hangar {
         cx.notify();
     }
 
-    fn reload_allowed(&self) -> bool {
-        self.chat_online && self.chat.state.state == "idle"
-            && self.selected_key().is_some_and(|key| !self.side.reloading.contains(&key))
+    pub(super) fn reload_allowed(&self) -> bool {
+        let reloading = self.selected_key().is_none_or(|key| self.side.reloading.contains(&key));
+        reload_ready(self.chat_online, &self.chat.state.state, self.chat.state.problema.as_deref(), reloading)
     }
 
     pub(super) fn reload(&mut self, cx: &mut Context<Self>) {
@@ -525,7 +525,7 @@ impl Hangar {
         self.side.reloading.insert(key.clone());
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
-            let result = api.act(&key.name, &["recarregar"], None, false, 60).await;
+            let result = api.act(&key.name, &["recarregar"], None, false, crate::api::REOPEN_SECONDS).await;
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Reply(key, Reply::Reload, result) }).await;
         });
         cx.notify();
@@ -1152,6 +1152,11 @@ const SHORTCUT_MIN: f32 = 76.;
 /// de pelo menos `SHORTCUT_MIN`, entre 2 e 5 (mais que cinco por linha fica miúdo), e os blocos dividindo a linha
 /// inteira. Coluna que ninguém ocupa sai da conta, como o `auto-fit` do web: três atalhos num painel largo dividem a
 /// linha em três, em vez de ficarem encostados à esquerda com um vão de bloco no fim.
+/// Recarregar pede a sessão parada; a de entrega parada aparece trabalhando e é justamente a que precisa.
+fn reload_ready(online: bool, state: &str, problem: Option<&str>, reloading: bool) -> bool {
+    online && !reloading && (state == "idle" || problem == Some(STALLED))
+}
+
 fn shortcut_grid(inner: f32, count: usize) -> (usize, f32) {
     let inner = inner.max(SHORTCUT_MIN);
     let fitting = (((inner + SHORTCUT_GAP) / (SHORTCUT_MIN + SHORTCUT_GAP)).floor() as usize).clamp(2, 5);
@@ -1210,8 +1215,19 @@ fn external_command(_name: &str) -> Option<std::process::Command> { None }
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
-    use super::{CHAT_MIN, FLOATING_GAPS, MIN_WIDTH, PANEL_EDGE, SHORTCUT_GAP, SIDE_PAD, Shortcut, Side, duration, merged_tiles, parse_shortcuts, shortcut_grid, tokens};
+    use super::{CHAT_MIN, FLOATING_GAPS, MIN_WIDTH, PANEL_EDGE, SHORTCUT_GAP, SIDE_PAD, Shortcut, Side, duration, merged_tiles, parse_shortcuts, reload_ready, shortcut_grid, tokens};
     use crate::appearance;
+
+    #[test]
+    fn reload_allowed_takes_a_working_session_whose_delivery_stalled() {
+        assert!(reload_ready(true, "idle", None, false));
+        // Mensagem presa com o processo surdo: a sessão aparece trabalhando, e é aí que o Reabrir serve.
+        assert!(reload_ready(true, "working", Some("headless_delivery_stalled"), false));
+        assert!(!reload_ready(true, "working", None, false));
+        assert!(!reload_ready(true, "working", Some("headless_processo_caiu"), false));
+        assert!(!reload_ready(false, "working", Some("headless_delivery_stalled"), false));
+        assert!(!reload_ready(true, "working", Some("headless_delivery_stalled"), true));
+    }
 
     #[test]
     fn shortcuts_fall_back_and_drop_bad_items() {

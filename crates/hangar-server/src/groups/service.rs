@@ -75,11 +75,22 @@ pub struct GroupService {
     server_id: String,
     /// Avisa a lista de que o disco do grupo mudou: sem isso ela só relê no prazo da descoberta.
     on_change: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Falha que só vira faxina (contrato não herdado, `orq` sozinho que não saiu) vai ao diário exportável.
+    diary: Option<crate::diag::DiagClient>,
 }
 
 impl GroupService {
     pub fn new(dir: PairDir, orq: Arc<dyn OrqFacts>, server_id: String) -> Self {
-        Self { dir: Arc::new(dir), lock: Mutex::new(()), orq, server_id, on_change: None }
+        Self { dir: Arc::new(dir), lock: Mutex::new(()), orq, server_id, on_change: None, diary: None }
+    }
+
+    pub fn with_diary(mut self, diary: crate::diag::DiagClient) -> Self {
+        self.diary = Some(diary);
+        self
+    }
+
+    fn report(&self, event: &'static str, name: &str, code: &str, reason: &'static str) {
+        if let Some(diary) = &self.diary { diary.report(event, name, code, reason); }
     }
 
     pub fn with_change_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
@@ -87,7 +98,9 @@ impl GroupService {
         self
     }
 
-    fn changed(&self) {
+    /// Toda escrita de sidecar chama isto depois de gravar, inclusive as de grupo entre máquinas
+    /// (`PUT` da dona, fila): a lista só reemite a dona nova (`pair_owner`) se for avisada.
+    pub(crate) fn changed(&self) {
         if let Some(hook) = &self.on_change { hook() }
     }
 
@@ -110,6 +123,15 @@ impl GroupService {
 
     pub fn contract_path(&self, gid: &str) -> std::path::PathBuf { self.dir.contract_path(gid) }
 
+    /// Contratos de `gid` para o arquivo (a pasta que só este `PairDir` conhece). Faxina: fora do lock.
+    pub async fn archive_contracts(&self, gid: &str) -> Result<(), GroupError> {
+        let (dir, gid) = (self.dir.clone(), gid.to_owned());
+        blocking(move || dir.archive_contracts(&gid)).await
+    }
+
+    /// O `PairDir` deste serviço, para quem grava sob o `locked` dele (grupo entre máquinas).
+    pub(super) fn dir(&self) -> Arc<PairDir> { self.dir.clone() }
+
     /// A pasta `.hangar-pair`, onde o Python também guarda `external_pairs.json`.
     pub fn pair_root(&self) -> &std::path::Path { self.dir.root() }
 
@@ -117,19 +139,22 @@ impl GroupService {
         let _guard = self.lock.lock().await;
         let dir = self.dir.clone();
         let name = input.name.clone();
-        let plan = blocking(move || -> Result<local::JoinPlan, GroupError> {
+        let (plan, unmerged) = blocking(move || -> Result<(local::JoinPlan, Vec<String>), GroupError> {
             let read = reader(&dir);
             let outside = |p: &str| input.outside.contains(p);
             let join = JoinInput { name: &input.name, others: &input.others, task: &input.task, replace_task: input.replace_task,
                 harness: &input.harness, orq: input.orq, outside: &outside, linked: input.linked };
             let plan = local::plan_join(&read, &join, &fresh_gid).map_err(GroupError::Refused)?;
-            for loser in &plan.merged { dir.merge_contract(loser, &plan.gid); }
+            let unmerged = plan.merged.iter().filter(|loser| !dir.merge_contract(loser, &plan.gid)).cloned().collect();
             if let Err(e) = apply(&dir, &[], &plan.writes) {
                 restore_logged(&dir, &plan.before);
                 return Err(e.into());
             }
-            Ok(plan)
+            Ok((plan, unmerged))
         }).await??;
+        for loser in &unmerged {
+            self.report("rust.groups_contract_merge_failed", loser, "groups_contract_merge_failed", "a fusão não herdou o contrato do grupo absorvido");
+        }
         // Promover sob o mesmo lock: um join concorrente não enxerga o grupo meio configurado.
         if plan.orq && plan.new_gid && let Err(failed) = self.orq.promote(&name, &plan.gid).await {
             let restored = self.restore_blocking(plan.before.clone()).await;
@@ -146,6 +171,11 @@ impl GroupService {
     /// Devolve os ex-companheiros. O contrato é arquivado depois de soltar o lock: faxina não
     /// desfaz uma saída que já valeu.
     pub async fn leave(&self, name: &str) -> Result<Vec<String>, GroupError> {
+        self.leave_with(name, &*self.orq).await
+    }
+
+    /// `leave` com a fase do `orq` de outra fonte: a que o Python mandou no pedido, sem pergunta de volta.
+    pub async fn leave_with(&self, name: &str, orq: &dyn OrqFacts) -> Result<Vec<String>, GroupError> {
         let (peers, archive, wrote) = {
             let _guard = self.lock.lock().await;
             let dir = self.dir.clone();
@@ -153,7 +183,7 @@ impl GroupService {
             // A fase só interessa a sidecar `orq`; `Live` e `Unknown` contam como viva.
             let link = blocking({ let (dir, owner) = (dir.clone(), owner.clone()); move || reader(&dir)(&owner) }).await?;
             let alive = match link {
-                Some(s) if s.orq => matches!(self.orq.phase(&s.gid).await, OrqPhase::Live | OrqPhase::Unknown),
+                Some(s) if s.orq => matches!(orq.phase(&s.gid).await, OrqPhase::Live | OrqPhase::Unknown),
                 _ => false,
             };
             blocking(move || -> Result<(Vec<String>, Option<String>, bool), GroupError> {
@@ -192,7 +222,10 @@ impl GroupService {
                 let (d, s) = (self.dir.clone(), stem.clone());
                 match blocking(move || d.clear_sidecar(&s)).await? {
                     Ok(()) => dissolved.push((stem, sidecar.gid)),
-                    Err(error) => tracing::warn!(code = "groups_lone_orq_clear_failed", name = %stem, %error, "groups: o grupo orq sozinho não foi dissolvido"),
+                    Err(error) => {
+                        tracing::warn!(code = "groups_lone_orq_clear_failed", name = %stem, %error, "groups: o grupo orq sozinho não foi dissolvido");
+                        self.report("rust.groups_lone_orq_clear_failed", &stem, "groups_lone_orq_clear_failed", "o grupo orq sozinho não foi dissolvido");
+                    }
                 }
             }
         }
@@ -302,14 +335,14 @@ fn reader(dir: &PairDir) -> impl Fn(&str) -> Option<Sidecar> + '_ {
     }
 }
 
-fn apply(dir: &PairDir, clears: &[String], writes: &[(String, Sidecar)]) -> Result<(), StoreError> {
+pub(super) fn apply(dir: &PairDir, clears: &[String], writes: &[(String, Sidecar)]) -> Result<(), StoreError> {
     for name in clears { dir.clear_sidecar(name)?; }
     for (name, sidecar) in writes { dir.write_sidecar(name, sidecar)?; }
     Ok(())
 }
 
 /// Tenta todos mesmo que um falhe: parar no primeiro deixaria o resto assimétrico. Devolve o primeiro erro.
-fn restore_all(dir: &PairDir, before: &Snapshot) -> Result<(), StoreError> {
+pub(super) fn restore_all(dir: &PairDir, before: &Snapshot) -> Result<(), StoreError> {
     let mut first = None;
     for (name, state) in before {
         let done = match state {
@@ -325,7 +358,7 @@ fn restore_all(dir: &PairDir, before: &Snapshot) -> Result<(), StoreError> {
 }
 
 /// Restauração de quem já está devolvendo outro erro: o erro original é o que importa ao chamador.
-fn restore_logged(dir: &PairDir, before: &Snapshot) { let _ = restore_all(dir, before); }
+pub(super) fn restore_logged(dir: &PairDir, before: &Snapshot) { let _ = restore_all(dir, before); }
 
 /// 8 hex como o `uuid4().hex[:8]` do Python; `RandomState` é semeado pelo sistema, sem dependência nova.
-fn fresh_gid() -> String { format!("{:08x}", RandomState::new().build_hasher().finish() as u32) }
+pub(super) fn fresh_gid() -> String { format!("{:08x}", RandomState::new().build_hasher().finish() as u32) }

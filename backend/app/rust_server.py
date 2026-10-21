@@ -32,7 +32,7 @@ _log = logging.getLogger("hangar.rust_server")
 HEALTH_PATH = "/__hangar_server/health"
 # Versão do contrato interno (rotas /internal, side-events, ambiente). Tem de casar com o
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
-RUST_SERVER_PROTOCOL = 85
+RUST_SERVER_PROTOCOL = 87
 START_TIMEOUT = 10.0
 OP_TIMEOUT_S = 75
 CRASH_WINDOW = 60.0
@@ -389,7 +389,6 @@ class Supervisor:
         `address` (endereço privado ausente ou inválido na saúde)."""
         global terminal_panel
         terminal_panel = None
-        from app import groups_bridge
         _point_bridges(None, None)
         self._cancel_snapshot_retry()
         if self.proc is not None:
@@ -444,9 +443,6 @@ class Supervisor:
                     _log.error("hangar-server sem owns válido na saúde")
                     diag.registrar("hangar_server.partida", "erro", codigo="capacidade_invalida")
                     return "address"
-                # `groups: false` (pastas da lista sem resolver): o Rust repassa as rotas de grupo e
-                # o Python segue dono delas.
-                groups_bridge.set_capable(health.get("groups") is not False)
                 # Pontes ligadas: o Rust recém-subido aprende as trocas de modo e transferências em curso.
                 self.configure_runtime(ready, env["HANGAR_INTERNAL_SECRET"], env["HANGAR_RUNTIME_INSTANCE"], owns)
                 # Sem a fotografia o convidado fica no 503 e a varredura não revoga nada; ela vai

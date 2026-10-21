@@ -17,9 +17,15 @@ describe('resolveDrop', () => {
     expect(resolveDrop('srv-a::b', { serverId: 'srv-a', name: 'a' }, rows)).toEqual({ kind: 'none' });
   });
 
-  it('solta sobre linha de outro servidor -> não faz nada (canPair recusa other_server)', () => {
+  it('solta sobre linha de outro servidor sem identificador lido -> não faz nada (no_identity)', () => {
     const rows = [s('a', 'srv-a'), s('b', 'srv-b')];
     expect(resolveDrop('srv-b::b', { serverId: 'srv-a', name: 'a' }, rows)).toEqual({ kind: 'none' });
+  });
+
+  it('solta sobre linha de outro servidor com os identificadores -> pede grupo', () => {
+    const rows = [s('a', 'srv-a'), s('b', 'srv-b')];
+    const identities = new Map([['srv-a', 'casa'], ['srv-b', 'lab']]);
+    expect(resolveDrop('srv-b::b', { serverId: 'srv-a', name: 'a' }, rows, identities)).toEqual({ kind: 'pair', chave: 'srv-b::b' });
   });
 
   it('solta no fundo (sem linha sob o dedo) com origem já num grupo -> pede saída', () => {

@@ -90,6 +90,7 @@ pub(super) struct BranchList { #[serde(default)] branches: Vec<String>, current:
 pub(super) enum Accounts { Loading, Known(Vec<AccountTarget>, Option<String>), Failed(String) }
 
 /// `pct` é a janela de cota mais cheia (None = sem leitura); `full` é conta perto demais do limite para continuar nela.
+/// `login: Some(false)` é conta sem login, onde o Claude não sobe; servidor antigo não manda o campo.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize)]
 pub(super) struct AccountTarget {
     pub(super) path: String,
@@ -98,6 +99,12 @@ pub(super) struct AccountTarget {
     #[serde(default)] pub(super) low: bool,
     #[serde(default)] pub(super) full: bool,
     pub(super) engine_account: Option<String>,
+    #[serde(default)] pub(super) login: Option<bool>,
+}
+
+impl AccountTarget {
+    /// Conta que não aceita a conversa: esgotada ou sem login.
+    fn unusable(&self) -> bool { self.full || self.login == Some(false) }
 }
 
 struct MenuRead { target: Target, seq: u64, mute: Mute, branches: Option<Branches>, accounts: Option<Accounts> }
@@ -122,6 +129,8 @@ pub(super) enum SidebarReply {
     Group(u64, super::grouping::GroupReply),
     /// Resposta de um pedido do painel do grupo.
     Sheet(super::group_sheet::SheetReply),
+    /// Identificador de uma máquina, pela chave dela.
+    Identity(String, Result<Value, Failure>),
 }
 
 /// Uma notificação por sessão: o "git pull…" dá lugar ao resultado, como o `flash` único do web.
@@ -421,6 +430,52 @@ pub(super) fn machine_split<'a>(layout: &Layout<'a>) -> MachineSplit<'a> {
     MachineSplit { waiting: layout.waiting.clone(), working, rest }
 }
 
+/// O que encabeça uma seção da barra; o número é o índice em `machines`. Fora do agrupar por máquina, cada seção é da
+/// última `Machine` antes dela (ou da única máquina).
+pub(super) enum Head<'b> {
+    /// "Aguardando você" ou "Trabalhando" de todas as máquinas (agrupar por máquina).
+    Top(&'static str),
+    /// O bloco da máquina: no agrupar por máquina, com as linhas dela; nos outros modos vazio, e as seções seguintes são dela.
+    Machine(usize),
+    /// "Aguardando você" de uma máquina.
+    Waiting,
+    /// Grupo de projeto, ou "Sessões", de uma máquina.
+    Group(usize, &'b Group<'b>),
+}
+
+pub(super) struct Section<'b> { pub(super) head: Head<'b>, pub(super) rows: Vec<super::grouping::Row<'b>> }
+
+/// As seções da barra na ordem da tela, com as linhas antes de juntar os grupos (`grouping::cluster`).
+pub(super) fn sections<'b>(machines: &'b [MachineList<'_>], by_machine: bool, multi: bool) -> Vec<Section<'b>> {
+    let rows = |i: usize, list: &[&'b SessionInfo]| -> Vec<super::grouping::Row<'b>> {
+        let m = &machines[i];
+        list.iter().map(|session| super::grouping::Row { server: &m.key, session, invite: m.entry.is_some_and(|e| e.invite) }).collect()
+    };
+    let mut out = Vec::new();
+    if by_machine {
+        let split: Vec<MachineSplit> = machines.iter().map(|m| machine_split(&m.layout)).collect();
+        out.push(Section { head: Head::Top("waiting"), rows: split.iter().enumerate().flat_map(|(i, p)| rows(i, &p.waiting)).collect() });
+        out.push(Section { head: Head::Top("working"), rows: split.iter().enumerate().flat_map(|(i, p)| rows(i, &p.working)).collect() });
+        out.extend(split.iter().enumerate().map(|(i, p)| Section { head: Head::Machine(i), rows: rows(i, &p.rest) }));
+        return out;
+    }
+    for (i, m) in machines.iter().enumerate() {
+        if multi { out.push(Section { head: Head::Machine(i), rows: Vec::new() }); }
+        out.push(Section { head: Head::Waiting, rows: rows(i, &m.layout.waiting) });
+        out.extend(m.layout.groups.iter().map(|g| Section { head: Head::Group(i, g), rows: rows(i, &g.sessions) }));
+    }
+    out
+}
+
+/// Quantas sessões cada seção mostra depois de juntar os grupos; a da máquina soma as seções dela até a próxima máquina.
+pub(super) fn section_counts(parts: &[Section], clustered: &[Vec<super::grouping::ListRow>]) -> Vec<usize> {
+    let own: Vec<usize> = clustered.iter().map(|rows| rows.iter().filter(|r| matches!(r, super::grouping::ListRow::Session { .. })).count()).collect();
+    parts.iter().enumerate().map(|(i, part)| match part.head {
+        Head::Machine(_) => own[i] + (i + 1..parts.len()).take_while(|&j| !matches!(parts[j].head, Head::Machine(_) | Head::Top(_))).map(|j| own[j]).sum::<usize>(),
+        _ => own[i],
+    }).collect()
+}
+
 fn collapsed_path() -> Option<PathBuf> {
     Some(crate::appearance::dir()?.join("sidebar-collapsed.json"))
 }
@@ -525,37 +580,30 @@ impl Hangar {
         if appearance::get().navigation.tabs() {
             return self.tab_targets();
         }
-        // Na ordem dos blocos de grupo, sem os membros de um bloco recolhido.
-        let shown = |key: &str, remote: Option<&str>, l: &Layout| -> Vec<Target> {
-            let rows = |list: &[&SessionInfo]| super::grouping::cluster(list).into_iter().filter_map(|row| match row {
-                super::grouping::ListRow::Session(s) if !self.pair_collapsed(s, remote) => Some(Target::new(key, &s.name)),
-                super::grouping::ListRow::External { gid, pair } if !self.sidebar.is_collapsed(&super::grouping::pair_key(&gid, remote)) =>
-                    self.outside_row(&gid, &pair, remote).map(|(s, at)| Target::new(&at.unwrap_or_else(|| self.active_key()), &s.name)),
-                _ => None,
-            }).collect::<Vec<_>>();
-            rows(&l.waiting).into_iter()
-                .chain(l.groups.iter().filter(|g| !(l.by_project && self.sidebar.collapsed.contains(&g.key))).flat_map(|g| rows(&g.sessions)))
-                .collect()
-        };
-        if Self::by_machine() {
-            let machines = self.machine_lists(cx);
-            let split: Vec<MachineSplit> = machines.iter().map(|m| machine_split(&m.layout)).collect();
-            let mut order = Vec::new();
-            // Na ordem da barra: "Aguardando você" e "Trabalhando" de todas as máquinas, depois o bloco de cada uma.
-            for (m, p) in machines.iter().zip(&split) { order.extend(shown(&m.key, m.remote.as_deref(), &p.only(&p.waiting))); }
-            for (m, p) in machines.iter().zip(&split) { order.extend(shown(&m.key, m.remote.as_deref(), &p.only(&p.working))); }
-            for (m, p) in machines.iter().zip(&split) {
-                if !self.sidebar.collapsed.contains(&format!("server:{}", m.key)) { order.extend(shown(&m.key, m.remote.as_deref(), &p.only(&p.rest))); }
-            }
-            return order;
-        }
-        if !self.multi_server() { return shown(&active, None, &self.sidebar_layout(cx)); }
+        // Na ordem da barra e dos blocos de grupo, sem máquina, projeto ou bloco recolhido.
+        use super::grouping::ListRow;
+        let machines = self.machine_lists(cx);
+        let parts = sections(&machines, Self::by_machine(), self.multi_server());
+        let clustered = super::grouping::cluster(&parts.iter().map(|p| p.rows.clone()).collect::<Vec<_>>(), &self.identities());
         let mut order = Vec::new();
-        for entry in self.servers.iter().filter(|s| servers::has_section(s)) {
-            let key = servers::norm(&entry.address);
-            if self.sidebar.collapsed.contains(&format!("server:{key}")) { continue; }
-            if key == active { order.extend(shown(&key, None, &self.sidebar_layout(cx))); }
-            else if let Some(list) = self.remote.get(&key) { order.extend(shown(&key, Some(&key), &self.remote_layout(&key, &list.sessions, cx))); }
+        let mut hidden = false;
+        for (part, list) in parts.iter().zip(&clustered) {
+            match part.head {
+                Head::Top(_) => hidden = false,
+                Head::Machine(m) => hidden = self.sidebar.is_collapsed(&format!("server:{}", machines[m].key)),
+                Head::Group(m, g) if machines[m].layout.by_project && self.sidebar.is_collapsed(&g.key) => continue,
+                _ => {}
+            }
+            if hidden { continue; }
+            for row in list {
+                match row {
+                    ListRow::Session { block: Some(b), .. } | ListRow::External { block: b, .. } if self.sidebar.is_collapsed(b) => {}
+                    ListRow::Session { row, .. } => order.push(Target::new(row.server, &row.session.name)),
+                    ListRow::External { gid, own, pair, .. } => order.extend(self.outside_row(gid, pair, (*own != active).then_some(*own))
+                        .map(|(s, at)| Target::new(&at.unwrap_or_else(|| active.clone()), &s.name))),
+                    ListRow::Header { .. } => {}
+                }
+            }
         }
         order
     }
@@ -627,14 +675,15 @@ impl Hangar {
         self.sidebar.remote_focus.retain(|t, _| rows.contains(t));
         for t in rows { self.sidebar.remote_focus.entry(t).or_insert_with(|| cx.focus_handle().tab_stop(true)); }
         if removed_focus && appearance::get().navigation.tabs() {
-            let targets = self.tab_targets();
-            let next = self.selected_target().and_then(|selected| targets.iter().position(|t| t == &selected))
+            let targets = self.tab_stops();
+            let next = self.selected_target().and_then(|selected| { let stop = self.tab_stop_of(&selected); targets.iter().position(|t| t == &stop) })
                 .or_else(|| (!targets.is_empty()).then_some(0));
             if let Some(index) = next && let Some(focus) = self.row_focus(&targets[index]) {
                 focus.focus(window, cx);
                 self.scroll_target_tab(&targets[index]);
             } else { self.root_focus.focus(window, cx); }
         }
+        self.ensure_identities();
         self.refresh_group_ask();
         self.refresh_group_sheet(window, cx);
         self.external_pairs_changed(window, cx);
@@ -858,9 +907,9 @@ impl Hangar {
                 Write::Editor => match editor { Some(open) => open.await, None => api.act(name, &["open-editor"], None, false, 15).await },
                 Write::Delete => api.act(name, &[], None, true, 30).await,
                 Write::Rename(new, _) => api.act(name, &["rename"], Some(json!({"new": new})), false, 30).await,
-                Write::Mode(terminal) => api.act(name, &["modo-execucao"], Some(json!({"terminal": terminal})), false, 60).await,
-                Write::Reload => api.act(name, &["recarregar"], None, false, 60).await,
-                Write::Account { path, engine_account, .. } => api.act(name, &["conta"], Some(account_body(path, engine_account.as_deref())), false, 120).await,
+                Write::Mode(terminal) => api.act(name, &["modo-execucao"], Some(json!({"terminal": terminal})), false, crate::api::REOPEN_SECONDS).await,
+                Write::Reload => api.act(name, &["recarregar"], None, false, crate::api::REOPEN_SECONDS).await,
+                Write::Account { path, engine_account, .. } => api.act(name, &["conta"], Some(account_body(path, engine_account.as_deref())), false, crate::api::REOPEN_SECONDS).await,
             };
             tell.send(SidebarReply::Wrote(target, what, result)).await;
         });
@@ -1110,6 +1159,7 @@ impl Hangar {
             SidebarReply::Note(target, kind, text) => window.push_notification(git_note(&target.name, kind, text), cx),
             SidebarReply::Group(seq, reply) => self.receive_group(seq, reply, window, cx),
             SidebarReply::Sheet(reply) => self.receive_sheet(reply, window, cx),
+            SidebarReply::Identity(key, result) => self.receive_identity(key, result, window, cx),
             SidebarReply::Chained(from, seq, target, result) => {
                 // Só o diálogo que mandou este pedido recebe a resposta; fechado, ela vai à notificação.
                 let open = self.sidebar.chain.as_ref().filter(|c| c.status.borrow().sent == Some(seq));
@@ -1205,8 +1255,7 @@ impl Hangar {
                     (Write::Account { .. }, Err(error)) => Some(Notification::error(failed("sidebar_same_failed", &error))),
                     (Write::Delete, Ok(value)) => {
                         // Fechou, mas um par do grupo não foi avisado: o motivo aparece em vez de fechar mudo.
-                        value.get("warning").filter(|w| !w.is_null()).map(|w| Notification::warning(
-                            w.get("msg").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| w.to_string())))
+                        value.get("warning").filter(|w| !w.is_null()).map(|w| Notification::warning(crate::api::warning_text(w)))
                     }
                     (Write::Delete, Err(error)) => {
                         self.sidebar.deleting.remove(&target);
@@ -1224,17 +1273,18 @@ impl Hangar {
 
     /// Cabeçalho do grupo de projeto: ▾, rótulo, contagem e quantos aguardam; clicar recolhe. O `AccordionTrigger` anuncia
     /// aberto/fechado e entra no Tab com Enter e Espaço, como os disparadores das configurações.
-    pub(super) fn render_group_header(&self, group: &Group, awaiting: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// `count`: as sessões que a seção mostra, com os grupos juntados.
+    pub(super) fn render_group_header(&self, group: &Group, count: usize, awaiting: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let open = !self.sidebar.collapsed.contains(&group.key);
         let id = SharedString::from(format!("group-{}", group.key));
         let focus = window.use_keyed_state(SharedString::from(format!("{id}-focus")), cx, |_, cx| cx.focus_handle().tab_stop(true)).read(cx).clone();
         let (key, weak) = (group.key.clone(), cx.entity().downgrade());
-        AccordionTrigger::new(id).open(open).track_focus(&focus).aria_label(format!("{} · {}", group.label, group.sessions.len()))
+        AccordionTrigger::new(id).open(open).track_focus(&focus).aria_label(format!("{} · {count}", group.label))
             .flex_shrink_0().mt(px(8.)).h(px(28.)).px(px(8.)).rounded(px(8.)).border_1().border_color(transparent_black())
             .flex().items_center().gap(px(6.)).cursor_pointer().hover(|el| el.bg(theme::hover())).focus_visible(|el| el.border_color(theme::accent_focus()))
             .child(chrome::small_icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, 14., theme::faint()))
             .child(div().min_w_0().truncate().text_xs().font_weight(FontWeight::MEDIUM).text_color(theme::muted()).child(group.label.clone()))
-            .child(div().flex_shrink_0().font_family(theme::MONO).text_size(px(11.)).text_color(theme::faint()).child(group.sessions.len().to_string()))
+            .child(div().flex_shrink_0().font_family(theme::MONO).text_size(px(11.)).text_color(theme::faint()).child(count.to_string()))
             .when(awaiting > 0, |el| el.child(div().flex_shrink_0().font_family(theme::MONO).text_size(px(11.)).text_color(theme::warning())
                 .child(format!("{awaiting} {}", tr("sidebar_awaiting_short")))))
             .on_change(move |_, _, _, cx| { let _ = weak.update(cx, |this, cx| this.toggle_group(key.clone(), cx)); })
@@ -1310,7 +1360,7 @@ pub(super) fn session_menu(hangar: WeakEntity<Hangar>, server: String, session: 
         }
         let view = entity.read(cx).sidebar.menu_for(&target);
         let list = others(entity.read(cx), &target);
-        let group = entity.read(cx).group_candidates(&target);
+        let group = entity.read(cx).group_candidates(&target, cx);
         let active = entity.read(cx).is_active_key(&target.server);
         fill_menu(menu, &hangar, &target, &session, Access { invite, active }, view, list, group, window, cx)
     }
@@ -1367,7 +1417,7 @@ fn release_items(hangar: &WeakEntity<Hangar>, target: &Target, pairs: &[api::dto
 
 #[allow(clippy::too_many_arguments)]
 fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, session: &SessionInfo, access: Access, mute: Option<Mute>,
-    others: Vec<String>, group: Vec<String>, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
+    others: Vec<String>, group: Vec<(Target, String)>, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
     let item = |label: String, act: fn(&mut Hangar, Target, &mut Window, &mut Context<Hangar>)| {
         let (hangar, target) = (hangar.clone(), target.clone());
         PopupMenuItem::new(label).on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| act(this, target.clone(), window, cx)); })
@@ -1545,15 +1595,18 @@ fn fill_accounts(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, 
     if list.is_empty() { return menu.item(PopupMenuItem::new(tr("sidebar_no_accounts")).disabled(true)); }
     let returning = hangar.upgrade().is_some_and(|entity| entity.read(cx).target_session(target)
         .is_some_and(|s| s.engine.as_deref().is_some_and(|e| !e.is_empty())));
-    list.into_iter().fold(menu.max_h(px(260.)).scrollable(true), |menu, AccountTarget { path, label, pct, low, full, engine_account }| {
+    list.into_iter().fold(menu.max_h(px(260.)).scrollable(true), |menu, target_row| {
+        let disabled = target_row.unusable();
+        let AccountTarget { path, label, pct, low, full, engine_account, login } = target_row;
         let (hangar, target) = (hangar.clone(), target.clone());
         // O % da janela mais cheia ao lado do nome; esgotada não aceita a conversa, acabando aceita com aviso na confirmação.
         let name = if returning && engine_account.is_none() { tr("sidebar_return_claude_account").replace("{n}", &label) }
             else if engine_account.is_some() { format!("ChatGPT · {label}") } else { label.clone() };
         let text = match pct { Some(pct) => format!("{name} · {pct:.0}%"), None => name };
-        let text = if full { format!("{text} · {}", tr("sidebar_account_full")) } else if low { format!("{text} · {}", tr("sidebar_account_low")) } else { text };
+        let text = if login == Some(false) { format!("{text} · {}", web("conta_sem_login_rotulo")) }
+            else if full { format!("{text} · {}", tr("sidebar_account_full")) } else if low { format!("{text} · {}", tr("sidebar_account_low")) } else { text };
         let warn = pct.filter(|_| low);
-        menu.item(PopupMenuItem::new(text).disabled(full).on_click(move |_, window, cx| {
+        menu.item(PopupMenuItem::new(text).disabled(disabled).on_click(move |_, window, cx| {
             let _ = hangar.update(cx, |this, cx| match &engine_account {
                 Some(account) => this.confirm_engine_account(target.clone(), account.clone(), label.clone(), warn, window, cx),
                 None => this.confirm_account(target.clone(), path.clone(), label.clone(), warn, window, cx),
@@ -1877,6 +1930,15 @@ mod tests {
         let (generic, notice) = super::merge_account_targets(legacy.clone(), Ok(None), false).unwrap();
         assert!(generic.is_empty() && notice.is_none());
         assert!(super::merge_account_targets(legacy, Err("invalid engine response".into()), false).is_err());
+    }
+
+    /// Conta sem login fica no menu, mas não aceita a conversa; servidor antigo, sem o campo, vale como logada.
+    #[test]
+    fn account_without_login_is_disabled_and_missing_field_is_logged_in() {
+        let targets: Vec<super::AccountTarget> = serde_json::from_value(serde_json::json!([
+            {"path":"/a", "label":"a", "pct":10.0, "login":false}, {"path":"/b", "label":"b", "pct":10.0},
+            {"path":"/c", "label":"c", "pct":99.5, "full":true, "login":true}])).unwrap();
+        assert_eq!(targets.iter().map(super::AccountTarget::unusable).collect::<Vec<_>>(), [true, false, true]);
     }
 
     #[test]

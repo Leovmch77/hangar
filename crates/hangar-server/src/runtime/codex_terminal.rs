@@ -18,16 +18,17 @@ use std::path::{Path,PathBuf};
 use std::sync::{Arc,Mutex};
 use std::time::Duration;
 use tokio::sync::{Notify,mpsc,watch};
-use tokio::task::JoinHandle;
+pub use super::cano_reconnect::Attempt;
+use super::cano_reconnect::ReconnectWaits;
+#[cfg(test)]
+use super::cano_reconnect::CanoReconnect;
 
-/// Problema da sessão enquanto o socket de controle está fora; a TUI segue respondendo no terminal. Código
-/// já traduzido em todas as telas; o que aconteceu vai no detalhe.
+/// Problema da sessão quando o app-server saiu ou mudou (`Gone`): pede a pessoa. Código já traduzido em
+/// todas as telas; o que aconteceu vai no detalhe.
 pub const DISCONNECTED:&str = "runtime_falhou";
-
-/// Espera da reconexão: primeira, multiplicador e teto (segundos).
-const RECONNECT_FIRST:f64 = 1.0;
-const RECONNECT_FACTOR:f64 = 1.5;
-const RECONNECT_MAX:f64 = 10.0;
+/// O socket de controle caiu e o ator religa ao mesmo app-server: a TUI segue respondendo, então é
+/// diagnóstico (`problem_gate::diagnostic`), nunca aviso na tela.
+pub const CONTROL_LOST:&str = "codex_control_lost";
 
 #[derive(Clone,Debug,PartialEq)]
 pub struct CodexTerminalTarget {
@@ -145,16 +146,9 @@ impl Adoption {
     fn still_ours(&self) -> bool { self.cell.current().is_some_and(|(endpoint,pid)|endpoint == self.endpoint && pid == self.app_pid) }
 }
 
-pub enum Attempt {
-    Connected(WebSocketConnection),
-    /// O mesmo processo segue vivo: tenta de novo depois da espera.
-    Retry(RuntimeError),
-    /// Vínculo trocado, sessão fechada ou processo morto: acorda a vigia, que adota a vida nova ou fecha
-    /// esta; nenhum app-server é subido daqui.
-    Gone(RuntimeError),
-}
-
 /// Uma tentativa: revalida vínculo, endereço e processo antes de conectar, e o vínculo de novo depois.
+/// `Gone` (vínculo trocado, sessão fechada ou processo morto) acorda a vigia, que adota a vida nova ou
+/// fecha esta; nenhum app-server é subido daqui. Nunca `Stopped`.
 pub async fn reconnect(adoption:&Adoption) -> Attempt {
     if !adoption.still_ours() { return Attempt::Gone(RuntimeError::new("codex_adoption_changed","a sessão trocou de dono ou de app-server")); }
     if let Err(error) = loopback_endpoint(&adoption.endpoint) { return Attempt::Gone(error); }
@@ -163,34 +157,15 @@ pub async fn reconnect(adoption:&Adoption) -> Attempt {
     }
     match WebSocketConnection::connect(&adoption.endpoint).await {
         Ok(_) if !adoption.still_ours() => Attempt::Gone(RuntimeError::new("codex_adoption_changed","a sessão trocou de dono durante a reconexão")),
-        Ok(connection) => Attempt::Connected(connection),
+        Ok(connection) => Attempt::Connected(super::actor::RuntimeConnection::WebSocket(connection)),
         Err(error) => Attempt::Retry(error),
     }
 }
 
-/// Estado da reconexão do ator terminal: uma tarefa em voo, espera crescente e a época do transporte
-/// em que a tentativa nasceu. Separado da religação do cano e da retentativa da assinatura.
-#[derive(Default)]
-pub(crate) struct Reconnect {
-    pub(crate) next_at:Option<f64>,
-    pub(crate) task:Option<JoinHandle<Attempt>>,
-    pub(crate) epoch:u64,
-    wait:Option<f64>,
-}
-
-impl Reconnect {
-    /// Próxima espera: 1 s, ×1,5, até 10 s.
-    pub(crate) fn schedule(&mut self,now:f64) {
-        let wait = self.wait.map_or(RECONNECT_FIRST,|wait|(wait*RECONNECT_FACTOR).min(RECONNECT_MAX));
-        self.wait = Some(wait);
-        self.next_at = Some(now + wait);
-    }
-    pub(crate) fn connected(&mut self) { self.wait = None; self.next_at = None; }
-    /// Fechamento ou transferência: timer e tentativa saem antes de ceder a posse.
-    pub(crate) fn cancel(&mut self) {
-        self.next_at = None;
-        if let Some(task) = self.task.take() { task.abort(); }
-    }
+/// Esperas da reconexão ao app-server adotado: 1 s, ×1,5, até 10 s, com ou sem mensagem esperando.
+pub(crate) fn reconnect_waits() -> ReconnectWaits {
+    let normal:Vec<Duration> = [1.0,1.5,2.25,3.375,5.0625,7.59375,10.0].into_iter().map(Duration::from_secs_f64).collect();
+    ReconnectWaits { pending:normal.clone(),normal,..ReconnectWaits::default() }
 }
 
 /// Transporte que já caiu: escrever nele falha na hora e ele não produz eventos.
@@ -766,13 +741,13 @@ mod tests {
 
     #[test]
     fn reconnect_wait_grows_by_half_up_to_ten_seconds() {
-        let mut reconnect = Reconnect::default();
+        let mut reconnect = CanoReconnect::new(reconnect_waits());
         let mut waits = Vec::new();
-        for _ in 0..9 { reconnect.schedule(0.0); waits.push(reconnect.next_at.unwrap()); }
+        for _ in 0..9 { reconnect.schedule(0.0,false); waits.push(reconnect.next_at.unwrap()); }
         assert_eq!(&waits[..3],&[1.0,1.5,2.25]);
         assert_eq!(*waits.last().unwrap(),10.0);
         reconnect.connected();
-        reconnect.schedule(5.0);
+        reconnect.schedule(5.0,false);
         assert_eq!(reconnect.next_at,Some(6.0),"conexão boa volta à primeira espera");
     }
 

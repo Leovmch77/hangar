@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { configureApi } from './apiEnv';
 import {
   confirmImportedMachine, createMachineImportLink, discoverMachineCandidates, isLocalMachineUrl, machineImportIssue,
-  mergeImportedMachines, normalizeMachineUrl, parseMachineImportPayload, readMachineIdentity,
+  mergeImportedMachines, normalizeMachineUrl, parseMachineImportPayload, readGroupIdentity, readMachineIdentity,
 } from './machineImport';
 import type { Server } from './servers';
 
@@ -70,6 +70,14 @@ describe('confirmação e redirecionamentos', () => {
       'https://home.test/api/peers/app-list', 'https://home.test/api/peers/remote/token',
     ]);
     for (const [, init] of fetchMock.mock.calls) expect(init).not.toHaveProperty('redirect');
+  });
+
+  test('identificador de agrupamento: lido da rota; vazio é falha `vazio`, como erro de rede', async () => {
+    expect(await readGroupIdentity(machine)).toBe('confirmed-home');
+    fetchMock.mockImplementation(async () => json({ identificador: '', lan_url: '' }));
+    await expect(readGroupIdentity(machine)).rejects.toMatchObject({ name: 'vazio' });
+    fetchMock.mockImplementation(async () => new Response('', { status: 500 }));
+    await expect(readGroupIdentity(machine, new AbortController().signal)).rejects.toMatchObject({ status: 500 });
   });
 });
 

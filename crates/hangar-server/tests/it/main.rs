@@ -5,6 +5,7 @@
 //! parte. O do diário é por servidor (o Python falso de cada um), e ali os nomes de sessão podem repetir.
 
 mod common;
+mod groups_text;
 mod session_defaults;
 mod push_expo;
 mod artifacts;
@@ -16,6 +17,8 @@ mod dictation_harness;
 mod dictation_process;
 mod dictation_provider;
 mod fake;
+#[cfg(unix)]
+mod groups_support;
 #[cfg(unix)]
 mod list_support;
 mod mods_support;
@@ -102,6 +105,17 @@ pub fn write_executable(path: &std::path::Path, content: impl AsRef<[u8]>) {
     std::fs::remove_file(&source).unwrap();
 }
 
+/// Copia um executável pelo mesmo `install` à parte do `write_executable`, e pelo mesmo motivo; o Windows
+/// não tem ETXTBSY.
+pub fn copy_executable(source: &std::path::Path, path: &std::path::Path) {
+    if cfg!(windows) {
+        std::fs::copy(source, path).unwrap();
+        return;
+    }
+    let status = std::process::Command::new("install").arg("-m").arg("755").arg(source).arg(path).status().unwrap();
+    assert!(status.success(), "install não copiou {}", path.display());
+}
+
 /// Nome de um teste deste executável para o `--exact`: o caminho do módulo de `module_path!()` sem o
 /// do crate, que o libtest não mostra.
 pub fn exact_name(module: &str, test: &str) -> String {
@@ -146,9 +160,16 @@ mod costs_routes;
 mod costs_session_unit;
 mod costs_uso_unit;
 mod groups_bridge;
+mod groups_close;
+mod groups_context_cmd;
+mod groups_convert;
 mod groups_deliver;
+mod groups_federation;
+mod groups_fed_exit;
+mod groups_fed_notice;
 mod groups_legacy;
 mod groups_local;
+mod groups_outbox;
 mod groups_peers;
 mod groups_routes;
 mod groups_store;

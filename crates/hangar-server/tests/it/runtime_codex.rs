@@ -2018,7 +2018,8 @@ fn conversation_terminal_lost_socket_holds_the_queue_and_resubscribes_the_same_t
     // O turno sem recibo fica incerto, sem processo morto nem `headless_caiu`.
     assert_eq!(reply_of(&lost,"msg").map(|(d,_)|d),Some(Disposition::Unknown));
     let view = engine.view();
-    assert_eq!(view["problema"],hangar_server::runtime::codex_terminal::DISCONNECTED);
+    // A TUI segue respondendo: código de diagnóstico, que o portão tira da tela.
+    assert_eq!(view["problema"],hangar_server::runtime::codex_terminal::CONTROL_LOST);
     assert_ne!(view["state"],"dead");
     assert_eq!(view["headless"],false);
     let control = engine.control_view();
@@ -2050,6 +2051,22 @@ fn conversation_terminal_lost_socket_holds_the_queue_and_resubscribes_the_same_t
     assert_eq!(engine.view()["state"],"awaiting_input");
     line(&mut engine,json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"","status":"completed"}}}),16.0);
     assert_ne!(engine.view()["state"],"awaiting_input");
+}
+
+/// Limite de uso na tela e o controle cai: o diagnóstico da queda não tapa o bloqueio, que o portão mostraria.
+#[test]
+fn conversation_terminal_control_lost_keeps_the_usage_limit_on_screen() {
+    use hangar_server::runtime::codex_terminal::CONTROL_LOST;
+    let mut engine = subscribed_terminal();
+    engine.set_problem("codex_limite_uso",Some("volta às 14:00".into()));
+    engine.transport_lost("a conexão de controle caiu",&Default::default());
+    assert_eq!(engine.view()["problema"],"codex_limite_uso");
+    engine.set_problem(CONTROL_LOST,Some("reconectando".into()));
+    assert_eq!((engine.view()["problema"].as_str(),engine.view()["problema_detalhe"].as_str()),(Some("codex_limite_uso"),Some("volta às 14:00")));
+    // Sem código de tela, a queda entra (e o portão a leva ao diário).
+    let mut calm = subscribed_terminal();
+    calm.transport_lost("caiu",&Default::default());
+    assert_eq!(calm.view()["problema"],CONTROL_LOST);
 }
 
 #[test]

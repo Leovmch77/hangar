@@ -354,6 +354,19 @@ async def test_mcp_keeps_destination_hangar_entry_and_login(pair, monkeypatch):
         assert (Path(bia.home) / ".claude.json").stat().st_mode & 0o777 == 0o600
 
 
+async def test_mcp_never_carries_computer_control_entry(pair, monkeypatch):
+    ana, bia = pair
+    data = json.loads((Path(ana.home) / ".claude.json").read_text())
+    data["mcpServers"]["hangar-computer-control"] = {
+        "command": f"{ana.home}/.hangar/computer-control/hangar-computer-control",
+        "env": {"HCC_AGENT_CONFIG": f"{ana.home}/.hangar/computer-control/targets/linux-agent.json"}}
+    (Path(ana.home) / ".claude.json").write_text(json.dumps(data))
+    await _apply(_send(monkeypatch, ana, bia, ["claude_mcp"]), ["claude_mcp"], bia)
+    servers = json.loads((Path(bia.home) / ".claude.json").read_text())["mcpServers"]
+    assert "grafana" in servers
+    assert "hangar-computer-control" not in servers
+
+
 async def test_engines_file_is_private(pair, monkeypatch):
     ana, bia = pair
     await _apply(_send(monkeypatch, ana, bia, ["engines"]), ["engines"], bia)

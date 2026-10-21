@@ -330,7 +330,11 @@ texto, mas o backend a enviaria para o endpoint padrão do LLM.
 
 
   (`app/pair_texto.py` + `hooks/pair_hook.py` + `api._avisar_saida` + `registry._varrer_pares_mortos`,
-  02/09/2026). Decisões que fecham furos medidos na análise daquele dia:
+  02/09/2026). Os nomes Python abaixo são a origem das regras: desde 20/10/2026 o texto mora em
+  `groups/text.rs`, o hook é o `hangar-server pair-context`, a varredura é `groups/sweep.rs` e, em
+  grupo entre máquinas, `pulados` lista quem ficou sem o aviso
+  ([grupo entre máquinas](#grupo-entre-máquinas-do-dono-uma-dona-um-gid-e-fila-em-disco-20102026)).
+  Decisões que fecham furos medidos na análise daquele dia:
   - **Protocolo reinjetado no `SessionStart`** (`startup|resume|clear|compact`) a partir do sidecar
     `.hangar-pair/<nome>.json`. O prompt do `--pair` sumia no `/clear` e na compactação; o badge
     ficava e o modelo esquecia os pares. O `pair_dir` vai por argv porque é o do BACKEND — sessão em
@@ -2009,6 +2013,10 @@ O `follow` do Python fica com Pi, omp, Kimi e o modo `python`.
 
 ## Observação terminal Rust: erro visível, sem captura Python
 
+(20/10/2026: `terminal_observacao_falhou` e `state_facts_unavailable` continuam sendo produzidos,
+mas o portão de saída os leva ao diário em vez da tela; ver
+[aviso na tela só para ação que falhou](#aviso-na-tela-só-para-ação-que-falhou-ou-bloqueio-real-20102026).)
+
 (Parte 4, Tasks 5 e 7, 06/10/2026.) Com o Rust de pé, quem lê a captura de Claude com terminal é o
 `Monitor` do Rust, em processo (`PoolCapture` em `state/monitor.rs`, cliente `-C` do
 `TerminalPool`; no Windows a captura avulsa do psmux em `state/capture.rs`), e a falha dele sai com o mesmo `problema=terminal_observacao_falhou` sobre o último
@@ -2303,6 +2311,90 @@ segue como antes. Desenho: [desenho.md](../migracao-rust/parte6-grupos/desenho.m
 - **Contrato interno 40** (`RUST_SERVER_PROTOCOL` e `INTERNAL_PROTOCOL`; o 39 é o da 5B, juntada
   antes): a saúde ganhou `groups`, e o filho recebe `HANGAR_SERVER_ID`, `HANGAR_PEERS_FILE` e
   `HANGAR_PAIR_ARCHIVE`.
+- **Saída do Python (20/10/2026, branch `feat/groups-across-machines`).** As escritas do
+  `pair.py`, o `GroupsOwnedByRust`, o `pair_texto.py` e o `pair_hook.py` saíram (o mecanismo de
+  dois escritores foi para o [superado](superado.md#escritas-de-grupo-no-python-ao-lado-do-rust));
+  os três primeiros itens acima descrevem essa fase.
+  O `pair.py` só lê o arquivo de grupo para a lista do modo `python`, o convidado, o `orq` e o
+  bastão; o instalador do hook escreve o comando `hangar-server pair-context`. No modo `python`
+  operação de grupo responde 503 `groups_need_rust_server`, sem código antigo de reserva; fechar
+  sessão em grupo nesse modo ainda fecha, com o mesmo código como aviso e `grupos.saida_sem_rust`
+  no diário, e renomear sessão em grupo é recusado. Pedido de grupo pela 8768 com o Rust
+  reiniciando é erro na hora (503 `groups_bridge_off`), sem segurar o pedido no Python.
+  O `orq` manda junto o que o Rust precisa (`orq/grupo`, `group.leave`), sem a volta
+  Python → Rust → Python. Os casos em que o Rust já diferia do Python ficaram como no Rust: corpo
+  ilegível é 422 `erro_corpo_invalido`; contrato do grupo que perde a fusão com UTF-8 inválido vai
+  ao diário e a entrada segue; renomear que falha no meio é desfeito; falha ao dissolver um `orq`
+  sozinho é registrada e a varredura segue.
+
+## Grupo entre máquinas do dono: uma dona, um `gid` e fila em disco (20/10/2026)
+
+(Branch `feat/groups-across-machines`, plano `docs/migracao-rust/parte6-grupos/plano-federacao.md`.)
+Antes, parear com `servidor::sessao` fazia um par 1:1 que não crescia, e `--group` era só local
+([superado](superado.md#par-entre-máquinas-só-11)). Agora um grupo junta N sessões em M máquinas do
+`peers.json` do dono.
+
+- **Uma dona por grupo.** Membro = (máquina, nome); a dona é a máquina que criou o grupo e só ela
+  grava o registro (`.hangar-pair/groups/<gid>.json`: versão, tarefa, membros). As outras guardam
+  só os sidecars dos seus membros, com `fed: {owner, local, version}`. Por isso `a` em casa e `a`
+  em lab são dois membros, e o mesmo `gid` vale em todas. Fusão de grupos de donas diferentes é
+  409 `erro_grupo_fusao_entre_donos`: juntar dois registros exigiria as duas donas concordarem.
+- **Membro de fora (sessão de outra pessoa) não entra no registro.** O token do par vale numa
+  máquina só: as outras gravariam um endereço que não alcançam nem desfazem. O registro leva só a
+  lista informativa `outside`; o acesso dele continua só nas sessões da máquina do par. Aviso de
+  grupo chega a ele uma vez, com o mesmo `notice` gerado na dona, e o dele sobe à dona como
+  `[de fora: alias::x via <máquina>]` sem voltar a sair a outro par de fora. Prova:
+  `outside_member_access_stays_on_its_machine`, `notice_reaches_outside_once`.
+- **Fila em disco antes da rede.** `groups/outbox.json`, só do Rust: o item vai ao disco no mesmo
+  passo do registro, sob o lock do grupo e sem rede; um trabalhador por máquina de destino, em
+  ordem, que só existe com item. Espera 2 s, 5 s, 30 s, 1, 2, 4, 5, 10 e 30 min (a escada de
+  "servidor que não responde"). Tenta de novo só em rede, 503 `groups_need_rust_server` (máquina
+  em modo `python` volta), 409 `busy`, 429, 401, 408 e máquina fora do `peers.json` (com
+  `grupos.peer_desconhecido` no diário); outro 4xx com código é recusa e sai da fila. Versão antiga
+  só por sinal específico (404 sem `code` em `/api/groups/*`, ou `protocol` ausente na resposta):
+  404 com código nunca vira versão antiga.
+- **Prazos encaixados.** A dona espera cada máquina 12 s na entrada e 5 s no aviso (cada máquina
+  espera as sessões dela 3/5 disso); quem pediu à dona espera 20 s. Com o prazo de dentro maior,
+  quem pediu desistia antes e relatava o contrário do que a dona tinha feito.
+- **Entrada parcial é dita, não escondida.** Quem não
+  confirma sai do registro e a resposta leva `erro_grupo_membro_nao_confirmado`; nenhum confirmado
+  é 502 e o grupo volta ao que era. Envio atrasado, repetido ou fora de ordem não cria sidecar
+  fora do `joining` nem traz de volta quem saiu. Prova: `join_partial_when_one_server_is_down`,
+  `push_never_creates_sidecar_outside_joining`, `late_push_does_not_resurrect_pending_leave`.
+- **Sair nunca depende da dona.** O sidecar sai na hora e o `Leave` (ou `Rename`) espera na fila.
+  Com um só membro próprio sobrando no registro o grupo dissolve e a máquina que ficou mantém um
+  grupo local com o mesmo `gid`. Limite aceito: dona sem membro próprio continua dona enquanto
+  houver membros em duas máquinas.
+- **Aviso de grupo passa pela dona e não espera ninguém.** A dona aplica o limite de 5 por minuto
+  por `gid` (limite aceito: aviso vindo de fora conta) e entrega; máquina que não respondeu volta em
+  `pulados`. Dona fora: os membros daqui recebem e a resposta avisa `erro_grupo_dono_indisponivel`.
+- **Contrato só na dona.** `GET|PUT /api/sessions/{nome}/pair/contract` vale em grupo desta máquina
+  e entre máquinas; de outra máquina repassa à dona. O `GET` traz `content`, `mtime` e `owner`
+  (`path` só na dona). `mtime` é texto com nanossegundos;
+  `PUT` com `mtime` diferente é 409 `erro_contrato_mudou`, e com `mtime` nulo só cria. Dona fora =
+  503, sem réplica. CLI: `hangar-send --contrato
+  [--gravar <arquivo> --mtime <valor>]`; MCP: tool `contract`.
+- **Par 1:1 antigo vira grupo sozinho.** Dona = a máquina de menor `server_id` (ordem de bytes) e
+  `gid` derivado do par ordenado `srvA::a`/`srvB::b`: os dois lados chegam ao mesmo grupo sem
+  conversar. Máquina ainda antiga segue no 1:1 (`legacy.rs`) até atualizar. Prova:
+  `both_sides_convert_to_the_same_group`.
+- **Identidade conferida antes de gravar.** Chave do `peers.json` diferente do `server_id` que a
+  outra máquina responde é recusada citando os dois (`key_mismatch_is_refused_before_any_write`);
+  `CP_SERVER_ID` trocado com grupo entre máquinas vivo é recusado na subida
+  (`erro_grupo_identificador_trocado`), porque as outras guardam o nome velho.
+- **Limites registrados.** Só o Claude reinjeta o protocolo depois de `/clear` ou compactação
+  (Codex, Pi, omp e Kimi perdem). A sugestão de tarefa do grupo (`/api/pair/task-suggestion`,
+  Python) só lê conversas desta máquina.
+- **Pela 8768, recado a sessão do Python volta na resposta.** `group.leave` da ponte e as rotas
+  `/api/groups/*` repassadas da porta do Connect rodam sob o contexto da ponte: recado a Pi, omp
+  ou Kimi não chama o `/input` do Python dentro do pedido dele. Na saída vem em `deliveries`; nas
+  rotas entre máquinas, em `hangar_deliveries` no corpo, que o Python tira da resposta e entrega
+  depois dela (falha vai ao diário como `grupos.entrega_adiada_falhou`). Limites aceitos: nessas
+  rotas o recado adiado conta como entregue em `failed`/`pulados`; o `orq` (`is-orchestrator`,
+  fase, promoção) ainda é perguntado ao Python dentro do pedido, porque a outra máquina não manda
+  esses fatos; e o protocolo ao membro novo e o aviso de saída que saem depois da resposta
+  (`tell_newcomers`, `local_apply`, `relay_outside`) chamam o Python direto, fora do pedido.
+  Prova: `bridged_leave_never_calls_python`, `connect_forwarded_deliver_defers_python_sessions`.
 
 ## Organização opcional do ditado no Rust
 
@@ -2897,3 +2989,65 @@ provedor, grupos e recados. Faltavam quatro coisas, que entraram assim.
 - **A linha "N subagentes" é calculada em cada cliente, não é mod.** Mod só existe em sessão Claude
   (`AbovePrompt` do plugin); o pai pode ser Codex, Pi ou Kimi. A lista já traz estado, provedor,
   modelo e `last_reply` de cada filha (`SessionRow.linked_by`).
+
+## Aviso na tela só para ação que falhou ou bloqueio real (20/10/2026)
+
+(Branch `fix/session-recovery-and-alerts`, plano
+[`2026-10-20-session-recovery-and-alerts.md`](../superpowers/plans/2026-10-20-session-recovery-and-alerts.md).
+A religação ao mesmo cano, que tirou da tela a queda da ligação, está em
+[harnesses.md](harnesses.md#religação-ao-mesmo-cano-vivo-e-avisos-fora-da-tela-20102026).)
+
+**O que ele viu.** "Estado talvez velho: o servidor não respondeu o que o plugin da sessão disse —
+runtime_binding" numa sessão de outra máquina, que sumiu ao mandar mensagem; "lista desatualizada"
+laranja que aparece e some; avisos que piscam ao enviar.
+
+**Critério (decisão 5 do Jefferson).** A tela mostra erro só quando uma ação da pessoa falhou,
+dizendo por quê (troca de sessão, mensagem não entregue), ou quando há bloqueio real que pede a
+pessoa (processo morreu de fato, login expirado, cota). Falha interna de acompanhamento, dado velho
+ou condição que some sozinha ou com o uso normal vai ao log e ao diário de uso, com detalhe para
+investigar, e não vira faixa, anel ou linha laranja. Não é esconder falha: a regra "leitura que não
+vem é problema, nunca estado inventado" continua, só o destino do registro muda. Também não é
+apagar avisos em bloco nem trocar a frase.
+
+**Onde.** Uma classificação, `problem_gate::diagnostic(code, state)`, e os dois portões de saída
+que já existiam: `gate_problem` (`side.rs`, conversa) e `gate_problems` (`list/bridge.rs`, lista).
+O código de diagnóstico sai da saída na hora, sem o prazo de 3 s (`HOLD`), fica no estado interno
+(a lista ainda usa `list_capture_failed` dentro do servidor) e vai ao diário como
+`rust.problem_hidden` (uma vez por minuto por sessão e código) mais `tracing::warn` com o detalhe,
+porque o diário não aceita texto livre. O `Shown` da lista nunca guarda diagnóstico. Dois ajustes
+nos produtores, sem os quais o filtro apagaria aviso de tela: no `Monitor` e na lista, código de
+tela vence diagnóstico (antes, fatos indisponíveis tapavam um `terminal_input_*`); e o
+`runtime_falhou` deixou de embrulhar falhas de acompanhamento, que ganharam código próprio na
+origem. Cada causa de `list_error` vai ao diário (`rust.list_failed`). O modo `python` não mudou e
+segue publicando os códigos antigos.
+
+**Classificação final** (conferida em `problem_gate.rs`):
+
+| Destino | Códigos |
+|---|---|
+| Diário, fora da tela | `state_facts_unavailable` (inclui o detalhe `runtime_binding` do "Estado talvez velho"), `terminal_observacao_falhou`, `permission_observe_failed`, `list_facts_unavailable`, `list_capture_failed`, `list_runtime_unavailable`, `list_runtime_absent`, `list_orq_unavailable`, `codex_versao_nao_conferida`, `codex_sem_conexao`, `state_feed_binding_unavailable`, `runtime_absent`, `state_feed_invalid`, `codex_control_lost`, `cano_reconnect_stopped`, `cano_protocol_invalid`, `claude_sidecar_absent`; `interacao_indisponivel` fora de `awaiting_input` |
+| Tela | `headless_processo_caiu`, `headless_caiu`, `headless_nao_subiu`, `headless_sem_login`, `headless_sem_resposta`, `headless_turno_erro`, `codex_sem_login`, `codex_hooks_nao_aprovados`, `codex_limite_uso`, `codex_headless_nao_subiu`, `limit_switch_no_room`, `limit_switch_failed`, `limit_switch_no_target`, `codex_conversa_nao_abriu`, `codex_abertura_falhou`, `codex_prompt_bloqueado`, `codex_turno_cortado`, `terminal_clear_not_applied`, `terminal_input_*`, `runtime_falhou` (app-server morto e demais origens, como `queue_io`), `codex_esforco_nao_aplicado`, `headless_delivery_stalled`; `interacao_indisponivel` em `awaiting_input` |
+| Evento `list_error` | continua emitido; o cliente só o desenha com a lista vazia ("Sem resposta de {servidores}"). Com linhas na tela, nativo não mostra "Lista desatualizada" e PWA/Expo não marcam o servidor com erro; o PWA e o Expo registram no diário |
+
+`codex_esforco_nao_aplicado` fica na tela porque a escolha de esforço da pessoa foi recusada e não
+volta sozinha. `headless_delivery_stalled` é novo: mensagem da pessoa esperando há mais de 60 s com
+o cano vivo e sem conexão; os três clientes o mostram na mensagem presa com Reabrir. Com a
+queda da ligação tratada como religação, `runtime_falhou` + `cano_closed` com o cano vivo deixou de
+existir; com o cano morto virou `headless_processo_caiu`.
+
+**Perguntas fechadas por ele.** P1: `interacao_indisponivel` vai à tela só com a linha em
+`awaiting_input`, porque só ali a pessoa precisa responder; no resto, diário. P2:
+`codex_sem_conexao` vai ao diário (a faixa com Reiniciar saiu). P3: `limit_switch_no_target` fica
+na tela.
+
+**Clientes.** Nenhum desenha estado "reconectando". O nativo, na tela antes da conversa, mostra a
+frase traduzida do problema, nunca o código cru.
+
+**Fechamento pelo Connect.** O `DELETE` de Claude que chega pela 8768 deixou de fechar pelo nome no
+Python (que apagava o sidecar e matava o cano com o ator do Rust aberto, o caso `ipad-prova`) e vai
+ao Rust por `POST /__hangar_server/claude/<nome>/close`, com cliente, pedido e origem de quem pediu
+para o diário. A saída do grupo desse fechamento fica no Python, que lê a fase do `orq` antes, para
+o Rust não perguntar de volta numa chamada dele. O Reabrir de Claude pela 8768 vai a
+`POST /__hangar_server/claude/<nome>/recarregar`. 421 segue no Python; Pi, omp e Kimi fecham lá.
+Contrato interno 85 → 86 depois de juntar a `main`, que já estava em 85 (`RUST_SERVER_PROTOCOL` e
+`INTERNAL_PROTOCOL`).

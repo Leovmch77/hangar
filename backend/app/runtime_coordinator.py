@@ -68,15 +68,16 @@ def rust_codex_terminal(name, route, method="POST", body=b""):
     return _rust_bridge("codex", name, route, method, body)
 
 
-def rust_claude(name, route, method="POST", body=b"", timeout=90):
+def rust_claude(name, route, method="POST", body=b"", timeout=90, headers=None):
     """O mesmo repasse para a pergunta do Claude que entra pelo convite ou pelo Connect. Com o Rust de pé
-    ou esperado, ponte fora é falha com código (503), nunca o Python respondendo; `None` só no 421."""
+    ou esperado, ponte fora é falha com código (503), nunca o Python respondendo; `None` só no 421.
+    `headers`: os de quem pediu (cliente, pedido, origem), para o diário do Rust."""
     if _current is None or _current.mode == "python":
         return None
-    return _rust_bridge("claude", name, route, method, body, timeout)
+    return _rust_bridge("claude", name, route, method, body, timeout, headers)
 
 
-def _rust_bridge(provider, name, route, method, body, timeout=90):
+def _rust_bridge(provider, name, route, method, body, timeout=90, headers=None):
     from app import list_bridge
     import http.client, urllib.parse
     endpoint = list_bridge.endpoint()
@@ -85,7 +86,7 @@ def _rust_bridge(provider, name, route, method, body, timeout=90):
         conn = http.client.HTTPConnection(endpoint[0], timeout=timeout)
         try:
             conn.request(method, f"/__hangar_server/{provider}/{urllib.parse.quote(name, safe='')}/{route}", body=body or None,
-                         headers={"content-type": "application/json", "x-hangar-internal": endpoint[1]})
+                         headers={**(headers or {}), "content-type": "application/json", "x-hangar-internal": endpoint[1]})
             sent = True
             response = conn.getresponse()
             status, raw = response.status, response.read()

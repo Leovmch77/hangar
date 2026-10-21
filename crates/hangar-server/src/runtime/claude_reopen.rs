@@ -33,9 +33,8 @@ fn busy(code:&'static str) -> RuntimeError { RuntimeError::new(code,busy_message
 const EFFORTS:[&str;5] = ["low","medium","high","xhigh","max"];
 /// Quanto a árvore do processo antigo tem para sair antes de a conversa ganhar outro dono.
 const EXIT_WAIT:Duration = Duration::from_secs(15);
-/// `--resume` de conversa longa demora a mostrar o prompt.
-const TERMINAL_WAIT:Duration = Duration::from_secs(60);
-const HEADLESS_WAIT:Duration = Duration::from_secs(10);
+/// Quanto se espera o Claude reaberto subir. Máquina carregada leva minutos; passado isso, ele travou.
+pub(crate) const STARTUP_WAIT:Duration = Duration::from_secs(300);
 /// A vida nova que falhou e não saiu: nada volta por cima dela.
 const NEW_ALIVE:&str = "reopen_new_alive";
 
@@ -55,6 +54,10 @@ enum Life {
 /// A sessão Claude como está: o spec dela (gravado ⊕ observado), a conversa, a chave, a geração da fila
 /// e a base fora do plano.
 struct Current { spec:SessionSpec, sid:String, generation:u64, life:Life, previous_non_plan:Option<String>, settings:Option<Value> }
+
+/// Sessão ocupada (subindo, esperando resposta, trabalhando, fila pendente) diante do `claude_current`.
+#[derive(Clone,Copy,PartialEq,Eq)]
+enum BusyCheck { Skip, Refuse, RefuseUnlessStalled }
 
 /// O que a vida nova precisa, montado antes de encerrar a antiga.
 enum Start { Terminal(Box<PaneSpec>,TerminalEnv), Headless(Value) }
@@ -342,10 +345,12 @@ fn spec_of(procs:&dyn ProcessView,pid:i64,key:&str,name:&str,cwd:String,created:
 /// A marca da troca de conta em curso; sai quando a reabertura termina, de qualquer jeito.
 struct SwitchMark(PathBuf);
 impl SwitchMark {
-    fn write(home:&std::path::Path,next:&SessionSpec) -> Result<Self,RuntimeError> {
+    fn write(home:&std::path::Path,next:&SessionSpec) -> Result<Option<Self>,RuntimeError> {
+        // Sessão adotada do terminal não tem registro: a subida não teria o que acertar.
+        if crate::session_open::record::path(home,&next.key).is_err() {return Ok(None);}
         let unmarked=|_|refused("reopen_switch_mark","a troca não pôde ser marcada; nada foi reaberto");
         crate::session_open::record::write_switching(home,next).map_err(unmarked)?;
-        crate::session_open::record::switching_path(home,&next.key).map(SwitchMark).map_err(unmarked)
+        crate::session_open::record::switching_path(home,&next.key).map(|path|Some(SwitchMark(path))).map_err(unmarked)
     }
 }
 impl Drop for SwitchMark {
@@ -411,13 +416,13 @@ impl RuntimeRegistry {
             Ok(Some(_))=>{},
             Ok(None)=>if let Err(error)=self.watcher_ref()?.adopt_claude(self,name).await? {return Some(Err(error));},
         }
-        Some(self.claude_current(name,false,false).await.map(|current|current.spec))
+        Some(self.claude_current(name,BusyCheck::Skip,false).await.map(|current|current.spec))
     }
 
     /// O que o fork do `/btw` precisa da sessão Claude com terminal `name`, nas chaves do sidecar sem
     /// terminal: a conversa de agora do pane, a pasta, a conta, o modelo e o motor.
     pub async fn claude_fork_meta(&self,name:&str) -> Result<Value,RuntimeError> {
-        let current=self.claude_current(name,false,false).await?;
+        let current=self.claude_current(name,BusyCheck::Skip,false).await?;
         let Life::Terminal { target }=&current.life else { return Err(refused("runtime_provider","a sessão não tem terminal")) };
         let spec=&current.spec;
         // A pasta do processo vivo, não a do spec: é nela que a CLI gravou a conversa.
@@ -493,12 +498,12 @@ impl RuntimeRegistry {
     pub async fn claude_resume_spec(&self,name:&str) -> Option<Result<SessionSpec,RuntimeError>> {
         match self.claude_sidecar(name).await {
             Err(error)=>return Some(Err(error)),
-            Ok(Some(_))=>return Some(self.claude_current(name,false,false).await.map(|current|current.spec)),
+            Ok(Some(_))=>return Some(self.claude_current(name,BusyCheck::Skip,false).await.map(|current|current.spec)),
             Ok(None)=>{},
         }
         let watcher=self.watcher_ref()?;
         match watcher.adopt_claude(self,name).await {
-            Some(Ok(()))=>Some(self.claude_current(name,false,false).await.map(|current|current.spec)),
+            Some(Ok(()))=>Some(self.claude_current(name,BusyCheck::Skip,false).await.map(|current|current.spec)),
             // Sem conversa provada é o caso do `/resume`: a sessão aberta sem id.
             Some(Err(error)) if error.code!="claude_terminal_conversation_unproved"=>Some(Err(error)),
             _=>match watcher.bare_claude(name).await {
@@ -523,7 +528,8 @@ impl RuntimeRegistry {
         if change.reason==crate::session_open::ChangeReason::ModeSwitch && change.surface==Some(now) {
             return Ok(Reopened { spec:None,changed:false,warnings:Vec::new() });
         }
-        let mut current=self.claude_current(name,true,resume.is_some()).await.map_err(ReopenFailure::refused)?;
+        let check=if change.reason==crate::session_open::ChangeReason::Reload {BusyCheck::RefuseUnlessStalled} else {BusyCheck::Refuse};
+        let mut current=self.claude_current(name,check,resume.is_some()).await.map_err(ReopenFailure::refused)?;
         // Outra conversa leva as escolhas de plugins e skills guardadas dela, não as do processo de agora.
         if let Some(sid)=resume.filter(|sid|*sid!=current.sid) {
             let (home,sid)=(self.codex_environment().home,sid.to_owned());
@@ -546,7 +552,7 @@ impl RuntimeRegistry {
         // A conversa que muda de conta fica marcada até a vida nova estar gravada: o Rust que cair no meio
         // sobe pela conta em que ela estiver (`settle_switches`).
         let _switching=match between {
-            Some(_)=>Some(SwitchMark::write(&self.codex_environment().home,&next).map_err(ReopenFailure::refused)?),
+            Some(_)=>SwitchMark::write(&self.codex_environment().home,&next).map_err(ReopenFailure::refused)?,
             None=>None,
         };
         match self.stop_claude(name,&current,next.surface).await {
@@ -597,8 +603,8 @@ impl RuntimeRegistry {
     }
 
     /// A sessão, o spec dela e se ela está parada. Ocupada recusa com o motivo, antes de qualquer efeito.
-    async fn claude_current(&self,name:&str,checks:bool,bare:bool) -> Result<Current,RuntimeError> {
-        let env=self.codex_environment();
+    async fn claude_current(&self,name:&str,check:BusyCheck,bare:bool) -> Result<Current,RuntimeError> {
+        let (env,checks)=(self.codex_environment(),check!=BusyCheck::Skip);
         if let Some(meta)=self.claude_sidecar(name).await? {
             let mut spec=crate::session_open::record::claude_live(&env.home,&meta,name).map_err(|e|refused("launch_meta",&format!("registro da sessão ilegível: {e}")))?;
             let sid=meta["session_id"].as_str().filter(|s|!s.is_empty()).ok_or_else(||refused("lifecycle_conversation","sessão sem conversa"))?.to_owned();
@@ -607,10 +613,15 @@ impl RuntimeRegistry {
                 Some((generation,view))=>(generation,Some(view)),
                 None=>(self.queue_generation(&spec.key).await?,None),
             };
+            // Reabrir com a entrega parada (aviso do próprio ator) é a saída da mensagem presa: o turno, a
+            // subida e o cartão congelados na queda (inalcançáveis com o cano surdo) saem com a vida velha, e a
+            // fila vai para a nova, que entrega o que estiver esperando.
+            let stalled=check==BusyCheck::RefuseUnlessStalled && view.as_ref().is_some_and(|view|view["public_state"]["problema"]==super::actor::DELIVERY_STALLED);
+            let checks_busy=checks && !stalled;
             if let Some(view)=&view {
-                if checks && view["alive"]==true && view["initialized"]!=true {return Err(busy("erro_sessao_iniciando"));}
-                if checks && (!view["question"].is_null() || view["pending"].as_array().is_some_and(|p|!p.is_empty())) {return Err(busy("erro_sessao_esperando_resposta"));}
-                if checks && view["in_progress"]==true {return Err(busy("erro_sessao_trabalhando"));}
+                if checks_busy && view["alive"]==true && view["initialized"]!=true {return Err(busy("erro_sessao_iniciando"));}
+                if checks_busy && (!view["question"].is_null() || view["pending"].as_array().is_some_and(|p|!p.is_empty())) {return Err(busy("erro_sessao_esperando_resposta"));}
+                if checks_busy && view["in_progress"]==true {return Err(busy("erro_sessao_trabalhando"));}
                 // O modo e as escolhas que a CLI mudou sozinha valem; com motor, o do sidecar.
                 if let Some(mode)=view["permission_mode"].as_str().and_then(PermissionMode::claude) {spec.permission_mode=Some(mode);}
                 if !matches!(spec.account,Account::Engine{..}) {
@@ -619,7 +630,7 @@ impl RuntimeRegistry {
                 }
             }
             // Na troca por limite a fila foi segurada para ir com a conversa à conta nova.
-            if checks && !self.limit_held(name) && self.queue_pending(&spec.key).await {return Err(busy("erro_fila_pendente"));}
+            if checks_busy && !self.limit_held(name) && self.queue_pending(&spec.key).await {return Err(busy("erro_fila_pendente"));}
             if spec.permission_mode.is_none() {
                 spec.permission_mode=Some(super::claude_launch::account_mode(&env,spec.account.config_dir())?);
             }
@@ -820,8 +831,8 @@ impl RuntimeRegistry {
                     self.drop_failed_terminal(name).await?;
                     return Err(refused("reopen_terminal_spawn",&format!("o terminal não abriu: {}",error.stderr)));
                 }
-                let deadline=tokio::time::Instant::now()+TERMINAL_WAIT;
                 let io=crate::terminal_input::ProcessIo::default();
+                let deadline=tokio::time::Instant::now()+STARTUP_WAIT;
                 loop {
                     if let Some(Ok(()))=watcher.adopt_claude(self,name).await
                         && let Some((target,_))=self.claude_terminal_entry(name).await
@@ -837,7 +848,7 @@ impl RuntimeRegistry {
                     }
                     if tokio::time::Instant::now()>=deadline {
                         self.drop_failed_terminal(name).await?;
-                        return Err(refused("relaunch_confirmation","o Claude não voltou no terminal na conversa e no modo pedidos"));
+                        return Err(refused("relaunch_confirmation","o Claude não voltou no terminal na conversa e no modo pedidos em 5 minutos"));
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
@@ -853,20 +864,20 @@ impl RuntimeRegistry {
                     self.drop_failed_headless(name,&next.key).await?;
                     return Err(error);
                 }
-                let deadline=tokio::time::Instant::now()+HEADLESS_WAIT;
-                loop {
+                let deadline=tokio::time::Instant::now()+STARTUP_WAIT;
+                let why=loop {
                     if let Some((_,view))=self.claude_headless_view(name).await {
-                        if view["alive"]==false {break;}
+                        if view["alive"]==false {break "o Claude sem terminal saiu antes de subir";}
                         if view["initialized"]==true && view["conversation"]==sid {
                             if view["permission_mode"]==mode {return Ok(());}
-                            break;
+                            break "o Claude sem terminal subiu num modo diferente do pedido";
                         }
                     }
-                    if tokio::time::Instant::now()>=deadline {break;}
+                    if tokio::time::Instant::now()>=deadline {break "o Claude sem terminal não subiu em 5 minutos; travou";}
                     tokio::time::sleep(Duration::from_millis(50)).await;
-                }
+                };
                 self.drop_failed_headless(name,&next.key).await?;
-                Err(refused("relaunch_initialize","o Claude sem terminal não subiu na conversa e no modo pedidos"))
+                Err(refused("relaunch_initialize",why))
             },
         }
     }
@@ -1017,6 +1028,25 @@ impl RuntimeRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sessão adotada do terminal (`terminal_<hex>`) não tem registro: a troca de conta segue sem marca;
+    /// a do lançador fica marcada até a vida nova ser gravada.
+    #[test]
+    fn only_a_recorded_session_is_marked_while_switching_accounts() {
+        let home = tempfile::tempdir().unwrap();
+        let spec = |key:&str| SessionSpec { version:crate::session_open::SPEC_VERSION,key:key.into(),name:"s".into(),cwd:"/w".into(),
+            provider:crate::session_open::AgentProvider::Claude,surface:Surface::Terminal,account:Account::Default,
+            account_source:crate::session_open::AccountSource::Explicit,model:None,effort:None,service_tier:None,permission_mode:None,
+            subagent_model:None,customizations:None,jev:false,read_only:false,worktree:None,creator:None,created_at:0.0,conversation:None };
+        let adopted = format!("terminal_{}", "e6".repeat(32));
+        assert!(SwitchMark::write(home.path(),&spec(&adopted)).unwrap().is_none());
+        let key = "0123456789abcdef0123456789abcdef";
+        let mark = SwitchMark::write(home.path(),&spec(key)).unwrap().expect("sessão do lançador marcada");
+        let path = crate::session_open::record::switching_path(home.path(),key).unwrap();
+        assert!(path.is_file());
+        drop(mark);
+        assert!(!path.exists());
+    }
 
     /// O Python repassa o ambiente com o nome em maiúsculas (`PROGRAMFILES`); no Windows o nome não tem caixa.
     #[cfg(windows)]

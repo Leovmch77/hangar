@@ -132,11 +132,16 @@ async fn catalog_is_the_python_one_with_the_whole_open_request() {
     let mut mcp = Mcp::open(s.addr, &[]).await;
     let listed = mcp.request("tools/list", json!({})).await["result"]["tools"].clone();
     // Tools que nasceram depois do Python (ele não tem mais MCP) ficam fora da comparação.
-    let listed: Vec<Value> = listed.as_array().unwrap().iter().filter(|t| t["name"] != "interrupt").cloned().collect();
+    let listed: Vec<Value> = listed.as_array().unwrap().iter().filter(|t| !matches!(t["name"].as_str(), Some("interrupt" | "contract"))).cloned().collect();
     let python: Vec<Value> = serde_json::from_str(PYTHON_CATALOG).unwrap();
     let names = |tools: &[Value]| tools.iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
     assert_eq!(names(&listed), names(&python), "as 14 tools do Python, na mesma ordem");
     for (rust, python) in listed.iter().zip(&python) {
+        // O texto destas mudou com o grupo entre máquinas; os parâmetros continuam os do Python.
+        if matches!(python["name"].as_str(), Some("sessions" | "group" | "pair")) {
+            assert_eq!((&rust["inputSchema"], &rust["outputSchema"]), (&python["inputSchema"], &python["outputSchema"]), "{}", python["name"]);
+            continue;
+        }
         if python["name"] != "new_session" {
             assert_eq!(rust, python, "{} igual ao Python", python["name"]);
             continue;
@@ -197,7 +202,8 @@ async fn sessions_marks_the_caller() {
     let rows = result["structuredContent"]["result"].as_array().unwrap().clone();
     let mine: Vec<_> = rows.iter().filter(|r| r["voce"] == true).map(|r| r["name"].clone()).collect();
     assert_eq!(mine, [json!("s0")]);
-    assert!(rows.iter().all(|r| r.as_object().unwrap().keys().eq(["name", "state", "cwd", "provider", "headless", "voce", "grupo"])));
+    assert!(rows.iter().all(|r| r.as_object().unwrap().keys().eq(["name", "state", "cwd", "provider", "headless", "voce", "grupo",
+        "membros", "dona"])), "membros com `servidor::sessao` e a máquina dona do grupo");
     assert_eq!(result["content"].as_array().unwrap().len(), rows.len(), "um bloco de texto por sessão, como o SDK do Python");
     let mut nobody = Mcp::open(s.addr, &[]).await;
     let rows = nobody.call("sessions", json!({})).await["structuredContent"]["result"].clone();
@@ -225,16 +231,19 @@ async fn send_goes_through_the_input_route_as_the_caller() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn group_pair_unpair_call_the_routes_as_the_caller() {
-    let s = scene().await;
+    // Grupos são do Rust: nada disso segue ao Python.
+    let s = scene_with(true).await;
+    let pair = s.home.join(".claude/.hangar-pair");
     let mut mcp = Mcp::open(s.addr, &[("x-hangar-pane", "%7")]).await;
-    assert!(!failed(&mcp.call("group", json!({"texto": "marco"})).await));
-    assert_eq!(serde_json::from_slice::<Value>(&s.python.last_body()).unwrap(), json!({"text": "marco", "forcar_tmux": false}));
-    assert!(!failed(&mcp.call("pair", json!({"alvo": "outra", "tarefa": "t"})).await));
-    assert_eq!(serde_json::from_slice::<Value>(&s.python.last_body()).unwrap(),
-        json!({"peer": "outra", "task": "t", "replace_task": false, "orq": false}));
+    let paired = mcp.call("pair", json!({"alvo": "s0", "tarefa": "t"})).await;
+    assert!(!failed(&paired), "{paired}");
+    assert!(pair.join("beta.json").exists() && pair.join("s0.json").exists());
+    let notice = mcp.call("group", json!({"texto": "marco"})).await;
+    assert!(!failed(&notice) && notice["structuredContent"]["peers"] == json!(["s0"]), "{notice}");
     assert!(!failed(&mcp.call("desparear", json!({})).await));
+    assert!(!pair.join("beta.json").exists());
     for path in ["/api/sessions/beta/group-message", "/api/sessions/beta/pair"] {
-        assert!(s.python.hits_to(path) >= 1, "{path}");
+        assert_eq!(s.python.hits_to(path), 0, "{path}");
     }
 }
 
@@ -285,6 +294,30 @@ async fn close_session_refuses_itself_remote_and_unknown() {
     let voice = hangar_server::voice::machines::voice_signature(SECRET).unwrap();
     let refused = Mcp::open(s.addr, &[("x-hangar-voice", &voice)]).await.call("close_session", json!({"alvo": "outra"})).await;
     assert!(failed(&refused) && first_text(&refused).contains("sim"), "fechar pela voz só com o sim falado");
+}
+
+/// `contract` lê e grava pela rota `/pair/contract` da sessão que chama; gravar exige o `mtime` lido.
+#[tokio::test(flavor = "multi_thread")]
+async fn contract_reads_and_writes_through_the_session_route() {
+    let s = scene_with(true).await;
+    for (name, peer) in [("beta", "s0"), ("s0", "beta")] {
+        write_json(&s.home.join(format!(".claude/.hangar-pair/{name}.json")), json!({"peers": [peer], "task": "", "gid": "g1", "harness": {}}));
+    }
+    let mut mcp = Mcp::open(s.addr, &[("x-hangar-pane", "%7")]).await;
+    let read = mcp.call("contract", json!({})).await;
+    assert!(!failed(&read), "{read}");
+    assert_eq!(read["structuredContent"]["content"], "");
+    let written = mcp.call("contract", json!({"conteudo": "decisão A\n", "mtime": null})).await;
+    assert!(!failed(&written), "{written}");
+    let mtime = written["structuredContent"]["mtime"].clone();
+    assert!(mtime.as_str().is_some_and(|m| !m.is_empty()), "{written}");
+    assert_eq!(mcp.call("contract", json!({})).await["structuredContent"]["content"], "decisão A\n");
+    let stale = mcp.call("contract", json!({"conteudo": "velho\n"})).await;
+    assert!(failed(&stale) && first_text(&stale).starts_with("erro_contrato_mudou"), "{stale}");
+    assert!(!failed(&mcp.call("contract", json!({"conteudo": "decisão B\n", "mtime": mtime})).await));
+    let voice = hangar_server::voice::machines::voice_signature(SECRET).unwrap();
+    let unnamed = Mcp::open(s.addr, &[("x-hangar-voice", &voice)]).await.call("contract", json!({})).await;
+    assert!(failed(&unnamed) && first_text(&unnamed).contains("`sessao`"), "{unnamed}");
 }
 
 /// `interrupt` só passa para o pai ligado ainda no grupo da filha; passando, é a rota `/interrupt` de sempre.
@@ -409,21 +442,22 @@ async fn html_render_publishes_for_the_caller() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn voice_names_the_session_it_acts_for() {
-    let s = scene().await;
+    let s = scene_with(true).await;
     desktop(&s.home, |verb| format!("ok: {verb}")).await;
     let voice = hangar_server::voice::machines::voice_signature(SECRET).unwrap();
     let mut mcp = Mcp::open(s.addr, &[("x-hangar-voice", &voice)]).await;
     assert!(!failed(&mcp.call("send", json!({"alvo": "fora", "texto": "terminei"})).await));
     assert_eq!(serde_json::from_slice::<Value>(&s.python.last_body()).unwrap()["text"], "[de: voz] terminei");
-    for (tool, args) in [("group", json!({"texto": "x"})), ("pair", json!({"alvo": "beta"})), ("unpair", json!({})),
+    for (tool, args) in [("pair", json!({"alvo": "s0"})), ("group", json!({"texto": "x"})), ("unpair", json!({})),
         ("browser", json!({"verbo": "snapshot"})), ("browser_batch", json!({"passos": []})), ("html_render", json!({"title": "t", "html": "<p>x</p>"}))] {
         let result = mcp.call(tool, args.clone()).await;
         assert!(failed(&result) && first_text(&result).contains("`sessao`"), "{tool}: {result}");
         let mut args = args;
         args["sessao"] = json!(if tool == "html_render" { "s0" } else { "beta" });
-        assert!(!failed(&mcp.call(tool, args).await), "{tool}");
+        let done = mcp.call(tool, args).await;
+        assert!(!failed(&done), "{tool}: {done}");
     }
-    assert_eq!(s.python.hits_to("/api/sessions/beta/group-message"), 1);
+    assert!(!s.home.join(".claude/.hangar-pair/beta.json").exists(), "a voz desfez o par de beta");
 }
 
 #[tokio::test(flavor = "multi_thread")]

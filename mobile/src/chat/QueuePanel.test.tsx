@@ -9,14 +9,29 @@ import { QueuePanel } from './QueuePanel';
 // Cada chave devolve o próprio nome, como nos outros testes de componente do app.
 vi.mock('../paraglide/messages', () => ({ ...Object.fromEntries(
   ('queue_panel_title queue_panel_collapse queue_panel_expand queue_panel_actions queue_panel_move_up queue_panel_move_down '
-    + 'queue_panel_remove codex_orientar codex_orientar_ajuda atalhos_editar comum_apagar comum_cancelar mobile_queue_mode_label mobile_queue_mode_queued mobile_queue_mode_direct mobile_queue_mode_jev mobile_queue_jev_short')
+    + 'queue_panel_remove codex_orientar codex_orientar_ajuda atalhos_editar comum_apagar comum_cancelar mobile_queue_mode_label mobile_queue_mode_queued mobile_queue_mode_direct mobile_queue_mode_jev mobile_queue_jev_short '
+    + 'problema_headless_delivery_stalled reabrir_sessao_presa chat_servidor_removido native_invalid_response erro_desconhecido')
     .split(' ').map((k) => [k, () => k]),
 ), queue_panel_steer_message: ({ text }: { text: string }) => `queue_panel_steer_message: ${text}`,
+  erro_recarregar: ({ erro }: { erro: string }) => `erro_recarregar: ${erro}`,
   mobile_queue_jev_fallback: ({ reason }: { reason: string }) => `fallback: ${reason}` }));
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 // O mock de react-native diz Android: sem isto o menu nativo de verdade seria carregado.
 vi.mock('@react-native-menu/menu', () => ({ MenuView: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
+const reopen = vi.hoisted(() => ({
+  recarregar: vi.fn<(name: string, server: unknown) => Promise<{ ok: boolean }>>(),
+  erro: vi.fn(), success: vi.fn(), announce: vi.fn(),
+  servers: [{ id: 'a', label: 'a', baseUrl: 'http://10.0.0.1:8765', token: 'token-a' }],
+}));
+vi.mock('react-native', async (original) => {
+  const native = await original<typeof import('react-native')>();
+  return { ...native, AccessibilityInfo: { ...native.AccessibilityInfo, announceForAccessibility: reopen.announce } };
+});
+vi.mock('@hangar/core', async (original) => ({ ...await original<typeof import('@hangar/core')>(), recarregarSessao: reopen.recarregar }));
+vi.mock('../stores/servers', () => ({ useServers: { getState: () => ({ servers: reopen.servers }) } }));
+vi.mock('../ui/Toast', () => ({ toast: { erro: reopen.erro } }));
+vi.mock('../ui/haptics', () => ({ haptic: { selection: vi.fn(), success: reopen.success, error: vi.fn() } }));
 
 const panel = { actions: true, entries: [{ id: 'a', text: 'primeira', ts: 1 }, { id: 'b', text: 'segunda', ts: 2 }] };
 
@@ -89,6 +104,52 @@ describe('QueuePanel (app)', () => {
     const cancel = [...container.querySelectorAll('button')].find((b) => b.textContent === 'comum_cancelar')!;
     act(() => cancel.click());
     expect(handlers.onCancelEdit).toHaveBeenCalled();
+    act(() => root.unmount());
+  });
+
+  it('sem o aviso de entrega parada: nem a frase nem o Reabrir', () => {
+    const { container, root } = render({});
+    expect(container.textContent).not.toContain('problema_headless_delivery_stalled');
+    expect(buttons(container, 'reabrir_sessao_presa')).toHaveLength(0);
+    act(() => root.unmount());
+  });
+
+  it('entrega parada: frase e Reabrir no painel; o pedido vai ao servidor da sessão e o botão espera a resposta', async () => {
+    reopen.recarregar.mockReset();
+    reopen.erro.mockClear();
+    reopen.success.mockClear();
+    reopen.announce.mockClear();
+    let finish!: (ok: boolean) => void;
+    reopen.recarregar.mockImplementation(() => new Promise((done, fail) => {
+      finish = (ok) => (ok ? done({ ok: true }) : fail(new Error('reabrir recusado')));
+    }));
+    const { container, root } = render({ reopen: { serverId: 'a', name: 'sess' } });
+    expect(container.textContent).toContain('primeira');
+    expect(container.textContent).toContain('problema_headless_delivery_stalled');
+    // O VoiceOver não anuncia `accessibilityRole="alert"` num Text: o aviso é falado ao aparecer.
+    expect(reopen.announce).toHaveBeenCalledExactlyOnceWith('problema_headless_delivery_stalled');
+    act(() => buttons(container, 'reabrir_sessao_presa')[0].click());
+    expect(buttons(container, 'reabrir_sessao_presa')[0].disabled).toBe(true);
+    act(() => buttons(container, 'reabrir_sessao_presa')[0].click());
+    expect(reopen.recarregar).toHaveBeenCalledExactlyOnceWith('sess', reopen.servers[0]);
+    await act(async () => finish(false));
+    expect(reopen.erro).toHaveBeenCalledExactlyOnceWith('erro_recarregar: reabrir recusado');
+    expect(reopen.success).not.toHaveBeenCalled();
+    expect(buttons(container, 'reabrir_sessao_presa')[0].disabled).toBe(false);
+    act(() => buttons(container, 'reabrir_sessao_presa')[0].click());
+    await act(async () => finish(true));
+    expect(reopen.success).toHaveBeenCalledTimes(1);
+    expect(reopen.erro).toHaveBeenCalledTimes(1);
+    act(() => root.unmount());
+  });
+
+  it('Reabrir que falha sem detalhe diz que não recarregou, nunca "dados inválidos"', async () => {
+    reopen.recarregar.mockReset();
+    reopen.erro.mockClear();
+    reopen.recarregar.mockRejectedValue(new Error(''));
+    const { container, root } = render({ reopen: { serverId: 'a', name: 'sess' } });
+    await act(async () => buttons(container, 'reabrir_sessao_presa')[0].click());
+    expect(reopen.erro).toHaveBeenCalledExactlyOnceWith('erro_recarregar: erro_desconhecido');
     act(() => root.unmount());
   });
 

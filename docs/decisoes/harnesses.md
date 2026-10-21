@@ -216,8 +216,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   argv/env saem de `runtime/codex_launch.rs` e o arquivo da sessão é gravado por
   `runtime/codex_sidecar.rs`, sem pedir ao Python (`launch_env`/`patch_meta`/`clear_cano` da
   política Python recusam Codex). O `env` (tokens, `CODEX_HOME`, Jev) é montado a cada subida e
-  nunca vai a disco nem a log. O cano que sai é religado por
-  evento (teto de 3 subidas seguidas, espera 5/10/20 s), sem varrer. Reiniciar com turno rodando
+  nunca vai a disco nem a log. O cano que morre é religado por
+  evento (teto de 3 subidas seguidas, espera 5/10/20 s), sem varrer; o teto vale só para processo
+  morto: socket que cai com o cano vivo segue a religação ao mesmo cano, sem teto (regra abaixo). Reiniciar com turno rodando
   é permitido (destrava turno preso); trocar o sandbox com turno rodando recusa com
   `erro_permissao_ocupada` (409). `initialize` repetido responde "Already initialized" e é
   sucesso; thread sem turno não tem rollout e o `resume` a recusa — processo novo abre outra,
@@ -244,6 +245,24 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   cartão fecha sem autoria e o app recebe 409 `erro_sem_confirmacao_resposta`. Pedido sem
   resposta do app fica para a TUI; nunca recusar automaticamente como no sem terminal. Ver
   [Codex com terminal no Rust](#codex-com-terminal-no-rust-adoção-e-dono-único).
+- **Claude e Codex sem terminal religam ao MESMO cano vivo quando só o socket cai.** Nada é
+  encerrado: sem `cano_saiu`, sem `claude_exit`, sem erro no ator, sem `problema`. Uma tarefa por
+  ator (`runtime/cano_reconnect.rs`, `CanoReconnect`) tenta com as esperas `RECONNECT_WAITS`
+  (0, 1, 3, 10, 30, 60, 120, 300 s, e fica em 300); com mensagem da pessoa esperando,
+  `RECONNECT_WAITS_PENDING` (0, 1, 3, 10 s, e fica em 10). Gatilho (mensagem, conversa aberta,
+  `request_reopen`) só antecipa a tentativa marcada, nunca cria outra. A vida do cano é conferida a
+  cada 5 s (`CANO_CHECK`), fora das tentativas. O servidor nunca mata o agente sozinho. Enquanto
+  religa a entrada segue saudável: a escrita vai ao ator, espera na fila e sai ao religar.
+  Mensagem sem entrega há mais de `DELIVERY_STALL` (60 s) com o cano vivo vira
+  `headless_delivery_stalled` na mensagem presa, com Reabrir (`/recarregar`, que com esse aviso
+  passa por cima das recusas de fila e de sessão ocupada). Para de tentar quando: o cano morre
+  (queda real, `headless_processo_caiu`, religação de processo como antes); a sessão fecha ou muda
+  de geração (cancela calado); falta o que prova o processo desta vida (nascimento, vínculo:
+  `cano_reconnect_stopped` uma vez no diário, ator sem erro). Sidecar ilegível é passageiro, não
+  para. Claude aberto sobre cano vivo de antes que recusa conexão nasce religando, com `initialize`
+  adiado à primeira conexão. Claude sem socket nunca é estacionado. O Codex com terminal usa a
+  mesma vaga com 1 s × 1,5 até 10 s. Ver
+  [religação ao mesmo cano](#religação-ao-mesmo-cano-vivo-e-avisos-fora-da-tela-20102026).
 - **Processo do cano é um módulo só (`runtime/process.rs`), Claude e Codex.** Subir espera o
   `listen` por 10 s; matar confere a identidade do pid (pid reaproveitado nunca é morto) e apaga
   `cano-<chave16>*` só na pasta da sessão, nunca numa derivada de caminho gravado no arquivo. A
@@ -388,9 +407,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   turno continua trabalhando.
 - **Turno do Codex que não fala com o provedor vira `problema` no estado**, não "trabalhando"
   calado: `error` com `willRetry` é `codex_sem_conexao`, turno `failed` é `headless_turno_erro`.
-  Some quando a resposta chega ou outro turno começa. Sem terminal a faixa oferece Reiniciar, e
-  a retomada cai no provedor nativo quando o da thread não existe mais. Medição:
-  [provedor fora do ar](#codex-provedor-fora-do-ar-o-turno-nunca-fecha).
+  Some quando a resposta chega ou outro turno começa. `codex_sem_conexao` é diagnóstico: o portão
+  de saída o tira da tela e o registra no diário, sem faixa nem Reiniciar; `headless_turno_erro`
+  segue na tela. A retomada cai no provedor nativo quando o da thread não existe mais. Medição:
+  [provedor fora do ar](#codex-provedor-fora-do-ar-o-turno-nunca-fecha); destino do aviso em
+  [religação ao mesmo cano](#religação-ao-mesmo-cano-vivo-e-avisos-fora-da-tela-20102026).
   O `codexErrorInfo` decide antes do `willRetry`: `usageLimitExceeded`/`rateLimitExceeded` é
   `codex_limite_uso` e `unauthorized` é `codex_sem_login`, no Python e no Rust. Turno `failed`
   sem `codexErrorInfo` não apaga essas duas causas, que vieram no `error` anterior.
@@ -866,6 +887,90 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   (`commit_blocks`, fora do JSON). Python (`transcript.py`) e Rust (`transcript/claude.rs`) iguais,
   provados pelo golden do contrato. Ver
   [entradas juntadas pela CLI](#entradas-juntadas-pela-cli-numa-mensagem-só-14102026).
+
+- **O protocolo de grupo volta depois de `/clear` e compactação pelo `hangar-server pair-context`.**
+  É o comando do `SessionStart` (`startup|resume|clear|compact`) que o `hook_installer.py` grava em
+  cada conta, com a pasta `.hangar-pair` no argv e `|| exit 0`: lê o sidecar e os pares externos do
+  disco, sem rede nem token, e responde com o servidor parado. Grupo com par de fora traz as duas
+  partes. Só o Claude tem esse gancho: Codex, Pi, omp e Kimi perdem o protocolo ao compactar
+  (limite registrado). Ver [grupos: o Rust grava](plataforma.md#grupos-o-rust-grava).
+
+## Religação ao mesmo cano vivo e avisos fora da tela (20/10/2026)
+
+(Branch `fix/session-recovery-and-alerts`, plano
+[`2026-10-20-session-recovery-and-alerts.md`](../superpowers/plans/2026-10-20-session-recovery-and-alerts.md);
+decisões do Jefferson de 20/10, D1–D7 e P1–P4 no plano.) O critério dos avisos e a tabela de
+códigos estão em
+[plataforma.md](plataforma.md#aviso-na-tela-só-para-ação-que-falhou-ou-bloqueio-real-20102026).
+
+**Antes, no Rust.** Socket do cano que caía sem `cano_saiu`, com o cano vivo, virava erro
+`cano_closed` + `cano_saiu` sem código: a sessão aparecia morta (`runtime_falhou`). A religação do
+Claude dependia de `schedule_claude_respawn`: no máximo 3 tentativas, e saía calada se faltasse
+receita, nascimento ou vínculo; depois a fila virava "não chegou". Na subida do servidor, uma
+tentativa por sessão, com a falha só no log. Escrita com a sessão nesse estado levava 503
+`runtime_unhealthy` na hora. O Python fazia diferente: queda com o pid do cano vivo não gravava
+problema e agendava religação, uma tentativa a cada 10 s por sessão, sem limite.
+
+**Decisões.** D1: falha da ponte servidor ↔ cano ↔ agente nunca encerra sessão viva; o cano
+cumpre, sem terminal, o papel do tmux. D2: espera crescente enquanto o cano viver, sem prazo de
+desistência, sem copiar o laço fixo de 10 s; uma tarefa por sessão, estado de tamanho fixo, e
+gatilho só acorda a tarefa que existe (a preocupação dele era consumo e vazamento, não causa
+provada). D3: para quando o cano morre, a sessão fecha ou muda de geração, ou falta dado
+permanente, registrado uma vez. D4: nenhum cliente mostra "reconectando". D6: a escrita feita na
+queda entra na fila e sai ao religar. P4: Codex sem terminal igual, sem teto enquanto o cano viver;
+à pergunta dele ("se eu mandar uma msg ele vai ficar em erro pra sempre?") a resposta adotada foi a
+espera curta com mensagem esperando e o aviso `headless_delivery_stalled` após 60 s, com Reabrir;
+o servidor não reabre sozinho.
+
+**Como ficou.**
+- `runtime/cano_reconnect.rs`: `CanoReconnect` substitui a vaga de religação do Codex com terminal e
+  serve aos três (Claude e Codex sem terminal, app-server adotado do Codex com terminal, este com
+  1 s × 1,5 até 10 s). `ClaudeEngine::transport_lost`/`reattach` e `CodexEngine::reattach` trocam o
+  transporte sem perder o motor: no Codex, cartões com o mesmo `interaction_id`, uso, limites e
+  avisos como `codex_limite_uso`. Ao religar, `confirm_inputs` confere o que saiu antes da queda.
+- Uma tentativa pode levar perto de 25 s (prazos de conexão do `cano.rs`); a espera conta do fim da
+  anterior. A conferência de vida a cada 5 s existe para a morte aparecer numa espera de 300 s.
+- Mesmo processo = `process::liveness == Ours` e nascimento igual ao gravado. No Linux o nascimento
+  sai do `btime` relido, que o relógio ajustado (NTP) desloca: tolerância de 1,5 s.
+- Erro permanente é só ausência (vínculo, nascimento): `cano_reconnect_stopped`. Sidecar ilegível é
+  passageiro porque no Windows a leitura no meio da troca falha. O ator não entra em erro: o feed
+  (`state/runtime_feed.rs`) o mostraria como faixa; se a pessoa escrever, o aviso de 60 s cobre.
+- `End` sem código de saída com o cano vivo também religa e vai ao diário como
+  `cano_protocol_invalid`. Cano morto vira `headless_processo_caiu` com detalhe
+  `"cano_closed sem código de saída"`.
+- Subida e abertura sobre cano vivo de antes que recusa conexão (`open_headless_locked` com
+  `adopt_unreachable`, só Claude): o ator nasce sem conexão (`spawn_unconnected_with`) e religando,
+  com `initialize` adiado. Cano recém-subido pela reabertura que não atende continua falhando na
+  hora. `park_idle_claude` conta socket fora como aberto: não estaciona nem mata.
+- Reabrir com o aviso ativo: `claude_current` deixa passar `erro_sessao_iniciando`,
+  `erro_sessao_trabalhando`, `erro_fila_pendente` e `erro_sessao_esperando_resposta`, e a fila vai
+  para a vida nova; sem o aviso as recusas ficam. A chamada pode levar até `STARTUP_WAIT` (5 min).
+  No Codex, `Watcher::restart` já não recusava; o `transport_lost` dele encerra na hora as respostas
+  abertas (`NotWritten` se não saiu, `Unknown` se saiu).
+- `codex_sem_conexao` (P2) e a queda do controle do Codex com terminal (`codex_control_lost`, antes
+  `runtime_falhou` com "reconectando…", contra D4) vão ao diário; app-server morto (`Gone`) segue
+  `runtime_falhou` na tela.
+
+**O caso `ipad-prova`.** No log do servidor (`~/.hangar/logs/privado/hangar-server.log`, 18/10
+13:49 → 20/10), `cano_closed` às 17:50:55Z e 3 religações automáticas que falharam em
+`lifecycle_sidecar_read`. O diário (`uso-2026-10-20.jsonl:168`) mostrou que foi fechamento pedido
+pelo dono, pelo nome no Python (`registry.py:2547-2563`: apaga o sidecar e mata o cano com o ator
+do Rust aberto), no binário da `beta` anterior a `3ae696a96`. Agora: sidecar ausente em duas
+leituras que toleram a troca do Windows tira a entrada sem matar nem dar erro
+(`release_closed_by_name`, `claude_sidecar_absent` no diário); `close()` sem kill ganha da
+religação em curso; o `DELETE` de Claude que entra pelo Connect (8768) vai ao Rust
+(`POST /__hangar_server/claude/<nome>/close`, contrato interno 85 → 86 depois de juntar a `main`),
+com quem pediu no diário; a saída do grupo desse fechamento fica com o Python, que lê a fase do
+`orq` antes, para o Rust não perguntar de volta numa chamada dele. O Reabrir pelo Connect também vai
+ao Rust (`POST /__hangar_server/claude/<nome>/recarregar`). Pi, omp e Kimi seguem fechando pelo nome
+no Python.
+
+**Fora desta entrega.** `lifecycle_process_read` repetido nas sessões com terminal (17× no mesmo
+log) e `runtime_closed` uma vez por minuto já tinham causa e correção (`3ae696a96`;
+`48b13ba3b`/`9be470545`/`eb9c74c9b`/`9a19ab7b5`). O cano que para de aceitar conexão com o
+processo vivo continua sendo religado sem fim; sem mensagem esperando não há aviso, com mensagem
+aparece `headless_delivery_stalled`. Consertar o cano surdo é no `hangar-cano`, fora da branch
+(D7).
 
 ## Entradas juntadas pela CLI numa mensagem só (14/10/2026)
 

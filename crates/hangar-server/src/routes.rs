@@ -87,8 +87,10 @@ pub struct AppState {
     pub btw_programs: crate::session_write::btw::Programs,
     /// Grupos de sessões em `.hangar-pair`; `None` sem as pastas da lista (as rotas seguem ao Python).
     pub groups: Option<Arc<crate::groups::service::GroupService>>,
-    /// Outras máquinas do dono (`peers.json`), para o par 1:1 entre máquinas.
+    /// Outras máquinas do dono (`peers.json`), para os grupos entre máquinas.
     pub peers: Arc<crate::groups::peers::PeerClient>,
+    /// Id desta máquina entre as do dono (`CP_SERVER_ID`); vazio = sem id.
+    pub server_id: String,
     /// Voz ao vivo; o teste troca por um hub com pastas temporárias.
     pub voice: Arc<crate::voice::hub::VoiceHub>,
     /// Convites e par externo; `None` sem `HANGAR_SHARES_FILE` (o Python segue dono).
@@ -105,20 +107,29 @@ impl AppState {
     }
 
     pub fn new(cfg: Config) -> AppState {
-        Self::with_terminal_pool(cfg, crate::terminal_control::TerminalPool::new())
+        Self::with_server_id(cfg, String::new())
+    }
+
+    /// `server_id` = `HANGAR_SERVER_ID`, lido só no `main`.
+    pub fn with_server_id(cfg: Config, server_id: String) -> AppState {
+        Self::build(cfg, crate::terminal_control::TerminalPool::new(), server_id)
     }
 
     pub fn with_terminal_pool(cfg: Config, terminal: crate::terminal_control::TerminalPool) -> AppState {
+        Self::build(cfg, terminal, String::new())
+    }
+
+    fn build(cfg: Config, terminal: crate::terminal_control::TerminalPool, server_id: String) -> AppState {
         let costs = Arc::new(crate::costs::collect::Collector::new(
             crate::costs::index::default_dir(), crate::costs::pricing::default_dir(),
             crate::costs::areas::default_map_file(),
             Arc::new(crate::costs::collect::HttpScopes::new(cfg.upstream, cfg.internal_secret.clone())),
         ));
-        Self::with_parts(cfg, terminal, costs, Arc::new(crate::costs::fx::Fx::new()))
+        Self::with_parts(cfg, terminal, costs, Arc::new(crate::costs::fx::Fx::new()), server_id)
     }
 
     pub fn with_parts(cfg: Config, terminal: crate::terminal_control::TerminalPool,
-                      costs: Arc<crate::costs::collect::Collector>, fx: Arc<crate::costs::fx::Fx>) -> AppState {
+                      costs: Arc<crate::costs::collect::Collector>, fx: Arc<crate::costs::fx::Fx>, server_id: String) -> AppState {
         let http = proxy::client();
         let mods = crate::mods::state::Mods::default();
         let interactions = Arc::new(crate::interactions::InteractionStore::default());
@@ -138,9 +149,10 @@ impl AppState {
             queue_dir: list.env().dirs.as_ref().map(|dirs| dirs.claude.join(".hangar-queue")),
             problem_hold: crate::problem_gate::HOLD,
             shown_problems: list.shown_problems(),
+            diag: crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone()),
         };
         mods.bind_hubs(side.hubs.downgrade());
-        let diag = crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone());
+        let diag = side.diag.clone();
         let state = Arc::new(crate::state::live::StateEnv::new(terminal.clone(), list.clone(), diag.clone()));
         list.set_permissions(state.permissions.clone());
         side.monitors = Some(crate::state::live::spawner(state.clone()));
@@ -149,9 +161,9 @@ impl AppState {
             Err(e) => { tracing::error!("{e}"); None }
         };
         if let Some(share) = &share { list.set_shares(share.clone()); }
-        let groups = crate::groups::from_env(list.env().dirs.as_ref(),
-            Arc::new(crate::groups::orq::PythonOrq::new(cfg.upstream, cfg.internal_secret.clone(), http.clone())), list.clone());
-        AppState { accounts: crate::accounts::AccountService::new(crate::accounts::environment::AccountEnvironment::capture()), command_catalog: Arc::default(), groups, peers: Arc::new(crate::groups::peers_from_env()), auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, public_v6: None, diag,
+        let groups = crate::groups::from_env(list.env().dirs.as_ref(), server_id.clone(),
+            Arc::new(crate::groups::orq::PythonOrq::new(cfg.upstream, cfg.internal_secret.clone(), http.clone())), list.clone(), diag.clone());
+        AppState { accounts: crate::accounts::AccountService::new(crate::accounts::environment::AccountEnvironment::capture()), command_catalog: Arc::default(), groups, server_id, peers: Arc::new(crate::groups::peers_from_env()), auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, public_v6: None, diag,
             workspace_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             interactions, plugin,
             transcription: Arc::default(),
@@ -250,6 +262,7 @@ pub async fn serve_with_guest(listener: TcpListener, mut state: AppState, guest:
     let _session_restore = crate::session_open::restore::spawn(state.clone()).map(crate::AbortOnDrop);
     let _group_sweep = crate::groups::sweep::spawn(state.clone()).map(crate::AbortOnDrop);
     let _link_return = crate::groups::link_return::spawn(state.clone()).map(crate::AbortOnDrop);
+    let _federation = crate::groups::federation::spawn(state.clone()).map(crate::AbortOnDrop);
     let _limit_switch = crate::session_write::limit_switch::spawn(state.clone()).map(crate::AbortOnDrop);
     // Sem a fotografia do Python a varredura não revoga nada (ver `life::sweep`); o túnel religa já.
     let _share_sweep = state.share.clone().map(|share| crate::AbortOnDrop(tokio::spawn(
@@ -1102,6 +1115,7 @@ mod tests {
             queue_dir: None,
             problem_hold: std::time::Duration::ZERO,
             shown_problems: Default::default(),
+            diag: crate::diag::DiagClient::new("127.0.0.1:9".parse().unwrap(), "s".into()),
         };
         let jsonl = dir.join("t.jsonl");
         std::fs::write(&jsonl, "").unwrap();

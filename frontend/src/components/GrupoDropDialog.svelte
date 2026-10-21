@@ -7,7 +7,7 @@
   import { arrastarGrupo, mensagemRecusa, type ChaveSessao } from '../lib/arrastarGrupo.svelte';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { findServer, withServer } from '../lib/auth';
-  import { pairSession, unpairSession, suggestGroupTask, formataErro, canPair, pairAnchor, pairExternals, fullPairsByAlias, grantFull } from '@hangar/core';
+  import { pairSession, unpairSession, suggestGroupTask, formataErro, canPair, pairAnchor, pairExternals, fullPairsByAlias, grantFull, identityOf } from '@hangar/core';
   import type { AggSession } from '@hangar/core';
   import * as m from '../paraglide/messages';
 
@@ -85,7 +85,7 @@
     if (!pedido) return null;
     if (pedido.modo === 'sair') return origemSessao ? null : mensagemRecusa('dead');
     if (!origemSessao || !alvoSessao) return mensagemRecusa('dead');
-    const r = canPair(origemSessao, alvoSessao);
+    const r = canPair(origemSessao, alvoSessao, sessionsStore.identities);
     return r.ok ? null : mensagemRecusa(r.reason);
   });
 
@@ -132,14 +132,16 @@
     const o = origemSessao;
     const a = alvoSessao;
     if (!o || !a) { erro = mensagemRecusa('dead'); return; }
-    const checagem = canPair(o, a);
+    const checagem = canPair(o, a, sessionsStore.identities);
     if (!checagem.ok) { erro = mensagemRecusa(checagem.reason); return; }
     grupoNoClique = grupoExistente;
     const herda = grupoExistente !== null;
     busy = true;
     erro = null;
     try {
-      const res = await withServer(a.serverId, () => pairSession(a.name, [o.name], herda ? '' : tarefa.trim(), substituir));
+      // De outra máquina, a origem vai qualificada; o servidor do alvo leva o pedido até a dona.
+      const origemNome = o.serverId === a.serverId ? o.name : `${identityOf(o.serverId, sessionsStore.identities)}::${o.name}`;
+      const res = await withServer(a.serverId, () => pairSession(a.name, [origemNome], herda ? '' : tarefa.trim(), substituir));
       if (pedido !== pedidoEmVoo) return;
       const falhas = await grantFull(liberacoes.filter((x) => liberar.includes(x.alias))
         .flatMap((l) => l.sessoes.map((name) => ({ name, alias: l.alias }))), findServer(a.serverId));

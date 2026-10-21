@@ -142,10 +142,6 @@ def mode_change(name: str, begin: bool) -> dict | None:
     return _asked("mode_change_end", name=name, source_life=source)
 
 
-def session_died(name: str) -> dict | None:
-    return _asked("session_died", name=name)
-
-
 def send_snapshot() -> bool:
     """Fotografia do que só o Python sabe, mandada a cada Rust que sobe. Sem ela o Rust responde
     "não sei" (503) e a varredura não revoga nada; com uma fotografia incompleta daria 410."""

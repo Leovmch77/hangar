@@ -379,6 +379,15 @@ describe('SessionRow', () => {
     }
   });
 
+  it('selo do grupo entra no rótulo da linha: escondido do leitor, ele só existia na tela', async () => {
+    const { container, root } = await render({ ...base, name: 'api', provider: 'claude', pair_peers: ['web'], pair_task: 'migracao-login' });
+    try {
+      expect(container.querySelector('button')?.getAttribute('aria-label')).toContain('migracao-login');
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
   it('orquestrador sem pasta: selo próprio e sem menu de toque longo', async () => {
     const { container, root } = await render({ ...base, name: 'g1-orq', provider: 'orq', pair_gid: 'g1', orq_arbiter: 'arb' });
     expect(container.textContent).toContain('orq_row_badge');

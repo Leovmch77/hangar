@@ -6,7 +6,7 @@ import * as m from '../paraglide/messages';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-import { SessionProblem } from './SessionProblem';
+import { SessionProblem, showsSessionProblem } from './SessionProblem';
 
 async function texto(problem: string) {
   const container = document.createElement('div');
@@ -24,5 +24,18 @@ describe('SessionProblem', () => {
     expect(await texto('limit_switch_no_room')).toBe(m.problema_limit_switch_no_room());
     expect(await texto('limit_switch_failed')).toBe(m.problema_limit_switch_failed());
     expect(await texto('limit_switch_no_target')).toBe(m.problema_limit_switch_no_target());
+  });
+
+  it('mensagem presa sem entrega tem frase própria, não a de código desconhecido', async () => {
+    const out = await texto('headless_delivery_stalled');
+    expect(out).toBe(m.problema_headless_delivery_stalled());
+    expect(out).not.toBe(m.session_problem_unknown());
+  });
+
+  it('com o painel "Na fila" à mostra, a entrega parada fica só nele; os outros problemas continuam aqui', () => {
+    expect(showsSessionProblem('headless_delivery_stalled', true)).toBe(false);
+    expect(showsSessionProblem('headless_delivery_stalled', false)).toBe(true);
+    expect(showsSessionProblem('headless_turno_erro', true)).toBe(true);
+    expect(showsSessionProblem(null, false)).toBe(false);
   });
 });

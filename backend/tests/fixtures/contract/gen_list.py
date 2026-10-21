@@ -773,7 +773,7 @@ def _run_case(world, ticks, mode):
     os.environ["HOME"] = str(home)
     settings.projects_dir = home / ".claude" / "projects"
     dirs = [home / ".claude", home / ".claude-alt"]
-    for cls_cache in ("_jsonl_cache", "_pair_ausencias", "_last_res", "_status_cache", "_context_cache",
+    for cls_cache in ("_jsonl_cache", "_last_res", "_status_cache", "_context_cache",
                       "_agent_pid", "_label_cache", "_limit_cache", "_reply_cache"):
         getattr(SessionRegistry, cls_cache).clear()
     SessionRegistry._fd_locked.clear()
@@ -910,7 +910,6 @@ def _child(out_dir: Path):
                                       lambda w=world: [w.root / "home" / ".claude", w.root / "home" / ".claude-alt"]),
                     mock.patch.object(askquestion, "dirs_de_config",
                                       lambda w=world: [w.root / "home" / ".claude", w.root / "home" / ".claude-alt"]),
-                    mock.patch.object(SessionRegistry, "_varrer_pares_mortos", lambda self, vivos, agora=None: None),
                     mock.patch.object(registry, "_atualizar_git", _no_git),
                     mock.patch.object(hs_mod.hook_state, "demote_awaiting", demote),
                     mock.patch.object(runtime_adapter, "runtime_problem",

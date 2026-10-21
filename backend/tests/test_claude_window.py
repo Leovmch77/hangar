@@ -49,6 +49,31 @@ def test_window_bridge_has_no_cache_to_invalidate(monkeypatch):
         account_bridge.ClaudeWindows().run(body)
 
 
+def test_opening_a_window_closes_the_ones_left_by_a_previous_backend(monkeypatch, tmp_path):
+    """A lista de janelas vive só na memória: reiniciado o backend, as da vida anterior ficavam
+    abertas para sempre segurando a conta. Abrir uma janela nova fecha as órfãs, nunca as ativas."""
+    from types import SimpleNamespace
+
+    from app import account_bridge, config, runtime_coordinator
+    account = _conta(tmp_path, "orfa")
+    monkeypatch.setattr(runtime_coordinator, "current", lambda: SimpleNamespace(instance="fixture-instance"))
+    monkeypatch.setattr(config, "list_config_dirs", lambda: [SimpleNamespace(path=str(account))])
+    orphan, live, fresh = "b" * 32, "c" * 32, "d" * 32
+    sessions = [f"term-login-{orphan}", f"term-login-{live}", "outra-sessao"]
+    killed = []
+    monkeypatch.setattr(claude_window.tmux, "list_sessions", lambda: [{"name": n, "cwd": ""} for n in sessions])
+    monkeypatch.setattr(claude_window, "kill", lambda target: killed.append(target))
+    monkeypatch.setattr(claude_window, "spawn", lambda name, cwd, config_dir: "term-" + name)
+    monkeypatch.setattr(claude_window, "submit", lambda target, command: None)
+    windows = account_bridge.ClaudeWindows()
+    key = account_bridge.AccountKey.new("claude", account)
+    windows.active[live] = (key, "fixture-instance")
+    body = {"instance": "fixture-instance", "key": {"provider": "claude", "canonical_home": str(key.canonical_home)},
+            "operation": fresh, "action": "open", "code": None}
+    windows.run(body)
+    assert killed == [f"term-login-{orphan}"]
+
+
 def _conta(tmp_path: Path, nome: str) -> Path:
     d = tmp_path / f".claude-{nome}"
     d.mkdir(parents=True)
