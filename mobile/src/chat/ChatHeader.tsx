@@ -30,6 +30,7 @@ export function ChatHeader({
   chipLoop,
   header = 'phone',
   onTogglePanel,
+  panelOpen,
 }: {
   name: string;
   state: State | null;
@@ -41,6 +42,7 @@ export function ChatHeader({
   chipLoop?: React.ReactNode;
   header?: 'phone' | 'tablet';
   onTogglePanel?: () => void;
+  panelOpen?: boolean;
 }) {
   const { theme } = useUnistyles();
   // Destino lido da rota e da lista: quem monta o cabeçalho não precisa repassar máquina e pasta.
@@ -106,10 +108,10 @@ export function ChatHeader({
             ) : null}
           </View>
         </Pressable>
-        {serverId ? <LiveVoiceChatButton serverId={serverId} name={name} /> : null}
+        {header === 'phone' && serverId ? <LiveVoiceChatButton serverId={serverId} name={name} /> : null}
         {header === 'tablet' ? (
           <Pressable onPress={onTogglePanel} hitSlop={8} style={styles.more}
-                     accessibilityRole="button" accessibilityLabel={m.ctx_painel_titulo()}>
+                     accessibilityRole="button" accessibilityLabel={m.ctx_painel_titulo()} accessibilityState={{ expanded: panelOpen }}>
             <Icon name="PanelRight" size={18} color={theme.tokens.text.secondary} />
           </Pressable>
         ) : null}

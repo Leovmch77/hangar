@@ -1,4 +1,4 @@
-import { useCallback, useContext, useMemo, useRef, useState, type ReactNode, type Ref } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from 'react';
 import { BackHandler, Platform, useWindowDimensions, View } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import { StyleSheet } from 'react-native-unistyles';
@@ -22,7 +22,9 @@ import { DrawerMenu } from './DrawerMenu';
 // `edgeStart`: a faixa de arrasto começa a essa distância da borda, que fica com o voltar do iOS.
 // `openOnBack` (Início): o Back do Android abre a gaveta fechada; com ela aberta, segue o sistema
 // e sai do app, senão o Back nunca sairia dali.
-export function SessionsDrawer({ ref, edgeStart, openOnBack, onClose, onOpenServers, children }: {
+// `enabled`: desliga a navegação sem remontar os filhos quando o tablet gira.
+export function SessionsDrawer({ ref, edgeStart, openOnBack, onClose, onOpenServers, children, enabled = true }: {
+  enabled?: boolean;
   ref?: Ref<DrawerLayoutMethods>;
   edgeStart?: number;
   openOnBack?: boolean;
@@ -33,16 +35,19 @@ export function SessionsDrawer({ ref, edgeStart, openOnBack, onClose, onOpenServ
   const { width } = useWindowDimensions();
   const inner = useRef<DrawerLayoutMethods | null>(null);
   const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!enabled) inner.current?.closeDrawer();
+  }, [enabled]);
   useFocusEffect(useCallback(() => {
     // Só fechada com `openOnBack` (abre) ou aberta sem ele (fecha); no resto o Back é do sistema.
-    if (Platform.OS !== 'android' || open === !!openOnBack) return;
+    if (!enabled || Platform.OS !== 'android' || open === !!openOnBack) return;
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       if (open) inner.current?.closeDrawer();
       else inner.current?.openDrawer();
       return true;
     });
     return () => sub.remove();
-  }, [open, openOnBack]));
+  }, [enabled, open, openOnBack]));
   const setRef = (r: DrawerLayoutMethods | null) => {
     inner.current = r;
     if (typeof ref === 'function') ref(r);
@@ -51,14 +56,15 @@ export function SessionsDrawer({ ref, edgeStart, openOnBack, onClose, onOpenServ
   // A faixa da própria gaveta nasce colada na borda (hitSlop fixo do gesture-handler): com
   // `edgeStart` ela fica travada fechada e este arrasto, mais para dentro, a abre.
   const insetPan = useMemo(() => edgeStart == null ? null : Gesture.Pan()
+    .enabled(enabled)
     .runOnJS(true)
     .hitSlop(drawerEdgeSlop(edgeStart))
     .activeOffsetX(10)
     .failOffsetY([-15, 15])
     .onEnd((e, success) => {
       if (success && shouldOpenDrawer(e.translationX, e.velocityX)) inner.current?.openDrawer({ initialVelocity: e.velocityX });
-    }), [edgeStart]);
-  const content = (progress?: SharedValue<number>) => <DrawerContent progress={progress}>{children}</DrawerContent>;
+    }), [enabled, edgeStart]);
+  const content = (progress?: SharedValue<number>) => <DrawerContent progress={progress} enabled={enabled}>{children}</DrawerContent>;
   return (
     <ReanimatedDrawerLayout
       ref={setRef}
@@ -66,16 +72,16 @@ export function SessionsDrawer({ ref, edgeStart, openOnBack, onClose, onOpenServ
       onDrawerClose={() => setOpen(false)}
       drawerType={DrawerType.FRONT}
       drawerWidth={Math.min(width * 0.85, 360)}
-      edgeWidth={EDGE_WIDTH}
-      drawerLockMode={edgeStart == null ? DrawerLockMode.UNLOCKED : DrawerLockMode.LOCKED_CLOSED}
+      edgeWidth={enabled ? EDGE_WIDTH : 0}
+      drawerLockMode={enabled && edgeStart == null ? DrawerLockMode.UNLOCKED : DrawerLockMode.LOCKED_CLOSED}
       overlayColor="rgba(0,0,0,0.3)"
       animationSpeed={0.8}
       keyboardDismissMode={DrawerKeyboardDismissMode.ON_DRAG}
-      renderNavigationView={(progress) => (
+      renderNavigationView={(progress) => enabled ? (
         <DrawerPanel progress={progress}>
           <DrawerMenu open={open} onClose={onClose} onOpenServers={onOpenServers} />
         </DrawerPanel>
-      )}
+      ) : null}
     >
       {(progress) => insetPan ? (
         <GestureDetector gesture={insetPan}><View style={styles.content}>{content(progress)}</View></GestureDetector>
@@ -97,14 +103,14 @@ export function shouldOpenDrawer(translationX: number, velocityX: number) {
 }
 
 // O conteúdo recua um pouco junto com o arrasto; com Reduzir movimento fica parado (o escurecido basta).
-function DrawerContent({ progress, children }: { progress?: SharedValue<number>; children: ReactNode }) {
+function DrawerContent({ progress, children, enabled }: { progress?: SharedValue<number>; children: ReactNode; enabled: boolean }) {
   const reduced = useReducedMotion();
   const anim = useAnimatedStyle(() => ({
-    transform: [{ translateX: reduced || !progress ? 0 : interpolate(progress.value, [0, 1], [0, 36]) }],
+    transform: [{ translateX: !enabled || reduced || !progress ? 0 : interpolate(progress.value, [0, 1], [0, 36]) }],
   }));
   return (
     <Animated.View style={[styles.content, anim]}>
-      <SafeAreaView style={styles.content}>{children}</SafeAreaView>
+      <SafeAreaView style={styles.content} edges={enabled ? undefined : []}>{children}</SafeAreaView>
     </Animated.View>
   );
 }

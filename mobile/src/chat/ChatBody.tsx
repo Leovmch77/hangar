@@ -60,9 +60,11 @@ export interface ChatBodyProps {
   onOpenMore?: () => void;
   header?: 'phone' | 'tablet';
   onTogglePanel?: () => void;
+  panelOpen?: boolean;
+  maxReading?: number;
 }
 
-export function ChatBody({ serverId, name, askFallback, onBack, deepStack, onOpenMore, header = 'phone', onTogglePanel }: ChatBodyProps) {
+export function ChatBody({ serverId, name, askFallback, onBack, deepStack, onOpenMore, header = 'phone', onTogglePanel, panelOpen, maxReading }: ChatBodyProps) {
   const router = useRouter();
   const rota = `${serverId}::${name}`;
   const settingsSequence = useRef(0);
@@ -504,6 +506,7 @@ export function ChatBody({ serverId, name, askFallback, onBack, deepStack, onOpe
         chipLoop={chipLoop}
         header={header}
         onTogglePanel={onTogglePanel}
+        panelOpen={panelOpen}
       />
       <MoreSheet open={moreOpen} onClose={() => setMoreOpen(false)} serverId={serverId} name={name} orq={orq}
                  provider={provider} semTerminal={semTerminal} temPergunta={!!askPayload}
@@ -583,6 +586,7 @@ export function ChatBody({ serverId, name, askFallback, onBack, deepStack, onOpe
             </View>
           ) : (
             <LiveMessageList
+              maxReading={maxReading}
               chat={chat}
               events={events}
               eventsRevision={eventsRevision}

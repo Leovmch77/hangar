@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement, useRef, useState, type ReactNode } from 'react';
+import { act, createElement, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { create } from 'zustand';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -10,6 +10,7 @@ import type { ChatBodyProps } from './ChatBody';
 
 const h = vi.hoisted(() => ({
   size: { width: 390, height: 844, scale: 1, fontScale: 1 },
+  os: 'android',
   retain: vi.fn(), release: vi.fn(), bodyMounts: 0,
   session: { serverId: 'srv', name: 'chat', provider: 'claude', tracked: true, state: 'idle' },
   router: { push: vi.fn(), replace: vi.fn(), dismissTo: vi.fn(), canGoBack: () => false, back: vi.fn() },
@@ -18,11 +19,15 @@ const h = vi.hoisted(() => ({
 
 vi.mock('react-native', async (original) => ({
   ...await original<typeof import('react-native')>(), useWindowDimensions: () => h.size,
+  Platform: { get OS() { return h.os; }, select: (options: Record<string, unknown>) => options[h.os] ?? options.default },
+  Pressable: ({ children, onPress, accessibilityLabel, accessibilityState }: { children?: ReactNode; onPress?: () => void; accessibilityLabel?: string; accessibilityState?: { expanded?: boolean } }) =>
+    createElement('button', { onClick: onPress, 'aria-label': accessibilityLabel, 'aria-expanded': accessibilityState?.expanded }, children),
 }));
 vi.mock('expo-router', () => ({
   useRouter: () => h.router, useIsFocused: () => true,
   useLocalSearchParams: () => ({ server: 'srv', name: 'chat' }),
   useNavigation: () => h.navigation, useRoute: () => ({ key: 'chat' }),
+  useFocusEffect: (effect: () => void | (() => void)) => useEffect(effect, [effect]),
 }));
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(), fetchSessionsForServer: async () => [h.session],
@@ -50,7 +55,38 @@ vi.mock('../stores/newConversation', () => ({
 vi.mock('../features/voice/liveVoiceStore', () => ({ useLiveVoice: { getState: () => ({ registerChat: () => () => {} }) } }));
 vi.mock('../features/activity/useActivity', () => ({ useActivity: () => ({ agents: [] }) }));
 vi.mock('../ui/Screen', () => ({ Screen: ({ children }: { children: ReactNode }) => children }));
-vi.mock('../features/sessions/SessionsDrawer', () => ({ SessionsDrawer: ({ children }: { children: ReactNode }) => children }));
+vi.mock('react-native-gesture-handler', () => ({
+  GestureDetector: ({ children }: { children: ReactNode }) => children,
+  Gesture: {
+    Pan: () => {
+      const pan = { enabled: () => pan, runOnJS: () => pan, hitSlop: () => pan, activeOffsetX: () => pan, failOffsetY: () => pan, onEnd: () => pan };
+      return pan;
+    },
+  },
+}));
+vi.mock('react-native-gesture-handler/ReanimatedDrawerLayout', () => ({
+  DrawerType: { FRONT: 0 }, DrawerKeyboardDismissMode: { ON_DRAG: 0 }, DrawerLockMode: { UNLOCKED: 0, LOCKED_CLOSED: 1 },
+  default: ({ ref, children, edgeWidth, renderNavigationView }: {
+    ref: React.Ref<unknown>; children: (progress: { value: number }) => ReactNode;
+    edgeWidth: number; renderNavigationView: (progress: { value: number }) => ReactNode;
+  }) => {
+    useImperativeHandle(ref, () => ({ closeDrawer: () => {}, openDrawer: () => {} }));
+    const navigation = renderNavigationView({ value: 0 });
+    return createElement('div', { 'data-drawer-enabled': String(edgeWidth > 0), 'data-drawer-navigation': String(navigation !== null) },
+      navigation, children({ value: 0 }));
+  },
+}));
+vi.mock('../features/sessions/DrawerMenu', () => ({ DrawerMenu: () => null }));
+vi.mock('../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) => children }));
+vi.mock('../features/tablet/SessionsBar', () => ({ SessionsBar: () => createElement('nav', { 'data-tablet-bar': true }) }));
+vi.mock('../features/tablet/ContextPanel', () => ({ ContextPanel: () => createElement('aside', null, 'session-context') }));
+vi.mock('../ui/HangarMark', () => ({ HangarMark: () => null }));
+vi.mock('../stores/tabletPrefs', () => {
+  const useTabletPrefs = create(() => ({ placement: 'bottom', panelOpen: true,
+    togglePanel: () => useTabletPrefs.setState(s => ({ panelOpen: !s.panelOpen })),
+  }));
+  return { useTabletPrefs };
+});
 vi.mock('../features/sessions/ServerSheet', () => ({ ServerSheet: () => null }));
 vi.mock('react-native-keyboard-controller', () => ({ KeyboardAvoidingView: ({ children }: { children: ReactNode }) => children }));
 vi.mock('../ui/Icon', () => ({ Icon: () => null }));
@@ -61,14 +97,14 @@ vi.mock('../features/sessions/SessionAvatar', () => ({ SessionAvatar: () => null
 vi.mock('../features/voice/LiveVoiceChatButton', () => ({ LiveVoiceChatButton: () => null }));
 vi.mock('./BubbleActions', () => ({ pararTts: () => {} }));
 vi.mock('./LoopChip', () => ({ LoopChip: () => null }));
-vi.mock('./MessageList', () => ({ MessageList: () => null }));
+vi.mock('./MessageList', () => ({ MessageList: ({ maxReading }: { maxReading?: number }) => createElement('section', { 'data-max-reading': maxReading }) }));
 vi.mock('./ComposerField', () => ({
   ComposerDock: ({ children }: { children: ReactNode }) => children,
   ComposerViewport: ({ children }: { children: ReactNode }) => children,
 }));
 vi.mock('./Composer', () => ({ Composer: function DraftField() {
   const [text, setText] = useState('');
-  return createElement('textarea', { value: text, onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => setText(e.target.value) });
+  return createElement('textarea', { value: text, onInput: (e: React.FormEvent<HTMLTextAreaElement>) => setText(e.currentTarget.value) });
 } }));
 vi.mock('./ComposerStatusLine', () => ({ ComposerStatusLine: () => null }));
 vi.mock('./OrqFooter', () => ({ OrqFooter: () => null }));
@@ -92,19 +128,23 @@ vi.mock('./ChatBody', async (original) => {
 import ChatScreen from '../../app/s/[server]/[name]/index';
 import { ChatBody } from './ChatBody';
 import * as m from '../paraglide/messages';
+import { useTabletPrefs } from '../stores/tabletPrefs';
 
 let root: Root;
 let host: HTMLDivElement;
 beforeEach(() => {
   vi.clearAllMocks();
   h.size = { width: 390, height: 844, scale: 1, fontScale: 1 };
+  h.os = 'android';
   h.bodyMounts = 0;
+  useTabletPrefs.setState({ panelOpen: true });
   host = document.createElement('div');
   root = createRoot(host);
 });
 afterEach(() => act(() => root.unmount()));
 
-it('girar e estreitar a janela conserva o ChatBody, o rascunho e a conexão', async () => {
+it.each(['android', 'ios'])('%s: girar e estreitar a janela conserva o ChatBody, o rascunho e a conexão', async os => {
+  h.os = os;
   await act(async () => root.render(createElement(ChatScreen)));
   expect(host.querySelector('[data-body-instance]')).not.toBeNull();
   const instance = host.querySelector('[data-body-instance]')!.getAttribute('data-body-instance');
@@ -117,6 +157,10 @@ it('girar e estreitar a janela conserva o ChatBody, o rascunho e a conexão', as
   for (const size of [{ width: 1180, height: 820 }, { width: 507, height: 820 }, { width: 820, height: 1180 }]) {
     h.size = { ...h.size, ...size };
     await act(async () => root.render(createElement(ChatScreen)));
+    const tablet = size.width === 1180;
+    expect(host.querySelector('[data-tablet-bar]') !== null).toBe(tablet);
+    expect(host.querySelector('[data-drawer-enabled]')!.getAttribute('data-drawer-enabled')).toBe(String(!tablet));
+    expect(host.querySelector('[data-drawer-navigation]')!.getAttribute('data-drawer-navigation')).toBe(String(!tablet));
     expect(host.querySelector('[data-body-instance]')!.getAttribute('data-body-instance')).toBe(instance);
     expect(host.querySelector('textarea')).toBe(field);
     expect(host.querySelector('textarea')!.value).toBe('rascunho ao girar');
@@ -144,4 +188,19 @@ it('cabeçalho de tablet troca a navegação pelo painel sem remontar o campo', 
   expect(onOpenMore).toHaveBeenCalledTimes(1);
   expect(host.querySelector('textarea')).toBe(field);
   expect(h.retain).toHaveBeenCalledTimes(1);
+});
+
+it('a rota transmite painel aberto e limita a leitura só ao fechar o painel no tablet', async () => {
+  h.size = { ...h.size, width: 1180, height: 820 };
+  await act(async () => root.render(createElement(ChatScreen)));
+  const panel = () => host.querySelector(`[aria-label="${m.ctx_painel_titulo()}"]`);
+  expect(panel()?.getAttribute('aria-expanded')).toBe('true');
+  expect(host.querySelector('section')?.getAttribute('data-max-reading')).toBeNull();
+  act(() => (panel() as HTMLButtonElement).click());
+  expect(panel()?.getAttribute('aria-expanded')).toBe('false');
+  expect(host.querySelector('aside')).toBeNull();
+  expect(host.querySelector('section')?.getAttribute('data-max-reading')).toBe('760');
+  h.size = { ...h.size, width: 390, height: 844 };
+  await act(async () => root.render(createElement(ChatScreen)));
+  expect(host.querySelector('section')?.getAttribute('data-max-reading')).toBeNull();
 });
