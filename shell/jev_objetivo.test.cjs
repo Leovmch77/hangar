@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { parsarSnapshot, montarPerguntas, montarEstado, decidir, rodar, pedidoDeTexto, valorDoCampo, cabecaDoValor, perguntaDeConfere, chegouNoEstado, destinoDoJev, NENHUM, SEM_SELECT, decidirPeloAuxiliar, pedidoDeAjuda } = require('./jev_objetivo.cjs');
+const { parsarSnapshot, montarPerguntas, montarEstado, decidir, rodar, pedidoDeTexto, valorDoCampo, cabecaDoValor, perguntaDeConfere, chegouNoEstado, destinoDoJev, NENHUM, SEM_SELECT, decidirPeloAuxiliar, pedidoDeAjuda, LIMIARES_COM_PRINT } = require('./jev_objetivo.cjs');
 
 const SNAPSHOT = `- RootWebArea "Cadastro"
   - link "Ver ajuda" [ref=@e1]
@@ -1509,4 +1509,131 @@ test('sem alvo com controles desabilitados na tela: espera a carga terminar ante
     perguntar: async () => resposta({ click: NENHUM }),
   });
   assert.ok(executados.includes('wait --idle --timeout 5000'), executados.join('\n'));
+});
+
+const PRINT = { base64: 'iVBORw0KGgo=', largura: 1280, altura: 800 };
+// O `perguntar` do CLI marca no próprio objeto como o pedido saiu; o falso faz o mesmo.
+const perguntarComPrint = (status, r = () => resposta({ click: 'e2' }), vistos = []) => async (estado) => {
+  vistos.push(estado.__imagem);
+  if (estado.__imagem) estado.__imagem.status = status;
+  return r();
+};
+
+test('com capturar, o passo leva o print ao perguntar e o trajeto registra imagem enviada', async () => {
+  const eventos = [];
+  const vistos = [];
+  await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 1,
+    executar: navegador([]),
+    capturar: async () => PRINT,
+    perguntar: perguntarComPrint('enviada', undefined, vistos),
+    registrar: (e) => eventos.push(e),
+  });
+  assert.ok(vistos[0], 'o passo levou o print');
+  assert.equal(vistos[0].base64, 'iVBORw0KGgo=');
+  assert.equal(vistos[0].largura, 1280);
+  assert.equal(vistos[0].altura, 800);
+  const d = eventos.find((e) => e.tipo === 'decisao');
+  assert.equal(d.imagem, 'enviada');
+  assert.equal(d.motivo, null);
+  assert.equal(d.bloqueado, null);
+});
+
+test('print fora do limite ou ausente: o passo pergunta sem imagem e o trajeto diz por que', async () => {
+  for (const [capturar, imagem, motivo] of [
+    [async () => ({ status: 'fora_do_limite', motivo: '2560x1600' }), 'fora_do_limite', '2560x1600'],
+    [async () => ({ status: 'sem_print', motivo: 'erro: janela minimizada' }), 'sem_print', 'erro: janela minimizada'],
+    [undefined, null, null],
+  ]) {
+    const eventos = [];
+    const vistos = [];
+    await rodar({
+      objetivo: 'iniciar o cadastro',
+      maxPassos: 1,
+      executar: navegador([]),
+      capturar,
+      perguntar: perguntarComPrint('enviada', undefined, vistos),
+      registrar: (e) => eventos.push(e),
+    });
+    assert.equal(vistos[0], undefined);
+    const d = eventos.find((e) => e.tipo === 'decisao');
+    assert.equal(d.imagem, imagem);
+    assert.equal(d.motivo, motivo);
+  }
+});
+
+test('a pergunta de bloqueio so vai quando o passo leva o print', () => {
+  assert.equal(montarPerguntas(CANDIDATOS).bloqueado, undefined);
+  const p = montarPerguntas(CANDIDATOS, {}, new Set(), '', false, true);
+  assert.ok(p.bloqueado, 'com print a pergunta vai');
+  assert.equal(p.bloqueado.type, 'noul');
+  assert.match(p.bloqueado.instructions, /screenshot `tela`/);
+  assert.equal(LIMIARES_COM_PRINT.bloqueado, 0.5);
+});
+
+const comBloqueio = (noul) => () => ({ ...resposta({ click: 'e2' }), bloqueado: { noul } });
+
+test('bloqueio no print: o auxiliar escreve o motivo e o laco para com ele', async () => {
+  const executados = [];
+  const eventos = [];
+  const pedidos = [];
+  const r = await rodar({
+    objetivo: 'iniciar o cadastro',
+    dados: { senha: 'S3gr3do!' },
+    maxPassos: 2,
+    executar: navegador(executados),
+    capturar: async () => PRINT,
+    perguntar: perguntarComPrint('enviada', comBloqueio(0.8)),
+    ajudar: async (p) => { pedidos.push(p); return '{"acoes":[],"motivo":"a pagina pede login com uma conta que nao temos"}'; },
+    registrar: (e) => eventos.push(e),
+  });
+  assert.equal(r.sucesso, false);
+  assert.equal(r.parou, 'bloqueado: a pagina pede login com uma conta que nao temos');
+  assert.ok(!executados.some((l) => l.startsWith('click')), 'nao clica');
+  assert.equal(pedidos.length, 1);
+  assert.match(pedidos[0], /iniciar o cadastro/);
+  assert.match(pedidos[0], /Cadastro de paciente/);
+  assert.ok(!pedidos[0].includes('S3gr3do!'));
+  const b = eventos.find((e) => e.tipo === 'bloqueio');
+  assert.equal(b.resultado, 'bloqueado');
+  assert.equal(b.motivo, 'a pagina pede login com uma conta que nao temos');
+  assert.equal(eventos.find((e) => e.tipo === 'decisao').bloqueado, 0.8);
+});
+
+test('bloqueio no print sem motivo do auxiliar, sem auxiliar ou com falha dele: o passo segue e o trajeto anota', async () => {
+  for (const [ajudar, resultado] of [
+    [async () => '{"acoes":[],"motivo":""}', 'auxiliar_discorda'],
+    [undefined, 'sem_auxiliar'],
+    [async () => { throw new Error('o modelo auxiliar recusou: 401'); }, 'auxiliar_falhou'],
+  ]) {
+    const executados = [];
+    const eventos = [];
+    await rodar({
+      objetivo: 'iniciar o cadastro',
+      maxPassos: 1,
+      executar: navegador(executados),
+      capturar: async () => PRINT,
+      perguntar: perguntarComPrint('enviada', comBloqueio(0.8)),
+      ajudar,
+      registrar: (e) => eventos.push(e),
+    });
+    assert.ok(executados.includes('click @e2'), `${resultado}: ${executados.join('\n')}`);
+    assert.equal(eventos.find((e) => e.tipo === 'bloqueio')?.resultado, resultado);
+  }
+});
+
+test('bloqueio de um pedido que nao levou o print e ignorado', async () => {
+  const executados = [];
+  let chamado = false;
+  await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 1,
+    executar: navegador(executados),
+    capturar: async () => PRINT,
+    perguntar: perguntarComPrint('falhou', comBloqueio(0.9)),
+    ajudar: async () => { chamado = true; return '{"acoes":[],"motivo":"x"}'; },
+  });
+  assert.equal(chamado, false);
+  assert.ok(executados.includes('click @e2'));
 });

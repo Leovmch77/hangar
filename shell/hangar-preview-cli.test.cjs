@@ -29,9 +29,9 @@ function homeComSidecar(dadosSrv) {
   return home;
 }
 
-function rodarCli(args, { entrada = null, home } = {}) {
+function rodarCli(args, { entrada = null, home, env = {}, cwd } = {}) {
   return new Promise((resolvePromise, reject) => {
-    const filho = spawn(process.execPath, [CLI, ...args], { env: { ...process.env, HOME: home } });
+    const filho = spawn(process.execPath, [CLI, ...args], { cwd, env: { ...process.env, HOME: home, ...env } });
     let stdout = '';
     let stderr = '';
     filho.stdout.on('data', (d) => { stdout += d; });
@@ -147,5 +147,71 @@ test('sidecar com pid morto e recusado com a mesma mensagem do sidecar ausente',
   const r = await rodarCli(['url', '--sessao', 'sessaoteste'], { home });
 
   assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /nao esta no ar/);
+  assert.match(r.stderr, /nao esta aberto nesta maquina/);
+});
+
+// Só o cabeçalho que o CLI lê (assinatura + IHDR com largura e altura).
+function png(largura, altura) {
+  const b = Buffer.alloc(33);
+  Buffer.from('89504e470d0a1a0a', 'hex').copy(b, 0);
+  b.writeUInt32BE(13, 8);
+  b.write('IHDR', 12, 'latin1');
+  b.writeUInt32BE(largura, 16);
+  b.writeUInt32BE(altura, 20);
+  return b;
+}
+
+const ctlComPrint = (shots = []) => ({
+  enfileirar: (fn) => fn(),
+  snapshot: async () => '- RootWebArea "Lista"\n  - button "Novo" [ref=@e1]',
+  capturarPagina: async () => { shots.push(Date.now()); return { isEmpty: () => false, toPNG: () => png(1280, 800) }; },
+});
+
+test('confere manda o print; recusado com imagem, refaz sem ela e responde pelo pedido sem imagem', async () => {
+  const corpos = [];
+  const jevFalso = http.createServer((req, res) => {
+    let bruto = '';
+    req.on('data', (d) => { bruto += d; });
+    req.on('end', () => {
+      const corpo = JSON.parse(bruto);
+      corpos.push(corpo);
+      if (corpo.state?.tela) { res.writeHead(400); res.end('imagem recusada'); return; }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ answers: { chegou: { noul: 0.9 } } }));
+    });
+  });
+  await new Promise((r) => jevFalso.listen(0, '127.0.0.1', r));
+  const shots = [];
+  const srv = await subirServidor({ controladorDe: () => ctlComPrint(shots), escrever: () => {} });
+  const home = homeComSidecar({ porta: srv.porta, token: srv.token, pid: process.pid });
+
+  const r = await rodarCli(['confere', 'a lista mostra o botao Novo', '--sessao', 'sessaoteste'], {
+    home,
+    env: { JEV_ENDPOINT: `http://127.0.0.1:${jevFalso.address().port}/v1/systemone`, TYPESAFE_API_KEY: 'chave-teste', JEV_MODEL: '' },
+  });
+  srv.fechar();
+  jevFalso.close();
+
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), 'confere: 0.90');
+  assert.equal(shots.length, 1);
+  assert.equal(corpos.length, 2);
+  assert.match(corpos[0].state.pagina, /button "Novo"/);
+  assert.equal(corpos[0].assets[corpos[0].state.tela].format, 'png');
+  assert.equal(typeof corpos[1].state, 'string', 'sem imagem, o corpo e o de antes');
+  assert.match(r.stderr, /400/);
+});
+
+test('shot com --max e sem caminho grava no caminho padrao, nunca num arquivo chamado --max', async () => {
+  const srv = await subirServidor({ controladorDe: () => ctlComPrint(), escrever: () => {} });
+  const home = homeComSidecar({ porta: srv.porta, token: srv.token, pid: process.pid });
+
+  const r = await rodarCli(['shot', '--max', '1568', '--sessao', 'sessaoteste'], { home, cwd: home });
+  srv.fechar();
+
+  assert.equal(r.status, 0, r.stderr);
+  const gravado = r.stdout.trim().replace(/^ok: shot /, '');
+  assert.equal(path.dirname(gravado), path.join(home, '.hangar', 'nav', 'shots', 'sessaoteste'));
+  assert.ok(fs.existsSync(gravado));
+  assert.equal(fs.existsSync(path.join(home, '--max')), false);
 });

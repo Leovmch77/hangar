@@ -42,7 +42,8 @@
 // mesmo com o shell fora do ar.
 import { execFileSync } from 'node:child_process';
 import { accessSync, appendFileSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
+import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import fmt from '../shell/preview_fmt.cjs';
 import folha from '../shell/folha.cjs';
@@ -401,9 +402,12 @@ if (VERBOS_SERVIDOR.has(cmd)) {
   // relativo mandado cru pro shell grava no cwd de onde o ELECTRON subiu, não no do agente, e a
   // resposta citava um caminho que não existia onde o agente (e o app do celular) foram procurar.
   if (cmd === 'shot') {
-    if (!cmdArgs[0]) mkdirSync(pastaShots(), { recursive: true });
     // Um arquivo por shot: a `folha` precisa da sequência, e sobrescrever perderia o antes/depois.
-    cmdArgs[0] = resolve(cmdArgs[0] || join(pastaShots(), `${Date.now()}.png`));
+    // `shot --max 1568` sem caminho: o flag fica, o caminho padrão entra na frente.
+    if (!cmdArgs[0] || cmdArgs[0].startsWith('--')) {
+      mkdirSync(pastaShots(), { recursive: true });
+      cmdArgs.unshift(join(pastaShots(), `${Date.now()}.png`));
+    } else cmdArgs[0] = resolve(cmdArgs[0]);
   }
   process.exit(await comando(chave, cmd, cmdArgs));
 }
@@ -643,6 +647,53 @@ function abrirTrajeto(dados) {
   return { arquivo, gravar };
 }
 
+/**
+ * O print que vai ao Jev: `{ base64, largura, altura }`, ou `{ status, motivo }` quando não há o que
+ * mandar. O arquivo temporário sai sempre; o Electron ignora o `--max` e o print grande cai no limite.
+ */
+async function capturarPrint(chave) {
+  const arquivo = join(tmpdir(), `hangar-jev-${process.pid}-${randomUUID()}.png`);
+  try {
+    const { texto, codigo } = await chamar(chave, 'shot', [arquivo, '--max', '1568'], flags.aba, lancar);
+    if (codigo !== 0) return { status: 'sem_print', motivo: semToken(texto).slice(0, 160) };
+    let buf;
+    try {
+      buf = readFileSync(arquivo);
+    } catch {
+      return { status: 'sem_print', motivo: 'o shot nao gravou o arquivo' };
+    }
+    const dim = jev.dimensoesPng(buf);
+    if (!dim) return { status: 'sem_print', motivo: 'o shot nao gravou um PNG' };
+    if (!jev.imagemDentroDoLimite(dim)) return { status: 'fora_do_limite', motivo: `${dim.largura}x${dim.altura}` };
+    return { base64: buf.toString('base64'), ...dim };
+  } catch (err) {
+    return { status: 'sem_print', motivo: String(err?.message ?? err).slice(0, 160) };
+  } finally {
+    try { unlinkSync(arquivo); } catch { /* o shot nao chegou a gravar */ }
+  }
+}
+
+/**
+ * Pedido ao Jev com a reserva da imagem: recusado ou sem resposta com ela, o mesmo pedido sai sem, e a
+ * imagem fica desligada pelo resto da execução. Só o erro do pedido sem imagem chega a quem chamou.
+ */
+function perguntadorDoJev(chaveJev) {
+  const { url, modelo, tipo } = jev.destinoDoJev(process.env);
+  let desligada = false;
+  // Sem o print, a pergunta de bloqueio falaria de uma tela que o Jev não recebeu.
+  const sem = (estado, { bloqueado, ...perguntas }) => jev.askJev({ url, modelo, chave: chaveJev, estado, perguntas });
+  return async (estado, perguntas, imagem) => {
+    if (!imagem) return { respostas: await sem(estado, perguntas), status: null };
+    if (desligada) return { respostas: await sem(estado, perguntas), status: 'desligada' };
+    try {
+      return { respostas: await jev.askJev({ url, modelo, chave: chaveJev, estado, perguntas, imagem, tipo }), status: 'enviada' };
+    } catch (err) {
+      desligada = true;
+      return { respostas: await sem(estado, perguntas), status: 'falhou', motivo: err.message };
+    }
+  };
+}
+
 if (cmd === 'confere') {
   const estado = pos.slice(1).join(' ').trim();
   if (!estado) erro('confere precisa do estado: hangar-preview confere "o dialogo fechou e a lista mostra o item novo"');
@@ -651,7 +702,7 @@ if (cmd === 'confere') {
   const chave = chaveAlvo();
   // O corte daqui (cabeça e cauda) é o que vale: o teto do snapshot só corta a cauda, onde a prova
   // pode estar, então ele recebe a página inteira.
-  const snap = await chamar(chave, 'snapshot', ['--max', '1000000']);
+  const [snap, print] = await Promise.all([chamar(chave, 'snapshot', ['--max', '1000000']), capturarPrint(chave)]);
   // Falta de chave, erro do snapshot e da chamada ao Jev saem 2: com 1, um laço `until confere`
   // giraria achando que a tela só não chegou lá. Navegador fechado ou shell fora do ar ainda saem 1
   // (helpers comuns).
@@ -661,14 +712,16 @@ if (cmd === 'confere') {
   let arvore = jev.mascararValores(semToken(snap.texto));
   // A prova pode estar no topo ou no fim da página; o miolo de uma lista longa é repetição.
   if (arvore.length > 100_000) arvore = `${arvore.slice(0, 50_000)}\n…\n${arvore.slice(-50_000)}`;
-  let respostas;
-  const { url, modelo } = jev.destinoDoJev(process.env);
+  let pedido;
   try {
-    respostas = await jev.askJev({ url, modelo, chave: chaveJev, estado: arvore, perguntas: jev.perguntaDeConfere(estado) });
+    pedido = await perguntadorDoJev(chaveJev)(arvore, jev.perguntaDeConfere(estado), print.base64 ? print : null);
   } catch (err) {
     erro(err.message, 2);
   }
-  const { p, ok } = jev.chegouNoEstado(respostas);
+  const status = pedido.status ?? print.status;
+  // A saída é a de sempre; o print que não foi aparece no stderr.
+  if (status !== 'enviada') console.error(`hangar-preview: aviso: confere sem o print (${status}: ${pedido.motivo ?? print.motivo ?? ''})`);
+  const { p, ok } = jev.chegouNoEstado(pedido.respostas, status === 'enviada' ? jev.LIMIARES_COM_PRINT : jev.LIMIARES);
   console.log(`confere: ${p.toFixed(2)}`);
   process.exit(ok ? 0 : 1);
 }
@@ -703,6 +756,7 @@ if (cmd === 'objetivo') {
     if (!fechado) gravar({ tipo: 'fim', sucesso: false, parou: `saiu com codigo ${codigo} antes do fim do laco (motivo no stderr)` });
   });
   const { ajudar, aviso } = auxiliarDoObjetivo(process.env, (texto) => gravar({ tipo: 'aviso', texto }));
+  const perguntarAoJev = perguntadorDoJev(chaveJev);
   if (aviso) console.error(`hangar-preview: aviso: ${aviso}`);
   // Só os nomes das chaves de --dados: os valores podem ser credenciais.
   gravar({ tipo: 'inicio', objetivo, dados: Object.keys(dados ?? {}), maxPassos, auxiliar: Boolean(ajudar),
@@ -727,10 +781,16 @@ if (cmd === 'objetivo') {
     },
     // Tudo que o navegador devolve vira estado enviado ao Jev: o token não sai da máquina.
     executar: async (verbo, args) => semToken((await chamar(chave, verbo, args)).texto),
+    capturar: () => capturarPrint(chave),
+    // A imagem sai do estado antes do envio (nunca vai como campo cru) e o resultado volta no mesmo
+    // objeto, para o laço saber se decidiu com print sem mudar a assinatura do `perguntar`.
     perguntar: async (estado, perguntas) => {
-      const { url, modelo } = jev.destinoDoJev(process.env);
+      const { __imagem: imagem, ...limpo } = estado;
       try {
-        return await jev.askJev({ url, modelo, chave: chaveJev, estado, perguntas });
+        const { respostas, status, motivo } = await perguntarAoJev(limpo, perguntas, imagem);
+        if (imagem) Object.assign(imagem, { status }, motivo ? { motivo } : {});
+        if (status === 'falhou') console.error(`hangar-preview: aviso: o Jev recusou o pedido com o print; seguindo sem print (${semToken(motivo)})`);
+        return respostas;
       } catch (err) {
         gravar({ tipo: 'fim', sucesso: false, parou: err.message });
         fechado = true;
