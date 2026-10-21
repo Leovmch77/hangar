@@ -12,8 +12,8 @@ export default function FilesSheet() {
   const pathParam = Array.isArray(path) ? path[0] : path;
 
   return (
-    <View style={{ flex: 1, backgroundColor: theme.tokens.bg.base, paddingBottom: insets.bottom }}>
-      <FilesPanel serverId={String(server ?? '')} name={String(name ?? '')} path={pathParam} onBack={() => router.back()} />
+    <View style={{ flex: 1, backgroundColor: theme.tokens.bg.base }}>
+      <FilesPanel serverId={String(server ?? '')} name={String(name ?? '')} path={pathParam} onBack={() => router.back()} bottomInset={insets.bottom} />
     </View>
   );
 }

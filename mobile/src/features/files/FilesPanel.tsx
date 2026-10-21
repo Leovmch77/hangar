@@ -16,9 +16,10 @@ interface Props {
   name: string;
   path?: string;
   onBack?: () => void;
+  bottomInset?: number;
 }
 
-export function FilesPanel({ serverId, name: sessionName, path: pathParam, onBack }: Props) {
+export function FilesPanel({ serverId, name: sessionName, path: pathParam, onBack, bottomInset = 0 }: Props) {
   const { theme } = useUnistyles();
 
   const api = filesStore(serverId, sessionName);
@@ -114,7 +115,7 @@ export function FilesPanel({ serverId, name: sessionName, path: pathParam, onBac
   }
 
   return (
-    <View style={styles.root}>
+    <View style={[styles.root, { paddingBottom: bottomInset }]}>
       {/* tabs */}
       <View style={[styles.tabs, { borderBottomColor: theme.tokens.border.subtle }]}>
         <Pressable onPress={() => setAba('arvore')} style={[styles.tab, aba === 'arvore' ? { borderBottomColor: theme.tokens.accent.base } : null]}>
