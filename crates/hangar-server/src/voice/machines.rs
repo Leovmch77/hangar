@@ -16,7 +16,7 @@ impl SelfApi {
     pub fn new(addr: SocketAddr, token: &str) -> Self {
         let addr = if addr.ip().is_unspecified() { SocketAddr::new(Ipv4Addr::LOCALHOST.into(), addr.port()) } else { addr };
         // Sem proxy nem redirect: o token do dono nunca sai deste servidor.
-        let http = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
+        let http = crate::http_client().no_proxy().redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(120)).build().expect("cliente http local");
         Self { base: format!("http://{addr}"), token: token.to_owned(), http }
     }

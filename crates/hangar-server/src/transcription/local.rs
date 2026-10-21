@@ -49,7 +49,7 @@ impl Default for LocalWhisper {
     fn default() -> Self {
         Self { running: Mutex::new(None), view: SyncMutex::new(View::default()),
             stopping: watch::channel(false).0, shutdown_started: AtomicBool::new(false), lifecycle: Mutex::new(()),
-            client: reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
+            client: crate::http_client().no_proxy().redirect(reqwest::redirect::Policy::none())
                 .build().expect("Cliente HTTP local com parâmetros válidos") }
     }
 }

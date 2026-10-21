@@ -163,7 +163,7 @@ impl DeviceInstall {
             pinned: SIDESTORE_IPA,
             config: Arc::new(|| Value::Null),
             code_wait: CODE_WAIT,
-            http: reqwest::Client::builder().timeout(DOWNLOAD_TIMEOUT).build().unwrap_or_default(),
+            http: crate::http_client().timeout(DOWNLOAD_TIMEOUT).build().unwrap_or_default(),
             jobs: Mutex::default(),
         }
     }

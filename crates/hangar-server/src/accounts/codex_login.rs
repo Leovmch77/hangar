@@ -35,7 +35,7 @@ impl CodexInvalidator {
         if !upstream.ip().is_loopback() || instance.is_empty() {
             return Err(AccountError::io());
         }
-        let client = reqwest::Client::builder()
+        let client = crate::http_client()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(10))

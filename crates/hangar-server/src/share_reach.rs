@@ -61,7 +61,7 @@ struct DohReply { #[serde(rename = "Answer", default)] answer: Vec<DohAnswer> }
 struct DohAnswer { #[serde(rename = "type")] kind: u16, data: String }
 
 fn client() -> reqwest::Client {
-    reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
+    crate::http_client().no_proxy().redirect(reqwest::redirect::Policy::none())
         .build().expect("cliente http")
 }
 
@@ -115,7 +115,7 @@ async fn attempt(probe: &Probe, link: &InviteLink, end: Option<Instant>) -> Resu
     let mut last = String::new();
     // O DNS público pode trazer mais de um endereço; basta um entregar a página desta máquina.
     for ip in ips {
-        let outside = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none())
+        let outside = crate::http_client().no_proxy().redirect(reqwest::redirect::Policy::none())
             .resolve(&link.host, SocketAddr::new(ip, probe.funnel_port))
             .build().map_err(|e| Failure::Funnel { detail: e.to_string() })?;
         match page(outside.get(&url).timeout(call_timeout(end))).await {

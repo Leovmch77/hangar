@@ -15,7 +15,7 @@ pub struct TranscriptionService {
 impl Default for TranscriptionService {
     fn default() -> Self {
         Self { snapshot: RwLock::new(ConfigSnapshot::default()), quota: Mutex::new(Quota::default()), local: LocalWhisper::default(),
-            client: reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
+            client: crate::http_client().redirect(reqwest::redirect::Policy::none())
                 .user_agent("hangar/1.0").connect_timeout(Duration::from_secs(10))
                 .build().expect("Cliente HTTP de transcrição com parâmetros válidos") }
     }

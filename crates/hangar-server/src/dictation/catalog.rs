@@ -457,7 +457,7 @@ async fn engine_models(context: &context::Context) -> Result<Vec<Value>, &'stati
         .env
         .get("ANTHROPIC_API_KEY")
         .ok_or("dictation_catalog_unavailable")?;
-    let client = reqwest::Client::builder()
+    let client = crate::http_client()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(15))
         .build()
@@ -690,7 +690,7 @@ async fn codex_http(
     {
         return Ok(None);
     }
-    let client = reqwest::Client::builder()
+    let client = crate::http_client()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(15))
         .build()

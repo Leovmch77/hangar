@@ -175,7 +175,7 @@ async fn list(body: ModelsBody, home: std::path::PathBuf, claude_dir: std::path:
 /// Anthropic pede `x-api-key`; os compatíveis com a OpenAI (CLIProxyAPI, OpenRouter), Bearer.
 async fn fetch(base: &reqwest::Url, key: &str) -> Result<Vec<String>, (Option<u16>, String)> {
     // Sem redirect: um 30x levaria a chave a outro host.
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(8)).redirect(reqwest::redirect::Policy::none())
+    let client = crate::http_client().timeout(Duration::from_secs(8)).redirect(reqwest::redirect::Policy::none())
         .build().map_err(|e| (None, e.to_string()))?;
     let anthropic = base.host_str().is_some_and(|h| h == "anthropic.com" || h.ends_with(".anthropic.com"));
     let mut url = base.clone();

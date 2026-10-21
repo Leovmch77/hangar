@@ -269,7 +269,7 @@ pub async fn call(address: &str, token: Option<&str>, method: reqwest::Method, p
     let http = match HTTP.get() {
         Some(http) => http,
         None => {
-            let built = peers::client(reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()))
+            let built = peers::client(crate::http_client().redirect(reqwest::redirect::Policy::none()))
                 .map_err(|e| peers::transport(address, &e))?;
             HTTP.get_or_init(|| built)
         }

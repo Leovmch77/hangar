@@ -266,7 +266,7 @@ async fn engine_models(base: &str, key: &str) -> Result<Vec<Value>, String> {
     // A URL pode vir com o `/v1` que o provedor documenta.
     let base = base.trim_end_matches('/');
     let base = base.strip_suffix("/v1").map_or(base, |b| b.trim_end_matches('/'));
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(15)).build().map_err(|e| e.to_string())?;
+    let client = crate::http_client().timeout(std::time::Duration::from_secs(15)).build().map_err(|e| e.to_string())?;
     // User-Agent explícito: o Cloudflare de alguns provedores recusa o padrão.
     let response = client.get(format!("{base}/v1/models")).bearer_auth(key).header("user-agent", "hangar/1.0").send().await
         .map_err(|e| format!("não foi possível falar com o provedor: {e}"))?;

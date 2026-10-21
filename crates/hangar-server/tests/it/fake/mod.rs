@@ -445,7 +445,7 @@ pub async fn serve_mods_gated(name: &str, link: Arc<dyn hangar_server::mods::sta
 }
 
 pub fn client() -> reqwest::Client {
-    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap()
+    hangar_server::http_client().redirect(reqwest::redirect::Policy::none()).build().unwrap()
 }
 /// Linha sintética no formato do Claude (nunca conversa real): user com texto e relógio crescente.
 pub fn claude_line(i: usize) -> String {

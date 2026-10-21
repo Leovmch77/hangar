@@ -89,7 +89,7 @@ fn fetch_online() -> Option<f64> {
     std::thread::Builder::new().name("usd-brl-http".into()).spawn(|| {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
         runtime.block_on(async {
-            let client = reqwest::Client::builder().timeout(Duration::from_secs(3)).build().ok()?;
+            let client = crate::http_client().timeout(Duration::from_secs(3)).build().ok()?;
             let response = client.get(RATE_URL).send().await.ok()?.error_for_status().ok()?;
             let body = response.bytes().await.ok()?;
             let value: serde_json::Value = serde_json::from_slice(&body).ok()?;

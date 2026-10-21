@@ -107,7 +107,7 @@ async fn organize_before_deadline(
     if openrouter_by_throughput(endpoint, model) {
         body["provider"] = json!({"sort": "throughput"});
     }
-    let client = match reqwest::Client::builder()
+    let client = match crate::http_client()
         .redirect(reqwest::redirect::Policy::none())
         .build()
     {
