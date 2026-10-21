@@ -136,7 +136,7 @@ jobs:
             exit 0
           fi
           runtime=$(node -p 'require("./app.json").expo.runtimeVersion')
-          if ! npx eas-cli@latest build:list --platform android --status finished --build-profile preview \
+          if ! npx --yes eas-cli@23.2.0 build:list --platform android --status finished --build-profile preview \
               --runtime-version "$runtime" --limit 1 --json --non-interactive > ../out/builds.json; then
             # Sem saber se há build deste runtime, o hangar.apk publicado fica como está.
             touch ../out/apk-keep
