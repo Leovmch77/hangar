@@ -139,7 +139,7 @@ describe('atualizar todas as máquinas', () => {
     expect(el.textContent).not.toContain(m.update_all_updated());
   });
 
-  it('ignora publicações e resultado após desmontar a tela', async () => {
+  it('com a tela desmontada, a rodada termina sem desenhar nada e ainda avisa o resultado pela vibração', async () => {
     let publish!: (id: string, state: UpdateAllState) => void;
     let finish!: (results: UpdateAllResult[]) => void;
     mocks.updateAll.mockImplementation((_servers, onChange) => {
@@ -152,7 +152,7 @@ describe('atualizar todas as máquinas', () => {
       const state: UpdateAllState = { status: 'atualizado', warnings: [] };
       publish(first.id, state); finish([{ server: first, state }]);
     });
-    expect(mocks.notification).not.toHaveBeenCalled();
+    expect(mocks.notification).toHaveBeenCalledWith('success');
     expect(el.textContent).toBe('');
   });
 });
