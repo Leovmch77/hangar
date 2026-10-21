@@ -162,7 +162,8 @@ describe('API e execução por máquina', () => {
     read = (_id, count) => { if (count === 1) return json(ready()); throw new TypeError('fixture-silent'); };
     await updateAll([server('silent')], onChange, options);
     expect(reads.get('silent')).toBe(301);
-    expect(final('silent')).toMatchObject({ status: 'falhou', error: 'sem resposta' });
+    expect(final('silent')).toMatchObject({ status: 'falhou', errorCode: 'silent' });
+    expect(final('silent')?.error).toBeUndefined();
   });
 
   it('uma resposta zera o silêncio e rodando não desiste por número de leituras', async () => {
@@ -181,7 +182,8 @@ describe('API e execução por máquina', () => {
     read = (_id, count) => json(count === 1 ? ready() : ready({ fase: 'rodando' }));
     await updateAll([server('ceiling')], onChange, options);
     expect(clock).toBe(30 * 60 * 1000);
-    expect(final('ceiling')).toMatchObject({ status: 'falhou', error: 'tempo limite de 30 minutos excedido' });
+    expect(final('ceiling')).toMatchObject({ status: 'falhou', errorCode: 'timeout' });
+    expect(final('ceiling')?.error).toBeUndefined();
     clock = 0;
     read = (_id, count) => { if (count > 1) clock = 30 * 60 * 1000; return json(count === 1 ? ready() : done()); };
     await updateAll([server('terminal')], onChange, options);

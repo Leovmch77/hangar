@@ -62,6 +62,7 @@ export interface UpdateAllState {
   status: 'consultando' | 'iniciando' | 'em_dia' | 'travado' | 'fora_do_ar' | UpdateFollow;
   reason?: UpdateHoldReason;
   error?: string;
+  errorCode?: 'silent' | 'timeout';
   /** Campos originais do motor: passo, total, texto, erro e avisos. */
   state?: AtualizacaoEstado;
   preflight?: Atualizacao['pre_voo'];
@@ -155,7 +156,7 @@ export async function updateAll(
         value = { ...latest, status: 'esperando', error: errorMessage(error) };
       }
       if (silent >= SILENT_READS || now() - startedAt >= FOLLOW_CEILING_MS) {
-        return finish({ status: 'falhou', error: silent >= SILENT_READS ? 'sem resposta' : 'tempo limite de 30 minutos excedido',
+        return finish({ status: 'falhou', errorCode: silent >= SILENT_READS ? 'silent' : 'timeout',
           state: value.state, warnings: value.warnings });
       }
       latest = publish(value);
