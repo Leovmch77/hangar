@@ -116,7 +116,7 @@ async fn deliver(path: PathBuf, base: String, diag: DiagClient, notify: Notify) 
     let Ok(Ok(registry)) = tokio::task::spawn_blocking(move || read(&reading)).await else { return report("push_expo_registry") };
     if registry.tokens.is_empty() { return; }
     static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
-    let Some(client) = CLIENT.get_or_init(|| reqwest::Client::builder().timeout(Duration::from_secs(10)).build().ok()) else {
+    let Some(client) = CLIENT.get_or_init(|| crate::http_client().timeout(Duration::from_secs(10)).build().ok()) else {
         return report("push_expo_client");
     };
     let (mut dead, mut read_ids) = (HashSet::new(), HashSet::new());
