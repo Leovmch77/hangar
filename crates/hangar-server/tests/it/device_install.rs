@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::fake::*;
-use hangar_server::device_install::apple::{ANISETTE, FakeSigner};
+use hangar_server::device_install::apple::{ANISETTE, CertInfo, FakeSigner};
 use hangar_server::device_install::job::{DeviceInstall, Pinned, SOURCE_URL};
 use hangar_server::device_install::{DeviceError, DeviceInfo, FakeLink};
 use serde_json::{Value, json};
@@ -324,6 +324,56 @@ async fn two_devices_never_sign_at_the_same_time() {
         s.wait(job, "done", None).await;
     }
     assert_eq!(s.signer.signing.1.load(std::sync::atomic::Ordering::SeqCst), 1, "duas assinaturas juntas dividiriam a pasta do temp");
+}
+
+fn full_account() -> FakeSigner {
+    let cert = |serial: &str, machine: &str| CertInfo { name: "iPhone Developer".into(), machine_name: machine.into(), serial: serial.into() };
+    FakeSigner { cert_limit: vec![cert("AAA111", "SideStore"), cert("BBB222", "iloader")], ..signer() }
+}
+
+#[tokio::test]
+async fn full_certificates_pause_and_revoking_resumes_to_done() {
+    let l = link();
+    l.installed.lock().unwrap().push(BUNDLE.into());
+    let s = serve(l, full_account()).await;
+    let job = s.start().await;
+    s.wait(&job, "awaiting_code", None).await;
+    let (status, body) = s.post("certs", json!({"job": job, "revoke": ["AAA111"]})).await;
+    assert_eq!((status, body["error"]["code"].as_str()), (409, Some("device_install_not_waiting")), "fora da etapa");
+    s.code(&job, json!({"code": "123456"})).await;
+    let p = s.wait(&job, "awaiting_cert_choice", None).await;
+    assert_eq!(p["certs"], json!([
+        {"name": "iPhone Developer", "machine_name": "SideStore", "serial": "AAA111"},
+        {"name": "iPhone Developer", "machine_name": "iloader", "serial": "BBB222"},
+    ]));
+    let (status, _) = s.post("certs", json!({"job": job, "revoke": ["ZZZ999"]})).await;
+    assert_eq!(status, 422, "serial que a tela não mostrou");
+    let (status, _) = s.post("certs", json!({"job": job})).await;
+    assert_eq!(status, 422, "nem revogar nem cancelar");
+    let (status, body) = s.post("certs", json!({"job": job, "revoke": ["AAA111"]})).await;
+    assert_eq!(status, 200, "{body}");
+    let done = s.wait(&job, "done", None).await;
+    assert!(done.get("certs").is_none(), "{done}");
+    assert_eq!(*s.signer.revoked.lock().unwrap(), ["AAA111"]);
+    assert_eq!(s.link.installs.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn cancelling_the_certificate_choice_fails_with_cert_limit() {
+    let s = serve(link(), full_account()).await;
+    let job = s.start().await;
+    s.wait(&job, "awaiting_code", None).await;
+    s.code(&job, json!({"code": "123456"})).await;
+    s.wait(&job, "awaiting_cert_choice", None).await;
+    let (status, body) = s.post("certs", json!({"job": job, "cancel": true})).await;
+    assert_eq!(status, 200, "{body}");
+    s.wait(&job, "failed", Some("device_install_cert_limit")).await;
+    assert!(s.signer.revoked.lock().unwrap().is_empty());
+    assert!(s.link.installs.lock().unwrap().is_empty());
+    let (status, _) = s.post("certs", json!({"job": job, "cancel": true})).await;
+    assert_eq!(status, 409);
+    let (status, _) = s.post("certs", json!({"job": "nenhum", "cancel": true})).await;
+    assert_eq!(status, 404);
 }
 
 fn assert_no_password_on_disk(dir: &std::path::Path) {

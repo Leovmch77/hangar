@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use zeroize::Zeroize;
 
 use super::apple::CodeReply;
-use super::job::{BUSY, Failure, FORBIDDEN, NOT_WAITING, SERVICE_MISSING, Start, UNKNOWN_JOB};
+use super::job::{BAD_REQUEST, BUSY, Failure, FORBIDDEN, NOT_WAITING, SERVICE_MISSING, Start, UNKNOWN_JOB};
 use super::DeviceError;
 use crate::routes::AppState;
 
@@ -27,7 +27,7 @@ fn failure(status: StatusCode, f: Failure) -> Response {
 }
 
 fn bad_body() -> Response {
-    failure(StatusCode::UNPROCESSABLE_ENTITY, Failure::new("device_install_bad_request"))
+    failure(StatusCode::UNPROCESSABLE_ENTITY, Failure::new(BAD_REQUEST))
 }
 
 /// Recusa repasse (Python, convidado), outra origem e quem não traz o token do dono.
@@ -127,6 +127,32 @@ pub async fn code(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
         Ok(()) => reply(StatusCode::OK, json!({"ok": true})),
         Err(f) if f.code == UNKNOWN_JOB => failure(StatusCode::NOT_FOUND, f),
         Err(f) if f.code == NOT_WAITING => failure(StatusCode::CONFLICT, f),
+        Err(f) => failure(StatusCode::INTERNAL_SERVER_ERROR, f),
+    }
+}
+
+#[derive(Deserialize)]
+struct Certs {
+    job: String,
+    #[serde(default)]
+    revoke: Vec<String>,
+    #[serde(default)]
+    cancel: bool,
+}
+
+pub async fn certs(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+    if let Err(r) = guard(&st, peer, &req) { return r; }
+    let Some(Certs { job, revoke, cancel }) = body(req).await else { return bad_body() };
+    let choice = match (cancel, revoke.is_empty()) {
+        (true, true) => None,
+        (false, false) => Some(revoke),
+        _ => return bad_body(),
+    };
+    match st.device_install.choose_certs(&job, choice) {
+        Ok(()) => reply(StatusCode::OK, json!({"ok": true})),
+        Err(f) if f.code == UNKNOWN_JOB => failure(StatusCode::NOT_FOUND, f),
+        Err(f) if f.code == NOT_WAITING => failure(StatusCode::CONFLICT, f),
+        Err(f) if f.code == BAD_REQUEST => failure(StatusCode::UNPROCESSABLE_ENTITY, f),
         Err(f) => failure(StatusCode::INTERNAL_SERVER_ERROR, f),
     }
 }

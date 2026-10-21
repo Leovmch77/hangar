@@ -585,6 +585,7 @@ fn public_routes(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router 
         .route("/api/device-install/trust", axum::routing::post(crate::device_install::routes::trust))
         .route("/api/device-install/start", axum::routing::post(crate::device_install::routes::start))
         .route("/api/device-install/code", axum::routing::post(crate::device_install::routes::code))
+        .route("/api/device-install/certs", axum::routing::post(crate::device_install::routes::certs))
         .fallback(pass_any)
         .layer(axum::middleware::from_fn(crate::migration_status::count_public))
         .with_state(state.clone())
