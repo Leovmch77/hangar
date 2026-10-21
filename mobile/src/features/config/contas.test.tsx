@@ -22,6 +22,10 @@ vi.mock('@hangar/core', async (original) => ({
   getCredentialsForServer: calls.credentials,
   getEnginesForServer: calls.engines,
 }));
+const stored = vi.hoisted(() => new Map<string, string>());
+vi.mock('../../stores/prefs', () => ({ prefs: {
+  getString: (key: string) => stored.get(key), set: (key: string, value: string) => { stored.set(key, value); }, remove: (key: string) => { stored.delete(key); },
+} }));
 vi.mock('expo-linking', () => ({ openURL: vi.fn() }));
 vi.mock('expo-clipboard', () => ({ setStringAsync: vi.fn() }));
 vi.mock('../../ui/Sheet', () => ({
@@ -84,6 +88,7 @@ vi.mock('react-native-unistyles', () => ({ StyleSheet: { create: (fn: any) => ty
 
 import { motivoLoginIndisponivel, type Credencial } from '@hangar/core';
 import Contas from '../../../app/config/contas';
+import * as m from '../../paraglide/messages';
 
 describe('contas Codex', () => {
   beforeEach(() => {
@@ -115,7 +120,9 @@ describe('contas Codex', () => {
     expect(container.textContent).toContain('Servidor B');
     expect((container.textContent?.match(/Trabalho/g) ?? []).length).toBe(1);
     expect(container.textContent).not.toContain('Codex OAuth');
-    expect(container.textContent).toContain('Assinaturas');
+    // Lista única: os títulos de seção saíram.
+    expect(container.textContent).not.toContain('Assinaturas');
+    expect(container.textContent).not.toContain('Outras chaves');
     expect(container.textContent).toContain('Claude');
     expect(container.textContent).toContain('API key');
     expect(container.textContent).toContain('Unknown');
@@ -148,12 +155,62 @@ describe('contas Codex', () => {
     await act(async () => root.render(createElement(Contas)));
     await act(async () => Promise.resolve());
 
-    const description = (title: string) => [...container.querySelectorAll('section')]
-      .find((row) => row.querySelector('strong')?.textContent === title)?.querySelector('span')?.textContent;
+    // Título, email e descrição ficam no mesmo bloco de textos; a descrição é o último.
+    const description = (title: string) => [...container.querySelectorAll('span')]
+      .find((node) => node.textContent === title)?.parentElement?.parentElement?.lastElementChild?.textContent;
     for (const row of [claude, codexConta, codexSolta]) expect(motivoLoginIndisponivel(row)).toBeTruthy();
     expect(description('Claude')).toContain(motivoLoginIndisponivel(claude));
     expect(description('Trabalho')).toBe(motivoLoginIndisponivel(codexConta));
     expect(description('Solta')).toBe(motivoLoginIndisponivel(codexSolta));
     root.unmount();
+  });
+
+  it('filtra por agente, busca por email e guarda a ordem escolhida', async () => {
+    stored.clear();
+    calls.credentials.mockResolvedValue([
+      { id: 'claude:/a', tipo: 'claude', auth_method: 'oauth', nome: 'Bravo', nome_natural: 'Bravo', ativa: false, usos: [],
+        login: { estado: 'ok', loggedIn: true, email: 'bravo@example.com', plano: 'max' },
+        cota: { estado: 'lida', janelas: [{ rotulo: '5h', pct: 10 }] } },
+      { id: 'claude:/b', tipo: 'claude', auth_method: 'oauth', nome: 'Alfa', nome_natural: 'Alfa', ativa: true, usos: [],
+        login: { estado: 'ok', loggedIn: true, email: 'alfa@example.com', plano: 'pro' },
+        cota: { estado: 'lida', janelas: [{ rotulo: '5h', pct: 90 }] } },
+    ]);
+    calls.list.mockResolvedValue([]);
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    await act(async () => root.render(createElement(Contas)));
+    await act(async () => Promise.resolve());
+    const names = () => [...container.querySelectorAll('span')].map((s) => s.textContent).filter((t) => t === 'Alfa' || t === 'Bravo');
+    const press = async (label: string) => {
+      const target = [...container.querySelectorAll('button')].find((b) => b.getAttribute('aria-label') === label);
+      expect(target, label).toBeTruthy();
+      await act(async () => target!.click());
+    };
+
+    // Sem ordem escolhida, a que está em uso vem primeiro.
+    expect(names()).toEqual(['Alfa', 'Bravo']);
+    await press(`${m.accounts_list_filter_codex()} 0`);
+    expect(names()).toEqual([]);
+    expect(container.textContent).toContain(m.accounts_list_empty());
+    await press(`${m.accounts_list_filter_all()} 2`);
+
+    const nameAsc = m.accounts_list_sort_state({ column: m.accounts_list_sort_name(), direction: m.accounts_list_sort_asc() });
+    await press(`${m.accounts_list_sort()}: ${m.accounts_list_sort_default()}`);
+    await press(m.accounts_list_sort_name());
+    expect(names()).toEqual(['Alfa', 'Bravo']);
+    expect(JSON.parse(stored.get('accounts_sort')!)).toEqual({ key: 'name', dir: 1 });
+    await press(`${m.accounts_list_sort()}: ${nameAsc}`);
+    await press(nameAsc);
+    expect(names()).toEqual(['Bravo', 'Alfa']);
+    expect(JSON.parse(stored.get('accounts_sort')!)).toEqual({ key: 'name', dir: -1 });
+    root.unmount();
+
+    // A ordem volta ao abrir a tela de novo.
+    const again = document.createElement('div');
+    const root2 = createRoot(again);
+    await act(async () => root2.render(createElement(Contas)));
+    await act(async () => Promise.resolve());
+    expect([...again.querySelectorAll('span')].map((s) => s.textContent).filter((t) => t === 'Alfa' || t === 'Bravo')).toEqual(['Bravo', 'Alfa']);
+    root2.unmount();
   });
 });

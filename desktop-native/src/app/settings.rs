@@ -902,8 +902,6 @@ impl Hangar {
         self.settings_ui.reveal.set(true);
     }
 
-    pub(super) fn jumped(&self) -> Option<&'static str> { self.settings_ui.jump }
-
     /// Destaque da linha levada pela busca, e a rolagem até ela quando o desenho já sabe onde ela está.
     pub(super) fn mark(&self, el: Div, key: &str) -> Div {
         let hit = self.settings_ui.hit == Some(key);

@@ -407,6 +407,25 @@ pub fn remember_root(path: &str) {
 
 pub fn search_all_folders() -> Result<bool, String> {
     let file = dir().ok_or_else(|| "sem pasta de configuração".to_owned())?.join("create-search-all.json");
+/// Ordem escolhida na lista de Contas, no formato do `cp_accounts_sort` do web; ilegível volta à ordem padrão. Bloqueantes.
+pub fn accounts_sort() -> Option<(String, i8)> {
+    #[derive(Deserialize)]
+    struct Saved { key: String, dir: i8 }
+    let saved: Saved = serde_json::from_slice(&std::fs::read(dir()?.join("accounts-sort.json")).ok()?).ok()?;
+    matches!(saved.dir, 1 | -1).then_some((saved.key, saved.dir))
+}
+
+pub fn remember_accounts_sort(sort: Option<&(String, i8)>) {
+    let Some(dir) = dir() else { return };
+    let file = dir.join("accounts-sort.json");
+    let result = match sort {
+        Some((key, dir_)) => std::fs::create_dir_all(&dir)
+            .and_then(|_| std::fs::write(&file, serde_json::json!({"key": key, "dir": dir_}).to_string())),
+        None => std::fs::remove_file(&file).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }),
+    };
+    if let Err(error) = result { eprintln!("ordem das contas não gravou: {error}"); }
+}
+
     read_search_all(&file)
 }
 
