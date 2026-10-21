@@ -2238,7 +2238,9 @@ def _sidecar_state(name: str) -> str:
         return "absent"
     except (OSError, ValueError):
         return "unreadable"
-    return "absent" if isinstance(data, dict) else "unreadable"
+    if not isinstance(data, dict) or not isinstance(data.get("peers") or [], list):
+        return "unreadable"
+    return "absent"
 
 
 async def _rust_leave(name: str, phases: dict) -> list[dict]:

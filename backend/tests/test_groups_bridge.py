@@ -170,9 +170,10 @@ def _close_stubs(monkeypatch):
     monkeypatch.setattr(api.share_bridge, "revoke_session", lambda n: None)
 
 
-def test_close_with_an_unreadable_sidecar_still_leaves_and_journals(monkeypatch, client):
+@pytest.mark.parametrize("content", ["{torto", '{"peers": 5}'])
+def test_close_with_an_unreadable_sidecar_still_leaves_and_journals(monkeypatch, client, content):
     """Sidecar que existe e não se lê não é "sem grupo": a saída vai pela ponte e a falha vai ao diário."""
-    (pair._pair_dir() / "a.json").write_text("{torto", encoding="utf-8")
+    (pair._pair_dir() / "a.json").write_text(content, encoding="utf-8")
     calls = _rust(monkeypatch, reply={"ex_peers": [], "warnings": []})
     _close_stubs(monkeypatch)
     journal = []

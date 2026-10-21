@@ -45,6 +45,8 @@ class PairLink:
             return None
         if "peers" not in data and data.get("peer"):
             data["peers"] = [data["peer"]]
+        if not isinstance(data.get("peers") or [], list):
+            return None
         peers = [p for p in (data.get("peers") or []) if p]
         # Sem peers só o grupo de orquestração existe: o árbitro do `orquestrar-auto` nasce sozinho
         # e o time chega depois, pelo orquestrador.
