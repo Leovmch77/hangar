@@ -2,9 +2,6 @@
   /**
    * A caixa de Atualizar — quatro estados: em dia, versão nova, atualizando, deu erro.
    *
-   * **Só desktop.** Celular é acesso remoto: quem atualiza é quem está na máquina onde o repo vive
-   * (decisão do usuário, 25/08/2026). Por isso ela é montada pelo DesktopShell, e não pelo App.
-   *
    * **Não lista os passos que a atualização executa.** O que precisa ser feito é problema do app; a
    * pessoa lê o que a versão traz e aperta um botão. Passo com texto próprio entra junto das
    * novidades, como texto — nunca como tarefa dela.
@@ -16,11 +13,13 @@
    */
   import * as m from '../paraglide/messages';
   import BottomSheet from './BottomSheet.svelte';
-  import { getAtualizacao, iniciarAtualizacao, reiniciarServidor, matchesRestartResult } from '@hangar/core';
+  import { getAtualizacao, iniciarAtualizacao, reiniciarServidor, matchesRestartResult,
+           ownUpdatableServers, updateAll } from '@hangar/core';
+  import { listOwnServers, onServersChanged, servidorDaOrigem } from '../lib/auth';
   import * as diag from '../lib/diag';
   import { aguardarSwNovo, esvaziarCaches } from '../lib/swNovo';
   import { renderMarkdown } from '../lib/markdown';
-  import type { Atualizacao } from '@hangar/core';
+  import type { Atualizacao, Server, UpdateAllState, UpdateAllResult } from '@hangar/core';
 
   interface Props {
     open: boolean;
@@ -34,6 +33,85 @@
   let carregando = $state(false);
   let erroDeRede = $state('');
   let enviando = $state(false);
+  let updateServers = $state<Server[]>([]);
+  let batchMode = $state(false);
+  let batchRunning = $state(false);
+  let batchResults = $state<UpdateAllResult[]>([]);
+  let batchError = $state('');
+  let pageServerId = $state<string | undefined>();
+  const pageUpdated = $derived(batchResults.some(({ server, state }) =>
+    server.id === pageServerId && state.status === 'atualizado'));
+
+  $effect(() => {
+    if (!open) {
+      if (!batchRunning) {
+        batchMode = false;
+        batchResults = [];
+        batchError = '';
+      }
+      return;
+    }
+    const refresh = () => { updateServers = ownUpdatableServers(listOwnServers()); };
+    refresh();
+    return onServersChanged(refresh);
+  });
+
+  function updateLabel(value: UpdateAllState): string {
+    switch (value.status) {
+      case 'consultando': return m.update_all_checking();
+      case 'iniciando': return m.update_all_starting();
+      case 'rodando': return m.update_all_running({ texto: value.state?.texto ?? '',
+        passo: value.state?.passo ?? 0, total: value.state?.total ?? 0 });
+      case 'esperando': return m.update_all_waiting();
+      case 'em_dia': return m.update_all_up_to_date();
+      case 'fora_do_ar': return m.update_all_offline();
+      case 'atualizado': return m.update_all_updated();
+      case 'atualizado_manual': return m.update_all_updated_manual();
+      case 'travado':
+        switch (value.reason) {
+          case 'branch': return m.update_all_held_branch();
+          case 'mudancas': return m.update_all_held_changes();
+          case 'rodando': return m.update_all_held_running();
+          default: return m.update_all_held_missing();
+        }
+      case 'falhou': return m.update_all_failed({ erro: value.errorCode === 'silent'
+        ? m.update_all_silent() : value.errorCode === 'timeout'
+          ? m.update_all_timeout() : value.error ?? value.state?.erro ?? '?' });
+    }
+  }
+
+  async function updateMachines() {
+    if (batchRunning) return;
+    const servers = ownUpdatableServers(listOwnServers());
+    if (servers.length < 2) return;
+    parar();
+    batchMode = true;
+    batchRunning = true;
+    batchError = '';
+    batchResults = [];
+    pageServerId = servidorDaOrigem()?.id;
+    try {
+      const results = await updateAll(servers, (serverId, state) => {
+        if (!vivo) return;
+        const server = servers.find((candidate) => candidate.id === serverId);
+        if (!server) return;
+        const index = batchResults.findIndex((result) => result.server.id === serverId);
+        if (index < 0) batchResults.push({ server, state });
+        else batchResults[index] = { server, state };
+      }, { last: pageServerId });
+      if (!vivo) return;
+      batchResults = results;
+      // Conserva os resultados na tela quando há algo que a pessoa precisa ler.
+      if (pageUpdated && results.every(({ state }) =>
+        (state.status === 'atualizado' || state.status === 'em_dia') && !state.warnings.length)) {
+        await concluir();
+      }
+    } catch (error) {
+      if (vivo) batchError = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (vivo) batchRunning = false;
+    }
+  }
   /** Quantas novidades a lista mostra antes de resumir o resto numa linha. */
   const TETO_MUDANCAS = 5;
   let verTudo = $state(false);
@@ -88,7 +166,7 @@
    * deles falhar, o próximo vem do mesmo jeito, dois segundos depois.
    */
   function agendar() {
-    if (timer) return;   // já há um relógio andando
+    if (timer || batchMode) return;   // o core acompanha a rodada de várias máquinas
     timer = setInterval(async () => {
       try {
         await carregar(true);
@@ -156,7 +234,7 @@
     && agoraMs - new Date(estado.ts).getTime() < _TETO_TRAVA_MS);
 
   function fecharSePuder() {
-    if (travada) return;
+    if (batchRunning || (!batchMode && travada)) return;
     onClose();
   }
 
@@ -219,7 +297,7 @@
   // Reabrir a caixa com uma atualização já em curso (outra aba a começou, ou a página recarregou no
   // meio) tem que voltar a acompanhar — senão a barra fica parada num estado antigo.
   $effect(() => {
-    if (open && !reiniciando && (rodando || lancamos) && !timer) agendar();
+    if (open && !batchMode && !reiniciando && (rodando || lancamos) && !timer) agendar();
   });
 
   const passosComTexto = $derived((dados?.passos ?? []).filter((p) => p.texto.trim()));
@@ -350,15 +428,64 @@
   );
 </script>
 
+{#snippet updateAllButton()}
+  {#if updateServers.length >= 2}
+    <button class="bt secundario" onclick={updateMachines} disabled={enviando || reiniciando}>
+      {m.update_all_button({ n: updateServers.length })}
+    </button>
+  {/if}
+{/snippet}
+
 <!-- `onClose` filtrado, e não `persistent`: enquanto a atualização roda, a caixa NÃO fecha por
      Escape, por clique fora nem pelo ×. Todos esses caminhos chamam `onClose`, então barrar aqui
      cobre os três de uma vez, sem mexer no BottomSheet, que é compartilhado com meia dúzia de
      telas. Fechar no meio não interrompe nada (o motor roda fora do navegador), mas some com a
      única janela que mostra o que está acontecendo — e reabrir depois é uma dança que ninguém
      descobre sozinho. -->
-<BottomSheet {open} onClose={fecharSePuder} wide centered ariaLabel={m.atualizar_titulo()}>
+<BottomSheet {open} onClose={fecharSePuder} wide centered ariaLabel={batchMode ? m.update_all_title() : m.atualizar_titulo()}>
   <div class="cx">
-    {#if carregando && !dados}
+    {#if batchMode}
+      <h2 class="titulo">{m.update_all_title()}</h2>
+      <div aria-live="polite">
+        {#if !batchResults.length && batchRunning}
+          <p class="msg">{m.update_all_checking()}</p>
+        {:else if !batchResults.length && !batchError}
+          <p class="msg">{m.busca_nenhum_resultado()}</p>
+        {/if}
+        {#if batchError}<p class="erro-linha">{m.update_all_failed({ erro: batchError })}</p>{/if}
+        <ul class="machines">
+          {#each batchResults as result (result.server.id)}
+            <li class="machine">
+              <h3 class="machine-name">{result.server.label}</h3>
+              <p class="machine-status" class:erro-linha={result.state.status === 'falhou' || result.state.status === 'fora_do_ar'}>
+                {updateLabel(result.state)}
+              </p>
+              {#if result.state.status === 'fora_do_ar' && result.state.error}
+                <p class="erro-linha">{result.state.error}</p>
+              {/if}
+              {#if result.state.warnings.length}
+                <p class="rotulo">{m.update_all_warnings()}</p>
+                <ul class="avisos">
+                  {#each result.state.warnings as warning, index (index)}<li>{warning}</li>{/each}
+                </ul>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      </div>
+      {#if !batchRunning}
+        <div class="acoes">
+          {#if batchError}
+            <button class="bt secundario" onclick={updateMachines}>{m.atualizar_tentar_de_novo()}</button>
+          {/if}
+          {#if pageUpdated}
+            <button class="bt primario" onclick={concluir}>{m.nav_recarregar()}</button>
+          {/if}
+          <button class="bt secundario" onclick={onClose}>{m.atualizar_fechar()}</button>
+        </div>
+      {/if}
+
+    {:else if carregando && !dados}
       <p class="msg">{m.atualizar_carregando()}</p>
 
     {:else if rodando}
@@ -483,6 +610,7 @@
       {#if erroDeRede}<p class="erro-linha">{erroDeRede}</p>{/if}
       <div class="acoes">
         <button class="bt secundario" onclick={onClose}>{m.atualizar_agora_nao()}</button>
+        {@render updateAllButton()}
         {#if !branchDeTrabalho}
           <button class="bt primario" onclick={atualizar} disabled={enviando}>
             {m.atualizar_botao()}
@@ -530,6 +658,9 @@
         {/if}
       </div>
     {/if}
+    {#if !batchMode && !rodando && (!temNovidade || falhou || terminouComAvisos || faltaReiniciar)}
+      <div class="acoes">{@render updateAllButton()}</div>
+    {/if}
   </div>
 </BottomSheet>
 
@@ -537,6 +668,11 @@
   /* Sem superfície própria: quem carrega o material é o BottomSheet, que já anda com o slider de
      Transparência. Uma cor de fundo aqui viraria retângulo chapado sobre o papel de parede. */
   .cx { padding: var(--space-5); }
+  .machines { list-style: none; padding: 0; margin: var(--space-4) 0; }
+  .machine { padding: var(--space-3) 0; border-bottom: 1px solid var(--border-subtle);
+             overflow-wrap: anywhere; }
+  .machine-name { margin: 0 0 var(--space-1); font-size: var(--text-sm); color: var(--text-primary); }
+  .machine-status { margin: 0 0 var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); }
 
   .titulo { margin: 0 0 var(--space-1); font-size: var(--text-lg); font-weight: 600;
             color: var(--text-primary); }
@@ -599,7 +735,7 @@
   .val { font-family: var(--font-mono, monospace); font-size: var(--text-xs);
          color: var(--text-primary); }
 
-  .acoes { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2);
+  .acoes { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2);
            margin-top: var(--space-4); }
   .bt { border-radius: var(--radius-md); padding: var(--space-2) var(--space-4);
         font-family: inherit; font-size: var(--text-sm); font-weight: 600; border: 0; }

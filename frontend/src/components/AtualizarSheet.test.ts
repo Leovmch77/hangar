@@ -4,10 +4,12 @@
 // "desconectado" — que é a mesma frase que ela usa quando o servidor caiu de verdade.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, unmount, tick } from 'svelte';
+import { fromStore, writable } from 'svelte/store';
 import AtualizarSheet from './AtualizarSheet.svelte';
 import * as m from '../paraglide/messages';
 import * as api from '@hangar/core';
-import type { Atualizacao } from '@hangar/core';
+import * as auth from '../lib/auth';
+import type { Atualizacao, Server, UpdateAllState } from '@hangar/core';
 
 function base(over: Partial<Atualizacao> = {}): Atualizacao {
   return {
@@ -27,12 +29,171 @@ let comp: Record<string, unknown> | null = null;
 function montar(props: Record<string, unknown> = {}) {
   alvo = document.createElement('div');
   document.body.appendChild(alvo);
-  comp = mount(AtualizarSheet, { target: alvo, props: { open: true, onClose: () => {}, ...props } });
+  comp = mount(AtualizarSheet, { target: alvo,
+    props: Object.defineProperties({ open: true, onClose: () => {} }, Object.getOwnPropertyDescriptors(props)) });
   return alvo;
 }
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  vi.spyOn(auth, 'listOwnServers').mockReturnValue([]);
+  vi.spyOn(auth, 'servidorDaOrigem').mockReturnValue(null);
+});
+
+describe('atualizar todas as máquinas', () => {
+  const local: Server = { id: 'local', label: 'Casa', baseUrl: window.location.origin, token: 'test' };
+  const remote: Server = { id: 'remote', label: 'Trabalho', baseUrl: 'https://remote.test', token: 'test' };
+  const button = () => [...document.querySelectorAll('button')]
+    .find((element) => element.textContent?.includes(m.update_all_button({ n: 2 })));
+
+  beforeEach(() => {
+    vi.spyOn(api, 'getAtualizacao').mockResolvedValue(base({ atualizacao_disponivel: true }));
+    vi.mocked(auth.listOwnServers).mockReturnValue([local, remote]);
+    vi.mocked(auth.servidorDaOrigem).mockReturnValue(local);
+  });
+
+  it('oferece o botão com duas máquinas próprias elegíveis', async () => {
+    montar(); await tick(); await tick();
+    expect(button()).toBeTruthy();
+    expect(document.body.textContent).toContain(m.atualizar_botao());
+  });
+
+  it('esconde o botão com uma máquina, sem contar convites, efêmeras ou desligadas', async () => {
+    vi.mocked(auth.listOwnServers).mockReturnValue([
+      local, { ...remote, invite: true }, { ...remote, ephemeral: true }, { ...remote, disabled: true },
+    ]);
+    montar(); await tick(); await tick();
+    expect(button()).toBeUndefined();
+  });
+
+  it('oferece atualizar todas mesmo quando esta máquina está em dia', async () => {
+    vi.mocked(api.getAtualizacao).mockResolvedValue(base());
+    montar(); await tick(); await tick();
+    expect(button()).toBeTruthy();
+  });
+
+  it('mantém o botão original atualizando só a máquina selecionada', async () => {
+    const start = vi.spyOn(api, 'iniciarAtualizacao').mockResolvedValue({ ok: true, pid: 1 });
+    const all = vi.spyOn(api, 'updateAll');
+    montar(); await tick(); await tick();
+    [...document.querySelectorAll('button')].find((element) => element.textContent?.trim() === m.atualizar_botao())!.click();
+    await tick(); await tick();
+    expect(start).toHaveBeenCalledOnce();
+    expect(all).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { fase: 'pronto', ok: false, erro: 'fixture-error' },
+    { fase: 'pronto', ok: true, avisos: ['fixture-warning'] },
+    { fase: 'pronto', ok: true, reiniciar_manual: true },
+  ] as const)('oferece atualizar todas após o desfecho anterior %j', async (state) => {
+    vi.mocked(api.getAtualizacao).mockResolvedValue(base({
+      atualizacao_disponivel: true, estado: { ...state, avisos: 'avisos' in state ? [...(state.avisos ?? [])] : [] },
+    }));
+    montar(); await tick(); await tick();
+    expect(button()).toBeTruthy();
+  });
+
+  it('fecha e reabre a folha para permitir uma nova rodada', async () => {
+    const opened = writable(true);
+    const reactive = fromStore(opened);
+    vi.spyOn(api, 'updateAll').mockResolvedValue([
+      { server: remote, state: { status: 'em_dia', warnings: [] } },
+    ]);
+    montar({ get open() { return reactive.current; }, onClose: () => opened.set(false) });
+    await tick(); await tick();
+    button()!.click(); await tick(); await tick();
+    [...document.querySelectorAll('button')].find((element) => element.textContent === m.atualizar_fechar())!.click();
+    await tick();
+    opened.set(true); await tick(); await tick();
+    expect(button()).toBeTruthy();
+    expect(document.body.textContent).toContain(m.atualizar_botao());
+  });
+
+  it('acompanha etapas, mantém o sheet aberto e passa a origem por último', async () => {
+    let publish!: (serverId: string, state: UpdateAllState) => void;
+    let finish!: (value: Awaited<ReturnType<typeof api.updateAll>>) => void;
+    const run = vi.spyOn(api, 'updateAll').mockImplementation((_servers, onChange) => {
+      publish = onChange;
+      return new Promise((resolve) => { finish = resolve; });
+    });
+    const close = vi.fn();
+    montar({ onClose: close }); await tick(); await tick();
+    button()!.click(); await tick();
+    expect(run).toHaveBeenCalledWith([local, remote], expect.any(Function), { last: local.id });
+    expect(document.body.textContent).toContain(m.update_all_checking());
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    expect(close).not.toHaveBeenCalled();
+    publish(remote.id, { status: 'rodando', state: { texto: 'fixture-step', passo: 2, total: 5 }, warnings: [] });
+    await tick();
+    expect(document.body.textContent).toContain(remote.label);
+    expect(document.body.textContent).toContain(m.update_all_running({ texto: 'fixture-step', passo: 2, total: 5 }));
+    publish(remote.id, { status: 'esperando', warnings: [] }); await tick();
+    expect(document.body.textContent).toContain(m.update_all_waiting());
+    const state: UpdateAllState = { status: 'atualizado', warnings: ['fixture-warning'] };
+    finish([{ server: remote, state }]); await tick(); await tick();
+    expect(document.body.textContent).toContain(m.update_all_updated());
+    expect(document.body.textContent).toContain(m.update_all_warnings());
+    expect(document.body.textContent).toContain('fixture-warning');
+  });
+
+  it.each([
+    [{ status: 'consultando' }, () => m.update_all_checking()],
+    [{ status: 'iniciando' }, () => m.update_all_starting()],
+    [{ status: 'em_dia' }, () => m.update_all_up_to_date()],
+    [{ status: 'travado', reason: 'branch' }, () => m.update_all_held_branch()],
+    [{ status: 'travado', reason: 'mudancas' }, () => m.update_all_held_changes()],
+    [{ status: 'travado', reason: 'rodando' }, () => m.update_all_held_running()],
+    [{ status: 'travado', reason: 'falta' }, () => m.update_all_held_missing()],
+    [{ status: 'fora_do_ar' }, () => m.update_all_offline()],
+    [{ status: 'atualizado_manual' }, () => m.update_all_updated_manual()],
+    [{ status: 'falhou', error: 'fixture-error' }, () => m.update_all_failed({ erro: 'fixture-error' })],
+    [{ status: 'falhou', errorCode: 'silent' }, () => m.update_all_failed({ erro: m.update_all_silent() })],
+    [{ status: 'falhou', errorCode: 'timeout' }, () => m.update_all_failed({ erro: m.update_all_timeout() })],
+  ] satisfies [Partial<UpdateAllState>, () => string][])('mostra o desfecho %j', async (partial, label) => {
+    const state = { ...partial, warnings: [] } as UpdateAllState;
+    vi.spyOn(api, 'updateAll').mockImplementation(async (_servers, onChange) => {
+      onChange(remote.id, state);
+      return [{ server: remote, state }];
+    });
+    montar(); await tick(); await tick();
+    button()!.click(); await tick(); await tick();
+    expect(document.body.textContent).toContain(remote.label);
+    expect(document.body.textContent).toContain(label());
+    expect(document.body.textContent).not.toContain(local.label);
+  });
+
+  it('mostra erro de execução e lista vazia sem esconder a falha', async () => {
+    const run = vi.spyOn(api, 'updateAll').mockRejectedValueOnce(new Error('fixture-error')).mockResolvedValueOnce([]);
+    montar(); await tick(); await tick();
+    button()!.click(); await tick(); await tick();
+    expect(document.body.textContent).toContain(m.update_all_failed({ erro: 'fixture-error' }));
+    [...document.querySelectorAll('button')].find((element) => element.textContent === m.atualizar_tentar_de_novo())!.click();
+    await tick(); await tick();
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain(m.busca_nenhum_resultado());
+    expect(document.body.textContent).not.toContain('fixture-error');
+  });
+
+  it.each([false, true])('recarrega após atualizar a origem, preservando avisos: %s', async (warning) => {
+    vi.useFakeTimers();
+    const reload = vi.spyOn(window.location, 'reload').mockImplementation(() => {});
+    vi.spyOn(api, 'updateAll').mockResolvedValue([
+      { server: remote, state: { status: 'em_dia', warnings: [] } },
+      { server: local, state: { status: 'atualizado', warnings: warning ? ['fixture-warning'] : [] } },
+    ]);
+    try {
+      montar(); await vi.advanceTimersByTimeAsync(0);
+      button()!.click(); await vi.advanceTimersByTimeAsync(0);
+      if (warning) {
+        expect(reload).not.toHaveBeenCalled();
+        expect(document.body.textContent).toContain('fixture-warning');
+        [...document.querySelectorAll('button')].find((element) => element.textContent === m.nav_recarregar())!.click();
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      expect(reload).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
+  });
 });
 
 afterEach(() => {
