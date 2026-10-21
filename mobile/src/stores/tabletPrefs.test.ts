@@ -81,19 +81,25 @@ describe('useTabletPrefs', () => {
     expect(prefs.getBoolean('tablet.panelOpen')).toBe(true);
   });
 
-  it('começa compacto e restaura o modo completo sem alterar a posição ou o recolhimento', async () => {
+  it('começa completo e restaura o modo compacto sem alterar a posição ou o recolhimento', async () => {
     const { useTabletPrefs } = await import('./tabletPrefs');
-    expect(useTabletPrefs.getState().tabsDetail).toBe('compact');
-    useTabletPrefs.getState().setTabsDetail('full');
-    expect(prefs.getString('tablet.tabsDetail')).toBe('full');
+    expect(useTabletPrefs.getState().tabsDetail).toBe('full');
+    useTabletPrefs.getState().setTabsDetail('compact');
+    expect(prefs.getString('tablet.tabsDetail')).toBe('compact');
     vi.resetModules();
     const reopened = await import('./tabletPrefs');
-    expect(reopened.useTabletPrefs.getState()).toMatchObject({ tabsDetail: 'full', placement: 'bottom', collapsed: false });
+    expect(reopened.useTabletPrefs.getState()).toMatchObject({ tabsDetail: 'compact', placement: 'bottom', collapsed: false });
   });
 
-  it('detalhe desconhecido gravado cai em compacto', async () => {
+  it.each(['compact', 'full'] as const)('preserva o detalhe %s gravado', async tabsDetail => {
+    prefs.set('tablet.tabsDetail', tabsDetail);
+    const { useTabletPrefs } = await import('./tabletPrefs');
+    expect(useTabletPrefs.getState().tabsDetail).toBe(tabsDetail);
+  });
+
+  it('detalhe desconhecido gravado cai em completo', async () => {
     prefs.set('tablet.tabsDetail', 'outro');
     const { useTabletPrefs } = await import('./tabletPrefs');
-    expect(useTabletPrefs.getState().tabsDetail).toBe('compact');
+    expect(useTabletPrefs.getState().tabsDetail).toBe('full');
   });
 });

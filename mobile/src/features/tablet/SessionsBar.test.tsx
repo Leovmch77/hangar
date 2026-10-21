@@ -23,8 +23,8 @@ vi.mock('react-native-keyboard-controller', () => ({
 vi.mock('../../ui/Glass', () => ({ Glass: ({ children, style }: { children: ReactNode; style: unknown }) =>
   createElement('div', { 'data-glass': true, style: Object.assign({}, ...[style].flat(Infinity).filter(Boolean)) }, children) }));
 vi.mock('../../ui/Icon', () => ({ Icon: ({ name }: { name: string }) => createElement('i', { 'data-icon': name }) }));
-vi.mock('../sessions/SessionAvatar', () => ({ SessionAvatar: ({ session }: { session: Partial<AggSession> }) =>
-  createElement('i', { 'data-avatar': session.provider, 'data-state': session.state, 'data-engine': session.engine }) }));
+vi.mock('../sessions/SessionAvatar', () => ({ SessionAvatar: ({ session, size }: { session: Partial<AggSession>; size: number }) =>
+  createElement('i', { 'data-avatar': session.provider, 'data-state': session.state, 'data-engine': session.engine, 'data-size': size }) }));
 vi.mock('../../ui/Sheet', () => ({ Sheet: ({ children, open }: { children: ReactNode; open: boolean }) =>
   open ? createElement('div', { role: 'dialog' }, children) : null }));
 vi.mock('../sessions/SessionRow', () => ({ SessionRow: ({ session, onPress, mostrarServidor }: {
@@ -33,8 +33,10 @@ vi.mock('../sessions/SessionRow', () => ({ SessionRow: ({ session, onPress, most
 vi.mock('react-native', async (original) => {
   const native = await original<typeof import('react-native')>();
   return { ...native,
-    View: ({ children, style, testID }: { children?: ReactNode; style?: unknown; testID?: string }) => createElement('div', { 'data-testid': testID, style: Object.assign({}, ...[style].flat(Infinity).filter(Boolean)) }, children),
-    Text: ({ children }: { children?: ReactNode }) => createElement('span', null, children),
+    View: ({ children, style, testID, accessibilityLabel }: { children?: ReactNode; style?: unknown; testID?: string; accessibilityLabel?: string }) => createElement('div', { 'data-testid': testID, 'aria-label': accessibilityLabel, style: Object.assign({}, ...[style].flat(Infinity).filter(Boolean)) }, children),
+    Text: ({ children, style }: { children?: ReactNode; style?: unknown }) => createElement('span', {
+      style: Object.assign({}, ...[style].flat(Infinity).filter(Boolean)),
+    }, children),
     Pressable: ({ children, onPress, onLongPress, style, testID, accessibilityLabel, accessibilityState }: {
       children?: ReactNode; onPress?: () => void; accessibilityLabel?: string; accessibilityState?: { selected?: boolean };
       onLongPress?: () => void; style?: unknown; testID?: string;
@@ -46,6 +48,7 @@ vi.mock('react-native', async (original) => {
 
 import { SessionsBar } from './SessionsBar';
 import { SessionChip } from './SessionChip';
+import { useUnistyles } from 'react-native-unistyles';
 import * as m from '../../paraglide/messages';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -187,11 +190,41 @@ it.each(['top', 'bottom'] as const)('%s tem abas de 240 pt, máquina na borda e 
   const tabs = [...container.querySelectorAll<HTMLElement>('[data-testid="session-tab"]')];
   expect(tabs).toHaveLength(2);
   expect(tabs.map(tab => tab.style.width)).toEqual(['240px', '240px']);
+  expect(container.querySelector<HTMLElement>('[data-glass]')!.style.height).toBe('60px');
+  expect(tabs[0].firstElementChild!.getAttribute('style')).toContain('height: 44px');
+  expect(tabs[0].style.paddingTop).toBe('8px');
+  expect(tabs[0].style.paddingBottom).toBe('8px');
+  expect(container.querySelector('[data-size="22"]')).not.toBeNull();
+  expect([...tabs[0].querySelectorAll('span')].find(el => el.textContent === session.name)!.style.fontSize)
+    .toBe(`${useUnistyles().theme.base.text.sm}px`);
   expect(container.querySelector<HTMLElement>('[data-testid="machine-legend"]')!.style.position).toBe('absolute');
   expect(container.textContent).not.toContain('feat/tablet');
   state.tabsDetail = 'full'; render(placement);
+  expect(container.querySelector<HTMLElement>('[data-glass]')!.style.height).toBe('68px');
+  expect(tabs[0].firstElementChild!.getAttribute('style')).toContain('height: 52px');
   for (const text of ['hangar', 'feat/tablet', '↑2', '↓3']) expect(container.textContent).toContain(text);
   expect(container.querySelector('button[aria-label^="api,"]')!.getAttribute('aria-label')).toContain(m.git_sync_titulo({ ahead: 2, behind: 3 }));
+});
+
+it.each(['compact', 'full'])('%s mostra perguntas pendentes da principal e filhas e o selo só no completo', detail => {
+  state.tabsDetail = detail;
+  state.rows = [
+    { ...session, headless: true, pending_questions: 2 },
+    { ...session, name: 'api-question', linked_by: 'api', pending_questions: 3 },
+    { ...session, name: 'api-waiting', linked_by: 'api', state: 'awaiting_input' },
+    { ...session, name: 'api-limited', linked_by: 'api', limited: true },
+    { ...session, name: 'api-idle', linked_by: 'api' },
+  ];
+  render('bottom');
+  expect(container.textContent).toContain('? 5');
+  const parent = container.querySelector('button[aria-label^="api,"]')!;
+  expect(parent.getAttribute('aria-label')).toContain(`${m.ask_perguntas()}: 5`);
+  expect(container.querySelector(`[aria-label="${m.criar_modo_exec_headless()}"]`) !== null).toBe(detail === 'full');
+  if (detail === 'full') expect(parent.getAttribute('aria-label')).toContain(m.criar_modo_exec_headless());
+  state.rows = [{ ...session, headless: false, pending_questions: 0 }];
+  render('bottom');
+  expect(container.textContent).not.toContain('? ');
+  expect(container.querySelector(`[aria-label="${m.criar_modo_exec_headless()}"]`)).toBeNull();
 });
 
 it('oferece três filhas com prioridade a perguntas e acesso a todas pelo contador por agente', () => {

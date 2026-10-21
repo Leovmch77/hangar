@@ -3,6 +3,7 @@ import { Alert, Pressable, ScrollView, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { cwdParts, providerName, rotuloEstado, type AggSession } from '@hangar/core';
 import { SessionAvatar } from '../sessions/SessionAvatar';
+import { HeadlessSignal } from '../sessions/HeadlessSignal';
 import { Icon } from '../../ui/Icon';
 import { Sheet } from '../../ui/Sheet';
 import { superficie } from '../../theme/superficie';
@@ -41,6 +42,7 @@ export const SessionChip = memo(function SessionChip({ session, members = [], la
   const selectedKey = selected && keyOf(selected);
   const on = [session, ...members].some(s => keyOf(s) === selectedKey);
   const grouped = members.length > 0;
+  const pendingQuestions = (session.pending_questions ?? 0) + children.filter(waits).length;
   const names = [session, ...members].map(s => s.name);
   const agents = new Map<AggSession['provider'], number>();
   for (const child of children) {
@@ -55,7 +57,7 @@ export const SessionChip = memo(function SessionChip({ session, members = [], la
   const ahead = full ? session.git_ahead ?? 0 : 0;
   const behind = full ? session.git_behind ?? 0 : 0;
   const meta = [showFolder ? folder : null, branch, ahead > 0 || behind > 0 ? m.git_sync_titulo({ ahead, behind }) : null].filter(Boolean).join(', ');
-  const aria = `${session.name}, ${description(session)}${label ? `, ${label.trim()}` : ''}${meta ? `, ${meta}` : ''}`;
+  const aria = `${session.name}, ${description(session)}${label ? `, ${label.trim()}` : ''}${meta ? `, ${meta}` : ''}${pendingQuestions > 0 ? `, ${m.ask_perguntas()}: ${pendingQuestions}` : ''}${full && session.headless ? `, ${m.criar_modo_exec_headless()}` : ''}`;
   const pick = (s: AggSession) => { setOpen(false); onPick(s); };
   const showName = (s: AggSession) => Alert.alert(s.name, description(s));
   return (
@@ -64,13 +66,16 @@ export const SessionChip = memo(function SessionChip({ session, members = [], la
         backgroundColor: on || grouped ? superficie(theme, 0.8) : 'transparent',
         borderColor: on ? theme.tokens.accent.base : children.some(waits) ? theme.tokens.status.warning : theme.tokens.border.default,
       }]}>
-        <View style={[styles.body, grouped && styles.groupBody]}>
+        <View style={styles.body}>
           <Pressable onPress={() => pick(session)} onLongPress={() => showName(session)} accessibilityRole="button"
             accessibilityState={{ selected: on }} accessibilityLabel={aria}
             style={({ pressed }) => [styles.main, { backgroundColor: pressed ? superficie(theme, 0.8) : 'transparent' }]}>
-            <SessionAvatar session={session} size={28} />
+            <SessionAvatar session={session} size={22} />
             <View style={styles.text}>
-              <Text numberOfLines={1} style={styles.name}>{session.name}</Text>
+              <View style={styles.title}>
+                <Text numberOfLines={1} style={[styles.name, styles.titleName]}>{session.name}</Text>
+                {full && session.headless ? <HeadlessSignal /> : null}
+              </View>
               {full ? <View style={styles.meta}>
                 {showFolder ? <View style={styles.metaItem}><Icon name="Folder" size={11} /><Text numberOfLines={1} style={styles.metaText}>{folder}</Text></View> : null}
                 {branch ? <View style={styles.metaItem}><Icon name="GitBranch" size={11} /><Text numberOfLines={1} style={styles.metaText}>{branch}</Text></View> : null}
@@ -78,6 +83,7 @@ export const SessionChip = memo(function SessionChip({ session, members = [], la
                 {behind > 0 ? <Text style={[styles.metaText, styles.sync, { color: theme.tokens.status.warning }]}>{`↓${behind}`}</Text> : null}
               </View> : null}
             </View>
+            {pendingQuestions > 0 ? <Text style={styles.pending}>{`? ${pendingQuestions}`}</Text> : null}
           </Pressable>
           {grouped ? <Pressable testID="agent-count" onPress={() => setOpen(true)} accessibilityRole="button"
             accessibilityLabel={`${m.tab_group_children({ n: members.length })}, ${counts}`} accessibilityState={{ expanded: open }} style={styles.counter}>
@@ -98,7 +104,7 @@ export const SessionChip = memo(function SessionChip({ session, members = [], la
             accessibilityLabel={`${child.name}, ${description(child)}`} accessibilityState={{ selected: keyOf(child) === selectedKey }}
             onPress={() => pick(child)} onLongPress={() => showName(child)} style={styles.childTarget}>
             <View style={[styles.child, { borderColor: keyOf(child) === selectedKey ? theme.tokens.accent.base : theme.tokens.border.default }]}>
-              <SessionAvatar session={child} size={18} />
+              <SessionAvatar session={child} size={10} />
               <Text numberOfLines={1} style={styles.childName}>{shortName(child.name, names)}</Text>
             </View>
           </Pressable>)}
@@ -127,13 +133,15 @@ export const SessionChip = memo(function SessionChip({ session, members = [], la
 });
 
 const styles = StyleSheet.create((theme) => ({
-  slot: { width: 240, flexShrink: 0, paddingTop: 12, paddingBottom: 22 },
-  tab: { position: 'relative', height: 68, borderRadius: theme.base.radius.md, borderWidth: 1 },
-  fullTab: { height: 84 },
+  slot: { width: 240, flexShrink: 0, paddingTop: 8, paddingBottom: 8 },
+  tab: { position: 'relative', height: 44, borderRadius: theme.base.radius.md, borderWidth: 1 },
+  fullTab: { height: 52 },
   body: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: theme.base.space[1] },
-  groupBody: { paddingBottom: 22 },
   main: { flex: 1, minWidth: 0, minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], borderRadius: theme.base.radius.md },
   text: { flex: 1, minWidth: 0, gap: theme.base.space[0.5] },
+  title: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1] },
+  titleName: { flexShrink: 1 },
+  pending: { flexShrink: 0, fontSize: theme.base.text.xxs, color: theme.tokens.status.warning },
   name: { fontSize: theme.base.text.sm, fontWeight: theme.base.weight.semibold, color: theme.tokens.text.primary },
   machine: { position: 'absolute', top: -8, right: 8, maxWidth: 160, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], paddingHorizontal: theme.base.space[1], borderRadius: theme.base.radius.sm, backgroundColor: theme.tokens.bg.base },
   meta: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1], overflow: 'hidden' },
@@ -144,9 +152,9 @@ const styles = StyleSheet.create((theme) => ({
   agents: { flexDirection: 'row', flexWrap: 'wrap', flexShrink: 1 },
   agent: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[0.5] },
   count: { fontSize: theme.base.text.xxxs, color: theme.tokens.accent.base },
-  children: { position: 'absolute', bottom: 0, left: 6, right: 6, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1] },
+  children: { position: 'absolute', bottom: -14, left: 6, right: 6, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1] },
   childTarget: { width: 56, minHeight: 44, justifyContent: 'center' },
-  child: { minHeight: 24, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[0.5], borderRadius: theme.base.radius.full, borderWidth: 1, paddingHorizontal: theme.base.space[0.5], backgroundColor: theme.tokens.bg.base },
+  child: { minHeight: 16, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[0.5], borderRadius: theme.base.radius.full, borderWidth: 1, paddingHorizontal: theme.base.space[0.5], backgroundColor: theme.tokens.bg.base },
   childName: { flexShrink: 1, fontSize: theme.base.text.xxxs, color: theme.tokens.text.secondary },
   more: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   sheet: { padding: theme.base.space[4], gap: theme.base.space[2] },

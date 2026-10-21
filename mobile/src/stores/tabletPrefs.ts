@@ -35,7 +35,7 @@ export const useTabletPrefs = create<TabletPrefs>((set, get) => {
     placement: readPlacement(),
     collapsed: prefs.getBoolean(COLLAPSED_KEY) ?? false,
     panelOpen: prefs.getBoolean(PANEL_KEY) ?? true,
-    tabsDetail: prefs.getString(DETAIL_KEY) === 'full' ? 'full' : 'compact',
+    tabsDetail: prefs.getString(DETAIL_KEY) === 'compact' ? 'compact' : 'full',
     setTabsDetail(tabsDetail) {
       prefs.set(DETAIL_KEY, tabsDetail);
       set({ tabsDetail });
