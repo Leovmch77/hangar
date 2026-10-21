@@ -816,12 +816,14 @@ describe('ActivitySheet real', () => {
     expect(route.back).toHaveBeenCalledTimes(1);
   });
 
-  it('iOS mantém as opções do cabeçalho quando o proxy do tema muda sem mudar as cores', async () => {
+  it('iOS não republica as opções da folha quando só o relógio do painel muda', async () => {
     vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
-    await mount();
+    const { render } = await mount();
     const before = screenOptions.at(-1);
     screenOptions.length = 0;
     await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(screenOptions).toEqual([]);
+    await render();
     expect(screenOptions.length).toBeGreaterThan(0);
     expect(screenOptions.every((options) => options === before)).toBe(true);
   });

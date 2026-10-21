@@ -202,7 +202,7 @@ describe('FilesSheet — deep-link', () => {
     root.unmount();
   });
 
-  it('reserva inset inferior na raiz e mantém filtro funcional', async () => {
+  it('reserva inset inferior no conteúdo e mantém filtro funcional', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -219,7 +219,8 @@ describe('FilesSheet — deep-link', () => {
       });
 
       expect(mocks.api.setOnlyModified).toHaveBeenCalledWith(false);
-      expect((container.firstElementChild as HTMLElement).style.paddingBottom).toBe('34px');
+      expect((container.firstElementChild as HTMLElement).style.paddingBottom).toBe('');
+      expect((container.firstElementChild!.firstElementChild as HTMLElement).style.paddingBottom).toBe('34px');
     } finally {
       await act(async () => root.unmount());
     }
