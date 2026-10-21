@@ -143,10 +143,21 @@ impl Hangar {
         use std::hash::{DefaultHasher, Hash, Hasher};
         let entries: Vec<(Target, &SessionInfo)> = self.ungrouped_tab_targets().into_iter()
             .filter_map(|target| self.target_session(&target).map(|session| (target, session))).collect();
+        let working_first = appearance::get().tabs_working_first;
         let mut hasher = DefaultHasher::new();
         self.hash_identities(&mut hasher);
-        for (t, s) in &entries { (t, &s.pair_gid, &s.pair_owner, s.peers(), &s.pair_task, s.orq(), &s.linked_by).hash(&mut hasher); }
-        super::grouping::memo(&self.sidebar.grouping.tabs, hasher.finish(), || groups(entries, &self.identities()))
+        working_first.hash(&mut hasher);
+        for (t, s) in &entries {
+            (t, &s.pair_gid, &s.pair_owner, s.peers(), &s.pair_task, s.orq(), &s.linked_by).hash(&mut hasher);
+            if working_first { (s.state == "working").hash(&mut hasher); }
+        }
+        super::grouping::memo(&self.sidebar.grouping.tabs, hasher.finish(), || {
+            let working: std::collections::HashSet<Target> = entries.iter().filter(|(_, s)| s.state == "working").map(|(t, _)| t.clone()).collect();
+            let mut out = groups(entries, &self.identities());
+            // Grupos na frente como sempre; das soltas, as que trabalham vêm antes, cada parte na ordem em que estava.
+            if working_first { out.sort_by_key(|g| !g.mother && !g.members.iter().any(|t| working.contains(t))); }
+            out
+        })
     }
 
     /// Onde a aba de `target` começa na janela e a faixa de cima e de baixo dela, já com a rolagem; pela mesma conta do

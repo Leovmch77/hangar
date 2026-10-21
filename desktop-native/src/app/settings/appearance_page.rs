@@ -631,6 +631,10 @@ impl Hangar {
                 segmented("tab-preview", &[tr("settings_tab_preview_off"), tr("settings_tab_preview_on")], a.tab_preview as usize, tabs_nav,
                     |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.tab_preview = index == 1; this.apply_appearance(next, true, cx); }, cx),
                 true))
+            .child(self.line("settings_tabs_working_first", Some(tr("settings_tabs_working_first_hint")), tabs_nav,
+                segmented("tabs-working-first", &[tr("settings_tab_preview_off"), tr("settings_tab_preview_on")], a.tabs_working_first as usize, tabs_nav,
+                    |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.tabs_working_first = index == 1; this.apply_appearance(next, true, cx); }, cx),
+                true))
             .child(self.line("settings_sidebar_height", Some(tr("settings_only_floating")), floating, height, false))
             .child(self.line("settings_sidebar_grouping", Some(tr("settings_sidebar_grouping_desc")), !a.navigation.tabs(),
                 segmented("sidebar-grouping", &[tr("sidebar_group_none"), tr("sidebar_group_project"), tr("sidebar_group_machine_short")],
