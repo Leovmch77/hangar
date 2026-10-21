@@ -411,8 +411,6 @@ pub fn remember_root(path: &str) {
     if let Some(dir) = dir() { let _ = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join("last-root"), path)); }
 }
 
-pub fn search_all_folders() -> Result<bool, String> {
-    let file = dir().ok_or_else(|| "sem pasta de configuração".to_owned())?.join("create-search-all.json");
 /// Ordem escolhida na lista de Contas, no formato do `cp_accounts_sort` do web; ilegível volta à ordem padrão. Bloqueantes.
 pub fn accounts_sort() -> Option<(String, i8)> {
     #[derive(Deserialize)]
@@ -432,6 +430,8 @@ pub fn remember_accounts_sort(sort: Option<&(String, i8)>) {
     if let Err(error) = result { eprintln!("ordem das contas não gravou: {error}"); }
 }
 
+pub fn search_all_folders() -> Result<bool, String> {
+    let file = dir().ok_or_else(|| "sem pasta de configuração".to_owned())?.join("create-search-all.json");
     read_search_all(&file)
 }
 
