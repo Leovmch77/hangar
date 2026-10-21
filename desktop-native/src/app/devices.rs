@@ -91,7 +91,7 @@ const ERROR_CODES: &[&str] = &[
     "device_install_login_refused", "device_install_apple_busy", "device_install_anisette_unreachable", "device_install_download_failed",
     "device_install_download_mismatch", "device_install_sign_failed", "device_install_not_installed", "device_error",
     "device_install_forbidden", "device_install_busy", "device_install_unknown_job", "device_install_not_waiting", "connection_failed",
-    "server_outdated", "unauthorized",
+    "server_outdated", "unauthorized", "device_install_bad_request",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
