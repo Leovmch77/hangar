@@ -138,10 +138,16 @@ jobs:
           runtime=$(node -p 'require("./app.json").expo.runtimeVersion')
           if ! npx eas-cli@latest build:list --platform android --status finished --build-profile preview \
               --runtime-version "$runtime" --limit 1 --json --non-interactive > ../out/builds.json; then
-            echo "::warning::eas build:list falhou; mobile-latest sai sem hangar.apk."
+            # Sem saber se há build deste runtime, o hangar.apk publicado fica como está.
+            touch ../out/apk-keep
+            echo "::warning::eas build:list falhou; o hangar.apk da mobile-latest não foi atualizado nem removido."
             exit 0
           fi
-          url=$(node -p 'require("../out/builds.json")[0]?.artifacts?.buildUrl ?? ""') || url=
+          if ! url=$(node -p 'require("../out/builds.json")[0]?.artifacts?.buildUrl ?? ""'); then
+            touch ../out/apk-keep
+            echo "::warning::Resposta do eas build:list ilegível; o hangar.apk da mobile-latest não foi atualizado nem removido."
+            exit 0
+          fi
           if [ -z "$url" ]; then
             echo "::warning::Nenhum build Android preview pronto com runtime $runtime; mobile-latest sai sem hangar.apk."
             exit 0
@@ -161,8 +167,12 @@ jobs:
                  --notes "App do celular para SideStore (iOS) e instalação direta (Android). Reescrita a cada build Release do iOS."
           gh release upload mobile-latest "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           # APK de outro runtime nativo não roda o JS deste build; melhor a release sem APK.
-          if ! test -f out/hangar.apk; then
-            gh release delete-asset mobile-latest hangar.apk --repo "$GITHUB_REPOSITORY" -y \
-              && echo "::warning::hangar.apk anterior removido da mobile-latest." || true
+          # Remoção que falha derruba o job: o APK velho seguiria publicado.
+          if ! test -f out/hangar.apk && ! test -f out/apk-keep; then
+            assets=$(gh release view mobile-latest --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+            if grep -qx hangar.apk <<<"$assets"; then
+              gh release delete-asset mobile-latest hangar.apk --repo "$GITHUB_REPOSITORY" -y
+              echo "::warning::hangar.apk anterior removido da mobile-latest."
+            fi
           fi
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/mobile-latest" -f sha="$GITHUB_SHA" -F force=true >/dev/null
