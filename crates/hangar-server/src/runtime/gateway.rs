@@ -4028,7 +4028,8 @@ pub(crate) mod tests {
         let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"test".into(),"instance".into()));registry.bind_lifecycle();
         let (handle,wakes)=super::super::actor::RuntimeHandle::counting_wakes("CX",1);
         let binding=crate::interactions::InteractionBinding {key:"CX".into(),conversation:"thread".into(),generation:1};
-        registry.entries.lock().await.insert("CX".into(),Entry {generation:1,handle:EntryHandle::Headless(handle),lease_path:"CX.lock".into(),name:"cx-wake".into(),mods_life:0,provider:"codex".into(),account_key:None,relaunch:None,settings_owner:None,
+        let dir=tempfile::tempdir().unwrap();
+        registry.entries.lock().await.insert("CX".into(),Entry {generation:1,handle:EntryHandle::Headless(handle),lease_path:dir.path().join("CX.lock"),name:"cx-wake".into(),mods_life:0,provider:"codex".into(),account_key:None,relaunch:None,settings_owner:None,
             mode_source:crate::terminal_facts::ModeSource {binding,transcript:"t.jsonl".into(),confirmed:None},live:registry.live_sender("cx-wake"),runtime_target:None,cano_birth:None,auto_respawn:None,respawn_inflight:false});
         registry.request_reopen("cx-wake");
         tokio::time::timeout(Duration::from_secs(5),async {while wakes.load(std::sync::atomic::Ordering::SeqCst)==0 {tokio::time::sleep(Duration::from_millis(10)).await;}})
