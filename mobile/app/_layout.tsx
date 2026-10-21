@@ -16,6 +16,7 @@ import { aplicarTemaSalvo, useAparencia } from '../src/stores/aparencia';
 import { aplicarMaterial } from '../src/theme/aplicarMaterial';
 import { Toaster, toast } from '../src/ui/Toast';
 import { LiveVoiceRoot } from '../src/features/voice/LiveVoiceRoot';
+import { applyOrientationLock } from '../src/features/tablet/orientationLock';
 import { setFatalErrorRoute, takeFatalErrorNotice } from '../src/net/fatalErrors';
 import * as m from '../src/paraglide/messages';
 import { installNotificationHandler, pushRegistrationKey, registerExpoPush, retryExpoPushIfDenied, useNotificationNavigation } from '../src/features/push/expoPush';
@@ -39,6 +40,12 @@ export default function Layout() {
   const servers = useServers((s) => s.servers);
   const aviso = useServers((s) => s.aviso);
   const limparAviso = useServers((s) => s.limparAviso);
+
+  useEffect(() => {
+    applyOrientationLock().catch((e: unknown) => {
+      registrarDiag({ evento: 'orientation.lock_failed', nivel: 'erro', codigo: 'orientation_lock_failed', detalhe: e instanceof Error ? e.message : String(e) });
+    });
+  }, []);
 
   useEffect(() => {
     try { if (takeFatalErrorNotice()) toast.aviso(m.native_last_error_available()); }

@@ -16,7 +16,7 @@ describe('OTA na configuração nativa', () => {
       EXUpdatesEnabled: true,
       EXUpdatesURL: updateUrl,
       EXUpdatesRequestHeaders: { 'expo-channel-name': 'preview' },
-      EXUpdatesRuntimeVersion: 'native-3',
+      EXUpdatesRuntimeVersion: 'native-4',
       EXUpdatesCheckOnLaunch: 'ALWAYS',
       EXUpdatesLaunchWaitMs: 0,
     });
@@ -26,13 +26,13 @@ describe('OTA na configuração nativa', () => {
   it('preserva o runtime quando só a versão visível do app muda', async () => {
     const nextConfig = { ...config, version: '0.2.0' };
     const plist = await IOSConfig.Updates.setUpdatesConfigAsync(projectRoot, nextConfig, {}, null);
-    expect(plist.EXUpdatesRuntimeVersion).toBe('native-3');
+    expect(plist.EXUpdatesRuntimeVersion).toBe('native-4');
   });
 
   it('muda o runtime quando a versão nativa explícita sobe', async () => {
-    const nextConfig = { ...config, runtimeVersion: 'native-4' };
+    const nextConfig = { ...config, runtimeVersion: 'native-5' };
     const plist = await IOSConfig.Updates.setUpdatesConfigAsync(projectRoot, nextConfig, {}, null);
-    expect(plist.EXUpdatesRuntimeVersion).toBe('native-4');
+    expect(plist.EXUpdatesRuntimeVersion).toBe('native-5');
   });
 
   it('gera o Android com a mesma busca automática e o runtime nativo explícito', async () => {
@@ -55,7 +55,7 @@ describe('OTA na configuração nativa', () => {
       'expo.modules.updates.EXPO_UPDATES_CHECK_ON_LAUNCH': 'ALWAYS',
       'expo.modules.updates.EXPO_UPDATES_LAUNCH_WAIT_MS': '0',
     });
-    expect(strings.resources.string).toContainEqual({ $: { name: 'expo_runtime_version' }, _: 'native-3' });
+    expect(strings.resources.string).toContainEqual({ $: { name: 'expo_runtime_version' }, _: 'native-4' });
   });
 });
 
@@ -78,13 +78,13 @@ const pluginOptions = (name: string) => {
   return Array.isArray(entry) ? entry[1] : entry;
 };
 
-describe('native-3: tablet, ditado em segundo plano e push', () => {
+describe('native-4: tablet, ditado em segundo plano e push', () => {
   let native: Awaited<ReturnType<typeof generatedNative>>;
   beforeAll(async () => { native = await generatedNative(); }, 60_000);
 
   it('iPhone só em retrato e iPad nas quatro orientações', () => {
     const { plist } = native;
-    expect(config.orientation).toBe('portrait');
+    expect(config.orientation).toBe('default');
     expect(config.ios?.supportsTablet).toBe(true);
     expect(plist.UISupportedInterfaceOrientations).toEqual(['UIInterfaceOrientationPortrait']);
     expect(plist['UISupportedInterfaceOrientations~ipad']).toEqual([
@@ -93,6 +93,11 @@ describe('native-3: tablet, ditado em segundo plano e push', () => {
       'UIInterfaceOrientationLandscapeLeft',
       'UIInterfaceOrientationLandscapeRight',
     ]);
+  });
+
+  it('Android nasce sem trava nativa para permitir que o tablet gire', () => {
+    const activity = AndroidConfig.Manifest.getMainActivityOrThrow(native.manifest);
+    expect(activity.$['android:screenOrientation']).toBe('unspecified');
   });
 
   it('Android grava em segundo plano pelo serviço do expo-audio', () => {

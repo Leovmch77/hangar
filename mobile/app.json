@@ -4,7 +4,7 @@
     "slug": "hangar",
     "scheme": "hangar",
     "version": "0.1.0",
-    "runtimeVersion": "native-3",
+    "runtimeVersion": "native-4",
     "updates": {
       "url": "https://u.expo.dev/9fd06001-323e-4b82-835f-6dfc3674236d",
       "checkAutomatically": "ON_LOAD",
@@ -13,7 +13,7 @@
         "expo-channel-name": "preview"
       }
     },
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
