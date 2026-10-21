@@ -8,9 +8,9 @@ import json
 import logging
 from datetime import datetime, time as dtime
 from pathlib import Path
-from threading import Lock, Timer
+from threading import Lock, Thread, Timer
 
-from app import atomico, guest_users
+from app import atomico, guest_users, push_expo_bridge
 from app.config import settings
 
 _log = logging.getLogger("hangar.push")
@@ -257,6 +257,7 @@ def _broadcast(session_name: str, body_fn, *, tag: str | None = None,
     """Manda push com o corpo dado (funcao do locale da inscricao) pra todas as inscricoes; poda as
     mortas. No-op se nao ha chaves VAPID configuradas (push desligado). Compartilhado pelos 3
     gatilhos (awaiting/finished/dead) — so o texto (e, no coalescido, tag/title/url) muda."""
+    _to_expo(session_name, body_fn, title_suffix_fn, url == "/")
     if not (settings.vapid_private and settings.vapid_public):
         return
     with _lock:
@@ -267,6 +268,17 @@ def _broadcast(session_name: str, body_fn, *, tag: str | None = None,
                                               title_suffix_fn=title_suffix_fn, url=url)]
         if len(alive) != len(subs):
             _save(alive)
+
+
+def _to_expo(session_name: str, body_fn, title_suffix_fn, list_view: bool) -> None:
+    """O canal Expo independe do Web Push: sai antes do VAPID e fora do `_lock`."""
+    if not push_expo_bridge.configured():
+        return
+    def text(fn) -> dict[str, str]:
+        return {locale: fn(locale) for locale in ("pt", "en")}
+    title = text(title_suffix_fn) if title_suffix_fn is not None else {"pt": session_name, "en": session_name}
+    # A ponte bloqueia até 5 s: nem o laço nem o Web Push esperam por ela.
+    Thread(target=push_expo_bridge.send, args=(session_name, title, text(body_fn), list_view), daemon=True).start()
 
 
 def notify_awaiting(session_name: str, body: str | None = None) -> None:

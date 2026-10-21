@@ -101,7 +101,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   import { fmtDur } from '../lib/fmt';
   import { hasSeam, mergeHistoryWithLiveRetiring } from '@hangar/core';
   import { especificidade, donoDaLinha } from '@hangar/core';
-  import { parseStatusLine, queuedMessages } from '@hangar/core';
+  import { DELIVERY_STALLED, parseStatusLine, queuedMessages } from '@hangar/core';
   import { mergeProjectShortcuts, runShortcutShell, runCodeCommand, sendsDirect, shortcutMissingSecret } from '@hangar/core';
   import { runsInHangar, answersInApp, hangarHome, hangarKeyOf, OutdatedServerError } from '@hangar/core';
   import {
@@ -1232,7 +1232,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     recargaDispensada = true;
     try { localStorage.setItem(recargaKey, '1'); } catch { /* sem storage: vale só nesta aba */ }
   }
-  // Codex preso tentando falar com o provedor: o turno nunca fecha, então reinicia trabalhando.
+  // Codex preso tentando falar com o provedor, ou mensagem presa com a sessão sem terminal surda
+  // (Reabrir do painel "Na fila"): o turno nunca fecha, então reinicia trabalhando.
   async function reiniciarCodex() {
     if (recarregando) return;
     recarregando = true;
@@ -3055,6 +3056,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   const problemaChave = $derived(stateEvent?.problema ? `${stateEvent.problema}\n${stateEvent.problema_detalhe ?? ''}` : null);
   const faixaProblema = $derived.by(() => {
     if (!problemaChave || problemaChave === problemaDispensado) return null;
+    // O painel "Na fila" já mostra este aviso com o Reabrir; repetir aqui o leitor de tela anunciaria duas vezes.
+    if (stateEvent?.problema === DELIVERY_STALLED && queuePanelShown && queueList.entries.length > 0) return null;
     const texto = textoProblema(stateEvent?.problema ?? null);
     if (!texto) return null;
     // Hook que barrou o prompt, ou código e motivo da falha do runtime: o detalhe é a informação
@@ -3868,7 +3871,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
           {#if queuePanelShown}
             <QueuePanel panel={queueList} editingId={queueEdit?.entryId ?? null} busy={queueBusy}
                         onEdit={startQueueEdit} onCancelEdit={cancelQueueEdit}
-                        onSteer={steerQueued} onRemove={removeQueued} onReorder={reorderQueued} />
+                        onSteer={steerQueued} onRemove={removeQueued} onReorder={reorderQueued}
+                        stalled={stateEvent?.problema === DELIVERY_STALLED} reopening={recarregando}
+                        onReopen={soLeituraPar ? undefined : reiniciarCodex} />
           {/if}
         {/snippet}
       </Composer>

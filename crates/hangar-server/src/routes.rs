@@ -151,9 +151,10 @@ impl AppState {
             queue_dir: list.env().dirs.as_ref().map(|dirs| dirs.claude.join(".hangar-queue")),
             problem_hold: crate::problem_gate::HOLD,
             shown_problems: list.shown_problems(),
+            diag: crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone()),
         };
         mods.bind_hubs(side.hubs.downgrade());
-        let diag = crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone());
+        let diag = side.diag.clone();
         let state = Arc::new(crate::state::live::StateEnv::new(terminal.clone(), list.clone(), diag.clone()));
         list.set_permissions(state.permissions.clone());
         side.monitors = Some(crate::state::live::spawner(state.clone()));
@@ -482,6 +483,7 @@ fn terminal_router_with(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> 
         .route("/__hangar_server/accounts/claude", axum::routing::post(crate::accounts::http::private_claude))
         .route("/__hangar_server/accounts/public", axum::routing::any(crate::accounts::http::private_public))
         .route("/__hangar_server/groups", axum::routing::post(crate::groups::bridge::private))
+        .route("/__hangar_server/push/expo", axum::routing::post(crate::push_expo::private))
         .route("/__hangar_server/codex/{*rest}", axum::routing::any(crate::session_write::bridge::codex))
         .route("/__hangar_server/claude/{*rest}", axum::routing::any(crate::session_write::bridge::claude))
         .route("/__hangar_server/presence", axum::routing::get(crate::presence::private))
@@ -559,6 +561,7 @@ fn public_routes(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router 
         .route("/api/migration/status", get(crate::migration_status::status).fallback(pass_any))
         .route("/api/claude/defaults", axum::routing::post(crate::claude_defaults::save).fallback(pass_any))
         .route("/api/session-defaults", axum::routing::get(crate::session_defaults::handle).put(crate::session_defaults::handle))
+        .route("/api/push/expo/subscribe", axum::routing::post(crate::push_expo::subscribe))
         .route("/api/presence", get(crate::presence::route).fallback(pass_any))
         // Mesmo caminho: o axum junta o POST à rota de cima (um repasse só, o dela).
         .route("/api/presence", axum::routing::post(crate::presence::route))
@@ -1127,6 +1130,7 @@ mod tests {
             queue_dir: None,
             problem_hold: std::time::Duration::ZERO,
             shown_problems: Default::default(),
+            diag: crate::diag::DiagClient::new("127.0.0.1:9".parse().unwrap(), "s".into()),
         };
         let jsonl = dir.join("t.jsonl");
         std::fs::write(&jsonl, "").unwrap();

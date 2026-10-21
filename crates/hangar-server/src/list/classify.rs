@@ -144,7 +144,13 @@ fn headless_state(row: &mut SessionRow, retrato: Option<&BTreeMap<String, Value>
     // Ausente ou `alive: false` é a sessão parada; erro ou retrato sem estado é falha do runtime.
     let broken = snapshot.is_some_and(|s| !s["error"].is_null()
         || (s["view"]["alive"] == true && !s["view"]["public_state"]["state"].is_string()));
-    if broken { row.problema = Some("list_runtime_unavailable".into()); }
+    if broken {
+        // Retrato que não veio ou vista ilegível é acompanhamento (diário); erro durável do ator é falha real, a
+        // mesma que o chat mostra como `runtime_falhou`.
+        let actor_error = snapshot.and_then(|s| s["error"].as_str())
+            .filter(|code| !matches!(*code, "runtime_live_unavailable" | "runtime_snapshot_timeout") && !crate::problem_gate::is_diagnostic(code));
+        row.problema = Some(if actor_error.is_some() { "runtime_falhou" } else { "list_runtime_unavailable" }.into());
+    }
     let live = snapshot.filter(|s| !broken && s["view"]["alive"] == true).map(|s| &s["view"]["public_state"]);
     let Some(state) = live else {
         // Retrato quebrado (ator subindo, erro): o turno pode estar rodando, vale o marcador.
@@ -826,10 +832,17 @@ mod tests {
         run(&mut row, &dirs, &io, Some(&snap(false))).await;
         assert_eq!(row.state, "idle");
         assert_eq!(*io.calls.lock().unwrap(), 0);
-        // Runtime com erro não passa por sessão parada calada.
+        // Erro durável do ator não passa por sessão parada calada: é falha real, como o `runtime_falhou` do chat.
         let broken = BTreeMap::from([("s".to_owned(), serde_json::json!({"error": "cano_exited", "view": {"alive": true}}))]);
         run(&mut row, &dirs, &io, Some(&broken)).await;
-        assert_eq!((row.state.as_str(), row.problema.as_deref()), ("working", Some("list_runtime_unavailable")));
+        assert_eq!((row.state.as_str(), row.problema.as_deref()), ("working", Some("runtime_falhou")));
+        // Retrato que não veio (acompanhamento) é diagnóstico.
+        for code in ["runtime_live_unavailable", "runtime_snapshot_timeout"] {
+            row.problema = None;
+            let unread = BTreeMap::from([("s".to_owned(), serde_json::json!({"error": code}))]);
+            run(&mut row, &dirs, &io, Some(&unread)).await;
+            assert_eq!(row.problema.as_deref(), Some("list_runtime_unavailable"), "{code}");
+        }
     }
 
     #[tokio::test]

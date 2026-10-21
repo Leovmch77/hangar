@@ -10,10 +10,16 @@
   import IconX from './icons/IconX.svelte';
   import IconChevronDown from './icons/IconChevronDown.svelte';
 
-  let { panel, editingId = null, busy = false, onEdit, onCancelEdit, onSteer, onRemove, onReorder }: {
+  let { panel, editingId = null, busy = false, stalled = false, reopening = false, onEdit, onCancelEdit, onSteer, onRemove, onReorder, onReopen }: {
     panel: QueuePanel; editingId?: string | null; busy?: boolean;
+    /** `headless_delivery_stalled`: a sessão sem terminal está viva e surda, e o servidor não a reabre sozinho. */
+    stalled?: boolean;
+    /** Reinício da sessão em andamento, venha ele daqui ou de outro botão da tela. */
+    reopening?: boolean;
     onEdit: (id: string) => void; onCancelEdit: () => void; onSteer: (id: string) => void;
     onRemove: (id: string) => void; onReorder: (id: string, beforeId: string | null) => void;
+    /** Ausente (quem só lê) = só o aviso. */
+    onReopen?: () => void;
   } = $props();
 
   let expanded = $state(true);
@@ -101,6 +107,16 @@
       <span class="qp-count">{panel.entries.length}</span>
       <span class="qp-chevron" class:closed={!expanded}><IconChevronDown size={14} /></span>
     </button>
+    {#if stalled}
+      <!-- Fora da lista: o painel recolhido ainda mostra o bloqueio. -->
+      <div class="qp-stalled">
+        <!-- `alert`: um `status` que nasce depois da renderização costuma passar mudo pelo leitor de tela. -->
+        <p role="alert">{m.problema_headless_delivery_stalled()}</p>
+        {#if onReopen}
+          <button type="button" disabled={reopening} onclick={onReopen}>{m.reabrir_sessao_presa()}</button>
+        {/if}
+      </div>
+    {/if}
     <ol class="qp-list" id={listId} hidden={!expanded} bind:this={listEl} onscroll={() => (boxes = null)}>
       {#each panel.entries as entry (entry.id)}
         {@const editing = editingId === entry.id}
@@ -191,6 +207,28 @@
     overscroll-behavior: contain;
   }
   .qp-list[hidden] { display: none; }
+  .qp-stalled {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 0 12px 6px;
+    font-size: var(--text-xs);
+    color: var(--warning-text);
+  }
+  .qp-stalled p { margin: 0; flex: 1; min-width: 0; }
+  .qp-stalled button {
+    flex-shrink: 0;
+    min-height: 28px;
+    padding: 0 10px;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    color: var(--text-primary);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-subtle);
+    cursor: pointer;
+  }
+  .qp-stalled button:disabled { opacity: 0.4; cursor: default; }
+  @media (pointer: coarse) { .qp-stalled button { min-height: 40px; } }
   .qp-row {
     position: relative;
     display: flex;

@@ -292,6 +292,29 @@ it('desktop reutiliza o stream da lista sem polling REST', async () => {
   }
 });
 
+// Entrega parada: no celular o painel "Na fila" já mostra o aviso e o Reabrir; a faixa repetiria a
+// frase (e o leitor de tela a anunciaria duas vezes). Na vista desktop não há painel: a faixa é o único lugar.
+it.each([
+  [false, true, false],   // celular, fila com mensagem: só o painel
+  [false, false, true],   // celular, fila vazia: sem painel, a faixa mostra
+  [true, true, true],     // desktop: sem painel, a faixa mostra
+] as const)('entrega parada: faixa só onde o painel não mostra o aviso (desktop=%s, fila=%s)', async (desktop, fila, faixa) => {
+  const t = montar(desktop);
+  try {
+    await tick();
+    if (fila) sseCtl.handlers.get('queue')?.({ data: JSON.stringify({ actions: true, entries: [{ id: 'q1', text: 'oi', ts: 1 }] }) } as MessageEvent);
+    // Outro problema antes prova que a faixa está montada nesta vista e que só este código some dela.
+    sseCtl.state({ state: 'working', problema: 'headless_turno_erro' });
+    await vi.waitFor(() => expect(t.el.querySelector('.faixa-problema')?.textContent).toContain(m.problema_headless_turno_erro()));
+    sseCtl.state({ state: 'working', problema: 'headless_delivery_stalled' });
+    await vi.waitFor(() => expect(t.el.querySelector('.faixa-problema')?.textContent ?? '').not.toContain(m.problema_headless_turno_erro()));
+    expect(t.el.querySelector('.faixa-problema') !== null).toBe(faixa);
+    if (faixa) expect(t.el.querySelector('.faixa-problema')?.textContent).toContain(m.problema_headless_delivery_stalled());
+  } finally {
+    await unmount(t.comp);
+  }
+});
+
 // Stub do matchMedia com ouvintes controlados na mao (ver nota no describe do visor).
 function stubMatchMedia() {
   const estados = new Map<string, boolean>();

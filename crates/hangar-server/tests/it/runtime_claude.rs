@@ -651,13 +651,36 @@ fn kill_or_exit_mid_turn_is_a_crash_and_lost_connection_is_visible() {
             "rc={rc} working={working}: {state}");
         assert!(persisted_problem(&effects).is_some());
     }
-    // Sem código de saída: a conexão com o processo caiu; a faixa diz isso, sem gravar queda no arquivo.
+    // Sem código de saída: o ator só entrega isto quando o cano morreu (com ele vivo, religa calado). É
+    // queda como as outras, gravada no arquivo da sessão.
     let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
     let effects = line(&mut engine,json!({"type":"cano_saiu","rc":null}),12.0);
     let state = engine.view()["public_state"].clone();
-    assert_eq!(state["problema"],"runtime_falhou","{state}");
-    assert!(state["problema_detalhe"].as_str().unwrap_or("").starts_with("cano_closed"),"{state}");
-    assert!(persisted_problem(&effects).is_none());
+    assert_eq!((state["problema"].as_str(),state["problema_detalhe"].as_str()),(Some("headless_processo_caiu"),Some("cano_closed sem código de saída")),"{state}");
+    assert_eq!(persisted_problem(&effects),Some(json!(["headless_processo_caiu","cano_closed sem código de saída"])));
+}
+
+#[test]
+fn an_answer_made_while_the_socket_was_down_is_not_written_after_reattach_and_can_be_repeated() {
+    // A resposta escrita com o socket fora nunca saiu: na religação ela volta como não escrita (a pessoa
+    // repete), nunca incerta, e o cartão do retrato é o mesmo.
+    let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+    identified(&mut engine);
+    let request = json!({"type":"control_request","request_id":7,"request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}});
+    line(&mut engine,request.clone(),10.0);
+    let shown = shown_id(&engine).unwrap();
+    engine.transport_lost(&Default::default());
+    let effects = engine.command(command(OperationKind::Select,json!({"option":1,"interaction_id":shown})),clock(11.0)).unwrap();
+    assert_eq!(writes(&effects).len(),1);
+    let mut snapshot = mods_support::cano_snapshot_json();
+    snapshot["pendentes"] = json!([request.to_string()]);
+    let effects = engine.reattach(CanoSnapshot::parse(snapshot).unwrap()).unwrap();
+    let answer = replies(&effects).into_iter().find(|(id,_,_)|id == "op-1").expect("a resposta tem desfecho na religação");
+    assert_eq!((answer.1,answer.2["write_outcome"].clone()),(Disposition::Rejected,json!("not_written")),"{answer:?}");
+    assert_eq!(shown_id(&engine).as_deref(),Some(shown.as_str()),"o mesmo cartão segue aberto");
+    let again = engine.command(RuntimeCommand { operation_id:"op-2".into(),kind:OperationKind::Select,
+        payload:json!({"option":1,"interaction_id":shown}) },clock(12.0)).unwrap();
+    assert_eq!(writes(&again)[0]["response"]["request_id"],7,"a pessoa responde de novo com o mesmo ID");
 }
 
 #[test]

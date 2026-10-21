@@ -2,15 +2,17 @@
 // Toque longo na linha abre o menu (Subir, Descer, Orientar, Editar, Apagar), como o T3 mobile; tocar no
 // texto mostra a mensagem inteira. Fila vazia não ocupa espaço nenhum.
 import { useEffect, useState } from 'react';
-import { ActionSheetIOS, Platform, Pressable, ScrollView, Text, View } from 'react-native';
+import { AccessibilityInfo, ActionSheetIOS, ActivityIndicator, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { MenuView, type NativeActionEvent } from '@react-native-menu/menu';
 import * as Haptics from 'expo-haptics';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import type { QueuePanel as Panel } from '@hangar/core';
-import { contextRefsPlainText } from '@hangar/core';
+import { contextRefsPlainText, formataErro, recarregarSessao } from '@hangar/core';
 import * as m from '../paraglide/messages';
+import { useServers } from '../stores/servers';
 import { Icon } from '../ui/Icon';
 import { haptic } from '../ui/haptics';
+import { toast } from '../ui/Toast';
 import { deliveryModeLabel, deliveryOptions, type DeliveryControls, type DeliveryMode } from './queueDelivery';
 
 type MenuId = 'up' | 'down' | 'steer' | 'edit' | 'remove';
@@ -44,13 +46,47 @@ interface Props {
   onMove: (id: string, delta: -1 | 1) => void;
   delivery?: DeliveryControls;
   onModeChange?: (mode: DeliveryMode) => void;
+  /** Só com o aviso `headless_delivery_stalled` da sessão: a fila não anda e só a pessoa reabre. */
+  reopen?: { serverId: string; name: string };
+}
+
+// O servidor nunca reabre sozinho a sessão surda: este botão é a única saída, e só existe com o aviso ativo.
+function ReopenStalled({ serverId, name }: { serverId: string; name: string }) {
+  const { theme } = useUnistyles();
+  const [busy, setBusy] = useState(false);
+  // O VoiceOver não anuncia `accessibilityRole="alert"` num Text: o aviso é falado ao aparecer.
+  useEffect(() => { AccessibilityInfo.announceForAccessibility(m.problema_headless_delivery_stalled()); }, []);
+  const reopen = async () => {
+    const server = useServers.getState().servers.find((s) => s.id === serverId);
+    if (!server) { toast.erro(m.chat_servidor_removido()); return; }
+    setBusy(true);
+    try {
+      await recarregarSessao(name, server);
+      haptic.success();
+    } catch (e) {
+      toast.erro(m.erro_recarregar({ erro: (e instanceof Error ? e.message : formataErro(e)) || m.erro_desconhecido() }));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <View style={styles.stalled}>
+      <Text style={[styles.stalledText, { color: theme.tokens.status.warning }]} accessibilityRole="alert">{m.problema_headless_delivery_stalled()}</Text>
+      <Pressable accessibilityRole="button" accessibilityLabel={m.reabrir_sessao_presa()}
+        accessibilityState={{ disabled: busy, busy }} disabled={busy}
+        onPress={() => void reopen()} style={[styles.reopen, busy && styles.disabled]}>
+        {busy ? <ActivityIndicator size="small" color={theme.tokens.accent.base} /> : null}
+        <Text style={styles.cancel}>{m.reabrir_sessao_presa()}</Text>
+      </Pressable>
+    </View>
+  );
 }
 
 // ponytail: a linha nasce e é despachada em escritas separadas, e entre as duas ela aparece como "esperando"
 // por um instante; o painel só surge se ela continuar esperando, para a mensagem que já está indo não piscar.
 export const QUEUE_PANEL_APPEAR_MS = 600;
 
-export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSteer, onRemove, onMove, delivery, onModeChange }: Props) {
+export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSteer, onRemove, onMove, delivery, onModeChange, reopen }: Props) {
   const { theme } = useUnistyles();
   const [expanded, setExpanded] = useState(true);
   const [full, setFull] = useState<string | null>(null);
@@ -115,6 +151,7 @@ export function QueuePanel({ panel, editingId, busy, onEdit, onCancelEdit, onSte
           {jevReady ? m.mobile_queue_jev_short() : m.mobile_queue_jev_fallback({ reason: delivery.help.replace(/[\s.…]+$/, '') })}
         </Text>
       ) : null}
+      {reopen ? <ReopenStalled serverId={reopen.serverId} name={reopen.name} /> : null}
       {expanded ? (
         <ScrollView style={styles.list} nestedScrollEnabled keyboardShouldPersistTaps="handled">
           {panel.entries.map((entry, index) => {
@@ -235,4 +272,7 @@ const styles = StyleSheet.create((theme) => ({
   cancelBtn: { minHeight: 32, justifyContent: 'center', paddingHorizontal: theme.base.space[2] },
   cancel: { fontSize: theme.base.text.xs, fontWeight: theme.base.weight.semibold, color: theme.tokens.accent.base },
   disabled: { opacity: 0.4 },
+  stalled: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[2], paddingLeft: theme.base.space[3], paddingRight: theme.base.space[2] },
+  stalledText: { flex: 1, fontSize: theme.base.text.xs },
+  reopen: { minHeight: 44, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1.5], paddingHorizontal: theme.base.space[2] },
 }));

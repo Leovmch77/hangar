@@ -2013,6 +2013,10 @@ O `follow` do Python fica com Pi, omp, Kimi e o modo `python`.
 
 ## Observação terminal Rust: erro visível, sem captura Python
 
+(20/10/2026: `terminal_observacao_falhou` e `state_facts_unavailable` continuam sendo produzidos,
+mas o portão de saída os leva ao diário em vez da tela; ver
+[aviso na tela só para ação que falhou](#aviso-na-tela-só-para-ação-que-falhou-ou-bloqueio-real-20102026).)
+
 (Parte 4, Tasks 5 e 7, 06/10/2026.) Com o Rust de pé, quem lê a captura de Claude com terminal é o
 `Monitor` do Rust, em processo (`PoolCapture` em `state/monitor.rs`, cliente `-C` do
 `TerminalPool`; no Windows a captura avulsa do psmux em `state/capture.rs`), e a falha dele sai com o mesmo `problema=terminal_observacao_falhou` sobre o último
@@ -2985,3 +2989,65 @@ provedor, grupos e recados. Faltavam quatro coisas, que entraram assim.
 - **A linha "N subagentes" é calculada em cada cliente, não é mod.** Mod só existe em sessão Claude
   (`AbovePrompt` do plugin); o pai pode ser Codex, Pi ou Kimi. A lista já traz estado, provedor,
   modelo e `last_reply` de cada filha (`SessionRow.linked_by`).
+
+## Aviso na tela só para ação que falhou ou bloqueio real (20/10/2026)
+
+(Branch `fix/session-recovery-and-alerts`, plano
+[`2026-10-20-session-recovery-and-alerts.md`](../superpowers/plans/2026-10-20-session-recovery-and-alerts.md).
+A religação ao mesmo cano, que tirou da tela a queda da ligação, está em
+[harnesses.md](harnesses.md#religação-ao-mesmo-cano-vivo-e-avisos-fora-da-tela-20102026).)
+
+**O que ele viu.** "Estado talvez velho: o servidor não respondeu o que o plugin da sessão disse —
+runtime_binding" numa sessão de outra máquina, que sumiu ao mandar mensagem; "lista desatualizada"
+laranja que aparece e some; avisos que piscam ao enviar.
+
+**Critério (decisão 5 do Jefferson).** A tela mostra erro só quando uma ação da pessoa falhou,
+dizendo por quê (troca de sessão, mensagem não entregue), ou quando há bloqueio real que pede a
+pessoa (processo morreu de fato, login expirado, cota). Falha interna de acompanhamento, dado velho
+ou condição que some sozinha ou com o uso normal vai ao log e ao diário de uso, com detalhe para
+investigar, e não vira faixa, anel ou linha laranja. Não é esconder falha: a regra "leitura que não
+vem é problema, nunca estado inventado" continua, só o destino do registro muda. Também não é
+apagar avisos em bloco nem trocar a frase.
+
+**Onde.** Uma classificação, `problem_gate::diagnostic(code, state)`, e os dois portões de saída
+que já existiam: `gate_problem` (`side.rs`, conversa) e `gate_problems` (`list/bridge.rs`, lista).
+O código de diagnóstico sai da saída na hora, sem o prazo de 3 s (`HOLD`), fica no estado interno
+(a lista ainda usa `list_capture_failed` dentro do servidor) e vai ao diário como
+`rust.problem_hidden` (uma vez por minuto por sessão e código) mais `tracing::warn` com o detalhe,
+porque o diário não aceita texto livre. O `Shown` da lista nunca guarda diagnóstico. Dois ajustes
+nos produtores, sem os quais o filtro apagaria aviso de tela: no `Monitor` e na lista, código de
+tela vence diagnóstico (antes, fatos indisponíveis tapavam um `terminal_input_*`); e o
+`runtime_falhou` deixou de embrulhar falhas de acompanhamento, que ganharam código próprio na
+origem. Cada causa de `list_error` vai ao diário (`rust.list_failed`). O modo `python` não mudou e
+segue publicando os códigos antigos.
+
+**Classificação final** (conferida em `problem_gate.rs`):
+
+| Destino | Códigos |
+|---|---|
+| Diário, fora da tela | `state_facts_unavailable` (inclui o detalhe `runtime_binding` do "Estado talvez velho"), `terminal_observacao_falhou`, `permission_observe_failed`, `list_facts_unavailable`, `list_capture_failed`, `list_runtime_unavailable`, `list_runtime_absent`, `list_orq_unavailable`, `codex_versao_nao_conferida`, `codex_sem_conexao`, `state_feed_binding_unavailable`, `runtime_absent`, `state_feed_invalid`, `codex_control_lost`, `cano_reconnect_stopped`, `cano_protocol_invalid`, `claude_sidecar_absent`; `interacao_indisponivel` fora de `awaiting_input` |
+| Tela | `headless_processo_caiu`, `headless_caiu`, `headless_nao_subiu`, `headless_sem_login`, `headless_sem_resposta`, `headless_turno_erro`, `codex_sem_login`, `codex_hooks_nao_aprovados`, `codex_limite_uso`, `codex_headless_nao_subiu`, `limit_switch_no_room`, `limit_switch_failed`, `limit_switch_no_target`, `codex_conversa_nao_abriu`, `codex_abertura_falhou`, `codex_prompt_bloqueado`, `codex_turno_cortado`, `terminal_clear_not_applied`, `terminal_input_*`, `runtime_falhou` (app-server morto e demais origens, como `queue_io`), `codex_esforco_nao_aplicado`, `headless_delivery_stalled`; `interacao_indisponivel` em `awaiting_input` |
+| Evento `list_error` | continua emitido; o cliente só o desenha com a lista vazia ("Sem resposta de {servidores}"). Com linhas na tela, nativo não mostra "Lista desatualizada" e PWA/Expo não marcam o servidor com erro; o PWA e o Expo registram no diário |
+
+`codex_esforco_nao_aplicado` fica na tela porque a escolha de esforço da pessoa foi recusada e não
+volta sozinha. `headless_delivery_stalled` é novo: mensagem da pessoa esperando há mais de 60 s com
+o cano vivo e sem conexão; os três clientes o mostram na mensagem presa com Reabrir. Com a
+queda da ligação tratada como religação, `runtime_falhou` + `cano_closed` com o cano vivo deixou de
+existir; com o cano morto virou `headless_processo_caiu`.
+
+**Perguntas fechadas por ele.** P1: `interacao_indisponivel` vai à tela só com a linha em
+`awaiting_input`, porque só ali a pessoa precisa responder; no resto, diário. P2:
+`codex_sem_conexao` vai ao diário (a faixa com Reiniciar saiu). P3: `limit_switch_no_target` fica
+na tela.
+
+**Clientes.** Nenhum desenha estado "reconectando". O nativo, na tela antes da conversa, mostra a
+frase traduzida do problema, nunca o código cru.
+
+**Fechamento pelo Connect.** O `DELETE` de Claude que chega pela 8768 deixou de fechar pelo nome no
+Python (que apagava o sidecar e matava o cano com o ator do Rust aberto, o caso `ipad-prova`) e vai
+ao Rust por `POST /__hangar_server/claude/<nome>/close`, com cliente, pedido e origem de quem pediu
+para o diário. A saída do grupo desse fechamento fica no Python, que lê a fase do `orq` antes, para
+o Rust não perguntar de volta numa chamada dele. O Reabrir de Claude pela 8768 vai a
+`POST /__hangar_server/claude/<nome>/recarregar`. 421 segue no Python; Pi, omp e Kimi fecham lá.
+Contrato interno 85 → 86 depois de juntar a `main`, que já estava em 85 (`RUST_SERVER_PROTOCOL` e
+`INTERNAL_PROTOCOL`).
