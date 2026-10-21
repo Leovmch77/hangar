@@ -720,7 +720,7 @@ if (cmd === 'confere') {
   const chave = chaveAlvo();
   // O corte daqui (cabeça e cauda) é o que vale: o teto do snapshot só corta a cauda, onde a prova
   // pode estar, então ele recebe a página inteira.
-  const [snap, print] = await Promise.all([chamar(chave, 'snapshot', ['--max', '1000000']), capturarPrint(chave)]);
+  const [snap, print] = await Promise.all([chamar(chave, 'snapshot', ['--max', '1000000']), jev.withCaptureCeiling(() => capturarPrint(chave))()]);
   // Falta de chave, erro do snapshot e da chamada ao Jev saem 2: com 1, um laço `until confere`
   // giraria achando que a tela só não chegou lá. Navegador fechado ou shell fora do ar ainda saem 1
   // (helpers comuns).
@@ -775,6 +775,7 @@ if (cmd === 'objetivo') {
   });
   const { ajudar, aviso } = auxiliarDoObjetivo(process.env, (texto) => gravar({ tipo: 'aviso', texto }));
   const perguntarAoJev = perguntadorDoJev(chaveJev);
+  const captureWithCeiling = jev.withCaptureCeiling(() => capturarPrint(chave));
   if (aviso) console.error(`hangar-preview: aviso: ${aviso}`);
   // Só os nomes das chaves de --dados: os valores podem ser credenciais.
   gravar({ tipo: 'inicio', objetivo, dados: Object.keys(dados ?? {}), maxPassos, auxiliar: Boolean(ajudar),
@@ -800,7 +801,7 @@ if (cmd === 'objetivo') {
     // Tudo que o navegador devolve vira estado enviado ao Jev: o token não sai da máquina.
     executar: async (verbo, args) => semToken((await chamar(chave, verbo, args)).texto),
     // Imagem desligada pelo 8A: o print não iria a lugar nenhum.
-    capturar: async () => (perguntarAoJev.desligada() ? { status: 'desligada' } : capturarPrint(chave)),
+    capturar: async () => (perguntarAoJev.desligada() ? { status: 'desligada' } : captureWithCeiling()),
     // A imagem sai do estado antes do envio (nunca vai como campo cru) e o resultado volta no mesmo
     // objeto, para o laço saber se decidiu com print sem mudar a assinatura do `perguntar`.
     perguntar: async (estado, perguntas) => {

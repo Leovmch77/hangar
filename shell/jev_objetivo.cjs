@@ -1569,6 +1569,29 @@ function dimensoesPng(buf) {
   return { largura: buf.readUInt32BE(16), altura: buf.readUInt32BE(20) };
 }
 
+const CAPTURE_TIMEOUT_MS = 5000;
+
+/**
+ * Navegador que não compõe quadro segura o `shot` até o teto dele em todo passo. Esgotado o teto ou
+ * vinda a resposta "nao produziu quadro", a captura fica desligada pelo resto da execução.
+ */
+function withCaptureCeiling(capture, { timeoutMs = CAPTURE_TIMEOUT_MS } = {}) {
+  let off = false;
+  return async () => {
+    if (off) return { status: 'sem_print', motivo: 'captura desligada' };
+    let timer;
+    let timedOut = false;
+    const result = await Promise.race([
+      capture(),
+      new Promise((r) => {
+        timer = setTimeout(() => { timedOut = true; r({ status: 'sem_print', motivo: `a captura passou de ${timeoutMs} ms` }); }, timeoutMs);
+      }),
+    ]).finally(() => clearTimeout(timer));
+    if (result?.status === 'sem_print' && (timedOut || /nao produziu quadro/.test(result.motivo ?? ''))) off = true;
+    return result;
+  };
+}
+
 const JEV_DEADLINE_MS = 15_000;
 
 const semChave = (texto, chave) => (chave ? String(texto).split(chave).join('***') : String(texto));
@@ -1617,7 +1640,7 @@ module.exports = {
   parsarSnapshot, montarPerguntas, montarEstado, decidir, rodar, pedidoDeTexto,
   valorDoCampo, cabecaDoValor, jsDeSelecionar, jsDeEstarAberto, normalizar,
   perguntaDeConfere, chegouNoEstado, destinoDoJev, askJev, nomeComOrdem, avisoDeSucesso,
-  dimensoesPng, imagemDentroDoLimite, LIMITE_IMAGEM,
+  dimensoesPng, imagemDentroDoLimite, LIMITE_IMAGEM, withCaptureCeiling, CAPTURE_TIMEOUT_MS,
   LIMIARES, LIMIARES_COM_PRINT, NENHUM, OPERACOES, SEM_SELECT, MAX_CANDIDATOS, CHAVE_SECRETA, semChave, mascararValores,
   SNAPSHOT_DO_LACO, ESPERA_ASSENTAR, JS_ESPERAR_OPCOES, semRotulo, rotulo, decidirPeloAuxiliar, pedidoDeAjuda, ESQUEMA_DO_AUXILIAR,
 };

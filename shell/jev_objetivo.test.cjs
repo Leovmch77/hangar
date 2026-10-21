@@ -1678,3 +1678,41 @@ test('motivo do auxiliar vira uma linha de ate 200 caracteres no parou e no even
   assert.equal(r.parou, `bloqueado: ${esperado}`);
   assert.equal(eventos.find((e) => e.tipo === 'bloqueio').motivo, esperado);
 });
+
+test('captura que passa do teto ou sem quadro: o passo segue sem imagem e os seguintes nem chamam a captura', { timeout: 5000 }, async () => {
+  const { withCaptureCeiling } = require('./jev_objetivo.cjs');
+  for (const [lenta, motivo] of [
+    // Nunca responde: só o teto devolve o passo.
+    [() => new Promise(() => {}), 'a captura passou de 50 ms'],
+    [async () => ({ status: 'sem_print', motivo: 'erro: o navegador desta sessao nao produziu quadro — text/snapshot/click funcionam' }),
+      'erro: o navegador desta sessao nao produziu quadro — text/snapshot/click funcionam'],
+  ]) {
+    let chamadas = 0;
+    const eventos = [];
+    const vistos = [];
+    await rodar({
+      objetivo: 'iniciar o cadastro',
+      maxPassos: 3,
+      executar: navegador([]),
+      capturar: withCaptureCeiling(() => { chamadas += 1; return lenta(); }, { timeoutMs: 50 }),
+      perguntar: perguntarComPrint('enviada', undefined, vistos),
+      registrar: (e) => eventos.push(e),
+    });
+    assert.equal(chamadas, 1, motivo);
+    assert.deepEqual(vistos, [undefined, undefined, undefined]);
+    assert.deepEqual(eventos.filter((e) => e.tipo === 'decisao').map((e) => [e.imagem, e.motivo]), [
+      ['sem_print', motivo],
+      ['sem_print', 'captura desligada'],
+      ['sem_print', 'captura desligada'],
+    ]);
+  }
+});
+
+test('outro sem_print (arquivo nao gravado) nao desliga a captura', async () => {
+  const { withCaptureCeiling } = require('./jev_objetivo.cjs');
+  let chamadas = 0;
+  const capture = withCaptureCeiling(async () => { chamadas += 1; return { status: 'sem_print', motivo: 'o shot nao gravou o arquivo' }; }, { timeoutMs: 50 });
+  assert.deepEqual(await capture(), { status: 'sem_print', motivo: 'o shot nao gravou o arquivo' });
+  assert.deepEqual(await capture(), { status: 'sem_print', motivo: 'o shot nao gravou o arquivo' });
+  assert.equal(chamadas, 2);
+});
