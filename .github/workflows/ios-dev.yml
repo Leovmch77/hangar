@@ -154,6 +154,18 @@ jobs:
             || { rm -f ../out/hangar.apk; echo "::warning::Download do APK falhou; mobile-latest sai sem hangar.apk."; }
       - name: Publica na mobile-latest
         run: |
+          # Run mais antigo que chega por último não pode sobrescrever o publicado por um mais novo.
+          if published=$(gh release download mobile-latest --pattern sidestore-source.json --repo "$GITHUB_REPOSITORY" -O - 2>/dev/null); then
+            if published_run=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).apps[0].versions[0].buildVersion))' "$published" 2>/dev/null) \
+               && [[ "$published_run" =~ ^[0-9]+$ ]]; then
+              if (( published_run > GITHUB_RUN_NUMBER )); then
+                echo "::notice::Run mais novo ($published_run) já publicado na mobile-latest; este ($GITHUB_RUN_NUMBER) não publica."
+                exit 0
+              fi
+            else
+              echo "::warning::sidestore-source.json publicado ilegível; será sobrescrito."
+            fi
+          fi
           mv out/hangar-release.ipa out/hangar.ipa
           node mobile/scripts/sidestore-source.mjs out/hangar.ipa "$GITHUB_RUN_NUMBER" > out/sidestore-source.json
           files=(out/hangar.ipa out/sidestore-source.json)
