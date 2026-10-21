@@ -3,7 +3,7 @@ import * as Haptics from 'expo-haptics';
 import { AccessibilityInfo, ActivityIndicator, Alert, AppState, Keyboard, Platform, Pressable, ScrollView, Text, View, type NativeSyntheticEvent, type TextInput, type TextInputKeyPressEventData } from 'react-native';
 import type { NativeStackNavigationProp } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { broadcast, formataErro, uploadFileForServer, steerSession, podeEnviarSozinho, providerName, sendInputForServer, sideQuestionOf, slashMatches, slashTokenAt, replaceSlashToken, relimparDitado, estilosDitado, canUpdateQueueEdit, queueEditLeft } from '@hangar/core';
+import { broadcast, formataErro, uploadFileForServer, steerSession, podeEnviarSozinho, providerName, sendInputForServer, sideQuestionOf, slashMatches, slashTokenAt, replaceSlashToken, relimparDitado, estilosDitado, canUpdateQueueEdit, queueEditLeft, DELIVERY_STALLED } from '@hangar/core';
 import type { CommandInfo, MotivoFim, Provider, QueueEdit, QueuePanel as QueuePanelModel, Server } from '@hangar/core';
 import { ComposerActions, ComposerBox, ComposerInput } from './ComposerField';
 import { Icon } from '../ui/Icon';
@@ -189,7 +189,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, s
   const events = chat.use((s) => s.events);
   const draftUpdate = chat.use((s) => s.draftUpdate);
   const state = chat.use((s) => s.stateEvent?.state ?? 'idle');
-  const deliveryStalled = chat.use((s) => s.stateEvent?.problema === 'headless_delivery_stalled');
+  const deliveryStalled = chat.use((s) => s.stateEvent?.problema === DELIVERY_STALLED);
   const detectedProvider = useSessions((s) => {
     const byServer = s.byServerRecord?.[serverId];
     if (byServer) {

@@ -659,6 +659,18 @@ test('list_error com linhas na tela vai ao diário e não desenha erro do servid
   rel();
 });
 
+test('list_error com linhas na tela tira o erro anterior do servidor, como no PWA', async () => {
+  const rel = useSessions.getState().retain();
+  await settle();
+  created[0].trigger('sessions', JSON.stringify([{ name: 'viva', state: 'working' }]));
+  created[0].trigger('sessions', '{torto');
+  expect(useSessions.getState().byServer[0].error).toBe(m.sessao_erro_servidor());
+  created[0].trigger('list_error', '{}');
+  expect(useSessions.getState().rows.map((s) => s.name)).toEqual(['viva']);
+  expect(useSessions.getState().byServer[0].error).toBeNull();
+  rel();
+});
+
 test('list_error sem lista na tela mantém o aviso de bloqueio do servidor', async () => {
   const rel = useSessions.getState().retain();
   await settle();

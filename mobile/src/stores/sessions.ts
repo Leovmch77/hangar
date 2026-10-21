@@ -393,11 +393,12 @@ async function synchronize(attempt: ConnectionAttempt, get: () => SessionsState,
       answered();
       falhaDados = true;
       registrarDiag({ evento: 'lista.falhou', nivel: 'erro', tela: 'lista', codigo: 'produtor_falhou' }, s.baseUrl);
-      // Resposta viva, só o produtor falhou. Com linhas na tela a falha é só do diário; sem lista,
-      // a pessoa não vê sessão nenhuma e o erro do servidor fica.
-      const sessions = slots.get(s.id)?.sessions ?? null;
-      if (sessions?.length) return;
-      slots.set(s.id, { sessions, error: m.sessao_erro_servidor() });
+      // Resposta viva, só o produtor falhou. Com linhas na tela a falha é só do diário (um erro
+      // anterior sai: o servidor respondeu); sem lista, a pessoa não vê sessão nenhuma e o erro fica.
+      const slot = slots.get(s.id);
+      const sessions = slot?.sessions ?? null;
+      if (sessions?.length && !slot?.error) return;
+      slots.set(s.id, { sessions, error: sessions?.length ? null : m.sessao_erro_servidor() });
       recompute(set);
     });
     es.onerror = (event) => {

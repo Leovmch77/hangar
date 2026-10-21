@@ -101,7 +101,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   import { fmtDur } from '../lib/fmt';
   import { hasSeam, mergeHistoryWithLiveRetiring } from '@hangar/core';
   import { especificidade, donoDaLinha } from '@hangar/core';
-  import { parseStatusLine, queuedMessages } from '@hangar/core';
+  import { DELIVERY_STALLED, parseStatusLine, queuedMessages } from '@hangar/core';
   import { mergeProjectShortcuts, runShortcutShell, runCodeCommand, sendsDirect, shortcutMissingSecret } from '@hangar/core';
   import { runsInHangar, answersInApp, hangarHome, hangarKeyOf, OutdatedServerError } from '@hangar/core';
   import {
@@ -3870,7 +3870,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
             <QueuePanel panel={queueList} editingId={queueEdit?.entryId ?? null} busy={queueBusy}
                         onEdit={startQueueEdit} onCancelEdit={cancelQueueEdit}
                         onSteer={steerQueued} onRemove={removeQueued} onReorder={reorderQueued}
-                        stalled={stateEvent?.problema === 'headless_delivery_stalled'}
+                        stalled={stateEvent?.problema === DELIVERY_STALLED}
                         onReopen={soLeituraPar ? undefined : reiniciarCodex} />
           {/if}
         {/snippet}
