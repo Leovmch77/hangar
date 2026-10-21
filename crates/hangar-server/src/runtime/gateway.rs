@@ -2783,7 +2783,7 @@ async fn events(State(state):State<Gateway>) -> Response {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::runtime::queue::acquire_lease;
 
@@ -3878,7 +3878,7 @@ mod tests {
 
     /// O `/internal/diag` do Python: guarda o corpo de cada aviso e responde 200.
     #[cfg(target_os="linux")]
-    async fn diag_sink() -> (SocketAddr,Arc<std::sync::Mutex<Vec<Value>>>) {
+    pub(crate) async fn diag_sink() -> (SocketAddr,Arc<std::sync::Mutex<Vec<Value>>>) {
         use tokio::io::{AsyncBufReadExt,AsyncReadExt,AsyncWriteExt,BufReader};
         let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
         let reports=Arc::new(std::sync::Mutex::new(Vec::new()));

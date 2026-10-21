@@ -987,7 +987,7 @@ impl Engine {
         }
         for entry in uncertain { self.set_reservation(&entry,ReservationState::Uncertain); }
         if !self.headless {
-            self.state.problema = Some(super::codex_terminal::DISCONNECTED.into());
+            self.state.problema = Some(super::codex_terminal::CONTROL_LOST.into());
             self.state.problema_detalhe = Some(detail.chars().take(300).collect());
         }
         self.changed(&mut effects,false);
@@ -2010,7 +2010,7 @@ impl Engine {
                         frame:json!({"jsonrpc":"2.0","method":"initialized","params":{}}) });
                     // Conectado já envia: a assinatura corre ao lado e não segura o primeiro turno.
                     self.connected = true;
-                    if self.state.problema.as_deref() == Some(super::codex_terminal::DISCONNECTED) { self.state.problema = None; self.state.problema_detalhe = None; }
+                    if matches!(self.state.problema.as_deref(),Some(super::codex_terminal::DISCONNECTED | super::codex_terminal::CONTROL_LOST)) { self.state.problema = None; self.state.problema_detalhe = None; }
                     effects.push(Effect::Reply { operation_id:parent.into(),disposition:Disposition::Accepted,payload:json!({"connected":true,"subscribed":false}) });
                     effects.push(Effect::WakeQueue);
                     self.subscribe(effects);

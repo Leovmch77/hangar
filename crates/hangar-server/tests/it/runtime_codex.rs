@@ -2018,7 +2018,8 @@ fn conversation_terminal_lost_socket_holds_the_queue_and_resubscribes_the_same_t
     // O turno sem recibo fica incerto, sem processo morto nem `headless_caiu`.
     assert_eq!(reply_of(&lost,"msg").map(|(d,_)|d),Some(Disposition::Unknown));
     let view = engine.view();
-    assert_eq!(view["problema"],hangar_server::runtime::codex_terminal::DISCONNECTED);
+    // A TUI segue respondendo: código de diagnóstico, que o portão tira da tela.
+    assert_eq!(view["problema"],hangar_server::runtime::codex_terminal::CONTROL_LOST);
     assert_ne!(view["state"],"dead");
     assert_eq!(view["headless"],false);
     let control = engine.control_view();

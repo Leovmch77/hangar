@@ -1772,7 +1772,7 @@ async fn run(mut target:RuntimeTarget,queue:QueueActor,connection:Option<Runtime
                         if crate::warn_limit::allow(Some(&target.key),"codex_terminal_reconnect") {
                             tracing::warn!(key=%target.key,session=%target.name,code=%failure.code,"reconexão ao app-server do Codex falhou; tentando de novo");
                         }
-                        effects.extend(engine.set_problem(super::codex_terminal::DISCONNECTED,Some(format!("reconectando ({})",failure.code))));
+                        effects.extend(engine.set_problem(super::codex_terminal::CONTROL_LOST,Some(format!("reconectando ({})",failure.code))));
                         reconnect.schedule(clock(start).monotonic_s,false);
                     }
                     Reconnection::Gone(failure) if adoption.is_some() => {

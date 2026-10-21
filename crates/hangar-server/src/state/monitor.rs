@@ -335,12 +335,18 @@ impl<S: Sources> Monitor<S> {
 
     /// O ator de entrada publicou: o problema dele entra ou sai do último estado sem rodada nova
     /// (a memória temporal não anda). Problema da observação ou dos fatos fica até a rodada boa.
+    /// O problema do ator quando é de tela (mensagem presa, troca de conta): vence o diagnóstico da rodada.
+    fn screen_runtime_problem(&self) -> Option<(String, String)> {
+        self.src.runtime_problem().filter(|(code, _)| !crate::problem_gate::diagnostic(code, ""))
+    }
+
     async fn runtime_changed(&mut self) -> Option<Step> {
         let last = self.mem.last.as_ref()?;
-        if last.problema.as_deref().is_some_and(|p| !edges::is_runtime_problem(p)) {
+        let now = self.src.runtime_problem();
+        // Problema da observação fica até a rodada boa, salvo quando chega um de tela, que ele não pode tapar.
+        if last.problema.as_deref().is_some_and(|p| !edges::is_runtime_problem(p)) && self.screen_runtime_problem().is_none() {
             return None;
         }
-        let now = self.src.runtime_problem();
         let same = match &now {
             Some((p, d)) => last.problema.as_deref() == Some(p.as_str()) && last.problema_detalhe.as_deref() == Some(d.as_str()),
             None => last.problema.is_none(),
@@ -451,7 +457,8 @@ impl<S: Sources> Monitor<S> {
         if crate::warn_limit::allow(Some(self.src.name()), problem) {
             tracing::warn!(session = self.src.name(), code = problem, detail, "estado: rodada sem quadro");
         }
-        let event = StateEvent { problema: Some(problem.to_owned()), problema_detalhe: Some(detail), claude_permission_mode: mode, ..base };
+        let (problema, problema_detalhe) = self.screen_runtime_problem().unwrap_or((problem.to_owned(), detail));
+        let event = StateEvent { problema: Some(problema), problema_detalhe: Some(problema_detalhe), claude_permission_mode: mode, ..base };
         // A rodada boa seguinte publica de novo, mesmo igual à de antes da falha.
         self.mem.key = None;
         self.publish(event).await.unwrap_or(Step::Sleep)
@@ -502,8 +509,12 @@ impl<S: Sources> Monitor<S> {
         let a = reduced.analysis;
         let (mode, previous) = self.mem.permission.current.clone().unzip();
         let loop_info = files.loop_info.unwrap_or_default();
-        // O problema do runtime entra na chave: muda o evento mesmo com a tela parada.
-        let problem = problem.map(|(p, d)| (p.to_owned(), d)).or_else(|| self.src.runtime_problem());
+        // O problema do runtime entra na chave: muda o evento mesmo com a tela parada. O de tela (mensagem presa)
+        // vence o diagnóstico daqui, que o portão da saída esconderia.
+        let problem = match self.screen_runtime_problem() {
+            Some(screen) => Some(screen),
+            None => problem.map(|(p, d)| (p.to_owned(), d)).or_else(|| self.src.runtime_problem()),
+        };
         let (problema, problema_detalhe) = problem.unzip();
         let mut event = StateEvent {
             session: name, state: a.state, label: a.label, question: a.question, options: a.options,
@@ -514,7 +525,7 @@ impl<S: Sources> Monitor<S> {
             claude_plan_pending: facts.plan_pending.clone(), ..Default::default()
         };
         let projection = super::facts::project_plugin_state(&mut event, &facts.questions);
-        if let Err(code) = &projection {
+        if let Err(code) = &projection && event.problema.as_deref().is_none_or(|p| crate::problem_gate::diagnostic(p, &event.state)) {
             event.problema = Some(UNAVAILABLE.into());
             event.problema_detalhe = Some(code.clone());
         }
@@ -722,6 +733,22 @@ mod tests {
         fake.epoch.fetch_add(1, Ordering::SeqCst);
         monitor.round().await;
         assert!(fake.events.lock().unwrap().last().unwrap().1.codex_question.is_none());
+    }
+
+    /// Fatos indisponíveis ou observação caída junto com mensagem presa: o estado leva a mensagem presa, que é
+    /// de tela; o diagnóstico não a tapa (o portão da saída o tiraria e a pessoa não veria nada).
+    #[tokio::test]
+    async fn a_stuck_message_wins_over_unavailable_facts() {
+        let fail = Err(CaptureFailed { code: "terminal observer EOF".into(), attempt: None });
+        let fake = Fake::new(vec![Ok(SPINNER), fail]);
+        *fake.runtime.lock().unwrap() = Some(("terminal_input_stalled".into(), "presa".into()));
+        *fake.facts.lock().unwrap() = RoundFacts { unavailable: Some("plugin_store_unavailable".into()), ..Default::default() };
+        let mut monitor = Monitor::new(fake.clone());
+        let last = || fake.events.lock().unwrap().last().unwrap().1.problema.clone();
+        monitor.round().await;
+        assert_eq!(last().as_deref(), Some("terminal_input_stalled"), "fatos indisponíveis");
+        monitor.round().await;
+        assert_eq!(last().as_deref(), Some("terminal_input_stalled"), "observação caída");
     }
 
     #[tokio::test(start_paused = true)]
@@ -965,14 +992,14 @@ mod tests {
         tokio::time::sleep(POLL).await;
         assert_eq!(fake.events.lock().unwrap().len(), 3);
         assert!(fake.events.lock().unwrap()[2].1.problema.is_none());
-        // Problema da observação vence o do runtime.
+        // O problema de tela do runtime vence o diagnóstico dos fatos, que a saída esconderia.
         *fake.runtime.lock().unwrap() = Some(("runtime_falhou".into(), "queue_io".into()));
         fake.facts.lock().unwrap().unavailable = Some("state_facts_timeout".into());
         tokio::time::sleep(POLL).await;
-        assert_eq!(fake.events.lock().unwrap().last().unwrap().1.problema.as_deref(), Some(UNAVAILABLE));
+        assert_eq!(fake.events.lock().unwrap().last().unwrap().1.problema.as_deref(), Some("runtime_falhou"));
         fake.runtime_wake.notify_one();
         tokio::time::sleep(Duration::from_millis(10)).await;
-        assert_eq!(fake.events.lock().unwrap().last().unwrap().1.problema.as_deref(), Some(UNAVAILABLE), "o ator não apaga o problema dos fatos");
+        assert_eq!(fake.events.lock().unwrap().last().unwrap().1.problema.as_deref(), Some("runtime_falhou"), "os fatos não tapam o problema do ator");
         task.abort();
     }
 
@@ -983,7 +1010,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (spawn, count) = fake_monitors(IDLE_PANE);
         let ctx = SideCtx { upstream: "127.0.0.1:9".parse().unwrap(), secret: "s".into(), http: crate::proxy::client(),
-            watchers: Default::default(), hubs: Hubs::default(), locate: std::sync::Arc::new(crate::locate::Unavailable), monitors: Some(spawn), mods: Default::default(), runtime: Default::default(), queue_dir: None, problem_hold: std::time::Duration::ZERO, shown_problems: Default::default() };
+            watchers: Default::default(), hubs: Hubs::default(), locate: std::sync::Arc::new(crate::locate::Unavailable), monitors: Some(spawn), mods: Default::default(), runtime: Default::default(), queue_dir: None, problem_hold: std::time::Duration::ZERO, shown_problems: Default::default(),
+            diag: crate::diag::DiagClient::new("127.0.0.1:9".parse().unwrap(), "s".into()) };
         let binding = |p| Binding { provider: p, jsonl: dir.path().join("a.jsonl"), key: "a".into(), headless: false, life: None };
         // Dono no celular, dono no desktop e o canal do convidado: um hub, um Monitor.
         let leases: Vec<_> = (0..3).map(|_| ctx.hubs.acquire("s", binding(Provider::Claude), &ctx)).collect();

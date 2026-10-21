@@ -263,8 +263,13 @@ impl RuntimeFeed {
         let live_binding_changed = runtime_binding.as_ref().is_some_and(|binding|
             value.as_ref().and_then(|live| live.as_ref()).is_some_and(|live| live.binding.as_ref() != Some(binding)));
         if live_binding_changed { self.plugin_reading = None; }
+        // Sem estado provado, nada sai: a tela fica com o último, sem `idle` inventado, e o motivo vai ao diário.
+        let unproven = |code: &str, message: &str| {
+            crate::problem_gate::report_hidden(hub.diag(), &self.name, code, Some(message));
+            true
+        };
         let (mut state, texts) = match &value {
-            None => (feed_problem(&self.name, self.headless, "runtime_absent", "o servidor não tem o runtime ligado"), Default::default()),
+            None => return unproven("runtime_absent", "o servidor não tem o runtime ligado"),
             // Sessão parada (não aberta no Rust, encerrada, ou abrindo): `idle`, como o Python. Abertura
             // que falhou e vida que acabou com erro chegam como `Some` com o erro.
             // Claude parado leva o que o sidecar diz dele; sem sidecar (ou Codex) fica o `idle` puro.
@@ -274,21 +279,21 @@ impl RuntimeFeed {
                 Parked::Absent => (idle(&self.name, self.headless), Default::default()),
             },
             Some(Some(live)) if live_binding_changed || interaction_unavailable && (!display_binding_confirmed || live.binding.as_ref().is_none_or(|binding| binding.conversation != source.1.key)) => {
-                let state = if !live_binding_changed && live.binding.is_none() && let Some((code, message)) = &live.error {
+                // Erro da vida desta conversa (ou de antes do vínculo) é falha real e sai; o de outra conversa, não.
+                let own = live.binding.as_ref().is_none_or(|binding| binding.conversation == source.1.key);
+                let state = if !live_binding_changed && own && let Some((code, message)) = &live.error {
                     feed_problem(&self.name, self.headless, code, message)
                 } else {
-                    feed_problem(&self.name, self.headless, "state_feed_binding_unavailable", "o estado não prova a conversa atual")
+                    return unproven("state_feed_binding_unavailable", "o estado não prova a conversa atual");
                 };
                 (state, Default::default())
             }
             Some(Some(live)) => {
                 let mut state = if live.public_state.is_null() { idle(&self.name, self.headless) } else {
-                    serde_json::from_value(live.public_state.clone()).unwrap_or_else(|_| {
-                        if crate::warn_limit::allow(Some(&self.name), "state_feed_invalid") {
-                            tracing::warn!(session = self.name.as_str(), code = "state_feed_invalid", "estado: vista do ator não é um estado");
-                        }
-                        feed_problem(&self.name, self.headless, "state_feed_invalid", "a vista do ator não é um estado")
-                    })
+                    match serde_json::from_value(live.public_state.clone()) {
+                        Ok(state) => state,
+                        Err(_) => return unproven("state_feed_invalid", "a vista do ator não é um estado"),
+                    }
                 };
                 if let Some((code, message)) = &live.error {
                     state.problema = Some("runtime_falhou".into());
@@ -700,8 +705,7 @@ mod tests {
         stale.refresh_facts().await;
         assert!(stale.round().await);
         let rejected = collect(&mut stale_rx,Duration::from_millis(20)).await;
-        assert!(of(&rejected,"state")[0].2["problema_detalhe"].as_str().unwrap().starts_with("state_feed_binding_unavailable"));
-        assert!(of(&rejected,"state")[0].2["status_line"].is_null());
+        assert!(of(&rejected,"state").is_empty(), "sem prova da conversa, nenhum estado inventado: {rejected:?}");
         assert!(of(&rejected,"ask_question").is_empty());
         assert!(!rejected.iter().any(|(_,_,data)| data.to_string().contains("metadata-a") || data.to_string().contains("ask:a")));
         let mut observed = registry.live("s");
@@ -710,16 +714,16 @@ mod tests {
         assert!(server.await.unwrap_err().is_cancelled());
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if observed.borrow().as_ref().is_some_and(|live| live.error.is_some()) { break; }
+                // O socket caiu e o cano (pid de mentira) não é mais o desta vida: queda real, na vista do ator.
+                if observed.borrow().as_ref().is_some_and(|live| live.public_state["problema"] == "headless_processo_caiu") { break; }
                 observed.changed().await.unwrap();
             }
-        }).await.expect("erro real do ator após perder a conexão");
-        assert!(registry.interaction_binding_readonly("s").await.is_err());
+        }).await.expect("queda real do ator após perder a conexão");
         let mut rx = f.lease.hub.tx.subscribe();
         feed.refresh_facts().await;
         assert!(feed.round().await);
         let failed = collect(&mut rx,Duration::from_millis(20)).await;
-        assert_eq!(of(&failed,"state")[0].2["problema"],"runtime_falhou");
+        assert_eq!(of(&failed,"state")[0].2["problema"],"headless_processo_caiu", "{failed:?}");
         assert!(of(&failed,"ask_question").is_empty(), "erro não resolve nem republica o cartão B");
         assert!(!failed.iter().any(|(_,_,data)| data.to_string().contains("ask:a") || data.to_string().contains("suggest-a")));
         registry.close("feed-key", 2).await.unwrap();
@@ -784,6 +788,17 @@ mod tests {
                    (Some("working"), Some("runtime_falhou"), Some("queue_io: fila recusou: x")));
     }
 
+    /// A vista do ator que não é um estado não vira `idle` inventado: nada sai e o motivo vai ao diário.
+    #[tokio::test(start_paused = true)]
+    async fn invalid_actor_view_publishes_no_invented_state() {
+        let f = fixture();
+        let mut rx = f.lease.hub.tx.subscribe();
+        let (_tx, live_rx) = channel(Some(LiveState { public_state: json!("não é um estado"), ..Default::default() }));
+        let _feed = spawn(&f, Some(live_rx));
+        let got = collect(&mut rx, Duration::from_millis(50)).await;
+        assert!(of(&got, "state").is_empty(), "{got:?}");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn absent_entry_is_idle() {
         // Sessão parada não é falha: reiniciar, encerrar ou reabrir não pode acender o problema.
@@ -798,14 +813,13 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn no_registry_is_runtime_absent() {
+    async fn no_registry_publishes_no_invented_state() {
         let f = fixture();
         let mut rx = f.lease.hub.tx.subscribe();
         let _feed = spawn(&f, None);
         let got = collect(&mut rx, Duration::from_millis(50)).await;
-        let state = &of(&got, "state")[0].2;
-        assert_eq!(state["problema"], "runtime_falhou");
-        assert!(state["problema_detalhe"].as_str().unwrap().starts_with("runtime_absent:"), "{state}");
+        // Sem runtime não há estado a provar: nada de `idle` com aviso; o motivo vai ao diário.
+        assert!(of(&got, "state").is_empty(), "{got:?}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1071,7 +1085,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failing_snapshot_shows_on_the_state() {
+    async fn failing_snapshot_stays_off_the_state() {
         let f = claude_fixture();
         let py = fake_python_with(usize::MAX, "").await;
         let store = Arc::new(crate::state::facts::FactsStore::default());
@@ -1080,7 +1094,8 @@ mod tests {
         let _feed = tokio::spawn(RuntimeFeed::new(&f.lease.hub, Some(live_rx), f.published.clone(), Some(feed_facts(&py, &store))).run());
         let got = collect(&mut rx, Duration::from_millis(500)).await;
         let state = &of(&got, "state")[0].2;
-        assert_eq!((state["state"].as_str(), state["problema"].as_str()), (Some("working"), Some(crate::state::facts::UNAVAILABLE)), "{got:?}");
+        // O feed marca os fatos velhos (`state_facts_unavailable`); o portão do hub os tira da saída: é diagnóstico.
+        assert_eq!((state["state"].as_str(), state["problema"].as_str()), (Some("working"), None), "{got:?}");
     }
 
     #[tokio::test]

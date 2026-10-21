@@ -138,9 +138,10 @@ impl AppState {
             queue_dir: list.env().dirs.as_ref().map(|dirs| dirs.claude.join(".hangar-queue")),
             problem_hold: crate::problem_gate::HOLD,
             shown_problems: list.shown_problems(),
+            diag: crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone()),
         };
         mods.bind_hubs(side.hubs.downgrade());
-        let diag = crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone());
+        let diag = side.diag.clone();
         let state = Arc::new(crate::state::live::StateEnv::new(terminal.clone(), list.clone(), diag.clone()));
         list.set_permissions(state.permissions.clone());
         side.monitors = Some(crate::state::live::spawner(state.clone()));
@@ -1100,6 +1101,7 @@ mod tests {
             queue_dir: None,
             problem_hold: std::time::Duration::ZERO,
             shown_problems: Default::default(),
+            diag: crate::diag::DiagClient::new("127.0.0.1:9".parse().unwrap(), "s".into()),
         };
         let jsonl = dir.join("t.jsonl");
         std::fs::write(&jsonl, "").unwrap();

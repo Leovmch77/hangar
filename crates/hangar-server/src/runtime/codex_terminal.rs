@@ -23,9 +23,12 @@ use super::cano_reconnect::ReconnectWaits;
 #[cfg(test)]
 use super::cano_reconnect::CanoReconnect;
 
-/// Problema da sessão enquanto o socket de controle está fora; a TUI segue respondendo no terminal. Código
-/// já traduzido em todas as telas; o que aconteceu vai no detalhe.
+/// Problema da sessão quando o app-server saiu ou mudou (`Gone`): pede a pessoa. Código já traduzido em
+/// todas as telas; o que aconteceu vai no detalhe.
 pub const DISCONNECTED:&str = "runtime_falhou";
+/// O socket de controle caiu e o ator religa ao mesmo app-server: a TUI segue respondendo, então é
+/// diagnóstico (`problem_gate::diagnostic`), nunca aviso na tela.
+pub const CONTROL_LOST:&str = "codex_control_lost";
 
 /// Espera da reconexão: primeira, multiplicador e teto (segundos).
 const RECONNECT_FIRST:f64 = 1.0;

@@ -227,6 +227,8 @@ pub struct SideCtx {
     pub problem_hold: std::time::Duration,
     /// O problema que a lista mostra de cada sessão (`ListBridge::gate_problems`): o hub nasce com ele.
     pub shown_problems: Arc<crate::problem_gate::Shown>,
+    /// Diário do dono: o aviso de diagnóstico que o portão tira da tela vai para ele.
+    pub diag: crate::diag::DiagClient,
 }
 
 impl SideCtx {
@@ -590,6 +592,8 @@ impl Hub {
 
     pub fn wake(&self) -> Arc<Notify> { self.wake.clone() }
 
+    pub(crate) fn diag(&self) -> &crate::diag::DiagClient { &self.ctx.diag }
+
     pub fn committed(&self) -> Option<Arc<str>> { self.committed.lock().unwrap().clone() }
 
     /// Resposta gravada lida na geração `generation`; troca de ligação no meio descarta.
@@ -899,19 +903,39 @@ impl Hub {
         }
     }
 
-    /// `Some`: o estado sai sem o problema, que ainda não valeu pelo prazo; o original volta a passar por
-    /// aqui quando o prazo vence, se nenhum estado mais novo chegou antes.
+    /// `Some`: o estado sai sem o problema, que é diagnóstico (vai ao diário, nunca à tela) ou ainda não valeu
+    /// pelo prazo; neste caso o original volta a passar por aqui quando o prazo vence, se nenhum estado mais
+    /// novo chegou antes.
     fn gate_problem(&self, data: &str, pane_question: bool) -> Option<String> {
         use crate::problem_gate::Gate;
         let mut value: serde_json::Value = serde_json::from_str(data).ok()?;
+        // P1: com a pergunta aberta, fatos que não identificam a interação são bloqueio (o card não responde) e saem
+        // com o código da lista; a causa fica no diário.
+        let unidentified = value["state"] == "awaiting_input" && value["problema"] == crate::state::facts::UNAVAILABLE
+            && value["problema_detalhe"].as_str().is_some_and(crate::list::bridge::interaction_unidentified);
+        if unidentified {
+            crate::problem_gate::report_hidden(&self.ctx.diag, &self.name, crate::state::facts::UNAVAILABLE, value["problema_detalhe"].as_str());
+            value["problema"] = crate::list::bridge::INTERACTION_UNAVAILABLE.into();
+            value["problema_detalhe"] = serde_json::Value::Null;
+        }
+        let hidden = value["problema"].as_str().filter(|code| crate::problem_gate::diagnostic(code, value["state"].as_str().unwrap_or("")))
+            .map(str::to_owned);
+        if let Some(code) = &hidden {
+            crate::problem_gate::report_hidden(&self.ctx.diag, &self.name, code, value["problema_detalhe"].as_str());
+            value["problema"] = serde_json::Value::Null;
+            value["problema_detalhe"] = serde_json::Value::Null;
+        }
+        let cleared = || (hidden.is_some() || unidentified).then(|| value.to_string());
         // Fora de um runtime não há como reenviar: o problema sai como chegou, sem contar prazo.
-        let runtime = tokio::runtime::Handle::try_current().ok()?;
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else { return cleared() };
         let mut problems = self.problems.lock().unwrap();
         problems.epoch += 1;
         if let Some(timer) = problems.timer.take() { timer.abort(); }
         let now = tokio::time::Instant::now();
-        let Gate::Hold(at) = problems.gate.admit(value["problema"].as_str(), now.into_std(), self.ctx.problem_hold) else { return None };
-        let (hub, original, epoch) = (self.me.clone(), data.to_owned(), problems.epoch);
+        let Gate::Hold(at) = problems.gate.admit(value["problema"].as_str(), now.into_std(), self.ctx.problem_hold) else { return cleared() };
+        // O que volta depois do prazo é o estado já traduzido, nunca o código interno.
+        let original = if unidentified { value.to_string() } else { data.to_owned() };
+        let (hub, epoch) = (self.me.clone(), problems.epoch);
         problems.timer = Some(runtime.spawn(async move {
             tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
             if let Some(hub) = hub.upgrade() { hub.redeliver_problem(epoch, &original, pane_question); }
@@ -1515,6 +1539,7 @@ pub(crate) fn test_ctx() -> SideCtx {
         queue_dir: None,
         problem_hold: std::time::Duration::ZERO,
         shown_problems: Arc::default(),
+        diag: crate::diag::DiagClient::new("127.0.0.1:9".parse().unwrap(), "s".into()),
     }
 }
 
@@ -2640,12 +2665,12 @@ mod tests {
                 .map(|(_, data)| serde_json::from_str(data.trim()).unwrap()).unwrap_or_default()
         };
         let with = |problema: Option<&str>| serde_json::json!({"state":"working","problema":problema,"problema_detalhe":problema.map(|p| format!("{p}: detalhe"))}).to_string();
-        assert!(lease.hub.publish_own("state", &with(Some("runtime_binding"))));
+        assert!(lease.hub.publish_own("state", &with(Some("headless_processo_caiu"))));
         assert_eq!((state(&lease.hub)["state"].as_str(), state(&lease.hub)["problema"].as_str()), (Some("working"), None), "estado já, problema não");
         // O temporizador do tokio arredonda o prazo para o milissegundo seguinte.
         tokio::time::advance(crate::problem_gate::HOLD + std::time::Duration::from_millis(5)).await;
         for _ in 0..5 { tokio::task::yield_now().await; }
-        assert_eq!(state(&lease.hub)["problema"], "runtime_binding", "valeu pelo prazo: sai sozinho");
+        assert_eq!(state(&lease.hub)["problema"], "headless_processo_caiu", "valeu pelo prazo: sai sozinho");
         assert!(lease.hub.publish_own("state", &with(None)));
         assert!(state(&lease.hub)["problema"].is_null(), "resolvido some na hora");
         assert!(lease.hub.publish_own("state", &with(Some("passageiro"))));
@@ -2675,6 +2700,96 @@ mod tests {
         assert!(frames(&lease.hub).contains(r#""problema":"headless_processo_caiu""#), "a lista já mostra: a conversa também, sem prazo");
         assert!(lease.hub.publish_own("state", r#"{"state":"idle","problema":"outro","problema_detalhe":null}"#));
         assert!(!frames(&lease.hub).contains(r#""problema":"outro""#), "problema diferente espera o prazo");
+    }
+
+    /// Aviso de diagnóstico (fatos velhos, Codex sem conexão, controle do Codex caído) sai do estado na hora e o
+    /// prazo não o traz de volta; o de tela (troca de conta sem destino, mensagem presa) espera o prazo e sai.
+    #[tokio::test]
+    async fn a_diagnostic_problem_never_goes_out_and_a_screen_problem_still_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = SideCtx { queue_dir: Some(dir.path().to_path_buf()), problem_hold: crate::problem_gate::HOLD, ..test_ctx() };
+        let lease = ctx.hubs.acquire("diagnostico", queue_binding(dir.path(), "a"), &ctx);
+        tokio::time::pause();
+        let state = |hub: &Hub| -> serde_json::Value {
+            let frames: String = hub.cache.lock().unwrap().replay().iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect();
+            frames.split("\n\n").find(|f| f.starts_with("event: state")).and_then(|f| f.split_once("data: "))
+                .map(|(_, data)| serde_json::from_str(data.trim()).unwrap()).unwrap_or_default()
+        };
+        let with = |problema: &str| serde_json::json!({"state":"working","problema":problema,"problema_detalhe":"detalhe"}).to_string();
+        let past_hold = || async {
+            tokio::time::advance(crate::problem_gate::HOLD + std::time::Duration::from_millis(5)).await;
+            for _ in 0..5 { tokio::task::yield_now().await; }
+        };
+        for code in ["state_facts_unavailable", "codex_sem_conexao", "codex_control_lost"] {
+            assert!(lease.hub.publish_own("state", &with(code)));
+            let now = state(&lease.hub);
+            assert_eq!((now["state"].as_str(), now["problema"].as_str(), now["problema_detalhe"].as_str()), (Some("working"), None, None), "{code}: fora da tela já");
+            past_hold().await;
+            assert!(state(&lease.hub)["problema"].is_null(), "{code}: o prazo não o traz");
+        }
+        for code in ["limit_switch_no_target", "headless_delivery_stalled"] {
+            assert!(lease.hub.publish_own("state", &with(code)));
+            assert!(state(&lease.hub)["problema"].is_null(), "{code}: espera o prazo, como hoje");
+            past_hold().await;
+            assert_eq!(state(&lease.hub)["problema"], code, "{code}: de tela, sai depois do prazo");
+        }
+    }
+
+    /// P1 na conversa: pergunta aberta (`awaiting_input`) cuja interação não tem identidade é bloqueio e sai com o
+    /// código da lista; fora da espera, ou fatos velhos por outra causa, ficam no diário.
+    #[tokio::test]
+    async fn an_unidentified_open_question_shows_only_while_awaiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = SideCtx { queue_dir: Some(dir.path().to_path_buf()), ..test_ctx() };
+        let lease = ctx.hubs.acquire("p1", queue_binding(dir.path(), "a"), &ctx);
+        let problem = |state: &str, detail: &str| -> serde_json::Value {
+            let data = serde_json::json!({"state":state,"problema":"state_facts_unavailable","problema_detalhe":detail}).to_string();
+            assert!(lease.hub.publish_own("state", &data));
+            let frames: String = lease.hub.cache.lock().unwrap().replay().iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect();
+            let state: serde_json::Value = frames.split("\n\n").find(|f| f.starts_with("event: state")).and_then(|f| f.split_once("data: "))
+                .map(|(_, data)| serde_json::from_str(data.trim()).unwrap()).unwrap_or_default();
+            state["problema"].clone()
+        };
+        assert_eq!(problem("awaiting_input", "askq_pane_mismatch"), "interacao_indisponivel", "card sem como responder: tela");
+        assert_eq!(problem("awaiting_input", "runtime_binding"), "interacao_indisponivel");
+        assert!(problem("idle", "askq_pane_mismatch").is_null(), "fora da espera: diário");
+        assert!(problem("awaiting_input", "state_files_timeout").is_null(), "fatos velhos por outra causa: diário");
+    }
+
+    /// Com o prazo, o que sai quando ele vence é o código traduzido, nunca o `state_facts_unavailable` original.
+    #[tokio::test]
+    async fn an_unidentified_open_question_after_the_hold_goes_out_translated() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = SideCtx { queue_dir: Some(dir.path().to_path_buf()), problem_hold: crate::problem_gate::HOLD, ..test_ctx() };
+        let lease = ctx.hubs.acquire("p1-prazo", queue_binding(dir.path(), "a"), &ctx);
+        tokio::time::pause();
+        assert!(lease.hub.publish_own("state", r#"{"state":"awaiting_input","problema":"state_facts_unavailable","problema_detalhe":"askq_pane_mismatch"}"#));
+        tokio::time::advance(crate::problem_gate::HOLD + std::time::Duration::from_millis(5)).await;
+        for _ in 0..5 { tokio::task::yield_now().await; }
+        let frames: String = lease.hub.cache.lock().unwrap().replay().iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect();
+        assert!(frames.contains(r#""problema":"interacao_indisponivel""#), "{frames}");
+        assert!(!frames.contains("state_facts_unavailable") && !frames.contains("askq_pane_mismatch"), "{frames}");
+    }
+
+    /// "Estado talvez velho" (`state_facts_unavailable`, detalhe `runtime_binding`) não sai na conversa e vai ao diário.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stale_facts_leave_the_state_and_go_to_the_diary() {
+        let (sink, reports) = crate::runtime::gateway::tests::diag_sink().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = SideCtx { queue_dir: Some(dir.path().to_path_buf()), problem_hold: crate::problem_gate::HOLD,
+            diag: crate::diag::DiagClient::new(sink, "s".into()), ..test_ctx() };
+        let lease = ctx.hubs.acquire("velho", queue_binding(dir.path(), "a"), &ctx);
+        assert!(lease.hub.publish_own("state", r#"{"state":"idle","problema":"state_facts_unavailable","problema_detalhe":"runtime_binding"}"#));
+        let frames: String = lease.hub.cache.lock().unwrap().replay().iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect();
+        assert!(frames.contains("event: state"), "o estado sai");
+        assert!(!frames.contains("state_facts_unavailable") && !frames.contains("runtime_binding"), "sem o aviso: {frames}");
+        assert!(lease.hub.problems.lock().unwrap().timer.is_none(), "nada retido para sair depois do prazo");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !reports.lock().unwrap().iter().any(|r| r["evento"] == "rust.problem_hidden" && r["codigo"] == "state_facts_unavailable" && r["sessao"] == "velho") {
+            assert!(std::time::Instant::now() < deadline, "o aviso tirado da tela não foi ao diário: {:?}", reports.lock().unwrap());
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 
     /// Troca de conversa: o retrato perde a fila da anterior na hora, quadro da geração anterior não
