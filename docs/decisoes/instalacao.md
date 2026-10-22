@@ -164,8 +164,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   não testa o app, e mudança no core ou nas mensagens já passa pelo `front` (à mão:
   `--tudo --passos mobile`). Evidência em
   [Verificação local antes do push](#verificação-local-antes-do-push-06102026).
-- **No Linux a verificação prepara uma vez e roda os passos em faixas paralelas; o registro é por
-  passo.** O preparo é o único que compila e instala, e o pytest roda com `pytest-xdist`, um arquivo
+- **No Linux a verificação prepara uma vez e roda os passos em duas faixas (cargo e o resto); o
+  registro é por passo.** O rápido do front não roda os testes do front quando só o core mudou, e o
+  do backend escolhe os testes por quem importa o módulo. O preparo é o único que compila e instala, e o pytest roda com `pytest-xdist`, um arquivo
   por processo (`git config hangar.verificarProcessos`, padrão 4; `1` = em fila). Um passo que passou
   fica gravado para a árvore, e a rodada seguinte só repete o que falta. O Node é o do `.node-version`
   da árvore verificada. Teste do backend não pode deixar timer, thread que age, `sys.modules`,
@@ -827,6 +828,17 @@ e mobile 139 s na mesma faixa; shell, statusline e pi 8 s. Caminho crítico ≈ 
 - **Preparo único.** Com os passos em paralelo, um `cargo build` de uma faixa reescrevia binário que
   outra executava, e o pytest chegava antes das sondas de contas (~30 falhas falsas). Os passos não
   compilam mais nada no Linux.
+- **Duas faixas, e seleção por quem importa (22/10/2026).** No notebook (12 núcleos, 23 GB), uma
+  rodada rápida que mexia em `backend/app/transcript.py`, `packages/core/src/format.ts`, um crate de
+  base e o nativo levou mais de 49 min, com load 21 e 13 GB em swap; a máquina ficou inutilizável.
+  Com uma faixa por passo pesado, cargo test (12 threads lançando tmux e servidores), pytest com 4
+  processos, svelte-check e vitest rodavam juntos: o `it` do `hangar-server` foi de 148–172 s para
+  954 s, com 19 falhas de prazo por carga. A palavra solta `transcript` escolhia 63 arquivos de teste
+  (13 o importam). O core é reexportado inteiro pelo `index.ts`, e `vitest related` sobre um arquivo
+  dele puxou quase todos os testes do front (mais de 40 min). Agora: os passos de cargo dividem uma
+  faixa e o resto outra; `RUST_TEST_THREADS=4`; o front só roda os testes dele com arquivo do front
+  mudado (tipos seguem pelo `tsc`/`svelte-check`); o backend casa `app.x`, `from app import ... x` e a
+  linha só com o nome num import em várias linhas.
 - **Teto de tamanho no `target` da árvore fixa.** Ela reaproveitava a compilação (0 recompilações
   na mesma árvore), mas o `crates/target` só crescia: 52 GB em três dias, 20 GB de sessões
   incrementais e 32 GB de `deps` com hashes que nenhum build seguinte usa. Poda por idade não serve

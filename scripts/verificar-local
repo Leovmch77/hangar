@@ -317,8 +317,12 @@ passo_backend_rapido() {
                 [[ "$m" == app ]] && { inteiro=1; continue; }
                 # O teste com o nome do módulo pode chegar a ele por outro (app.api registra o router).
                 [[ -f "backend/tests/test_${m}.py" ]] && testes+=("tests/test_${m}.py")
-                # Palavra solta, não só `app.x`: import em várias linhas (`from app import (\n x,`) também conta.
-                while IFS= read -r t; do testes+=("$t"); done < <(cd backend && grep -lw -- "$m" tests/test_*.py 2>/dev/null) ;;
+                # Quem importa o módulo: `app.x`, `from app import ... x` e a linha só com o nome dentro
+                # de um import em várias linhas (`from app import (\n    x,`). A palavra solta pegava
+                # quase a suíte inteira com nomes comuns ("transcript": 63 arquivos contra 13).
+                while IFS= read -r t; do testes+=("$t"); done < <(cd backend && grep -lE -- \
+                    "\\bapp\\.${m}\\b|from app(\\.[A-Za-z_.]+)? import [^#]*\\b${m}\\b|^[[:space:]]+${m},?[[:space:]]*(#.*)?\$" \
+                    tests/test_*.py 2>/dev/null) ;;
             # Dependência, conftest e helper de teste valem para a suíte inteira.
             backend/pyproject.toml|backend/uv.lock|backend/tests/*.py) inteiro=1 ;;
         esac
@@ -356,7 +360,13 @@ passo_front_rapido() {
     (( msgs )) && rel+=("$PWD/frontend/src/lib/i18nGuard.test.ts")
     (( ${#rel[@]} )) || return 0
     (cd packages/core && npx vitest related --run --passWithNoTests "${rel[@]}") || return 1
-    (cd frontend && npx vitest related --run --passWithNoTests "${rel[@]}")
+    # O core é reexportado inteiro pelo index: "relacionado" a um arquivo dele é quase todo teste do
+    # front (mais de 40 min). Core sozinho fica com os testes dele e o tsc/svelte-check acima; o
+    # comportamento do front que depende dele é do CI.
+    local front=()
+    for f in "${rel[@]}"; do [[ "$f" == "$PWD"/frontend/* ]] && front+=("$f"); done
+    (( ${#front[@]} )) || { echo "só o core mudou: testes do front ficam para o CI"; return 0; }
+    (cd frontend && npx vitest related --run --passWithNoTests "${front[@]}")
 }
 
 passo_mobile_rapido() {
@@ -445,23 +455,25 @@ node_da_arvore() {
 # Preparo e depois os passos em faixas; com PROCESSOS=1, uma faixa só, na ordem do plano. Imprime
 # um resumo único, no formato do rodar_passos.
 rodar_em_faixas() {   # $1 = sha, resto = passos
-    local sha="$1" p f faixas=() web=() leves=() saidas
+    local sha="$1" p f faixas=() web=() saidas
     shift
     saidas="$(mktemp -d)"
     rodar_passos "$sha" preparo > "$saidas/preparo" 2>&1 || { cat "$saidas/preparo"; rm -rf "$saidas"; return 1; }
+    local carga=()
     for p in "$@"; do
         if (( PROCESSOS == 1 )); then web+=("$p")
         else
-            # front e mobile juntos: os dois compilam as mensagens do core no mesmo lugar.
+            # Duas faixas, não uma por passo: quatro passos pesados juntos levavam a máquina ao swap e
+            # cada um ficava várias vezes mais lento. Os de cargo dividem uma (e a trava do cache de
+            # pacotes); o resto, a outra. front e mobile juntos compilam as mensagens no mesmo lugar.
             case "$p" in
-                rust|backend|nativo|rust_rapido|backend_rapido) faixas+=("$p") ;;
-                front|mobile|front_rapido|mobile_rapido) web+=("$p") ;;
-                *) leves+=("$p") ;;
+                rust|nativo|rust_rapido) carga+=("$p") ;;
+                *) web+=("$p") ;;
             esac
         fi
     done
+    (( ${#carga[@]} )) && faixas+=("${carga[*]}")
     (( ${#web[@]} )) && faixas+=("${web[*]}")
-    (( ${#leves[@]} )) && faixas+=("${leves[*]}")
     local i pids=() falhou=0
     for i in "${!faixas[@]}"; do
         # shellcheck disable=SC2086
@@ -494,7 +506,9 @@ preparar_arvore() {   # $1 = sha, $2 = bundle ("-" = sem bundle); usa $SO
     unset CARGO_TARGET_DIR
     # A depuração reduzida vem do perfil dev do crates/Cargo.toml: as mesmas flags de quem programa,
     # sem uma segunda cópia de cada artefato.
-    CARGO_ENV=(CARGO_BUILD_JOBS=4)
+    # Teste do `it` lança tmux, cano e servidores falsos: com uma thread por núcleo, a máquina vai ao
+    # swap e os testes de prazo falham por carga, não por defeito.
+    CARGO_ENV=(CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4)
     # Os testes procuram os binários em crates/target; um `target-dir` no ~/.cargo/config.toml da
     # máquina mandaria o build para outro lugar. A variável vence a configuração, e só chega aos
     # passos pela lista do `env -i`.
