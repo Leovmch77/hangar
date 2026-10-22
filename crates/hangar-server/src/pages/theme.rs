@@ -48,8 +48,10 @@ window.__hangarApply=apply;addEventListener("message",e=>{const d=e.data;if(d&&d
 /// Página de tema próprio sem fundo pintado e com texto claro: no branco do navegador ela some. Ganha o fundo do tema
 /// escuro e a marca `data-hangar-fallback`, que o rascunho lê para avisar. Texto escuro sem fundo continua legível e
 /// fica como está.
-const OWN_FALLBACK: &str = r##"(()=>{const fix=()=>{const d=document.documentElement,b=document.body,bg=e=>e?getComputedStyle(e).backgroundColor:"";
-const clear=c=>!c||c==="transparent"||/^rgba\(.*,\s*0\)$/.test(c);if(!clear(bg(d))||!clear(bg(b)))return;
+const OWN_FALLBACK: &str = r##"(()=>{const fix=()=>{const d=document.documentElement,b=document.body;
+const clear=e=>{if(!e)return true;const s=getComputedStyle(e),c=s.backgroundColor;
+return s.backgroundImage==="none"&&(!c||c==="transparent"||/^rgba\(.*,\s*0\)$/.test(c))};
+if(!clear(d)||!clear(b)||getComputedStyle(d).colorScheme.includes("dark"))return;
 const m=(getComputedStyle(b||d).color.match(/[\d.]+/g)||[]).map(Number);if(m.length<3)return;
 if((0.299*m[0]+0.587*m[1]+0.114*m[2])/255>0.5){d.style.background="#1a171a";d.dataset.hangarFallback="1"}};
 document.readyState==="loading"?document.addEventListener("DOMContentLoaded",fix):fix()})();"##;

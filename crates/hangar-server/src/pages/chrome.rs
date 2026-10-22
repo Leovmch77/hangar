@@ -307,8 +307,12 @@ async fn drive(url: &str, html: &str, jobs: &[Job], own_theme: bool) -> Result<R
     // Tema próprio fica com o branco padrão do Chromium: o print mostra a página como foi desenhada.
     let (mut cdp, session) = load(url, html, "file:*", !own_theme).await?;
     let s = Some(session.as_str());
-    let unpainted = own_theme && cdp.call(s, "Runtime.evaluate", json!({"expression": "document.documentElement.dataset.hangarFallback===\"1\"", "returnByValue": true}))
-        .await?["result"]["value"].as_bool().unwrap_or(false);
+    let unpainted = own_theme && {
+        let read = cdp.call(s, "Runtime.evaluate", json!({"expression": "document.documentElement.dataset.hangarFallback===\"1\"", "returnByValue": true})).await?;
+        let flag = read["result"]["value"].as_bool();
+        if flag.is_none() { tracing::warn!(code = "page_fallback_unread", "marca da reserva de fundo não lida; a página segue sem aviso"); }
+        flag.unwrap_or(false)
+    };
     let mut heights = BTreeMap::new();
     for job in jobs {
         cdp.call(s, "Emulation.setEmulatedMedia", json!({"features": [{"name": "prefers-color-scheme", "value": job.theme.as_str()}]})).await?;
