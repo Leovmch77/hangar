@@ -133,7 +133,7 @@ export const SessionChip = memo(function SessionChip({ session, members = [], la
 });
 
 const styles = StyleSheet.create((theme) => ({
-  slot: { width: 240, flexShrink: 0, paddingTop: 8, paddingBottom: 8 },
+  slot: { width: 240, flexShrink: 0, paddingTop: theme.base.space[2], paddingBottom: theme.base.space[2] },
   tab: { position: 'relative', height: 44, borderRadius: theme.base.radius.md, borderWidth: 1 },
   fullTab: { height: 52 },
   body: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: theme.base.space[1] },

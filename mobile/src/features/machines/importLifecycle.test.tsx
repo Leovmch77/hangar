@@ -14,11 +14,22 @@ const mocks = vi.hoisted(() => ({
   savedFatal: undefined as string | undefined,
 }));
 vi.mock('expo-secure-store', () => ({ getItemAsync: mocks.read, setItemAsync: vi.fn(async () => {}) }));
+vi.mock('expo-blur', async () => { const { View } = await import('react-native'); return { BlurTargetView: View, BlurView: View }; });
+vi.mock('expo-linear-gradient', async () => ({ LinearGradient: (await import('react-native')).View }));
+vi.mock('expo-glass-effect', async () => ({ GlassView: (await import('react-native')).View, isLiquidGlassAvailable: () => false }));
+vi.mock('@lodev09/react-native-true-sheet', () => ({ TrueSheet: () => null }));
+vi.mock('@react-native-menu/menu', () => ({ MenuView: ({ children }: { children: ReactNode }) => <>{children}</> }));
+vi.mock('expo-file-system', () => ({ Directory: class {}, File: class {}, Paths: { cache: '/tmp', document: '/tmp' } }));
+vi.mock('expo-clipboard', () => ({}));
+vi.mock('expo-intent-launcher', () => ({ startActivityAsync: vi.fn() }));
+vi.mock('expo-audio', () => ({ AudioModule: {}, RecordingPresets: {} }));
+vi.mock('react-native-enriched-markdown', () => ({ EnrichedMarkdownText: () => null }));
+vi.mock('react-native-gifted-charts', async () => ({ BarChart: (await import('react-native')).View }));
 vi.mock('./importMachines', () => ({ discoverSavedMachines: mocks.discover }));
 vi.mock('react-native-url-polyfill/auto', () => ({}));
 vi.mock('../../theme/unistyles', () => ({}));
 vi.mock('../../net/configureCore', () => ({ configureCore: () => {} }));
-vi.mock('../../stores/prefs', () => ({ prefs: { getString: () => mocks.savedFatal, set: (_k: string, v: string) => { mocks.savedFatal = v; } } }));
+vi.mock('../../stores/prefs', () => ({ prefs: { getString: () => mocks.savedFatal, getBoolean: () => undefined, set: (_k: string, v: string) => { mocks.savedFatal = v; } } }));
 vi.mock('../../stores/chat', () => ({ setChatsForeground: () => {} }));
 vi.mock('../../stores/sessions', () => ({
   useSessions: { getState: () => ({ setForeground: () => {} }) },
@@ -34,6 +45,9 @@ vi.mock('../../features/push/expoPush', () => ({
 vi.mock('sonner-native', () => ({ Toaster: () => null, toast: Object.assign(mocks.warning, { error: mocks.error }) }));
 vi.mock('expo-router', () => ({
   useRouter: () => ({ replace: mocks.replace }), useSegments: () => mocks.segments,
+  usePathname: () => `/${mocks.segments.join('/')}`, useGlobalSearchParams: () => ({}),
+  useTheme: () => ({ colors: { background: '#fff' } }),
+  ThemeProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
   Stack: Object.assign(({ children }: { children: ReactNode }) => <>{children}</>, { Screen: ({ name, options }: any) => { mocks.screens[name] = options; return null; } }),
 }));
 vi.mock('react-native-gesture-handler', () => ({ GestureHandlerRootView: ({ children }: { children: ReactNode }) => <>{children}</> }));

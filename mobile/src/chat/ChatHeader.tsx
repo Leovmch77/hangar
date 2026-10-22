@@ -148,11 +148,11 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.base.space[2],
-    paddingLeft: 90, // coluna do nome: recuo + ‹ + avatar + vãos
+    paddingLeft: theme.base.space[10] * 2 + theme.base.space[2] + theme.base.space[0.5], // coluna do nome: recuo + ‹ + avatar + vãos
     paddingRight: theme.base.space[2],
     paddingBottom: theme.base.space[1],
   },
-  chipsHome: { paddingLeft: 130 },
+  chipsHome: { paddingLeft: theme.base.space[10] * 3 + theme.base.space[2] + theme.base.space[0.5] },
   marca: { width: 30, height: 30, alignItems: 'center', justifyContent: 'center' },
   titulo: {
     flex: 1,
