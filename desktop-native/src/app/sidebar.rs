@@ -273,6 +273,8 @@ pub(super) struct Sidebar {
     pub(super) grouping: super::grouping::Grouping,
     /// Onde cada linha foi pintada, para deslizar quando a ordem muda no agrupar por máquina.
     pub(super) flip: Rc<RefCell<motion::FlipBook>>,
+    /// O mesmo para as abas da barra de baixo, que deslizam de lado quando a ordem muda.
+    pub(super) tab_flip: Rc<RefCell<motion::FlipBook>>,
     /// A linha desenhada agora está trocando de seção: o avatar dela fica parado (`nav_avatar`).
     pub(super) still_avatar: std::cell::Cell<bool>,
 }
@@ -283,7 +285,7 @@ impl Sidebar {
         cx.subscribe(&filter, |_, _, _: &InputEvent, cx| cx.notify()).detach();
         Self { filter, collapsed: load_collapsed(), deleting: HashSet::new(), editing: None, renaming: HashSet::new(), follow: None, lost: None, moving: HashMap::new(),
             menu: None, menu_seq: 0, rename_seq: 0, chain: None, chain_seq: 0, focus_tab: None, remote_focus: HashMap::new(), collapse_gen: 0, button_menu: None, hover: None, last_sub: Default::default(), press_seq: 0,
-            long_pressed: false, rail_anim: None, resize: None, grouping: Default::default(), flip: Default::default(), still_avatar: Default::default() }
+            long_pressed: false, rail_anim: None, resize: None, grouping: Default::default(), flip: Default::default(), tab_flip: Default::default(), still_avatar: Default::default() }
     }
 
     /// Troca de servidor: o que é da conexão anterior sai; filtro e grupos recolhidos são deste computador e ficam.

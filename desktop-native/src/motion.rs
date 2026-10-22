@@ -349,13 +349,17 @@ pub struct Flip {
     child: Option<AnyElement>,
     mask: std::rc::Rc<std::cell::Cell<Option<ContentMask<Pixels>>>>,
     book: std::rc::Rc<std::cell::RefCell<FlipBook>>,
+    /// Lista em fileira: a troca de lugar desliza no eixo x.
+    horizontal: bool,
 }
 
 impl Flip {
     pub fn new(key: String, child: AnyElement, book: std::rc::Rc<std::cell::RefCell<FlipBook>>) -> Self {
         let mask = std::rc::Rc::new(std::cell::Cell::new(None));
-        Self { key, child: Some(Masked { child, mask: mask.clone() }.into_any_element()), mask, book }
+        Self { key, child: Some(Masked { child, mask: mask.clone() }.into_any_element()), mask, book, horizontal: false }
     }
+
+    pub fn horizontal(mut self) -> Self { self.horizontal = true; self }
 }
 
 impl IntoElement for Flip {
@@ -378,9 +382,10 @@ impl Element for Flip {
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (),
         window: &mut Window, cx: &mut App) {
         let still = cx.reduce_motion() || !window.is_window_active();
-        let place = self.book.borrow_mut().place(&self.key, f32::from(bounds.origin.y), Instant::now(), still);
+        let at = if self.horizontal { bounds.origin.x } else { bounds.origin.y };
+        let place = self.book.borrow_mut().place(&self.key, f32::from(at), Instant::now(), still);
         if place.moving { request_frame(window, cx); }
-        let offset = point(px(0.), px(place.dy));
+        let offset = if self.horizontal { point(px(place.dy), px(0.)) } else { point(px(0.), px(place.dy)) };
         if place.lift {
             let child = self.child.take().expect("prepaint uma vez só");
             let (at, mask) = (window.element_offset() + offset, window.content_mask());

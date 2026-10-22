@@ -282,21 +282,33 @@ impl Hangar {
     pub(super) fn render_tab_groups(&self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut order = 0;
         let bands = self.tab_groups();
-        bands.iter().map(|group| {
+        // Ordem nova (trabalhando primeiro, mais recente primeiro) desliza cada aba até o lugar novo, como na lista.
+        let keys: Vec<String> = bands.iter().map(|g| g.members[0].id().to_string()).collect();
+        {
+            let mut book = self.sidebar.tab_flip.borrow_mut();
+            book.sections(&keys.iter().map(|k| (k.clone(), String::new())).collect::<Vec<_>>(), std::time::Instant::now(), cx.reduce_motion());
+            book.order(&keys);
+        }
+        bands.iter().zip(keys).map(|(group, key)| {
             let first = order;
             order += group.members.len();
-            let Some(label) = group.label.as_deref() else {
-                return div().flex_shrink_0().children(self.render_session_tab(&group.members[0], None, None, first, window, cx)).into_any_element();
+            let tab = match group.label.as_deref() {
+                None => div().flex_shrink_0().children(self.render_session_tab(&group.members[0], None, None, first, window, cx)).into_any_element(),
+                Some(label) => match group.mother.then(|| self.render_mother_tab(group, label, first, window, cx)).flatten() {
+                    Some(tab) => tab,
+                    None => {
+                        let (last, size) = group.slot(group.members.len() - 1).expect("grupo com membro");
+                        let width = last + size;
+                        // Os de trás pintam primeiro; todos mantêm a mesma altura e deixam uma faixa clicável exposta.
+                        let tabs = group.members.iter().enumerate().rev().filter_map(|(index, target)| {
+                            self.render_session_tab(target, (index == 0).then_some(label), group.slot(index), first + index, window, cx)
+                        }).collect::<Vec<_>>();
+                        div().id(SharedString::from(format!("tab-group-{}", group.members[0].id())))
+                            .relative().flex_shrink_0().w(px(width)).h(px(tab_height())).children(tabs).into_any_element()
+                    }
+                },
             };
-            if group.mother && let Some(tab) = self.render_mother_tab(group, label, first, window, cx) { return tab; }
-            let (last, size) = group.slot(group.members.len() - 1).expect("grupo com membro");
-            let width = last + size;
-            // Os de trás pintam primeiro; todos mantêm a mesma altura e deixam uma faixa clicável exposta.
-            let tabs = group.members.iter().enumerate().rev().filter_map(|(index, target)| {
-                self.render_session_tab(target, (index == 0).then_some(label), group.slot(index), first + index, window, cx)
-            }).collect::<Vec<_>>();
-            div().id(SharedString::from(format!("tab-group-{}", group.members[0].id())))
-                .relative().flex_shrink_0().w(px(width)).h(px(tab_height())).children(tabs).into_any_element()
+            motion::Flip::new(key, tab, self.sidebar.tab_flip.clone()).horizontal().into_any_element()
         }).collect()
     }
 
