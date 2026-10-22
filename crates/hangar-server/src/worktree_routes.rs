@@ -421,9 +421,10 @@ async fn mutation(st: Arc<AppState>, req: Request) -> Response {
             Ok(json!({"path":created[0]}))
         })
         .await;
+        // Caiu no meio: pode já ter mexido no disco, então não é a recusa 503 de antes de agir.
         return result(done.unwrap_or_else(|_| {
             Err(hangar_workspace::error(
-                503,
+                500,
                 "criação de worktree indisponível",
             ))
         }));
@@ -462,7 +463,7 @@ async fn mutation(st: Arc<AppState>, req: Request) -> Response {
         .await;
         return result(done.unwrap_or_else(|_| {
             Err(hangar_workspace::error(
-                503,
+                500,
                 "remoção de worktree indisponível",
             ))
         }));
@@ -565,7 +566,7 @@ async fn mutation(st: Arc<AppState>, req: Request) -> Response {
             }
             Err(_) => {
                 return result(Err(hangar_workspace::error(
-                    503,
+                    500,
                     "remoção de worktree indisponível",
                 )));
             }
