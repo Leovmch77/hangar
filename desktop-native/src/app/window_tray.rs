@@ -32,10 +32,13 @@ impl Hangar {
         let Some(dir) = std::env::home_dir().map(|home| home.join(".hangar/native")) else { return };
         let _ = std::fs::create_dir_all(&dir);
         let (tx, rx) = async_channel::bounded::<()>(1);
-        let Ok(mut watcher) = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             if event.is_ok_and(|event| !matches!(event.kind, notify::EventKind::Access(_))) { let _ = tx.try_send(()); }
-        }) else { return };
-        if watcher.watch(&dir, notify::RecursiveMode::NonRecursive).is_err() { return; }
+        }).and_then(|mut watcher| watcher.watch(&dir, notify::RecursiveMode::NonRecursive).map(|()| watcher));
+        let watcher = match watcher {
+            Ok(watcher) => watcher,
+            Err(error) => { crate::log_line(&format!("reinício por troca do app desligado: vigia de {} falhou: {error}", dir.display())); return }
+        };
         cx.spawn_in(window, async move |this, cx| {
             let _watcher = watcher;
             let mut attempted = None;
@@ -45,7 +48,7 @@ impl Hangar {
                     let Ok(waiting) = this.update_in(cx, |this, window, cx| {
                         let (busy, ready) = {
                             let updater = cx.global::<crate::update::Handle>().0.read(cx);
-                            (updater.is_busy(), updater.installed_update_ready(&mut attempted))
+                            (updater.restart_held(), updater.installed_update_ready(&mut attempted))
                         };
                         if ready { this.restart_from_tray(window, cx); }
                         !ready && busy

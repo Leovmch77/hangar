@@ -770,8 +770,11 @@ impl Updater {
         let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
         let installed = crate::app::setup::installed_app_target(cfg!(windows), &home, local.as_deref());
         installed_restart_needed(&home.join(".hangar/native/release.json"), self.exe.as_deref(), installed.as_deref(), CURRENT,
-            BUILT_CHANNEL, &self.channel(), self.busy() || self.suspended, attempted)
+            BUILT_CHANNEL, &self.channel(), self.restart_held(), attempted)
     }
+
+    /// Atualizando ou com o assistente aberto: o reinício por troca externa espera.
+    pub(crate) fn restart_held(&self) -> bool { self.busy() || self.suspended }
 
     pub fn restart_desktop(&mut self, cx: &mut Context<Self>) -> Result<tokio::task::JoinHandle<Result<(), String>>, String> {
         if self.busy() { return Err(tr("app_restart_busy")); }
