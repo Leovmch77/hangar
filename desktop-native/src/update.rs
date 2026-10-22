@@ -578,6 +578,7 @@ pub fn start(runtime: Arc<Runtime>, cx: &mut App) {
             this.refresh_server(cx);
             this.refresh_active(cx);
             this.check_app(cx);
+            this.refresh_machine_updates(cx);
         }) else { return };
         cx.background_executor().timer(EVERY).await;
     }).detach();

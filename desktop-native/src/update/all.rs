@@ -125,8 +125,10 @@ fn unique_machines(machines: Vec<Machine>, identities: &[String]) -> Vec<Machine
 struct Row { key: String, label: String, local: bool, status: Status, warnings: Vec<String> }
 
 impl Row {
-    fn text(&self) -> String {
-        let mut parts = vec![self.status.text()];
+    fn text(&self) -> String { self.describe(self.status.text()) }
+
+    fn describe(&self, head: String) -> String {
+        let mut parts = vec![head];
         match &self.status {
             Status::Held(Hold::WorkBranch(branch, target)) => parts.push(format!("{branch} → {target}")),
             Status::Held(Hold::Missing(what)) => parts.push(what.clone()),
@@ -141,12 +143,15 @@ impl Row {
 }
 
 #[derive(Default)]
-pub(super) struct Survey { rows: Vec<Row>, aliases: HashMap<String, String>, generation: u64 }
+pub(super) struct Survey { rows: Vec<Row>, aliases: HashMap<String, String>, generation: u64, from_round: bool }
 
 impl Survey {
     fn prepare(&mut self, machines: &[Machine], mut aliases: HashMap<String, String>) {
-        self.rows = machines.iter().map(|m| Row { key: m.key.clone(), label: m.label.clone(), local: m.local,
-            status: Status::Checking, warnings: Vec::new() }).collect();
+        // Reconsultar mantém o que a linha já mostrava até a resposta nova chegar, sem piscar "procurando".
+        let previous = std::mem::take(&mut self.rows);
+        self.rows = machines.iter().map(|m| previous.iter().find(|row| row.key == m.key).cloned()
+            .unwrap_or_else(|| Row { key: m.key.clone(), label: m.label.clone(), local: m.local,
+                status: Status::Checking, warnings: Vec::new() })).collect();
         for machine in machines.iter().filter(|m| !m.entry_id.is_empty()) {
             aliases.insert(machine.entry_id.clone(), machine.key.clone());
         }
@@ -157,9 +162,20 @@ impl Survey {
         if let Some(row) = self.rows.iter_mut().find(|row| row.key == key) { row.status = status; row.warnings = warnings; }
     }
 
+    fn forget(&mut self, key: &str) { self.rows.retain(|row| row.key != key); }
+
     fn text(&self, key: &str) -> Option<String> {
         let key = self.aliases.get(key).map(String::as_str).unwrap_or(key);
-        self.rows.iter().find(|row| row.key == key).map(Row::text)
+        let row = self.rows.iter().find(|row| row.key == key)?;
+        // Só consultada, a trava é o motivo de não poder atualizar, não o desfecho de uma tentativa.
+        let key = match (&row.status, self.from_round) {
+            (Status::Held(Hold::WorkBranch(..)), false) => "update_all_blocked_branch",
+            (Status::Held(Hold::LocalChanges), false) => "update_all_blocked_changes",
+            (Status::Held(Hold::Running), false) => "update_all_blocked_running",
+            (Status::Held(Hold::Missing(_)), false) => "update_all_blocked_missing",
+            _ => return Some(row.text()),
+        };
+        Some(row.describe(tr_shared(key, &[])))
     }
 }
 
@@ -204,7 +220,7 @@ impl Render for Progress {
 
 pub(super) struct Batch { progress: Entity<Progress> }
 
-enum Event { Prepared(Vec<Machine>, HashMap<String, String>), Changed(String, Status, Vec<String>) }
+enum Event { Prepared(Vec<Machine>, HashMap<String, String>), Changed(String, Status, Vec<String>), Unknown(String) }
 
 async fn prepare_machines(machines: Vec<Machine>) -> (Vec<Machine>, HashMap<String, String>) {
     let identities = futures::future::join_all(machines.iter().map(identify)).await;
@@ -219,14 +235,15 @@ async fn prepare_machines(machines: Vec<Machine>) -> (Vec<Machine>, HashMap<Stri
     (unique, aliases)
 }
 
-async fn read_machine(machine: &Machine) -> Status {
+// Consulta que falha não é ação que falhou: a linha some do resumo e o motivo vai só ao log.
+async fn read_machine(machine: &Machine) -> Option<Status> {
     let result = match &machine.api {
         Ok(api) => api.server_read(&["atualizacao"], &[], 20).await,
         Err(error) => Err(error.clone()),
     };
     match result {
-        Ok(snapshot) => snapshot_status(&snapshot),
-        Err(error) => Status::Offline(failure_text(&error)),
+        Ok(snapshot) => Some(snapshot_status(&snapshot)),
+        Err(error) => { eprintln!("update survey: {} unreadable: {}", machine.label, failure_text(&error)); None }
     }
 }
 
@@ -315,8 +332,11 @@ impl Updater {
             if tx.send(Event::Prepared(machines.clone(), aliases)).await.is_err() { return; }
             futures::future::join_all(machines.into_iter().map(|machine| {
                 let tx = tx.clone();
-                async move { let status = read_machine(&machine).await;
-                    let _ = tx.send(Event::Changed(machine.key, status, Vec::new())).await; }
+                async move { let event = match read_machine(&machine).await {
+                        Some(status) => Event::Changed(machine.key, status, Vec::new()),
+                        None => Event::Unknown(machine.key),
+                    };
+                    let _ = tx.send(event).await; }
             })).await;
         });
         cx.spawn(async move |this, cx| {
@@ -324,8 +344,9 @@ impl Updater {
                 let result = this.update(cx, |this, cx| {
                     if this.survey.generation != generation { return false; }
                     match event {
-                        Event::Prepared(machines, aliases) => this.survey.prepare(&machines, aliases),
+                        Event::Prepared(machines, aliases) => { this.survey.from_round = false; this.survey.prepare(&machines, aliases) }
                         Event::Changed(key, status, warnings) => this.survey.change(&key, status, warnings),
+                        Event::Unknown(key) => this.survey.forget(&key),
                     }
                     cx.notify();
                     true
@@ -417,6 +438,7 @@ impl Updater {
                             else if this.plan().app { this.install_app(window, cx); }
                         }
                         Event::Changed(key, status, warnings) => batch.progress.update(cx, |p, cx| { p.change(&key, status, warnings); cx.notify(); }),
+                        Event::Unknown(_) => {}
                     }
                     this.finish_batch(window, cx);
                 }); });
@@ -440,7 +462,7 @@ impl Updater {
         let install = batch.progress.update(cx, |p, cx| {
             if p.deferred_app && !p.remote_busy() { p.deferred_app = false; cx.notify(); true } else { false }
         });
-        self.survey.rows = batch.progress.read(cx).rows.clone();
+        self.survey.rows = batch.progress.read(cx).rows.clone(); self.survey.from_round = true;
         self.all_running = batch.progress.read(cx).busy();
         cx.notify();
         if install { self.install_app(window, cx); }
@@ -452,7 +474,7 @@ impl Updater {
             if let Some(row) = p.rows.iter_mut().find(|r| r.local) { row.status = status; }
             cx.notify();
         });
-        self.survey.rows = batch.progress.read(cx).rows.clone();
+        self.survey.rows = batch.progress.read(cx).rows.clone(); self.survey.from_round = true;
         self.all_running = batch.progress.read(cx).busy();
         cx.notify();
     }
@@ -483,7 +505,7 @@ impl Updater {
             }
             cx.notify();
         });
-        self.survey.rows = batch.progress.read(cx).rows.clone();
+        self.survey.rows = batch.progress.read(cx).rows.clone(); self.survey.from_round = true;
         self.all_running = batch.progress.read(cx).busy();
         cx.notify();
     }
@@ -745,8 +767,10 @@ mod tests {
         survey.aliases.insert("alias".into(), "remote".into());
         survey.rows.push(Row { key: "remote".into(), label: "remote".into(), local: false,
             status: Status::Held(Hold::WorkBranch("feature".into(), "main".into())), warnings: vec![] });
-        assert_eq!(survey.text("alias").as_deref(), Some("Não atualizou: está numa branch de trabalho. · feature → main"));
+        assert_eq!(survey.text("alias").as_deref(), Some("Não pode atualizar: está numa branch de trabalho. · feature → main"));
         survey.change("remote", Status::Held(Hold::Missing("git".into())), vec![]);
+        assert_eq!(survey.text("alias").as_deref(), Some("Não pode atualizar: faltam requisitos. · git"));
+        survey.from_round = true;
         assert_eq!(survey.text("alias").as_deref(), Some("Não atualizou: faltam requisitos para atualizar. · git"));
         survey.change("remote", Status::Running { step: 2, total: 9, text: "fixture-step".into() }, vec![]);
         assert_eq!(survey.text("alias").as_deref(), Some("fixture-step (2/9)"));
@@ -760,11 +784,25 @@ mod tests {
         let (machine, server) = mock(vec![("GET /api/atualizacao ", 200, json!({"atualizacao_disponivel":true}))]);
         let status = Runtime::new().unwrap().block_on(read_machine(&machine));
         server.join().unwrap();
-        assert_eq!(status, Status::Available);
+        assert_eq!(status, Some(Status::Available));
         let (machine, server) = mock(vec![("GET /api/atualizacao ", 503, json!({"detail":"fixture-unavailable"}))]);
         let status = Runtime::new().unwrap().block_on(read_machine(&machine));
         server.join().unwrap();
-        assert!(matches!(status, Status::Offline(_)));
+        assert_eq!(status, None, "consulta que falha não vira linha de erro");
+    }
+
+    #[test]
+    fn update_all_machine_survey_keeps_rows_on_refresh_and_forgets_unreadable() {
+        crate::i18n::english_in_this_thread(false);
+        let machine = |key: &str| Machine { key: key.into(), entry_id: String::new(), label: key.into(),
+            api: Err(Failure { status: None, detail: "fixture".into(), retry_after: None, uncertain: false, code: None }), local: false };
+        let mut survey = Survey::default();
+        survey.prepare(&[machine("a"), machine("b")], HashMap::new());
+        survey.change("a", Status::Available, vec![]);
+        survey.prepare(&[machine("a"), machine("b")], HashMap::new());
+        assert_eq!(survey.text("a").as_deref(), Some("Atualização disponível"), "reconsultar não volta a 'procurando'");
+        survey.forget("b");
+        assert_eq!(survey.text("b"), None);
     }
 
     #[gpui::test]
