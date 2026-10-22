@@ -657,6 +657,8 @@ async fn claude_operation(
             // A reserva pré-aquecida da conta deslogada não teria com o que falar com o modelo.
             if let Ok(account) = state.accounts.claude_by_label(label) && let Ok(key) = AccountKey::new(Provider::Claude, &account.home) {
                 state.prewarm.discard_account(&key, "conta_deslogada").await;
+            } else {
+                tracing::warn!(label, "prewarm: conta deslogada não resolvida; reservas dela não descartadas");
             }
             result
         }

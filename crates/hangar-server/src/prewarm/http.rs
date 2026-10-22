@@ -80,7 +80,9 @@ async fn discard(st: &Arc<AppState>, id: &str, uri: &Uri) -> Response {
         .and_then(|Query(mut query)| query.remove("client_id")).filter(|c| !c.is_empty());
     let (st, id) = (st.clone(), id.to_owned());
     // Destacado, como o `PUT`: o cliente que cai no meio não deixa o processo vivo.
-    let _ = tokio::spawn(async move { st.prewarm.release(&id, client_id.as_deref()).await }).await;
+    if let Err(error) = tokio::spawn(async move { st.prewarm.release(&id, client_id.as_deref()).await }).await {
+        tracing::warn!(%error, "prewarm: soltar a reserva caiu");
+    }
     StatusCode::NO_CONTENT.into_response()
 }
 

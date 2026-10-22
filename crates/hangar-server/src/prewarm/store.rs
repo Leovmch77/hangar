@@ -395,7 +395,8 @@ impl Store {
     /// (chave num sidecar) só sai; o resto passa pela limpeza completa. Devolve quantas foram limpas.
     pub async fn clean_receipts(&self) -> usize {
         let (dir, sidecars) = (self.dir.clone(), self.sidecar_dir.clone());
-        let found = tokio::task::spawn_blocking(move || read_receipts(&dir, &sidecars)).await.unwrap_or_default();
+        let found = tokio::task::spawn_blocking(move || read_receipts(&dir, &sidecars)).await
+            .unwrap_or_else(|error| { tracing::warn!(%error, "prewarm: leitura dos recibos caiu"); Vec::new() });
         let mut cleaned = 0;
         for (path, receipt, adopted) in found {
             if adopted {
@@ -406,7 +407,9 @@ impl Store {
                 Ok(()) => {
                     let Receipt { config_dir, cwd, session_id, name, .. } = receipt;
                     let customizations = self.cleaner().customizations;
-                    let _ = tokio::task::spawn_blocking(move || remove_traces(&config_dir, &cwd, &session_id, &path, &customizations)).await;
+                    if let Err(error) = tokio::task::spawn_blocking(move || remove_traces(&config_dir, &cwd, &session_id, &path, &customizations)).await {
+                        tracing::warn!(%error, "prewarm: limpeza dos rastros caiu");
+                    }
                     (self.diary)(super::diary_event(&name, "descartada", "sobra_da_subida"));
                     cleaned += 1;
                 }
@@ -477,7 +480,11 @@ pub(crate) fn remove_traces(config_dir: &Path, cwd: &str, session_id: &str, rece
 /// Os recibos da pasta e se a chave de cada um já está no sidecar do nome dele (a adoção grava
 /// `<nome>.json` com o nome da reserva). Ilegível fica e vai ao log.
 fn read_receipts(dir: &Path, sidecars: &Path) -> Vec<(PathBuf, Receipt, bool)> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => { tracing::warn!(%error, dir = %dir.display(), "prewarm: recibos ilegíveis; sobras não limpas"); return Vec::new() }
+    };
     let adopted = |receipt: &Receipt| std::fs::read(sidecars.join(format!("{}.json", receipt.name))).ok()
         .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
         .is_some_and(|meta| meta["key"] == receipt.key.as_str());

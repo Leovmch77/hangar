@@ -57,7 +57,12 @@ pub(super) struct Reserve {
 impl Reserve {
     pub(super) fn new(runtime: Arc<Runtime>) -> Self {
         let mut raw = [0u8; 16];
-        let _ = ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut raw);
+        // Sem aleatório, telas diferentes dividiriam o mesmo cliente e soltariam a reserva uma da outra.
+        if ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut raw).is_err() {
+            crate::log_line("prewarm: sem número aleatório; cliente pelo pid e pela hora");
+            let seed = format!("{}-{:?}", std::process::id(), std::time::SystemTime::now());
+            raw.copy_from_slice(&ring::digest::digest(&ring::digest::SHA256, seed.as_bytes()).as_ref()[..16]);
+        }
         let client = raw.iter().map(|b| format!("{b:02x}")).collect();
         Self { plan: Plan::default(), client, runtime, held: None, got: None, seq: 0, closed: false, host: None }
     }
@@ -70,7 +75,7 @@ impl Reserve {
         let client = self.client.clone();
         Some(self.runtime.spawn(async move {
             if let Err(error) = api.server_send_query(reqwest::Method::DELETE, &["sessions", "prewarm", &id], &[("client_id", &client)], None, 5).await {
-                eprintln!("prewarm-soltar: {}", error.detail);
+                crate::log_line(&format!("prewarm-soltar: {}", error.detail));
             }
         }))
     }
@@ -155,7 +160,7 @@ impl NewSession {
                 let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
                 this.prewarm.got = match result {
                     Ok(value) => text(&value, "id").zip(text(&value, "name")).map(|(id, name)| (want, id, name)),
-                    Err(error) => { eprintln!("prewarm-pedir: {}", error.detail); None }
+                    Err(error) => { crate::log_line(&format!("prewarm-pedir: {}", error.detail)); None }
                 };
             });
         }).detach();
