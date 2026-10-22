@@ -834,7 +834,7 @@ e mobile 139 s na mesma faixa; shell, statusline e pi 8 s. Caminho crítico ≈ 
   Com uma faixa por passo pesado, cargo test (12 threads lançando tmux e servidores), pytest com 4
   processos, svelte-check e vitest rodavam juntos: o `it` do `hangar-server` foi de 148–172 s para
   954 s, com 19 falhas de prazo por carga. A palavra solta `transcript` escolhia 63 arquivos de teste
-  (13 o importam). O core é reexportado inteiro pelo `index.ts`, e `vitest related` sobre um arquivo
+  (14 o importam). O core é reexportado inteiro pelo `index.ts`, e `vitest related` sobre um arquivo
   dele puxou quase todos os testes do front (mais de 40 min). Agora: os passos de cargo dividem uma
   faixa e o resto outra; `RUST_TEST_THREADS=4`; o front só roda os testes dele com arquivo do front
   mudado (tipos seguem pelo `tsc`/`svelte-check`); o backend casa `app.x`, `from app import ... x` e a

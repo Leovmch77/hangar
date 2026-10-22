@@ -319,9 +319,9 @@ passo_backend_rapido() {
                 [[ -f "backend/tests/test_${m}.py" ]] && testes+=("tests/test_${m}.py")
                 # Quem importa o módulo: `app.x`, `from app import ... x` e a linha só com o nome dentro
                 # de um import em várias linhas (`from app import (\n    x,`). A palavra solta pegava
-                # quase a suíte inteira com nomes comuns ("transcript": 63 arquivos contra 13).
+                # quase a suíte inteira com nomes comuns ("transcript": 63 arquivos contra 14).
                 while IFS= read -r t; do testes+=("$t"); done < <(cd backend && grep -lE -- \
-                    "\\bapp\\.${m}\\b|from app(\\.[A-Za-z_.]+)? import [^#]*\\b${m}\\b|^[[:space:]]+${m},?[[:space:]]*(#.*)?\$" \
+                    "\\bapp(\\.[A-Za-z_]+)*\\.${m}\\b|from app(\\.[A-Za-z_.]+)? import [^#]*\\b${m}\\b|^[[:space:]]+${m},?[[:space:]]*(#.*)?\$" \
                     tests/test_*.py 2>/dev/null) ;;
             # Dependência, conftest e helper de teste valem para a suíte inteira.
             backend/pyproject.toml|backend/uv.lock|backend/tests/*.py) inteiro=1 ;;
