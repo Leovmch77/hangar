@@ -32,6 +32,7 @@ impl Hangar {
         let Some(dir) = std::env::home_dir().map(|home| home.join(".hangar/native")) else { return };
         let _ = std::fs::create_dir_all(&dir);
         let (tx, rx) = async_channel::bounded::<()>(1);
+        let first = tx.clone();
         let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
             if event.is_ok_and(|event| !matches!(event.kind, notify::EventKind::Access(_))) { let _ = tx.try_send(()); }
         }).and_then(|mut watcher| watcher.watch(&dir, notify::RecursiveMode::NonRecursive).map(|()| watcher));
@@ -39,6 +40,8 @@ impl Hangar {
             Ok(watcher) => watcher,
             Err(error) => { crate::log_line(&format!("reinício por troca do app desligado: vigia de {} falhou: {error}", dir.display())); return }
         };
+        // Uma troca gravada antes de o vigia ficar de pé não gera evento: confere uma vez agora.
+        let _ = first.try_send(());
         cx.spawn_in(window, async move |this, cx| {
             let _watcher = watcher;
             let mut attempted = None;
