@@ -591,6 +591,8 @@ impl Hangar {
     pub(super) fn keyboard_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.keyboard.edit.is_none() {
             if !event.is_held || event.prefer_character_input || window.context_stack().iter().any(|context| context.contains("Terminal")) { return false; }
+            // A repetição do Ctrl+V (no RDP o soltar da tecla chega atrasado) colaria tudo de novo.
+            if is_paste(&event.keystroke) { return true; }
             let event = KeybindingKeystroke::new_with_mapper(event.keystroke.clone(), false, cx.keyboard_mapper().as_ref());
             return self.keyboard.config.shortcuts.iter().any(|binding| Keystroke::parse(&binding.key).ok().is_some_and(|key| {
                 let key = KeybindingKeystroke::new_with_mapper(key, false, cx.keyboard_mapper().as_ref());
@@ -825,10 +827,30 @@ fn keyboard_shortcut(item: &shortcuts::Item, project: Option<&str>) -> Option<si
         "anexos" => Some(side::Shortcut::Attach), "rodar" => Some(side::Shortcut::Run), "externo" => Some(side::Shortcut::External), _ => None }
 }
 
+fn is_paste(stroke: &Keystroke) -> bool {
+    let m = &stroke.modifiers;
+    match stroke.key.as_str() {
+        "v" => !m.alt && !m.shift && (m.control != m.platform),
+        "insert" => m.shift && !m.control && !m.alt && !m.platform,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn paste_shortcuts_are_recognized_and_others_are_not() {
+        let stroke = |s: &str| Keystroke::parse(s).unwrap();
+        assert!(is_paste(&stroke("ctrl-v")));
+        assert!(is_paste(&stroke("cmd-v")));
+        assert!(is_paste(&stroke("shift-insert")));
+        assert!(!is_paste(&stroke("v")));
+        assert!(!is_paste(&stroke("ctrl-shift-v")));
+        assert!(!is_paste(&stroke("ctrl-c")));
+    }
 
     #[test]
     fn cancelling_key_capture_preserves_the_last_persistence_error() {
