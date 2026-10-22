@@ -234,6 +234,8 @@ pub struct Appearance {
     pub tabs_full: bool,
     /// Com o mouse parado numa aba, a conversa dela e o compositor abrem por cima.
     pub tab_preview: bool,
+    /// Depois dos grupos, as abas que estão trabalhando vêm antes das outras.
+    pub tabs_working_first: bool,
     /// Caixa do "Ver ao vivo": distância da borda direita e da de baixo da janela, em px lógicos.
     pub live_corner: [f32; 2],
     /// Larguras arrastadas do painel lateral (abas comuns e Navegador; `None` no Navegador segue a fração da janela) e
@@ -283,7 +285,7 @@ const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeM
     desktop_text: DesktopText::Desktop, dark: MODE_COLORS, light: MODE_COLORS, transparency: 40, surface_material: SurfaceMaterial::Glass, solidity: 70,
     background: Background::Plain, background_effect: crate::effects::BackgroundEffect::None, background_scope: BackgroundScope::Everywhere, wallpaper: Wallpaper::Window, reading: Reading::Auto, sheet_solidity: 60, text_contrast: 30,
     font: Font::System, text_size: 100, line_height: 100, column: 100, sidebar_height: SidebarHeight::Full,
-    navigation: Navigation::Sidebar, show_remote_tabs: true, sidebar_width: None, sidebar_compact: false, tabs_full: false, tab_preview: false, live_corner: [16., 16.],
+    navigation: Navigation::Sidebar, show_remote_tabs: true, sidebar_width: None, sidebar_compact: false, tabs_full: false, tab_preview: false, tabs_working_first: false, live_corner: [16., 16.],
     side_width: 300., side_browser_width: None, terminal_height: 260.,
     tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, thinking_collapsed: false, table_chart: false, ask_highlight: AskHighlight::Accent,
     language: Language::System, currency: Currency::Usd, hands_free: false, skip_chat_confirmations: false, steer_while_working: false, jev_delivery: false, accounts_compact: false, sidebar_group: SidebarGroup::None, side_tab: SideTab::Context,

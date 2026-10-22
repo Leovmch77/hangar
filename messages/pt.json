@@ -5845,6 +5845,8 @@
   "native_settings_tabs_full": "Completa",
   "native_settings_tab_preview": "Prévia ao parar o mouse",
   "native_settings_tab_preview_hint": "Abre a conversa da aba com o compositor, para ler e responder sem trocar de sessão.",
+  "native_settings_tabs_working_first": "Trabalhando primeiro",
+  "native_settings_tabs_working_first_hint": "Depois dos grupos, as abas que estão trabalhando vêm antes das outras.",
   "native_settings_tab_preview_off": "Desligada",
   "native_settings_tab_preview_on": "Ligada",
   "native_tab_preview_placeholder": "Mensagem para {name}…",
