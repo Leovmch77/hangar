@@ -39,6 +39,8 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
         Owned::Commands
     } else if method == Method::POST && path == crate::mermaid::PATH {
         Owned::Mermaid
+    } else if crate::prewarm::http::matches(method, &path) {
+        Owned::Prewarm
     } else if crate::worktree_routes::matches(method, &path) {
         Owned::Worktrees
     } else if crate::plans::routes::matches(method, &path) {
@@ -75,6 +77,7 @@ pub async fn private(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connect
         Owned::Conductor => crate::orq_conductor::serve(&st, req).await,
         Owned::Commands => crate::commands::serve(&st, req).await,
         Owned::Mermaid => crate::mermaid::serve(&st, req).await,
+        Owned::Prewarm => crate::prewarm::http::serve(&st, req).await,
         Owned::Worktrees => crate::worktree_routes::public(st, req).await,
         Owned::Plans => crate::plans::routes::serve(&st, req).await,
         Owned::ArchiveResume(project, sid) => {
@@ -109,4 +112,4 @@ fn live_resume(method: &Method, path: &str) -> Option<String> {
 }
 
 /// As rotas do Rust que aceitam o repasse.
-enum Owned { Groups(bool), Conductor, Catalog, SessionDefaults, PushExpo, Commands, Mermaid, Plans, Worktrees, JevDelivery, ClientApi, ArchiveResume(String, String), Resume(String), Media(String, bool) }
+enum Owned { Groups(bool), Conductor, Catalog, SessionDefaults, PushExpo, Commands, Mermaid, Prewarm, Plans, Worktrees, JevDelivery, ClientApi, ArchiveResume(String, String), Resume(String), Media(String, bool) }

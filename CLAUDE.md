@@ -681,6 +681,12 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   pelo Python: texto que nasce nele (broadcast) acorda Claude/Codex sem terminal pedindo
   ao Rust, e a transferência Claude→Codex. Decisões e medições em
   [plataforma.md](docs/decisoes/plataforma.md#abertura-de-sessão-única-no-rust).
+- **Nova conversa do Claude sem terminal usa uma reserva pré-aquecida** (`crates/hangar-server/src/prewarm/`):
+  com a tela aberta o cliente pede `PUT /api/sessions/prewarm` e o create leva `prewarm`. A reserva
+  nasce pelo mesmo lançador, sem sidecar até a adoção, com chave, id e nome definitivos; adota só
+  com impressão, nome, conta, `config_marca` e pasta iguais, senão descarta e abre frio. Falha não
+  vai à tela. Evidência em
+  [plataforma.md](docs/decisoes/plataforma.md#reserva-pré-aquecida-da-nova-conversa-do-claude-22102026).
 - **Perguntas, permissões e ciclo de vida da sessão aberta são do Rust.** Rust: plugin do Claude (`/api/plugin/*`, `plugin::Store`), fatos e entrega, modos de
   permissão (sondagem, troca, memória), Codex e Claude com terminal adotados (o Claude pela
   `CP_SESSION_KEY` do pane, que o vínculo do Python também usa), pane morto, fechamento, `/clear`,

@@ -99,6 +99,8 @@ pub struct AppState {
     pub guest_bound: std::sync::atomic::AtomicBool,
     /// Instalar o SideStore no iPhone/iPad do cabo; o teste troca aparelho e Apple por falsos.
     pub device_install: Arc<crate::device_install::job::DeviceInstall>,
+    /// Reservas pré-aquecidas do Claude sem terminal (tela de nova conversa aberta).
+    pub prewarm: Arc<crate::prewarm::Store>,
 }
 
 impl AppState {
@@ -183,6 +185,7 @@ impl AppState {
             workspace_meta_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             costs, fx, reports: Arc::new(crate::costs::ReportCache::default()),
             origins_home: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()),
+            prewarm: Arc::new(crate::prewarm::Store::server(&hangar_dir)),
             hangar_dir, device_install,
             upload_naming: Default::default(),
             origins: std::sync::Mutex::new(indexmap::IndexMap::new()),
@@ -537,6 +540,9 @@ fn public_routes(state: Arc<AppState>, pair: Option<&Arc<PairState>>) -> Router 
         // Encerrar: o Codex com terminal do Rust encerra aqui e só então segue ao Python, marcado.
         .route("/api/sessions/{name}", axum::routing::delete(crate::session_write::bridge::delete).fallback(pass_any))
         .route("/api/sessions/creation-progress", get(crate::session_open::server::creation_progress).fallback(pass_any))
+        // Reserva pré-aquecida do Claude sem terminal: só o dono; outro método segue ao Python.
+        .route(crate::prewarm::http::PATH, axum::routing::put(crate::prewarm::http::put).fallback(pass_any))
+        .route("/api/sessions/prewarm/{id}", axum::routing::delete(crate::prewarm::http::delete).fallback(pass_any))
         // Bastão do dono: o Python prepara o dossiê e a sucessora Claude com terminal nasce aqui.
         .route("/api/sessions/{name}/bastao", axum::routing::post(crate::session_open::server::bastao).fallback(pass_any))
         // Retomar do Arquivo e o `/resume` ao vivo: a abertura e a reabertura do Rust, com a conversa que já existe.

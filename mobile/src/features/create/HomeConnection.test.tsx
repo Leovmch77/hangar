@@ -141,6 +141,9 @@ beforeEach(() => {
   });
   fetchMock = vi.fn(async (url: string) => {
     const path = new URL(url).pathname;
+    // Reserva pré-aquecida da conversa nova: pedida e solta sozinha enquanto a tela está aberta.
+    if (path === '/api/sessions/prewarm') return new Response(JSON.stringify({ id: 'fixture-prewarm', fingerprint: 'f', name: 'project' }));
+    if (path.startsWith('/api/sessions/prewarm/')) return new Response(null, { status: 204 });
     const payloads: Record<string, unknown> = {
       '/api/sessions': [session(url.startsWith(healthy.baseUrl) ? 'healthy-before' : 'pending-new')],
       '/api/claude-configs': [], '/api/cotas': [], '/api/providers': {}, '/api/engines': { motores: {} },

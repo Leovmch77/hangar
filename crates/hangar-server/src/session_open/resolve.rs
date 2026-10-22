@@ -298,7 +298,7 @@ fn resolve_with(request: &SessionOpenRequest, caller: &OpenCaller, facts: &dyn O
     let model = validate(request, caller, provider, headless, config_dir.as_deref(), codex_account.as_deref(), permission.as_deref(), facts)?;
     let raw = match &request.name {
         Some(raw) => raw.clone(),
-        None => folder_name(&request.cwd, facts)?,
+        None => folder_name(&request.cwd, request.take_reserved_name, facts)?,
     };
     let name = validate_name(&raw, provider, headless, request, facts)?;
 
@@ -590,15 +590,17 @@ fn validate_name(raw: &str, provider: AgentProvider, headless: bool, request: &S
     Ok(name)
 }
 
-/// O nome que ninguém escolheu, pela regra do `uniqueSessionName` das telas.
-fn folder_name(cwd: &str, facts: &dyn OpenFacts) -> Result<String, OpenError> {
+/// O nome que ninguém escolheu, pela regra do `uniqueSessionName` das telas. Com `take_reserved`, o
+/// nome que só uma reserva pré-aquecida segura conta como livre: a pessoa não a vê, e a abertura a descarta.
+fn folder_name(cwd: &str, take_reserved: bool, facts: &dyn OpenFacts) -> Result<String, OpenError> {
     let folder = cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or_default();
     let base = Some(crate::list::discover_other::sanitize_session_name(folder)).filter(|n| !n.is_empty()).unwrap_or_else(|| "sessao".into());
     // A base cede espaço ao sufixo para o nome caber no teto; quem está abrindo agora também ocupa.
     let fit = |suffix: &str| format!("{}{suffix}", base[..base.len().min(NAME_MAX - suffix.len())].trim_end_matches('-'));
+    let held = |name: &str| if take_reserved { super::open::NameClaim::opening_without_reserves(name) } else { super::open::NameClaim::opening(name) };
     let mut name = fit("");
     for n in 2.. {
-        if !facts.name_in_use(&name)? && !super::open::NameClaim::opening(&name) && !facts.name_has_leftovers(&name)? { break; }
+        if !facts.name_in_use(&name)? && !held(&name) && !facts.name_has_leftovers(&name)? { break; }
         name = fit(&format!("-{n}"));
     }
     Ok(name)

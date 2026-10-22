@@ -744,7 +744,10 @@ impl Api {
         let mut req = self.client.request(method, self.server_url(path, query));
         if let Some(body) = body { req = req.json(&body); }
         let r = req.timeout(Duration::from_secs(seconds)).send().await.map_err(|_| Failure::transport(true))?;
-        Self::checked(r, true).await?.json().await.map_err(|_| Failure::transport(true))
+        let r = Self::checked(r, true).await?;
+        // 204 não tem corpo para ler.
+        if r.status() == StatusCode::NO_CONTENT { return Ok(Value::Null); }
+        r.json().await.map_err(|_| Failure::transport(true))
     }
 
     /// DELETE de conta: o 409 de conta em uso com a lista do que a prende volta como `Removed::Held`.

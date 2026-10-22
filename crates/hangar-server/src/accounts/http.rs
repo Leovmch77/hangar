@@ -341,6 +341,9 @@ pub async fn public(state: Arc<crate::routes::AppState>, request: Request) -> Re
         Ok(account) => account,
         Err(err) => return error(err),
     };
+    // A reserva pré-aquecida da conta sai sob a guarda exclusiva: a que estava subindo já está no `Store`
+    // (ela solta a guarda compartilhada só depois de entrar), e o processo dela não prende a conta.
+    if provider == Provider::Claude { state.prewarm.discard_account(&key, "conta_excluida").await; }
     // Sem instância o runtime não é identificável: os fatos dele não provariam nada.
     if !matches!(crate::config::Config::runtime_instance(), Ok(Some(_))) {
         return error(AccountError::new(
@@ -649,7 +652,14 @@ async fn claude_operation(
         "step" => state.accounts.claude_step(label, client).await,
         "code" => state.accounts.confirm_claude(label, code, client).await,
         "cancel" => state.accounts.cancel_claude(label, client).await,
-        "logout" => state.accounts.logout_claude(label, client).await,
+        "logout" => {
+            let result = state.accounts.logout_claude(label, client).await;
+            // A reserva pré-aquecida da conta deslogada não teria com o que falar com o modelo.
+            if let Ok(account) = state.accounts.claude_by_label(label) && let Ok(key) = AccountKey::new(Provider::Claude, &account.home) {
+                state.prewarm.discard_account(&key, "conta_deslogada").await;
+            }
+            result
+        }
         _ => Err(AccountError::io()),
     }
 }

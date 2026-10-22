@@ -25,6 +25,8 @@ export type NewConversationIssue =
 export type NewConversationInput = {
   // Sem `name`, o store gera o nome estável; com ele, o nome escolhido fica congelado na tentativa.
   body: Omit<CreateSessionBody, 'name' | 'cwd'> & { cwd: string; name?: string };
+  // Nome da reserva pré-aquecida (`body.prewarm`): sem nome digitado, é o que a adoção espera.
+  reserveName?: string;
   text: string;
   // Escolhido antes de a sessão existir: o upload é por sessão, então ele sobe depois que ela nasce.
   attachment?: DraftAttachment | null;
@@ -177,12 +179,17 @@ async function runCreate(serverId: string, input: NewConversationInput, retried 
   const explicit = input.body.name?.trim();
   const id = newId();
   // Nome automático já recusado não volta: sem a lista, o mesmo nome seria recusado a cada envio.
-  const finalName = explicit || (await autoSessionName(server, input.body.cwd, refusedNames.get(serverId) ?? [])).name;
+  // A reserva guarda o nome dela no servidor; a repetição por nome em uso volta ao automático.
+  const finalName = explicit || (!retried && input.reserveName)
+    || (await autoSessionName(server, input.body.cwd, refusedNames.get(serverId) ?? [])).name;
+  // A reserva só vai com o nome dela: outro nome (digitado ou da repetição) a deixaria adotada sob nome errado.
+  const { prewarm, ...base } = input.body;
   // Branch nova sem nome digitado segue o nome final da sessão, só conhecido aqui, com a limpeza que o
   // backend faz no nome: o digitado pode ter espaço e acento.
   const draft: FirstConversationAttempt = Object.assign({
     id, serverId, text: input.text, phase: 'draft' as const, sessionName: null,
-    body: { ...input.body, name: finalName, ...(input.body.new_branch && !input.body.branch?.trim() ? { branch: sanitizeSessionName(finalName) } : {}) },
+    body: { ...base, name: finalName, ...(prewarm && finalName === input.reserveName ? { prewarm } : {}),
+      ...(input.body.new_branch && !input.body.branch?.trim() ? { branch: sanitizeSessionName(finalName) } : {}) },
   }, input.attachment ? { attachment: input.attachment } : {});
   const creating = transitionFirstConversation(draft, { type: 'begin' });
   try { persist(creating); } catch {

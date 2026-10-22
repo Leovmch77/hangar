@@ -713,6 +713,16 @@ async def session_defaults_forward(request: Request):
                                   "/__hangar_server/forwarded")
 
 
+@app.put("/api/sessions/prewarm", dependencies=[Depends(require_auth)])
+@app.delete("/api/sessions/prewarm/{reserve_id}", dependencies=[Depends(require_auth)])
+async def prewarm_forward(request: Request):
+    """A reserva pré-aquecida é do Rust (`prewarm::http`); o Connect só autentica e repassa."""
+    if _convidado(request):
+        raise HTTPException(403, detail=erro("prewarm_owner_only", "só o dono reserva uma sessão pré-aquecida"))
+    return await _repasse_ao_rust(request, erro(registry_mod.SessionOpenNeedsRust.code, "abrir e reabrir sessão precisam do servidor Rust, que não está rodando"),
+                                  "/__hangar_server/forwarded")
+
+
 @app.post("/api/push/expo/subscribe", dependencies=[Depends(require_auth)])
 async def push_expo_subscribe_forward(request: Request):
     """O registro é do Rust; pelo Connect o cabeçalho de convidado não chega a ele, então a recusa é aqui."""

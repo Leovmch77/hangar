@@ -8,7 +8,7 @@ import { useRouter } from 'expo-router';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { SettingsList } from '../../ui/SettingsList';
 import { ComposerActions, ComposerBox, ComposerInput } from '../../chat/ComposerField';
-import type { Server } from '@hangar/core';
+import type { PrewarmTicket, Server } from '@hangar/core';
 import { AnchoredPanel } from '../../ui/AnchoredPanel';
 import { Icon } from '../../ui/Icon';
 import { Glass } from '../../ui/Glass';
@@ -58,6 +58,10 @@ type Props = {
   notices: ReactNode;
   // null enquanto falta destino ou conta; o texto continua editável.
   body: NewConversationInput['body'] | null;
+  // Reserva pré-aquecida do corpo atual; chamar para a renovação dela antes do POST.
+  takePrewarm?: () => PrewarmTicket | null;
+  // A criação falhou e a tela continua: volta a reservar.
+  resumePrewarm?: () => void;
   blocked: boolean;
   // Distância fixa do topo da janela até a tela; sem ela o recuo do teclado é medido na janela.
   keyboardOffset?: number;
@@ -99,7 +103,7 @@ function HistoryButton({ onPress, disabled, busy }: { onPress: () => void; disab
 
 export function NewConversation({
   server, destination, destinationPending, providerLabel, folderPanel,
-  topPills, bottomPills, providerChip, resume, notices, body, blocked, keyboardOffset, home,
+  topPills, bottomPills, providerChip, resume, notices, body, takePrewarm, resumePrewarm, blocked, keyboardOffset, home,
 }: Props) {
   const collapsed = home?.mode === 'sessions';
   const input = useRef<TextInput>(null);
@@ -263,7 +267,12 @@ export function NewConversation({
     if (!body || blocked || busy || !restored || recording || (!text.trim() && !attachment) || submitting.current) return;
     submitting.current = true;
     try {
-      await beginAttempt(serverId, { body, text, attachment: attachment ? withoutUpload(attachment) : null });
+      const ticket = takePrewarm?.() ?? null;
+      await beginAttempt(serverId, {
+        body: ticket ? { ...body, prewarm: ticket.id } : body, reserveName: ticket?.name,
+        text, attachment: attachment ? withoutUpload(attachment) : null,
+      });
+      if (!useNewConversation.getState().attempts[serverId]?.sessionName) resumePrewarm?.();
       await advanceOnce();
     } finally { submitting.current = false; }
   };

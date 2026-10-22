@@ -1,4 +1,5 @@
 export * from './api';
+export * from './prewarm';
 export * from './esfriamento';
 export * from './sessions';
 export * from './servers';

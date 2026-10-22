@@ -1865,6 +1865,15 @@ fn run_contract(name: &str, patch: impl FnOnce(&mut Value)) -> (Value, tempfile:
 /// `run_contract` com `before` mexendo na raiz pronta, logo antes da abertura.
 #[cfg(target_os = "linux")]
 fn run_contract_with(name: &str, patch: impl FnOnce(&mut Value), before: impl FnOnce(&std::path::Path)) -> (Value, tempfile::TempDir, PathBuf) {
+    let (scenario, dir, root, env) = contract_setup(name, patch);
+    before(&root);
+    let raw = test_runtime().block_on(contract::run(&scenario, &root, env));
+    (raw, dir, root)
+}
+
+/// A raiz pronta de um cenário (arquivos, repositórios e o que o harness monta) e o ambiente da abertura.
+#[cfg(target_os = "linux")]
+fn contract_setup(name: &str, patch: impl FnOnce(&mut Value)) -> (Value, tempfile::TempDir, PathBuf, std::collections::BTreeMap<String, String>) {
     let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == name).unwrap();
     patch(&mut fixture["scenario"]);
     let dir = tempfile::tempdir().unwrap();
@@ -1881,11 +1890,262 @@ fn run_contract_with(name: &str, patch: impl FnOnce(&mut Value), before: impl Fn
     }
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     contract::prepare(&fixture["scenario"], &root, &repo).unwrap();
-    before(&root);
     let env = [("HOME", root.join("home")), ("PATH", root.join("bin")), ("CP_AUTH_TOKEN", "t".into())]
         .map(|(k, v)| (k.to_owned(), v.to_string_lossy().into_owned())).into_iter().collect();
-    let raw = test_runtime().block_on(contract::run(&fixture["scenario"], &root, env));
-    (raw, dir, root)
+    (fixture["scenario"].clone(), dir, root, env)
+}
+
+// ── reserva pré-aquecida: adoção no POST ──────────────────────────────────────────────────────────
+
+/// O lançador da reserva nos testes da adoção: o plano monta o spec na pasta pedida com o nome `name`, e
+/// o `spawn` sobe um processo que se apresenta como o cano da chave (`--escuta` e o log dela), sem `claude`.
+#[cfg(target_os = "linux")]
+struct ReserveLauncher { home: PathBuf, name: String, children: std::sync::Mutex<Vec<std::process::Child>>,
+    /// O cenário e o ambiente com que o plano resolve o pedido da reserva, como a abertura resolveria.
+    scenario: Value, root: PathBuf, env: std::collections::BTreeMap<String, String>, plans: std::sync::atomic::AtomicUsize }
+
+#[cfg(target_os = "linux")]
+impl crate::prewarm::Launcher for ReserveLauncher {
+    fn new_session_id(&self) -> String { open::uuid4(&crate::mods::state::random_hex(16)) }
+
+    fn plan<'a>(&'a self, request: &'a SessionOpenRequest, sid: &'a str)
+        -> futures_util::future::BoxFuture<'a, Result<crate::prewarm::Planned, OpenError>> {
+        Box::pin(async move {
+            self.plans.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let config_dir = self.home.join(".claude");
+            let resolved = contract::resolve_request(&self.scenario, &self.root, self.env.clone(), request.clone()).await?;
+            let mut spec = resolved.spec;
+            spec.name = self.name.clone();
+            spec.conversation = Some(sid.into());
+            let launch = crate::runtime::claude_launch::Launch { program: vec!["claude".into(), "--model".into(), spec.model.clone().unwrap_or_default()],
+                env: std::collections::BTreeMap::new() };
+            Ok(crate::prewarm::Planned { fingerprint: crate::prewarm::fingerprint(&launch, &request.cwd), session_id: sid.into(),
+                home: self.home.clone(), account: crate::accounts::AccountKey::new(crate::accounts::Provider::Claude, &config_dir).unwrap(),
+                config_dir, launch, spec, previous_non_plan: resolved.previous_non_plan, settings: None })
+        })
+    }
+
+    fn spawn<'a>(&'a self, planned: &'a crate::prewarm::Planned, sidecar_dir: &'a std::path::Path)
+        -> futures_util::future::BoxFuture<'a, Result<crate::prewarm::Spawned, OpenError>> {
+        Box::pin(async move {
+            let log = sidecar_dir.join(format!("cano-{}.log", &planned.spec.key[..16]));
+            let child = std::process::Command::new("sh").args(["-c", "sleep 60; :", "cano", "--escuta", "x", "--log"]).arg(&log)
+                .spawn().unwrap();
+            let mut extra = serde_json::Map::new();
+            // A marca que a abertura relê: a mesma função, a mesma conta (a padrão).
+            if let Some(stamp) = crate::runtime::gateway::claude_config_stamp(None) { extra.insert("config_marca".into(), json!(stamp)); }
+            let cano = crate::runtime::process::Cano { pid: child.id(), escuta: "unix:/nao-existe.sock".into(), token: "segredo-do-cano".into(),
+                ts: 0.0, versao: 2, extra };
+            self.children.lock().unwrap().push(child);
+            Ok(crate::prewarm::Spawned { cano, guard: None })
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ReserveLauncher {
+    fn drop(&mut self) {
+        for child in self.children.get_mut().unwrap().iter_mut() { let _ = child.kill(); let _ = child.wait(); }
+    }
+}
+
+/// Os processos da reserva vistos pelo `Store`: vivos até o `kill`, que só anota.
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct ReserveProcs { killed: std::sync::Mutex<Vec<u32>> }
+
+#[cfg(target_os = "linux")]
+impl crate::prewarm::Processes for ReserveProcs {
+    fn alive<'a>(&'a self, cano: &'a crate::runtime::process::Cano, _key: &'a str) -> futures_util::future::BoxFuture<'a, bool> {
+        Box::pin(async move { !self.killed.lock().unwrap().contains(&cano.pid) })
+    }
+    fn kill<'a>(&'a self, cano: &'a crate::runtime::process::Cano, _key: &'a str, _dir: &'a std::path::Path)
+        -> futures_util::future::BoxFuture<'a, Result<(), &'static str>> {
+        Box::pin(async move { self.killed.lock().unwrap().push(cano.pid); Ok(()) })
+    }
+}
+
+/// O `Store` do servidor sobre a casa do cenário, com uma reserva de nome `name` na pasta `cwd`.
+#[cfg(target_os = "linux")]
+struct ReserveWorld { store: std::sync::Arc<crate::prewarm::Store>, procs: std::sync::Arc<ReserveProcs>,
+    diary: std::sync::Arc<std::sync::Mutex<Vec<Value>>>, launcher: ReserveLauncher, reserve: crate::prewarm::Ticket,
+    key: String, session_id: String, pid: u32 }
+
+#[cfg(target_os = "linux")]
+impl ReserveWorld {
+    fn new(runtime: &tokio::runtime::Runtime, root: &std::path::Path, name: &str, cwd: &str, scenario: &Value,
+           env: &std::collections::BTreeMap<String, String>) -> Self {
+        let home = root.join("home");
+        let (procs, diary) = (std::sync::Arc::new(ReserveProcs::default()), std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+        let sink = diary.clone();
+        let store = std::sync::Arc::new(crate::prewarm::Store::new(home.join(".hangar/prewarm"), home.join(".hangar/claude-headless"),
+            procs.clone(), std::sync::Arc::new(move |event| sink.lock().unwrap().push(event))));
+        let launcher = ReserveLauncher { home: home.clone(), name: name.into(), children: Default::default(), scenario: scenario.clone(),
+            root: root.to_owned(), env: env.clone(), plans: Default::default() };
+        let request = SessionOpenRequest { cwd: cwd.into(), provider: Some("claude".into()), headless: Some(true), ..Default::default() };
+        let reserve = runtime.block_on(store.reserve(&launcher, &request, "tela-1")).unwrap();
+        let key = reserve.id.clone();
+        let pid = launcher.children.lock().unwrap()[0].id();
+        let receipt: Value = serde_json::from_slice(&std::fs::read(home.join(format!(".hangar/prewarm/{key}.json"))).unwrap()).unwrap();
+        let session_id = receipt["session_id"].as_str().unwrap().to_owned();
+        Self { store, procs, diary, launcher, reserve, key, session_id, pid }
+    }
+    fn killed(&self) -> Vec<u32> { self.procs.killed.lock().unwrap().clone() }
+    fn events(&self, etapa: &str) -> Vec<Value> { self.diary.lock().unwrap().iter().filter(|e| e["etapa"] == etapa).cloned().collect() }
+}
+
+/// O resultado da adoção que o `POST` deixou no diário da criação.
+#[cfg(target_os = "linux")]
+fn prewarm_outcome(raw: &Value) -> Value {
+    raw["diary"].as_array().unwrap().iter().find(|e| e["evento"] == "sessao.criar_prewarm").map_or(Value::Null, |e| e["resultado"].clone())
+}
+
+/// Um `POST` do cenário com o `Store` da reserva; `prewarm` no passo quando `adopt`.
+#[cfg(target_os = "linux")]
+fn run_with_reserve(fixture: &str, patch: impl FnOnce(&mut Value), name: &str, adopt: bool) -> (Value, ReserveWorld, tempfile::TempDir, PathBuf) {
+    let (mut scenario, dir, root, env) = contract_setup(fixture, patch);
+    let runtime = test_runtime();
+    let cwd = contract::place(scenario["steps"][0]["json"]["cwd"].as_str().unwrap(), &root);
+    let world = ReserveWorld::new(&runtime, &root, name, &cwd, &scenario, &env);
+    if adopt { scenario["steps"][0]["json"]["prewarm"] = json!(world.reserve.id); }
+    let raw = runtime.block_on(contract::run_with(&scenario, &root, env, Some(world.store.clone())));
+    (raw, world, dir, root)
+}
+
+/// Reserva da mesma impressão: a sessão nasce com a chave, a conversa e o processo da reserva (o sidecar
+/// aponta o cano vivo, então a subida conecta sem subir outro), e o recibo sai.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_matching_reserve_is_adopted_with_its_key_conversation_and_process() {
+    let (raw, world, _dir, root) = run_with_reserve("create_claude_headless_default",
+        |s| { s["steps"][0]["json"].as_object_mut().unwrap().remove("name"); }, "proj", true);
+    let step = &raw["steps"][0];
+    assert_eq!((step["status"].clone(), step["body"]["name"].clone()), (json!(200), json!("proj")), "{}", step["body"]);
+    assert!(step["body"]["jsonl"].as_str().unwrap().ends_with(&format!("{}.jsonl", world.session_id)), "{}", step["body"]["jsonl"]);
+    let home = root.join("home");
+    let sidecar: Value = serde_json::from_slice(&std::fs::read(home.join(".hangar/claude-headless/proj.json")).unwrap()).unwrap();
+    assert_eq!((sidecar["key"].as_str(), sidecar["session_id"].as_str()), (Some(world.key.as_str()), Some(world.session_id.as_str())));
+    assert_eq!((sidecar["cano"]["pid"].as_u64(), sidecar["cano"]["token"].as_str()), (Some(u64::from(world.pid)), Some("segredo-do-cano")));
+    assert_eq!(crate::runtime::process::liveness(world.pid, &world.key), crate::runtime::process::Liveness::Ours,
+        "o cano gravado é o vivo da reserva: a subida conecta em vez de subir outro");
+    assert_eq!(world.launcher.children.lock().unwrap().len(), 1, "nenhum processo além do da reserva");
+    assert_eq!(world.launcher.plans.load(std::sync::atomic::Ordering::SeqCst), 1, "a adoção compara o spec guardado, sem planejar de novo");
+    assert!(home.join(format!(".hangar/session-specs/{}.json", world.key)).exists(), "o registro tem a chave da reserva");
+    assert!(world.store.is_empty() && !home.join(format!(".hangar/prewarm/{}.json", world.key)).exists(), "adotada, o recibo sai");
+    assert!(world.killed().is_empty(), "a adoção não mata o processo");
+    assert_eq!(world.events("adotada").len(), 1);
+    assert_eq!(prewarm_outcome(&raw), "adotada");
+    assert_eq!(raw["runtime_requests"], json!([{"op": "claude_headless.acordar", "name": "proj"}]));
+}
+
+/// Spec resolvido diferente do da reserva (outro modelo): a reserva sai e a abertura é a de sempre, com
+/// chave e conversa novas e sem `cano` no sidecar; o nome que a reserva segurava fica para ela.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_reserve_with_another_model_is_discarded_and_the_open_is_cold() {
+    let (raw, world, _dir, root) = run_with_reserve("create_claude_headless_default", |s| {
+        s["steps"][0]["json"].as_object_mut().unwrap().remove("name");
+        s["steps"][0]["json"]["model"] = json!("opus");
+    }, "proj", true);
+    let step = &raw["steps"][0];
+    assert_eq!((step["status"].clone(), step["body"]["name"].clone()), (json!(200), json!("proj")), "{}", step["body"]);
+    let sidecar: Value = serde_json::from_slice(&std::fs::read(root.join("home/.hangar/claude-headless/proj.json")).unwrap()).unwrap();
+    assert_ne!(sidecar["key"].as_str(), Some(world.key.as_str()));
+    assert_ne!(sidecar["session_id"].as_str(), Some(world.session_id.as_str()));
+    assert!(sidecar.get("cano").is_none(), "sem cano: a subida sobe o processo pelo spec");
+    assert_eq!(world.killed(), vec![world.pid]);
+    assert!(world.store.is_empty());
+    assert_eq!(prewarm_outcome(&raw), "descartada:impressao");
+}
+
+/// Dois `POST` com a mesma reserva ao mesmo tempo: só um a tira; o outro abre frio.
+#[cfg(target_os = "linux")]
+#[test]
+fn two_opens_with_the_same_reserve_only_one_takes_it() {
+    let (scenario, _dir, root, env) = contract_setup("create_claude_headless_default", |_| {});
+    let runtime = test_runtime();
+    let cwd = contract::place(scenario["steps"][0]["json"]["cwd"].as_str().unwrap(), &root);
+    let world = ReserveWorld::new(&runtime, &root, "proj", &cwd, &scenario, &env);
+    let ask = || SessionOpenRequest { cwd: cwd.clone(), ..Default::default() };
+    let (mut first, mut second) = (ask(), ask());
+    let (a, b) = runtime.block_on(async {
+        tokio::join!(adopt::Adopting::take(world.store.clone(), &world.reserve.id, &mut first),
+            adopt::Adopting::take(world.store.clone(), &world.reserve.id, &mut second))
+    });
+    assert_eq!([a.reserve().is_some(), b.reserve().is_some()].iter().filter(|took| **took).count(), 1);
+    let (taker, other) = if a.reserve().is_some() { (a, b) } else { (b, a) };
+    assert_eq!(runtime.block_on(other.finish("proj", None))["resultado"], "descartada:ausente");
+    assert_eq!(runtime.block_on(taker.finish("proj", None))["resultado"], "descartada:nao_adotada", "tirada e não adotada, sai");
+    assert_eq!(world.killed(), vec![world.pid]);
+}
+
+/// `POST` com `prewarm` e worktree: a impressão é da pasta de origem, mas o processo rodaria nela enquanto o
+/// sidecar aponta a worktree. A reserva sai na tirada e a abertura é a fria, sem o `cano` dela.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_open_with_a_worktree_discards_the_reserve_and_opens_cold() {
+    let (raw, world, _dir, root) = run_with_reserve("create_worktree_new_branch",
+        |s| { s["steps"][0]["json"]["headless"] = json!(true); }, "proj", true);
+    let step = &raw["steps"][0];
+    assert_eq!(step["status"], json!(200), "{}", step["body"]);
+    assert_eq!(prewarm_outcome(&raw), "descartada:fora_do_escopo");
+    assert_eq!(world.killed(), vec![world.pid]);
+    assert!(world.store.is_empty());
+    let name = step["body"]["name"].as_str().unwrap();
+    let sidecar: Value = serde_json::from_slice(&std::fs::read(root.join(format!("home/.hangar/claude-headless/{name}.json"))).unwrap()).unwrap();
+    assert_ne!(sidecar["key"].as_str(), Some(world.key.as_str()));
+    assert!(sidecar.get("cano").is_none(), "sem cano: a subida sobe o processo na worktree");
+}
+
+/// A conferência antes de gravar recusa a reserva quando a abertura tem worktree ou outra pasta.
+#[cfg(target_os = "linux")]
+#[test]
+fn confirm_refuses_a_reserve_when_the_open_has_a_worktree() {
+    let (scenario, _dir, root, env) = contract_setup("create_claude_headless_default", |_| {});
+    let runtime = test_runtime();
+    let cwd = contract::place(scenario["steps"][0]["json"]["cwd"].as_str().unwrap(), &root);
+    let world = ReserveWorld::new(&runtime, &root, "proj", &cwd, &scenario, &env);
+    let mut request = SessionOpenRequest { cwd: cwd.clone(), ..Default::default() };
+    let mut adopting = runtime.block_on(adopt::Adopting::take(world.store.clone(), &world.reserve.id, &mut request));
+    assert!(adopting.reserve().is_some());
+    let meta = json!({"cwd": cwd, "key": world.key, "name": "proj", "session_id": world.session_id});
+    let mut spec = record::claude_from_meta(&meta, "proj", 0.0).unwrap();
+    spec.worktree = Some(WorktreeSpec { branch: "feat".into(), new_branch: true, base: None, path: Some(cwd.clone()) });
+    assert!(!runtime.block_on(adopting.confirm(&spec)));
+    assert_eq!(runtime.block_on(adopting.finish("proj", None))["resultado"], "descartada:pasta_diferente");
+    assert_eq!(world.killed(), vec![world.pid]);
+}
+
+/// Nome digitado igual ao de uma reserva viva (de outra tela, outra impressão): abre sem 409 e a reserva sai.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_open_named_like_a_live_reserve_opens_and_the_reserve_goes() {
+    let (raw, world, _dir, _root) = run_with_reserve("create_claude_headless_default", |_| {}, "s1", false);
+    let step = &raw["steps"][0];
+    assert_eq!((step["status"].clone(), step["body"]["name"].clone()), (json!(200), json!("s1")), "{}", step["body"]);
+    assert!(world.store.is_empty());
+    assert_eq!(world.killed(), vec![world.pid]);
+    assert!(world.events("descartada").iter().any(|e| e["motivo"] == "nome_pedido"), "{:?}", world.events("descartada"));
+}
+
+/// O nome derivado da pasta que só uma reserva segura é o da abertura do dono (a reserva sai depois);
+/// a resolução da própria reserva desvia dele, e a reserva já adotada conta como abertura comum.
+#[test]
+fn a_derived_name_held_only_by_a_reserve_belongs_to_the_owner_open() {
+    let (_, mut fixture) = create_fixtures().into_iter().find(|(n, _)| n == "create_claude_terminal_default").unwrap();
+    let cwd = "<ROOT>/work/so-na-reserva";
+    let step = fixture["scenario"]["steps"][0]["json"].as_object_mut().unwrap();
+    step.remove("name");
+    step.insert("cwd".into(), json!(cwd));
+    fixture["scenario"]["state"]["dirs"] = json!([cwd]);
+    let claim = open::NameClaim::reserve(std::path::Path::new("/outra-casa"), "so-na-reserva").unwrap();
+    let mut request = SessionOpenRequest::parse(&request_body(&fixture)).unwrap();
+    let name = |request: &SessionOpenRequest| resolve::resolve_open(request, &OWNER, &FixtureFacts::of(&fixture)).unwrap().spec.name;
+    assert_eq!(name(&request), "so-na-reserva-2", "a resolução da reserva desvia de outra reserva");
+    request.take_reserved_name = true;
+    assert_eq!(name(&request), "so-na-reserva");
+    claim.promote();
+    assert_eq!(name(&request), "so-na-reserva-2", "adotada, é uma abertura em curso");
 }
 
 /// Em Pi, omp e Kimi: o prompt inicial entra na fila durável da sessão (a do `PromptQueue`, que

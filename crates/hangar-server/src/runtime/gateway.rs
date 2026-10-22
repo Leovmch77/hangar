@@ -218,17 +218,14 @@ pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTar
     let (claude,bridge,name,runtime) = (target.provider == "claude",policy.plugin_bridge(),target.name.clone(),tokio::runtime::Handle::current());
     let (program,env,stamp) = tokio::task::spawn_blocking(move||if claude {
         let launch = super::claude_launch::prepare(&base,bridge.as_ref(),&meta,&name,runtime)?;
-        // Marca da configuração que o `claude -p` leu ao nascer: o botão Recarregar compara com ela.
-        let stamp = super::local_policy::config_stamp(meta["config_dir"].as_str().filter(|d|!d.is_empty()))
-            .inspect_err(|error|tracing::warn!(code=%error.code,"configuração da conta ilegível; sem marca de recarga")).ok();
-        Ok((launch.program,launch.env,stamp))
+        Ok((launch.program,launch.env,claude_config_stamp(meta["config_dir"].as_str().filter(|d|!d.is_empty()))))
     } else {
         super::codex_launch::launch_env(&base,&dir,&meta).map(|launch|(launch.program,launch.env,None))
     }).await.map_err(|_|failure("launch_job"))??;
     let cwd = target.metadata["cwd"].as_str().filter(|cwd|!cwd.is_empty()).ok_or_else(||failure("launch_cwd"))?;
     let spec = process::LaunchSpec { provider:process::Provider::from_str(&target.provider).ok_or_else(||failure("runtime_provider"))?,
         key:target.key.clone(),cwd:cwd.into(),program,env:env.into_iter().collect(),sidecar_dir:sidecar_dir.to_owned() };
-    let mut cano = match process::spawn(&spec).await {
+    let cano = match spawn_unregistered(&spec,stamp).await {
         Ok(cano)=>cano,
         Err(error)=>{
             // O gravado já não serve (morto ou de outro programa): o arquivo da sessão para de apontá-lo.
@@ -237,7 +234,6 @@ pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTar
             return Err(RuntimeError::new(error.code(),detail));
         }
     };
-    if let Some(stamp) = stamp { cano.extra.insert("config_marca".into(),json!(stamp)); }
     let value = serde_json::to_value(&cano).map_err(|_|failure("cano_json"))?;
     if let Err(error) = cano_recorded(launch_sidecar(target,sidecar_dir,"session.patch_meta",json!({"cano":value})).await) {
         // Sem o arquivo da sessão apontando para ele, o processo ficaria sem dono.
@@ -249,6 +245,19 @@ pub(super) async fn launch_if_needed(policy:&PolicyClient,target:&mut RuntimeTar
     target.binding = CanoBinding { pid:cano.pid,escuta:cano.escuta.clone(),token:cano.token.clone(),versao:cano.versao };
     target.metadata["cano"] = value;
     Ok(Some(cano))
+}
+/// Marca da configuração que o `claude -p` leu ao nascer: o botão Recarregar e a adoção da reserva
+/// pré-aquecida comparam com ela. Bloqueante.
+pub(crate) fn claude_config_stamp(config_dir:Option<&str>) -> Option<String> {
+    super::local_policy::config_stamp(config_dir)
+        .inspect_err(|error|tracing::warn!(code=%error.code,"configuração da conta ilegível; sem marca de recarga")).ok()
+}
+/// Sobe o cano com o comando já montado, sem sessão registrada nem sidecar gravado: a subida da sessão
+/// (`launch_if_needed`) e a reserva pré-aquecida. A marca vai no `cano` como `config_marca`.
+pub(crate) async fn spawn_unregistered(spec:&process::LaunchSpec,stamp:Option<String>) -> Result<process::Cano,process::ProcessError> {
+    let mut cano = process::spawn(spec).await?;
+    if let Some(stamp) = stamp { cano.extra.insert("config_marca".into(),json!(stamp)); }
+    Ok(cano)
 }
 /// A gravação do cano só vale confirmada: recusada como velha (`stale`), o processo novo ficaria sem o
 /// arquivo da sessão apontar para ele.

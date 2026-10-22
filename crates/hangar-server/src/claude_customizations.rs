@@ -886,6 +886,10 @@ pub fn stored(home: &Path, session_id: &str) -> std::result::Result<Option<Value
     let settings = load_settings(&home.join(".hangar/claude-customizations"), session_id).map_err(|e| (e.code, e.detail))?;
     Ok(settings.as_object().is_some_and(|object| !object.is_empty()).then_some(settings))
 }
+/// O arquivo das escolhas da conversa `session_id` sob `root` (`~/.hangar/claude-customizations`); `None` para id inválido.
+pub(crate) fn record_path(root: &Path, session_id: &str) -> Option<PathBuf> {
+    session_key(session_id).ok().map(|key| root.join(format!("{key}.json")))
+}
 fn store_root() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|home| !home.is_empty()).ok_or_else(|| error(500, "claude_customizations_store_unavailable", "Diretório das escolhas da conversa indisponível."))?;

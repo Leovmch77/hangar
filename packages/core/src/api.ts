@@ -792,6 +792,8 @@ export interface CreateSessionBody {
   // Com new_branch, `branch` é a branch NOVA criada a partir de `base` (vazio = a atual da pasta).
   new_branch?: boolean;
   base?: string | null;
+  // Reserva pré-aquecida da tela de nova conversa (`PUT /api/sessions/prewarm`) que esta abertura adota.
+  prewarm?: string | null;
 }
 
 export type SessionOpeningExtras = Pick<CreateSessionBody, 'engine_account' | 'service_tier' | 'claude_customizations'>;
@@ -861,6 +863,23 @@ export function setClaudeDefaultsForServer(s: Server, body: ClaudeDefaultsBody):
 export function createSessionForServer(server: Server, body: CreateSessionBody): Promise<SessionInfo> {
   return apiFetchForServer<SessionInfo>(server, '/api/sessions', { method: 'POST', body: JSON.stringify(buildCreateSessionBody(body)) }, SESSION_BIRTH_MS)
     .then(withSessionWarnings);
+}
+
+export interface PrewarmTicket { id: string; fingerprint: string; name: string }
+
+// O corpo é o da abertura sem `name`; a mesma impressão renova a reserva, outra a troca.
+export function prewarmSessionForServer(server: Server, body: Omit<CreateSessionBody, 'name' | 'prewarm'>, clientId: string): Promise<PrewarmTicket> {
+  const { name: _name, ...rest } = buildCreateSessionBody({ ...body, name: '' });
+  return apiFetchForServer<PrewarmTicket>(server, '/api/sessions/prewarm', {
+    method: 'PUT', body: JSON.stringify({ ...rest, client_id: clientId }),
+  }, SESSION_BIRTH_MS);
+}
+
+// Pelo `client_id` o servidor solta também a reserva desta tela que ainda está subindo (sem id ainda).
+export async function releasePrewarmForServer(server: Server, id: string | null, clientId: string): Promise<void> {
+  const path = `/api/sessions/prewarm/${encodeURIComponent(id || '-')}?client_id=${encodeURIComponent(clientId)}`;
+  const res = await apiFetchRes(path, { method: 'DELETE', keepalive: true, signal: AbortSignal.timeout(8000) }, server, false, false);
+  if (!res.ok) throw Object.assign(new Error(`${res.status}`), { status: res.status });
 }
 
 export function createSession(

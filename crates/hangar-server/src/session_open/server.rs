@@ -350,6 +350,8 @@ impl OpenHost for ServerHost {
             }
         });
     }
+
+    fn prewarm(&self) -> Option<&crate::prewarm::Store> { Some(&self.st.prewarm) }
 }
 
 pub enum Decision { Opened(super::open::Opened), Refused(OpenError), NotOurs }
@@ -406,24 +408,44 @@ async fn link_child(st: &Arc<AppState>, link: super::LinkPlan, opened: &Value) -
 
 /// Resolve e abre o que é do Rust: com terminal de todo provedor, e o Claude e o Codex sem terminal.
 /// Recusa da resolução é do Rust: as dele são as do Python mais os consertos.
-pub async fn decide(st: &Arc<AppState>, host: &ServerHost, request: SessionOpenRequest, caller: OpenCaller) -> Decision {
+pub async fn decide(st: &Arc<AppState>, host: &ServerHost, mut request: SessionOpenRequest, caller: OpenCaller) -> Decision {
+    // A reserva pré-aquecida é só do dono: o nome derivado que só ela segura fica para esta abertura.
+    let owner = matches!(caller, OpenCaller::Owner);
+    request.take_reserved_name = owner;
+    let mut adopting = match request.prewarm.take() {
+        Some(id) if owner => Some(super::adopt::Adopting::take(st.prewarm.clone(), &id, &mut request).await),
+        _ => None,
+    };
+    let decision = decide_adopting(st, host, &request, &caller, adopting.as_mut()).await;
+    if let Some(adopting) = adopting {
+        let error = match &decision { Decision::Refused(error) => Some(error), _ => None };
+        let name = match &decision { Decision::Opened(opened) => opened.body["name"].as_str().unwrap_or_default(), _ => request.name.as_deref().unwrap_or_default() };
+        host.diary(vec![adopting.finish(name, error).await]);
+    }
+    decision
+}
+
+async fn decide_adopting(st: &Arc<AppState>, host: &ServerHost, request: &SessionOpenRequest, caller: &OpenCaller,
+                         mut adopting: Option<&mut super::adopt::Adopting>) -> Decision {
     let facts_env = host.env.clone();
     let runtime = tokio::runtime::Handle::current();
     let (request_for_facts, caller_for_facts) = (request.clone(), caller.clone());
     let resolved = tokio::task::spawn_blocking(move || {
         let facts = super::facts::LocalFacts::new(facts_env, runtime);
         super::resolve_open(&request_for_facts, &caller_for_facts, &facts)
-    }).await.unwrap_or_else(|_| Err(OpenError::new(500, "erro_criacao_sessao", "a resolução da abertura não terminou")));
-    let resolved = match resolved {
+    }).await;
+    let resolved = match resolved.unwrap_or_else(|_| Err(OpenError::new(500, "erro_criacao_sessao", "a resolução da abertura não terminou"))) {
         Ok(resolved) => resolved,
         Err(error) => {
-            if let Some(events) = super::open::refusal_diary(crate::mods::state::random_hex(8), request.name.as_deref().unwrap_or(""), super::open::requested_provider(&request), &error) { host.diary(events); }
+            if let Some(events) = super::open::refusal_diary(crate::mods::state::random_hex(8), request.name.as_deref().unwrap_or(""), super::open::requested_provider(request), &error) { host.diary(events); }
             return Decision::Refused(error);
         }
     };
+    // O spec desta resolução contra o guardado na reserva: nada resolvido nem montado de novo para ela.
+    if let Some(adopting) = adopting.as_deref_mut() { adopting.compare(&resolved).await; }
     if !super::open::opens_here(&resolved.spec) { return Decision::NotOurs; }
     if let super::Account::Codex { account_id } = &resolved.spec.account { codex_preparation_warning(st, account_id).await; }
-    match super::open::open_session(host, resolved, &caller).await {
+    match super::open::open_adopting(host, resolved, caller, adopting).await {
         Ok(opened) => Decision::Opened(opened),
         Err(error) => Decision::Refused(error),
     }
@@ -462,7 +484,7 @@ pub(crate) fn exit_warnings(errs: &[Value]) -> Vec<String> {
     vec![format!("A sessão antiga saiu do grupo, mas o aviso de saída falhou: {}", crate::groups::routes::failures_text(errs))]
 }
 
-fn reply(error: &OpenError) -> Response {
+pub(crate) fn reply(error: &OpenError) -> Response {
     let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     crate::session_write::json_response(status, error.body())
 }

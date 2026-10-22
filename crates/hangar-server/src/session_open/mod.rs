@@ -1,6 +1,7 @@
 //! Abertura de sessão única: `SessionOpenRequest` (o pedido no fio, o `CreateBody` do Python mais
 //! `inherit`) → `resolve_open()` → `SessionSpec` (tudo decidido, gravado por sessão). Reabrir é o
 //! spec gravado ⊕ `SessionChange`. Spec: `docs/superpowers/specs/2026-10-15-unified-session-open.md`.
+pub mod adopt;
 pub mod agents;
 pub mod archive;
 pub mod claude;
@@ -203,6 +204,13 @@ pub struct SessionOpenRequest {
     /// Liga a sessão nova à criadora: entra no grupo dela.
     #[serde(default, skip_serializing_if = "is_false")]
     pub link: bool,
+    /// A reserva pré-aquecida (`PUT /api/sessions/prewarm`) que esta abertura adota se couber.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prewarm: Option<String>,
+    /// Fora do fio: o nome derivado da pasta que só uma reserva pré-aquecida segura fica para esta
+    /// abertura (a reserva sai). A abertura do dono liga; a resolução da própria reserva não.
+    #[serde(skip)]
+    pub take_reserved_name: bool,
 }
 
 fn is_false(value: &bool) -> bool { !value }

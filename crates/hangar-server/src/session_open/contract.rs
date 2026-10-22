@@ -192,7 +192,7 @@ impl OpenFacts for Facts {
 }
 
 struct Host { home: PathBuf, env: BTreeMap<String, String>, terminal: TerminalEnv, mux: FakeTmux, fakes: Value,
-    record: std::sync::Arc<Mutex<Record>> }
+    record: std::sync::Arc<Mutex<Record>>, prewarm: Option<std::sync::Arc<crate::prewarm::Store>> }
 
 /// As regras dos programas falsos do harness (`DEFAULT_PROGRAM_RULES` e `fakes.programs`).
 fn rule<'a>(fakes: &'a Value, prog: &str, args: &[String]) -> Option<&'a Value> {
@@ -276,6 +276,7 @@ impl OpenHost for Host {
     fn wake(&self, name: &str) {
         self.record.lock().unwrap().runtime_requests.push(json!({"op": "claude_headless.acordar", "name": name}));
     }
+    fn prewarm(&self) -> Option<&crate::prewarm::Store> { self.prewarm.as_deref() }
     /// O transcript que a lista do Python dava aos panes Claude do cenário: o id do comando, na conta do pane.
     fn live_sessions(&self) -> BoxFuture<'_, Result<Vec<(String, String)>, OpenError>> {
         Box::pin(async move {
@@ -293,7 +294,30 @@ impl OpenHost for Host {
 
 /// Roda os passos do cenário (só `POST /api/sessions`) pela abertura do Rust. `{"not_ours": true}`
 /// quando algum passo não é do Rust (o Python o atende): o harness diz a rota que falta.
-pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -> Value {
+pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -> Value { run_with(scenario, root, env, None).await }
+
+/// A resolução de `request` com os fatos do cenário, como a do passo `POST /api/sessions`, sem gravar
+/// nada: o lançador falso da reserva monta o spec dela por aqui.
+pub async fn resolve_request(scenario: &Value, root: &Path, env: BTreeMap<String, String>, request: SessionOpenRequest)
+    -> Result<super::Resolved, OpenError> {
+    let substituted: Value = serde_json::from_str(&place(&scenario.to_string(), root)).unwrap_or(Value::Null);
+    resolve_step(substituted["fakes"].clone(), root, env, Default::default(), request).await
+}
+
+async fn resolve_step(fakes: Value, root: &Path, env: BTreeMap<String, String>, record: std::sync::Arc<Mutex<Record>>, request: SessionOpenRequest)
+    -> Result<super::Resolved, OpenError> {
+    let (runtime, root, quotas) = (tokio::runtime::Handle::current(), root.to_owned(), fakes["quotas"].as_array().cloned().unwrap_or_default());
+    tokio::task::spawn_blocking(move || {
+        let local = super::facts::LocalFacts::new(crate::accounts::environment::AccountEnvironment::from_map(env), runtime)
+            .with_terminal(crate::list::mux::Mux::with_program(root.join("bin/tmux"), Duration::from_secs(2)),
+                std::sync::Arc::new(crate::list::procs::ProcFs::with_root(proc_root(&root))));
+        super::resolve_open(&request, &OpenCaller::Owner, &Facts { local, quotas, fakes, record })
+    }).await.unwrap()
+}
+
+/// `run` com as reservas pré-aquecidas do teste: o passo com `prewarm` adota como o `decide` do servidor,
+/// comparando o spec resolvido com o da reserva.
+pub async fn run_with(scenario: &Value, root: &Path, env: BTreeMap<String, String>, prewarm: Option<std::sync::Arc<crate::prewarm::Store>>) -> Value {
     let record = std::sync::Arc::new(Mutex::new(Record::default()));
     let substituted: Value = serde_json::from_str(&place(&scenario.to_string(), root)).unwrap_or(Value::Null);
     let state = &substituted["state"];
@@ -306,7 +330,7 @@ pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -
     let terminal = TerminalEnv { birth: Duration::from_millis(100), ..TerminalEnv::local(&home, &env) };
     let host = Host { home: home.clone(), env: env.clone(), terminal,
         mux: FakeTmux { sessions: Mutex::new(sessions), force: fakes["tmux_new_session"].clone(), record: record.clone(), silenced: Default::default() },
-        fakes: fakes.clone(), record: record.clone() };
+        fakes: fakes.clone(), record: record.clone(), prewarm };
     let mut steps = Vec::new();
     let mut restored = false;
     for step in substituted["steps"].as_array().into_iter().flatten() {
@@ -356,20 +380,18 @@ pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -
             continue;
         }
         if step["method"] != "POST" || step["path"] != "/api/sessions" { return json!({"not_ours": true}); }
-        let Ok(request) = SessionOpenRequest::parse(step["json"].to_string().as_bytes()) else { return json!({"not_ours": true}) };
-        let runtime = tokio::runtime::Handle::current();
-        let (facts_env, facts_root, facts_record, quotas) = (env.clone(), root.to_owned(), record.clone(),
-            fakes["quotas"].as_array().cloned().unwrap_or_default());
-        let (request_for_facts, facts_fakes) = (request.clone(), fakes.clone());
-        let resolved = tokio::task::spawn_blocking(move || {
-            let local = super::facts::LocalFacts::new(crate::accounts::environment::AccountEnvironment::from_map(facts_env), runtime)
-                .with_terminal(crate::list::mux::Mux::with_program(facts_root.join("bin/tmux"), Duration::from_secs(2)),
-                    std::sync::Arc::new(crate::list::procs::ProcFs::with_root(proc_root(&facts_root))));
-            super::resolve_open(&request_for_facts, &OpenCaller::Owner, &Facts { local, quotas, fakes: facts_fakes, record: facts_record })
-        }).await.unwrap();
+        let Ok(mut request) = SessionOpenRequest::parse(step["json"].to_string().as_bytes()) else { return json!({"not_ours": true}) };
+        request.take_reserved_name = host.prewarm.is_some();
+        let mut adopting = match (request.prewarm.take(), host.prewarm.clone()) {
+            (Some(id), Some(store)) => Some(super::adopt::Adopting::take(store, &id, &mut request).await),
+            _ => None,
+        };
+        let resolved = resolve_step(fakes.clone(), root, env.clone(), record.clone(), request.clone()).await;
+        // Como o `decide` do servidor: o spec resolvido contra o da reserva.
+        if let (Some(adopting), Ok(resolved)) = (adopting.as_mut(), &resolved) { adopting.compare(resolved).await; }
         let (status, body) = match resolved {
             Ok(resolved) if !super::open::opens_here(&resolved.spec) => return json!({"not_ours": true}),
-            Ok(resolved) => match super::open::open_session(&host, resolved, &OpenCaller::Owner).await {
+            Ok(resolved) => match super::open::open_adopting(&host, resolved, &OpenCaller::Owner, adopting.as_mut()).await {
                 Ok(opened) => (200, opened.body),
                 Err(error) => (error.status, error.body()),
             },
@@ -378,6 +400,7 @@ pub async fn run(scenario: &Value, root: &Path, env: BTreeMap<String, String>) -
                 (error.status, error.body())
             }
         };
+        if let Some(adopting) = adopting { host.diary(vec![adopting.finish(body["name"].as_str().unwrap_or_default(), None).await]); }
         steps.push(json!({"method": "POST", "path": "/api/sessions", "status": status, "body": body}));
     }
     let record = std::mem::take(&mut *record.lock().unwrap());

@@ -3144,3 +3144,41 @@ o Rust não perguntar de volta numa chamada dele. O Reabrir de Claude pela 8768 
 `POST /__hangar_server/claude/<nome>/recarregar`. 421 segue no Python; Pi, omp e Kimi fecham lá.
 Contrato interno 85 → 86 depois de juntar a `main`, que já estava em 85 (`RUST_SERVER_PROTOCOL` e
 `INTERNAL_PROTOCOL`).
+
+## Reserva pré-aquecida da nova conversa do Claude (22/10/2026)
+
+**Regra.** Enquanto a tela de nova conversa está aberta com Claude sem terminal, o cliente pede
+(`PUT /api/sessions/prewarm`) que o Rust mantenha um processo do Claude Code já subido, a
+**reserva**; no `POST /api/sessions` com `prewarm` a reserva vira a sessão. Ela passa pelo mesmo
+`resolve_open`, pelo mesmo começo do `launch` (login, trava da conta, `--prep`) e pelo corpo do
+`launch_if_needed`, mas não grava sidecar até a adoção: fica fora da lista. Adoção só com a mesma
+impressão (hash do argv e do ambiente sem identidade, calculado com o id de conversa da reserva),
+o mesmo nome, a conta logada, a mesma `config_marca`, a mesma pasta e sem worktree; qualquer
+diferença descarta a reserva e a abertura segue fria. Falha de reserva não aparece na tela.
+
+**Medição.** Pasta vazia, conta claude-200-05, `claude -p` stream-json com o argv da abertura sem
+terminal: envio → `system/init` frio 2,37 / 2,43 / 3,74 s (`opus`, `opus[1m]`, `default`); com o
+processo aberto 8 s antes, 0,18 s. No caminho real (cano + `initialize` do ator, prova
+`examples/prewarm_probe.rs`): ator conecta → `system/init` quente 205 / 216 / 197 ms contra frio
+2744 / 5410 / 3950 ms; o custo frio está no `initialize`, que espera o Claude terminar de subir
+(MCPs e hooks). Sem entrada o Claude roda os hooks de SessionStart e espera, sem chamar a API: a
+reserva não gasta cota.
+
+**Por que assim.**
+- O ambiente do processo leva nome, chave e token do plugin desde o spawn: chave, id e nome da
+  reserva já são os definitivos (o nome segura um `NameClaim` marcado como reserva, que a abertura
+  sem reserva ignora e descarta em vez de virar `x-2` ou 409).
+- Esforço só muda em processo vivo por `/effort`, que conta como turno: em vez de ajustar o
+  processo, qualquer troca de escolha descarta a reserva e o cliente pede outra (600 ms parado).
+- `kill_orphans` só existe no Linux: cada reserva grava um recibo em `~/.hangar/prewarm/` e a
+  subida do servidor limpa tudo em qualquer sistema; a saída limpa descarta as vivas.
+- Vida: renovação a cada 30 s, expira em 90 s sem renovação e em 10 min no máximo (configuração
+  velha); 1 por tela (`client_id`), 3 por servidor.
+- O cano descarta o que o Claude emite sem cliente: não há estado "pronta"; adotar cedo só ganha menos.
+
+**Rastros.** O descarte mata o grupo do processo (~55 ms) e apaga o jsonl só se não tiver linha
+`type:"user"`, `.hangar-active`, `.hangar-state`, `.hangar-prompt`, `claude-customizations/<sid>` e
+o recibo. O Arquivo e o relatório de uso ignoram conversa sem mensagem do usuário. Ficam, como em
+qualquer sessão: `session-env/<id>/`, `.caveman-sessions/<id>.mode` e o servidor de fundo do MCP
+`codegraph`, que roda em sessão própria por pasta e é reaproveitado. Cada reserva descartada
+repete os hooks de SessionStart da conta.

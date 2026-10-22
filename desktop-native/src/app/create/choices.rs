@@ -705,7 +705,8 @@ impl NewSession {
             || self.provider != "claude" || !self.engine.is_empty() || self.target().is_some() { return false; }
         let accounts: Vec<_> = self.accounts().map(|c| (c.path.as_str(), c.active, self.quota_of(&format!("claude:{}", c.path)))).collect();
         let Some(path) = quota_switch(self.config.as_deref(), &accounts, chrono::Local::now().timestamp() as f64) else { return false };
-        self.config = Some(path);
+        // A conta mostrada é a que vai no pedido; sem isso o servidor refaz a troca e avisa como se ninguém tivesse escolhido.
+        (self.config, self.account_suggested) = (Some(path), true);
         true
     }
 

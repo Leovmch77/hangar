@@ -26,6 +26,7 @@ pub mod mermaid;
 pub mod migration_status;
 pub mod mods;
 pub mod pages;
+pub mod prewarm;
 pub(crate) mod queue_feed;
 pub mod plugin;
 pub mod problem_gate;

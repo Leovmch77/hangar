@@ -1,11 +1,12 @@
 import { Children, Fragment, useEffect, useState, useCallback, useRef, type ComponentProps, type ReactNode } from 'react';
 import { Icon } from '../../ui/Icon';
-import { AccessibilityInfo, ActivityIndicator, BackHandler, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { AccessibilityInfo, ActivityIndicator, AppState, BackHandler, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { getArchivePorCwd, getCodexAccountsForServer, defaultCodexAccount,
   getEnginesForServer, getSessionDefaultsForServer, fetchSessionsForServer, listClaudeConfigsForServer, probeServerResponse,
-  modelOptionsForServer, resumeArchivedConversation, getProvidersForServer, createSessionForServer, sanitizeSessionName, getWorktreesForServer } from '@hangar/core';
+  modelOptionsForServer, resumeArchivedConversation, getProvidersForServer, createSessionForServer, sanitizeSessionName, getWorktreesForServer,
+  PrewarmReserve, prewarmSessionForServer, releasePrewarmForServer } from '@hangar/core';
 import { basename, ctxWindow, providerName, contaComFolga, cotaDaConta, cotaParada, janelaEsgotada, motivoCotaAntiga, resumoCota, CLAUDE_PERMISSION_MODES, EFFORT_LEVELS,
   SESSION_PROVIDERS, hasExecutionMode, effortLevels, contextRefsPlainText } from '@hangar/core';
 import type { ArchiveEntry, CodexAccount, ConfigDirInfo, Provider, ModelOption, CotaContaResumo, Server, WorktreeChoice, WorktreeRepo } from '@hangar/core';
@@ -539,7 +540,8 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
     ? { provider: 'codex', model: modelo || null, effort: esforco || null, permission_mode: headless ? permissao || null : null, codex_account: codexAccount, headless }
     : {
       provider,
-      config_dir: provider === 'claude' && accountChosen ? selectedConfig : null,
+      // A conta trocada pela cota também vai: é a que a tela mostra.
+      config_dir: provider === 'claude' && (accountChosen || !!switchedFrom) ? selectedConfig : null,
       engine: provider === 'claude' ? engine || null : null,
       model: (provider === 'claude' || provider === 'pi' || provider === 'kimi' || provider === 'omp') ? modelo || null : null,
       effort: (provider === 'claude' || provider === 'pi' || provider === 'omp') ? esforco || null : null,
@@ -548,6 +550,22 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
       ...(canHeadless ? { headless } : {}),
     };
   const body = picked && defaultsReady && !modelsLoading && codexReady && !providersLoading && (!providersError || providerTouched.current) ? { ...settings, ...(fastAvailable && serviceTier ? { service_tier: serviceTier } : {}), cwd: picked, remember_provider: true, ...(name.trim() ? { name: name.trim() } : {}), ...(worktree ?? {}) } : null;
+
+  // Reserva pré-aquecida enquanto a tela está aberta, na frente e compondo; o form remonta por
+  // máquina, então desmontar também cobre a troca de servidor.
+  const reserve = useRef<PrewarmReserve | null>(null);
+  reserve.current ??= new PrewarmReserve({ reserve: prewarmSessionForServer, release: releasePrewarmForServer });
+  const [foreground, setForeground] = useState(() => AppState.currentState !== 'background');
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => setForeground(next !== 'background'));
+    return () => sub.remove();
+  }, []);
+  useEffect(() => () => reserve.current?.release(), []);
+  const reserveBody = foreground && home?.mode !== 'sessions' ? body : null;
+  const reserveKey = reserveBody ? JSON.stringify(reserveBody) : '';
+  useEffect(() => { reserve.current?.update(active, reserveBody); }, [active, reserveKey]);
+  const takePrewarm = useCallback(() => reserve.current?.take() ?? null, []);
+  const resumePrewarm = useCallback(() => reserve.current?.resume(), []);
 
   // Toda escolha feita aqui volta na próxima abertura desta máquina.
   const chooseProvider = (p: Provider) => {
@@ -894,7 +912,11 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
     const typed = name.trim();
     const previous = attemptName.current;
     const retry = previous?.key === key;
-    let chosen = retry ? previous : typed ? { name: typed, known: true } : await autoSessionName(active, body.cwd);
+    // Antes do POST: renovação atrasada subiria outra reserva depois da adoção. O nome da reserva já
+    // está guardado para ela no servidor.
+    const ticket = takePrewarm();
+    let chosen = retry ? previous : typed ? { name: typed, known: true }
+      : ticket ? { name: ticket.name, known: true } : await autoSessionName(active, body.cwd);
     // Quem cancelou já saiu: a sessão nasceu e fica na lista, sem puxar a pessoa de volta.
     const open = (session: string) => { if (mounted.current) router.replace(`/s/${active.id}/${session}` as never); };
     try {
@@ -902,6 +924,8 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
         attemptName.current = { key, ...chosen };
         try {
           const session = await createSessionForServer(active, { ...body, name: chosen.name,
+            // Só com o nome da reserva: o digitado, a repetição ou o próximo automático vão sem ela.
+            ...(ticket && ticket.name === chosen.name ? { prewarm: ticket.id } : {}),
             ...(body.new_branch && !body.branch?.trim() ? { branch: sanitizeSessionName(chosen.name) } : {}) });
           open(session.name);
           return;
@@ -927,6 +951,7 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
         .then((list) => list.some((session) => session.name === finalName), () => null);
       if (exists) open(finalName);
       else if (mounted.current) {
+        reserve.current?.resume();
         setError(exists === null ? m.nova_conversa_criacao_incerta() : cause instanceof Error ? cause.message : m.criar_sessao_erro());
       }
     } finally {
@@ -1081,6 +1106,8 @@ function CreateSessionForm({ active, machines, onPickMachine, onClose, keyboardO
       } : null}
       notices={notices}
       body={body}
+      takePrewarm={takePrewarm}
+      resumePrewarm={resumePrewarm}
       blocked={blocked}
       keyboardOffset={keyboardOffset}
     />

@@ -111,11 +111,19 @@
   function markCompose() {
     if (!history.state?.[COMPOSE]) history.pushState({ ...history.state, [COMPOSE]: 1 }, '', location.href);
   }
+  // Página escondida solta a reserva pré-aquecida, como o app em segundo plano.
+  let visible = $state(document.visibilityState !== 'hidden');
   onMount(() => {
     if (mode === 'newConversation') markCompose();
     const onPop = () => { mode = history.state?.[COMPOSE] ? 'newConversation' : 'sessions'; };
+    const onVisibility = () => { visible = document.visibilityState !== 'hidden'; };
     window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('popstate', onPop);
+      document.removeEventListener('visibilitychange', onVisibility);
+      draft.releaseReserve();
+    };
   });
 
   // Síncrono dentro do toque: o iOS só abre o teclado (e o microfone) no mesmo gesto.
@@ -132,6 +140,9 @@
 
   const draft = createNewChatDraft();
   draft.init();
+
+  // Reserva só enquanto compõe; sair do modo, esconder a página ou desmontar a solta.
+  $effect(() => { draft.syncReserve(mode === 'newConversation' && visible); });
 
   // A pílula de conta mantém o feed vivo; aqui só reage a cada leitura nova.
   $effect(() => {

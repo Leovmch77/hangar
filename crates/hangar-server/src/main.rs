@@ -127,6 +127,12 @@ async fn run() {
         let term = state.term.clone();
         async move { term.restore_after_crash().await }
     });
+    // Reservas pré-aquecidas que um servidor que caiu deixou (todo sistema: a varredura abaixo é só Linux
+    // e não apaga transcript nem marcadores). Só aqui, pelo mesmo motivo do tmux acima.
+    let prewarm = state.prewarm.clone();
+    let cleaned = prewarm.clean_receipts().await;
+    if cleaned > 0 { tracing::info!(cleaned, "reservas pré-aquecidas que sobraram foram limpas"); }
+    let _prewarm_sweeper = prewarm.spawn_sweeper();
     // Órfãos do cano têm dono só: com o runtime ligado, o Rust varre uma vez, antes de anunciar o
     // gateway (o Python só abre sessões depois do anúncio). Só aqui, pelo mesmo motivo do tmux acima.
     // `CP_RUST_NO_ORPHAN_SWEEP=1`: o teste que sobe este binário de verdade nunca varre processos da máquina.
@@ -144,7 +150,9 @@ async fn run() {
         }
     }
     // A porta do convidado não entra no bind fatal acima: o filho anterior pode ainda segurá-la.
-    match hangar_server::serve_until_with_guest(listener, state, guest.listen, stop).await {
+    let served = hangar_server::serve_until_with_guest(listener, state, guest.listen, stop).await;
+    prewarm.discard_all("saida_do_servidor").await;
+    match served {
         Ok(()) => {
             tracing::info!("stdin fechou: o backend saiu, hangar-server sai junto");
             std::process::exit(0);

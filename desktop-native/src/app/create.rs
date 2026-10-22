@@ -3,6 +3,7 @@
 pub(super) mod choices;
 mod customizations;
 mod folder_git;
+mod prewarm;
 mod resume;
 #[cfg(test)]
 mod default_tests;
@@ -579,6 +580,9 @@ pub(in crate::app) struct NewSession {
     baton_by_model: bool,
     baton_open: bool,
     baton_preview: Remote<Option<Entity<TextViewState>>>,
+    /// O nome que a tela pôs no campo: mantido, a criação leva o nome da reserva.
+    suggested_name: String,
+    prewarm: prewarm::Reserve,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -634,7 +638,8 @@ impl NewSession {
             Ok(value) => (value, None),
             Err(error) => (true, Some(format!("{} {error}", tr("create_search_preference_failed")))),
         };
-        Self {
+        let prewarm = prewarm::Reserve::new(link.runtime.clone());
+        let mut dialog = Self {
             link, purpose: SessionDialogPurpose::Create, transfer_blocked: false, compact: false, menu: Default::default(), menu_query, servers: Remote::default(),
             roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(),
             folder_active: None, folder_scroll: UniformListScrollHandle::new(), root_scans: Vec::new(), search_all, search_error, query, picked: None, picked_query: String::new(), picked_dir: String::new(), enter_repeat: false, create_when_ready: false,
@@ -652,8 +657,10 @@ impl NewSession {
             notice: None, created_path: None, context_seq: 0, context_busy: false, context_on: None, context_want: None, context_error: None,
             archive: Remote::default(), want_resume: false, conversation: String::new(), before: None, preview: Remote::default(),
             preview_scroll: ScrollHandle::new(), resuming: false, baton, baton_by_model: false, baton_open: false,
-            baton_preview: Remote::default(), _subscriptions: subscriptions,
-        }
+            baton_preview: Remote::default(), suggested_name: String::new(), prewarm, _subscriptions: subscriptions,
+        };
+        dialog.start_prewarm(cx);
+        dialog
     }
 
     pub(in crate::app) fn for_transfer(link: Link, target: Target, source_life: String, source_jsonl: String,
@@ -1151,23 +1158,13 @@ impl NewSession {
                 && !self.models.loading && self.models.ok().is_some()))
     }
 
-    pub(super) fn create(&mut self, first: Option<(u64, String, Vec<FirstFile>)>, cx: &mut Context<Self>) {
-        if !self.can_create(cx) || self.compact != first.is_some() { return; }
-        let Some(cwd) = self.picked.clone() else { return };
-        // Worktree que já existe: a sessão nasce dentro dela, sem pedir worktree nova.
-        let cwd = self.existing.clone().filter(|_| !self.new_branch).unwrap_or(cwd);
-        let mut name = if self.compact { basename(&cwd).to_owned() } else { self.name.read(cx).value().trim().to_owned() };
+    /// O corpo do `POST /api/sessions` sem bastão. A reserva manda o mesmo, sem o nome.
+    fn open_body(&self, name: &str, cwd: &str, wanted: &str, cx: &App) -> Value {
         let provider = self.provider;
-        let typed = self.new_branch_name.read(cx).value().trim().to_string();
-        let typed_empty = typed.is_empty();
-        let wanted = if self.new_branch { if typed.is_empty() { name.clone() } else { typed } } else { self.branch.clone() };
-        let mut requested_branch = (!wanted.is_empty()).then(|| wanted.clone());
-        // Sem nome digitado, a branch é o nome final da sessão, que só sai do `unique_name` abaixo.
-        let branch_is_name = self.compact && self.new_branch && typed_empty && self.baton.is_none();
         let text = |s: &str| if s.is_empty() { Value::Null } else { json!(s) };
         let mut body = json!({"name": name, "cwd": cwd, "provider": provider, "model": text(&self.model), "effort": text(&self.effort)});
         if !wanted.is_empty() {
-            if let (Some(obj), Value::Object(extra)) = (body.as_object_mut(), worktree_body(&wanted, self.new_branch, &self.base)) {
+            if let (Some(obj), Value::Object(extra)) = (body.as_object_mut(), worktree_body(wanted, self.new_branch, &self.base)) {
                 obj.extend(extra);
             }
         }
@@ -1191,9 +1188,32 @@ impl NewSession {
             if provider == "codex" && self.headless && !self.permission.is_empty() { body["permission_mode"] = json!(self.permission); }
         }
         // O bastão não leva o Jev (o interruptor nem aparece) e vai por rota própria, que monta, grava e manda o resumo.
+        if let Some((on, _)) = self.jev_choice() { body["jev"] = json!(on); }
+        if let Some(customizations) = self.customization_payload() { body["claude_customizations"] = json!(customizations); }
+        body
+    }
+
+    pub(super) fn create(&mut self, first: Option<(u64, String, Vec<FirstFile>)>, cx: &mut Context<Self>) {
+        if !self.can_create(cx) || self.compact != first.is_some() { return; }
+        let Some(cwd) = self.picked.clone() else { return };
+        // Worktree que já existe: a sessão nasce dentro dela, sem pedir worktree nova.
+        let cwd = self.existing.clone().filter(|_| !self.new_branch).unwrap_or(cwd);
+        let mut name = if self.compact { basename(&cwd).to_owned() } else { self.name.read(cx).value().trim().to_owned() };
+        // A reserva deste mesmo pedido vai no POST; sem nome digitado pela pessoa, o nome é o dela.
+        let reserve = self.prewarm_want(cx).and_then(|want| self.prewarm.adoptable(&want));
+        let named = reserve.as_ref().filter(|_| self.compact || name == self.suggested_name).map(|(_, reserved)| reserved.clone());
+        if let Some(reserved) = &named { name = reserved.clone(); }
+        let provider = self.provider;
+        let typed = self.new_branch_name.read(cx).value().trim().to_string();
+        let typed_empty = typed.is_empty();
+        let wanted = if self.new_branch { if typed.is_empty() { name.clone() } else { typed } } else { self.branch.clone() };
+        let mut requested_branch = (!wanted.is_empty()).then(|| wanted.clone());
+        // Sem nome digitado, a branch é o nome final da sessão, que só sai do `unique_name` abaixo.
+        let branch_is_name = self.compact && self.new_branch && typed_empty && self.baton.is_none();
+        let text = |s: &str| if s.is_empty() { Value::Null } else { json!(s) };
+        let mut body = self.open_body(&name, &cwd, &wanted, cx);
         let baton = self.baton.as_ref().map(|b| b.name.clone());
         let jev = self.jev_choice().filter(|_| baton.is_none());
-        if let Some((on, _)) = jev { body["jev"] = json!(on); }
         if baton.is_some() {
             let claude = provider == "claude";
             let omp = self.omp.read(cx).value().trim().to_owned();
@@ -1207,12 +1227,16 @@ impl NewSession {
             if provider == "codex" { body["codex_account"] = json!(self.codex_account); }
             if claude && self.proxy_accounts().is_some() { body["engine_account"] = json!(self.engine_account); }
             if self.headless_inherited() { body.as_object_mut().unwrap().remove("headless"); }
+            if let Some(customizations) = self.customization_payload() { body["claude_customizations"] = json!(customizations); }
         }
-        if let Some(customizations) = self.customization_payload() { body["claude_customizations"] = json!(customizations); }
         // Sonda falhada deixa o Claude por omissão, e isso não é escolha a lembrar.
         if self.provider_touched || self.providers.ok().is_some() {
             body["remember_provider"] = json!(true);
         }
+        // Nome digitado diferente do da reserva: o servidor a descartaria, então ela fica para a próxima.
+        if let Some((id, _)) = reserve.as_ref().filter(|_| named.is_some()) { body["prewarm"] = json!(id); }
+        // A renovação para antes do POST: atrasada, ela subiria outra reserva depois da adoção.
+        self.prewarm.stop();
         // A memória vai antes do POST: a escolha não se perde se a criação falhar.
         let (key, model, effort) = (self.memory_key(), self.model.clone(), self.effort.clone());
         self.link.runtime.spawn_blocking(move || crate::appearance::remember_model(&key, &model, &effort));
@@ -1224,7 +1248,7 @@ impl NewSession {
             if !this.update(cx, |this, cx| { cx.notify(); this.creating }).unwrap_or(false) { break; }
         }));
         self.request(cx, move |api, send| Box::pin(async move {
-            if first.is_some() {
+            if first.is_some() && named.is_none() {
                 let sessions = match api.sessions().await {
                     Ok(sessions) => sessions,
                     Err(error) => { send(CreateReply::Created(seq, Err(Hangar::fetch_failure(&error)))).await; return; }
@@ -1355,6 +1379,7 @@ impl NewSession {
                     Err(_) => match &origin { Some(origin) => successor(origin, &HashSet::new()), None => basename(&path).to_owned() },
                 };
                 self.sessions.finish(seq, result.map_err(|e| Hangar::fetch_failure(&e)));
+                self.suggested_name = name.clone();
                 self.name.update(cx, |input, cx| input.set_value(name, window, cx));
                 if std::mem::take(&mut self.create_when_ready) { self.submit(cx); }
             }
@@ -2734,9 +2759,11 @@ impl Hangar {
             let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,
                 servers: self.server_choices(), servers_rev: self.servers_rev };
             self.new_chat_folders.set(None);
+            let host = cx.entity().downgrade();
             self.new_chat = Some(cx.new(|cx| {
                 let mut view = NewSession::new(link, None, window, cx);
                 view.compact = true;
+                view.prewarm.host = Some(host);
                 view.menu = self.new_chat_folders.clone();
                 cx.defer_in(window, |view, window, cx| view.load(window, cx));
                 view
@@ -2763,7 +2790,8 @@ impl Hangar {
             servers: self.server_choices(), servers_rev: self.servers_rev };
         let dialog = cx.new(|cx| NewSession::new(link, baton, window, cx));
         let query = dialog.read(cx).query.clone();
-        dialog.update(cx, |d, cx| d.load(window, cx));
+        let host = cx.entity().downgrade();
+        dialog.update(cx, |d, cx| { d.prewarm.host = Some(host); d.load(window, cx) });
         self.new_session = Some(dialog.clone());
         let weak = cx.entity().downgrade();
         let width = (window.viewport_size().width * 0.94).min(px(1320.));
@@ -2771,13 +2799,16 @@ impl Hangar {
             // Criando, o diálogo não fecha: ele é o único lugar onde o resultado aparece, como o Adicionar de Máquinas.
             let busy = dialog.read(cx).creating || dialog.read(cx).headless_saving;
             let (weak, me) = (weak.clone(), dialog.entity_id());
-            let cancel = dialog.clone();
+            let (cancel, closing) = (dialog.clone(), dialog.downgrade());
             popup::dialog(d).w(width).margin_top(px(DIALOG_TOP)).child(dialog.clone()).keyboard(!busy).overlay_closable(!busy).close_button(!busy)
                 .on_ok(enter_to_focused)
                 .on_cancel(move |_, window, cx| !cancel.update(cx, |dialog, cx| dialog.cancel_customizations(window, cx)))
-                .on_close(move |_, _, cx| { let _ = weak.update(cx, |this, _| {
-                    if this.new_session.as_ref().is_some_and(|d| d.entity_id() == me) { this.new_session = None; }
-                }); })
+                .on_close(move |_, _, cx| {
+                    let _ = closing.update(cx, |dialog, _| { dialog.prewarm.closed = true; drop(dialog.prewarm.release()); });
+                    let _ = weak.update(cx, |this, _| {
+                        if this.new_session.as_ref().is_some_and(|d| d.entity_id() == me) { this.new_session = None; }
+                    });
+                })
         });
         query.update(cx, |input, cx| input.focus(window, cx));
     }

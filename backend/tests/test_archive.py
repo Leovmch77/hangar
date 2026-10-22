@@ -253,3 +253,87 @@ def test_archive_por_cwd_filtra_provider_antes_do_limite(tmp_path, monkeypatch):
                                          provider="codex")
     assert [entry.session_id for entry in entries] == [sid]
 
+
+
+# ── Transcript sem mensagem do usuário (reserva pré-aquecida) ─────────────────
+
+RESERVA = "55555555-5555-5555-5555-555555555555"
+
+
+def _write_so_attachments(projdir, sid=RESERVA, cwd="/home/u/proj"):
+    """O que o Claude Code grava antes da 1ª mensagem: só os `attachment` dos hooks de SessionStart.
+    O texto do hook cita "user" entre aspas de propósito: não pode passar por linha de usuário."""
+    projdir.mkdir(parents=True, exist_ok=True)
+    j = projdir / f"{sid}.jsonl"
+    linhas = [json.dumps({
+        "parentUuid": None, "isSidechain": False,
+        "attachment": {"type": "hook_success", "hookName": "SessionStart:startup",
+                       "content": 'contexto do hook: "user" e "type"'},
+        "type": "attachment", "uuid": f"a{i}", "cwd": cwd, "timestamp": "2026-01-01T00:00:00Z",
+    }) for i in range(3)]
+    j.write_text("\n".join(linhas) + "\n", encoding="utf-8")
+    return j
+
+
+def test_jsonl_sem_linha_de_usuario_fica_fora_do_arquivo(tmp_path):
+    projdir = tmp_path / "-home-u-proj"
+    normal = _write_transcript(projdir)
+    reserva = _write_so_attachments(projdir)
+    # A reserva é a mais nova: com cap=1 ela não pode roubar a vaga da conversa de verdade.
+    os.utime(normal, (1000, 1000))
+    assert reserva.stat().st_mtime > 1000
+
+    assert [(f.project, f.count) for f in archive.list_folders()] == [("-home-u-proj", 1)]
+    assert [e.session_id for e in archive.list_conversations("-home-u-proj", set())] == [SID]
+    assert [e.session_id for e in archive.list_conversations("-home-u-proj", set(), cap=1)] == [SID]
+    assert [e.session_id for e in archive.list_recent(set())] == [SID]
+
+
+def test_pasta_so_com_reserva_nao_aparece(tmp_path):
+    _write_so_attachments(tmp_path / "-home-u-proj")
+    assert archive.list_folders() == []
+    assert archive.list_conversations("-home-u-proj", set()) == []
+
+
+def test_linha_de_usuario_sem_previa_continua_listada(tmp_path):
+    # Linha `type: "user"` que o chat não mostra (isMeta) não dá prévia, mas é conversa: fica.
+    projdir = tmp_path / "-home-u-proj"
+    _write_so_attachments(projdir, sid=SID)
+    with open(projdir / f"{SID}.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "user", "uuid": "m1", "isMeta": True, "cwd": "/home/u/proj",
+                             "message": {"role": "user", "content": "Caveat: meta"}}) + "\n")
+    assert [e.session_id for e in archive.list_conversations("-home-u-proj", set())] == [SID]
+    assert [f.count for f in archive.list_folders()] == [1]
+
+
+def test_previa_do_indice_dispensa_a_leitura(tmp_path, monkeypatch):
+    # Com a 1ª msg já no cabeçalho do índice, saber que há usuário não abre o arquivo de novo.
+    j = _write_transcript(tmp_path / "-home-u-proj")
+    monkeypatch.setattr(archive, "_heads", lambda: {str(j): ("oi arquivo", "/home/u/proj")})
+    abertos = []
+    original = open
+
+    def espia(path, *a, **kw):
+        abertos.append(str(path))
+        return original(path, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", espia)
+    assert [f.count for f in archive.list_folders()] == [1]
+    assert str(j) not in abertos
+
+
+def test_archive_por_cwd_ignora_jsonl_sem_usuario(tmp_path, monkeypatch):
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    from app.api import app
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "auth_token", "t-arquivo")
+    projdir = tmp_path / "-home-u-proj"
+    _write_transcript(projdir)
+    _write_so_attachments(projdir)
+    with patch("app.api.registry.list", return_value=[]):
+        r = TestClient(app).get("/api/archive-por-cwd", params={"cwd": "/home/u/proj"},
+                                headers={"Authorization": "Bearer t-arquivo"})
+    assert r.status_code == 200
+    assert [e["session_id"] for e in r.json()] == [SID]

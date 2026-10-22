@@ -177,8 +177,8 @@ impl Bucket {
     fn area(&mut self, t: &UsoLinha, cost: f64) {
         self.session(t); self.output.chamadas += t.chamadas; self.add_tokens(usage_tokens(t)); self.output.cost += cost;
     }
-    fn finish(mut self, key: String) -> UsoBucket {
-        self.output.key = key; self.output.sessions = self.sessions.len() as i64;
+    fn finish(mut self, key: String, real: &IndexSet<String>) -> UsoBucket {
+        self.output.key = key; self.output.sessions = self.sessions.iter().filter(|s| real.contains(*s)).count() as i64;
         self.output.subagentes = self.subagents.len() as i64;
         self.output.ctx_tokens_est = (self.output.ctx_chars as f64 / self.ruler) as i64 + self.estimated;
         self.output.ocupados_tokens_est = (self.occupied as f64 / 2.5) as i64;
@@ -188,28 +188,33 @@ impl Bucket {
 }
 
 fn descending(a: f64, b: f64) -> Ordering { b.partial_cmp(&a).unwrap_or(Ordering::Equal) }
-fn ranked(groups: Groups) -> Vec<UsoBucket> {
-    let mut out: Vec<_> = groups.into_iter().map(|(k, v)| v.finish(k)).collect();
+fn ranked(groups: Groups, real: &IndexSet<String>) -> Vec<UsoBucket> {
+    let mut out: Vec<_> = groups.into_iter().map(|(k, v)| v.finish(k, real)).collect();
     out.sort_by(|a, b| b.ocupados_eq_tokens_est.cmp(&a.ocupados_eq_tokens_est)
         .then_with(|| b.ocupados_tokens_est.cmp(&a.ocupados_tokens_est))
         .then_with(|| descending(a.cost, b.cost)).then_with(|| b.ctx_chars.cmp(&a.ctx_chars))
         .then_with(|| b.chamadas.cmp(&a.chamadas)).then_with(|| a.key.cmp(&b.key)));
     out
 }
-fn dimension(groups: Groups, label: Option<&dyn Fn(&str) -> Option<String>>) -> Vec<UsoBucket> {
+fn dimension(groups: Groups, label: Option<&dyn Fn(&str) -> Option<String>>, real: &IndexSet<String>) -> Vec<UsoBucket> {
     let mut out: Vec<_> = groups.into_iter().map(|(k, v)| {
-        let mut b = v.finish(k); b.label = label.and_then(|f| f(&b.key)); b
+        let mut b = v.finish(k, real); b.label = label.and_then(|f| f(&b.key)); b
     }).collect();
     let count = |b: &UsoBucket| b.input + b.output + b.cache_write + b.cache_read;
     out.sort_by(|a, b| count(b).cmp(&count(a)).then_with(|| b.chamadas.cmp(&a.chamadas)).then_with(|| a.key.cmp(&b.key)));
     out
 }
-fn daily(groups: Groups) -> Vec<UsoBucket> {
-    let mut out: Vec<_> = groups.into_iter().map(|(k, v)| v.finish(k)).collect();
+fn daily(groups: Groups, real: &IndexSet<String>) -> Vec<UsoBucket> {
+    let mut out: Vec<_> = groups.into_iter().map(|(k, v)| v.finish(k, real)).collect();
     out.sort_by(|a, b| a.key.cmp(&b.key)); out
 }
 fn project(value: &str) -> &str { if value.is_empty() { "desconhecido" } else { value } }
 fn prefix(value: &str) -> &str { value.split_once(':').map_or("", |(p, _)| p) }
+// Linha nascida de `attachment` (hooks, skills reinjetadas): o Claude Code grava os hooks de
+// SessionStart antes da 1ª mensagem, então sozinha ela não prova conversa (a reserva pré-aquecida).
+fn from_attachment(t: &UsoLinha) -> bool {
+    t.fonte == "claude" && (t.tipo == "contexto" || (t.tipo == "skill" && matches!(t.origem.as_str(), "hook" | "compactacao")))
+}
 fn matches_filter(values: &[String], value: &str) -> bool { values.is_empty() || values.iter().any(|v| v == value) }
 fn filter_values(values: &[String]) -> Vec<String> { values.iter().filter(|s| !s.is_empty()).cloned().collect() }
 
@@ -243,6 +248,8 @@ pub struct UsoBuilder<'a> {
     by_area_day: Groups,
     total: Bucket,
     series: Vec<(UsoLinha, f64, Share)>,
+    /// Sessões com alguma linha que não veio de `attachment`: só elas contam como sessão.
+    real: IndexSet<String>,
 }
 
 impl<'a> UsoBuilder<'a> {
@@ -263,11 +270,12 @@ impl<'a> UsoBuilder<'a> {
             focus: f.foco.clone().filter(|s| !s.is_empty()), accounts, projects, cutoff, period: period.into(),
             origins, all_agents, filtered_agents, by_account: Groups::new(), by_project: Groups::new(),
             by_model: Groups::new(), by_kind: IndexMap::new(), plugins: Groups::new(), by_day: Groups::new(),
-            by_area_day: Groups::new(), total: Bucket::default(), series: Vec::new(),
+            by_area_day: Groups::new(), total: Bucket::default(), series: Vec::new(), real: IndexSet::new(),
         }
     }
 
     pub fn push(&mut self, t: &UsoLinha, account: &str, pricing: &Pricing) {
+        if !from_attachment(t) && !self.real.contains(&t.session_id) { self.real.insert(t.session_id.clone()); }
         if self.cutoff.as_ref().is_some_and(|c| t.dia.is_empty() || t.dia < *c) { return; }
         let plugin = if !t.plugin.is_empty() { t.plugin.as_str() }
             else if t.tipo == "skill" && self.origins.is_some() { self.origins.unwrap().get(&t.nome).map_or("@embutida", String::as_str) }
@@ -312,7 +320,7 @@ impl<'a> UsoBuilder<'a> {
 
     pub fn finish(self, label: &dyn Fn(&str) -> Option<String>) -> UsoReport {
         let Self { accounts, projects, models, filters, focus, period, all_agents, filtered_agents, by_account,
-            by_project, by_model, mut by_kind, plugins, mut by_day, by_area_day, total, series, .. } = self;
+            by_project, by_model, mut by_kind, plugins, mut by_day, by_area_day, total, series, real, .. } = self;
         let agents = filtered_agents.as_ref().unwrap_or(&all_agents);
         let area_focus = focus.as_deref().is_some_and(|f| by_kind.get("area").is_some_and(|areas| areas.contains_key(f)));
         for (t, cost, share) in &series {
@@ -321,17 +329,52 @@ impl<'a> UsoBuilder<'a> {
                 if t.tipo == "area" { by_day.entry(t.dia.clone()).or_default().area(t, *cost); }
             } else { by_day.entry(t.dia.clone()).or_default().summary(t, *share, agents, true); }
         }
-        let mut area_days = daily(by_area_day);
+        let mut area_days = daily(by_area_day, &real);
         for b in &mut area_days { b.label = b.key.split_once('|').map(|(_, area)| area.to_owned()); }
-        let mut kind = |name: &str| ranked(by_kind.shift_remove(name).unwrap_or_default());
+        let mut kind = |name: &str| ranked(by_kind.shift_remove(name).unwrap_or_default(), &real);
         UsoReport {
-            totals: total.finish("totals".into()), by_skill: kind("skill"), by_tool: kind("tool"),
+            totals: total.finish("totals".into(), &real), by_skill: kind("skill"), by_tool: kind("tool"),
             by_bash: kind("bash"), by_mcp: kind("mcp"), by_agente: kind("agente"), by_contexto: kind("contexto"),
-            by_plugin: ranked(plugins), by_imagem: kind("imagem"), by_area: kind("area"), by_area_dia: area_days,
-            by_conta: dimension(by_account, Some(label)), by_projeto: dimension(by_project, None),
-            by_modelo: dimension(by_model, None), by_day: daily(by_day), conta: accounts, projeto: projects,
+            by_plugin: ranked(plugins, &real), by_imagem: kind("imagem"), by_area: kind("area"), by_area_dia: area_days,
+            by_conta: dimension(by_account, Some(label), &real), by_projeto: dimension(by_project, None, &real),
+            by_modelo: dimension(by_model, None, &real), by_day: daily(by_day, &real), conta: accounts, projeto: projects,
             modelo: models, plugin: filters, foco: focus,
             applied: Some(Applied { period }), usd_brl: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn row(session: &str, fonte: &str, tipo: &str, nome: &str, origem: &str) -> (UsoLinha, String) {
+        (UsoLinha { dia: "2026-10-22".into(), cwd: "/repo".into(), tipo: tipo.into(), nome: nome.into(),
+            origem: origem.into(), fonte: fonte.into(), session_id: session.into(), chamadas: 1, ctx_chars: 10,
+            ..UsoLinha::default() }, "conta".into())
+    }
+
+    #[test]
+    fn session_with_only_attachment_rows_does_not_count() {
+        let hook = "hook_success:SessionStart:startup";
+        let uso = vec![
+            row("conversa", "claude", "contexto", hook, ""),
+            row("conversa", "claude", "tool", "Bash", ""),
+            // A reserva pré-aquecida: só o que os hooks de SessionStart gravaram.
+            row("reserva", "claude", "contexto", hook, ""),
+            row("reserva", "claude", "skill", "skill-do-hook", "hook"),
+            // A regra é do Claude: linha de contexto de outro provedor segue contando.
+            row("codex", "codex", "contexto", "AGENTS.md", ""),
+        ];
+        let pricing = Pricing::load(Path::new("/nonexistent-pricing-dir"));
+        let report = build(&uso, &[], "all", LocalTs(0), &UsoFilters::default(), None, &pricing, &|_| None);
+        assert_eq!(report.totals.sessions, 2);
+        assert_eq!(report.by_contexto.iter().find(|b| b.key == hook).unwrap().sessions, 1);
+        assert_eq!(report.by_skill.iter().find(|b| b.key == "skill-do-hook").unwrap().sessions, 0);
+        assert_eq!(report.by_conta[0].sessions, 2);
+        assert_eq!(report.by_day[0].sessions, 2);
+        // As somas não mudam: só a contagem de sessões ignora a reserva.
+        assert_eq!(report.by_contexto.iter().find(|b| b.key == hook).unwrap().ctx_chars, 20);
     }
 }

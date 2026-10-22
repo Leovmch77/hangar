@@ -228,6 +228,22 @@ describe('newConversation', () => {
     expect(issue()).toBeNull();
   });
 
+  it('a reserva só vai com o nome dela: a repetição por nome em uso e o nome digitado saem sem ela', async () => {
+    calls.sessions.mockRejectedValue(new Error('503'));
+    calls.create.mockImplementation(async (_s, body) => ({ name: body.name, state: 'idle' }));
+    calls.create.mockRejectedValueOnce(Object.assign(httpError(409, 'já existe uma sessão com esse nome'), { code: 'erro_nome_em_uso' }));
+    const reserved = { ...input, body: { ...input.body, prewarm: 'k1' }, reserveName: 'reserva' };
+    await beginAttempt('server-a', reserved);
+    expect(calls.create.mock.calls.map((c) => [c[1].name, c[1].prewarm])).toEqual([['reserva', 'k1'], ['mobile', undefined]]);
+
+    _resetNewConversationForTests();
+    memory.clear();
+    calls.create.mockClear();
+    await beginAttempt('server-a', { ...reserved, body: { ...reserved.body, name: 'meu-nome' } });
+    expect(calls.create.mock.calls[0][1]).toMatchObject({ name: 'meu-nome' });
+    expect(calls.create.mock.calls[0][1]).not.toHaveProperty('prewarm');
+  });
+
   it('nome explícito é gravado antes do POST e não ganha sufixo nem troca após conflito', async () => {
     const create = deferred<SessionInfo>();
     calls.create.mockReturnValue(create.promise);

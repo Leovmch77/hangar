@@ -195,6 +195,13 @@ pub fn prepare(env: &AccountEnvironment, bridge: Option<&PluginBridge>, meta: &V
         .map_err(|error| refused("launch_meta", &format!("registro da sessão ilegível: {error}")))?;
     let facts = crate::session_open::facts::LocalFacts::new(env.clone(), runtime);
     refresh_window(&mut spec, &facts, &env.home.join(".hangar").join("claude-headless"), name);
+    plan_for(env, bridge, &spec, meta, &facts)
+}
+
+/// O comando de agora para um spec já decidido, sem sessão registrada: a subida da sessão (`prepare`) e
+/// a reserva pré-aquecida, que ainda não tem sidecar nem registro. Bloqueante: chamar fora do runtime.
+pub fn plan_for(env: &AccountEnvironment, bridge: Option<&PluginBridge>, spec: &SessionSpec, meta: &Value,
+                facts: &dyn crate::session_open::OpenFacts) -> Result<Launch, RuntimeError> {
     let config = super::codex_launch::runtime_config(env);
     let roots = crate::session_open::claude::plugin_roots(&env.home);
     let (engine, account) = match &spec.account {
@@ -207,11 +214,8 @@ pub fn prepare(env: &AccountEnvironment, bridge: Option<&PluginBridge>, meta: &V
             .map_err(|error| refused("launch_engine_account", &error.msg))?),
         _ => None,
     };
-    let fast = spec.service_tier.is_some() && {
-        use crate::session_open::OpenFacts;
-        facts.supports_fast(engine, spec.model.as_deref())
-    };
-    plan(&spec, meta, &Context { env, runtime_config: &config, plugin_roots: &roots, bridge, engine_route: route.as_ref(), fast })
+    let fast = spec.service_tier.is_some() && facts.supports_fast(engine, spec.model.as_deref());
+    plan(spec, meta, &Context { env, runtime_config: &config, plugin_roots: &roots, bridge, engine_route: route.as_ref(), fast })
 }
 
 #[cfg(test)]

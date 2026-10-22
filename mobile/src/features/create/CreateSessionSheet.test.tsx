@@ -19,6 +19,8 @@ const calls = vi.hoisted(() => ({
   prepare: vi.fn(),
   preparation: vi.fn(),
   create: vi.fn(),
+  prewarm: vi.fn(),
+  releasePrewarm: vi.fn(),
   send: vi.fn(),
   history: vi.fn(),
   archives: vi.fn(),
@@ -155,6 +157,8 @@ vi.mock('@hangar/core', async (original) => ({
   prepareCodexAccountForServer: calls.prepare,
   getCodexPreparationForServer: calls.preparation,
   createSessionForServer: calls.create,
+  prewarmSessionForServer: calls.prewarm,
+  releasePrewarmForServer: calls.releasePrewarm,
   getWorktreesForServer: calls.worktrees,
   sendInputForServer: calls.send,
   getHistory: calls.history,
@@ -306,6 +310,9 @@ describe('CreateSessionSheet Codex', () => {
     calls.prepare.mockReset().mockResolvedValue({ status: 'ready', trust_pending: false, issues: [] });
     calls.preparation.mockReset();
     calls.create.mockReset().mockResolvedValue({ name: 'nova', state: 'idle' });
+    // Sem resposta por padrão: os testes que não tratam da reserva criam pelo caminho frio.
+    calls.prewarm.mockReset().mockImplementation(() => new Promise(() => {}));
+    calls.releasePrewarm.mockReset().mockResolvedValue(undefined);
     calls.worktrees.mockReset().mockResolvedValue([]);
     calls.send.mockReset().mockResolvedValue(undefined);
     calls.history.mockReset().mockResolvedValue([]);
@@ -1648,6 +1655,74 @@ describe('CreateSessionSheet Codex', () => {
     root.unmount();
   });
 
+  it('a conta trocada pela cota esgotada vai no pedido', async () => {
+    calls.configs.mockResolvedValue([{ path: '/a', label: 'Conta A', active: true }, { path: '/b', label: 'Conta B', active: false }]);
+    calls.cotas = [
+      { id: 'claude:/a', estado: 'lida', janelas: [{ rotulo: '7d', pct: 100 }] },
+      { id: 'claude:/b', estado: 'lida', janelas: [{ rotulo: '5h', pct: 10 }] },
+    ];
+    const { container, root } = await renderSheet(false, false);
+    await send(container);
+    expect(calls.create.mock.calls.at(-1)?.[1]?.config_dir).toBe('/b');
+    root.unmount();
+  });
+
+  it('trocar a pasta pede nova reserva só depois de 600 ms parado; desmontar libera', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    calls.prewarm.mockResolvedValue({ id: 'k1', fingerprint: 'f', name: 'repo' });
+    const { container, root } = await renderSheet(false, false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    expect(calls.prewarm).toHaveBeenCalledTimes(1);
+    expect(calls.prewarm).toHaveBeenLastCalledWith(server, expect.objectContaining({ provider: 'claude', headless: true }), expect.any(String));
+    const clientId = calls.prewarm.mock.calls[0][2];
+    calls.scan.mockResolvedValue({ entries: [{ name: 'Child', path: '/repo/child', is_git: true, has_claude_md: false }] });
+    await openFolder(container);
+    await act(async () => [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Child'))!.click());
+    await flushDismiss();
+    await act(async () => { await vi.advanceTimersByTimeAsync(599); });
+    expect(calls.prewarm).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(calls.prewarm).toHaveBeenCalledTimes(2);
+    expect(calls.prewarm).toHaveBeenLastCalledWith(server, expect.objectContaining({ cwd: '/repo/child' }), clientId);
+    act(() => root.unmount());
+    expect(calls.releasePrewarm).toHaveBeenCalledWith(server, 'k1', clientId);
+  });
+
+  it('o create leva o prewarm e o nome da reserva, com a renovação parada antes', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    calls.prewarm.mockResolvedValue({ id: 'k1', fingerprint: 'f', name: 'reserva' });
+    const { container, root } = await renderSheet(false, false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    await send(container);
+    expect(calls.create).toHaveBeenLastCalledWith(server, expect.objectContaining({ prewarm: 'k1', name: 'reserva' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(calls.prewarm).toHaveBeenCalledTimes(1);
+    // A reserva virou a sessão: sair da tela não a solta.
+    act(() => root.unmount());
+    expect(calls.releasePrewarm).not.toHaveBeenCalled();
+  });
+
+  it('app em segundo plano solta a reserva; de volta à frente, pede outra', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    calls.prewarm.mockResolvedValue({ id: 'k1', fingerprint: 'f', name: 'repo' });
+    const { root } = await renderSheet(false, false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    await appState('background');
+    expect(calls.releasePrewarm).toHaveBeenCalledWith(server, 'k1', expect.any(String));
+    await appState('active');
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    expect(calls.prewarm).toHaveBeenCalledTimes(2);
+    act(() => root.unmount());
+  });
+
+  it('Codex não pede reserva', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const { root } = await renderSheet();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(calls.prewarm).not.toHaveBeenCalled();
+    act(() => root.unmount());
+  });
+
   it('diz por que a cota da conta não atualizou ao lado dos números antigos', async () => {
     calls.configs.mockResolvedValue([{ path: '/a', label: 'Conta A', active: true }, { path: '/b', label: 'Conta B', active: false }]);
     const antiga: CotaContaResumo = { id: 'claude:/a', estado: 'lida', janelas: [{ rotulo: '5h', pct: 42 }], motivo: 'sem-resposta' };
@@ -2002,6 +2077,22 @@ describe('CreateSessionSheet Codex', () => {
         for (let i = 0; i < 5; i++) await act(async () => Promise.resolve());
         expect(calls.create.mock.calls.map((call) => call[1].name)).toEqual(['hangar', 'hangar-2']);
         expect(calls.replace).toHaveBeenCalledWith('/s/server-b/nova');
+      } finally { act(() => root.unmount()); }
+    });
+
+    it('nome da reserva em uso: o próximo automático vai sem o prewarm', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      calls.scan.mockResolvedValue({ entries: [folder] });
+      calls.prewarm.mockResolvedValue({ id: 'k1', fingerprint: 'f', name: 'reserva' });
+      calls.create.mockRejectedValueOnce(Object.assign(new Error('nome em uso'), { status: 409, code: 'erro_nome_em_uso' }));
+      const { container, root } = await renderForm();
+      try {
+        await pickFolder(container);
+        await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+        expect(calls.prewarm).toHaveBeenCalledTimes(1);
+        await act(async () => button(container, 'criar_criar')!.click());
+        for (let i = 0; i < 5; i++) await act(async () => Promise.resolve());
+        expect(calls.create.mock.calls.map((call) => [call[1].name, call[1].prewarm])).toEqual([['reserva', 'k1'], ['hangar', undefined]]);
       } finally { act(() => root.unmount()); }
     });
 

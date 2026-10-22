@@ -6,7 +6,7 @@ const core = vi.hoisted(() => ({
   getCodexAccountsForServer: vi.fn(), getFolderBranchesForServer: vi.fn(), getRootsForServer: vi.fn(),
   listClaudeConfigs: vi.fn(), getClaudeAccountSuggestion: vi.fn(), getProviders: vi.fn(), modelOptions: vi.fn(),
   modelOptionsForServer: vi.fn(), getEnginesForServer: vi.fn(), getConfigForServer: vi.fn(), setClaudeDefaultsForServer: vi.fn(),
-  uploadFileForServer: vi.fn(),
+  uploadFileForServer: vi.fn(), prewarmSessionForServer: vi.fn(), releasePrewarmForServer: vi.fn(),
 }));
 vi.mock('@hangar/core', async (orig) => ({ ...(await orig<object>()), ...core }));
 vi.mock('./auth', () => ({ listOwnServers: () => [srv], selectServer: vi.fn(() => true), getActiveId: () => 'pc' }));
@@ -343,5 +343,60 @@ describe('NewChatDraft — Usar como padrão', () => {
     expect(draft.isDefault).toBe(true);
     draft.setModel('sonnet');
     expect(draft.isDefault).toBe(false);
+  });
+});
+
+describe('NewChatDraft — reserva pré-aquecida', () => {
+  const ticket = { id: 'k1', fingerprint: 'f', name: 'proj-r' };
+
+  it('send leva o prewarm e o nome da reserva, com a renovação parada antes do POST', async () => {
+    core.prewarmSessionForServer.mockResolvedValue(ticket);
+    core.releasePrewarmForServer.mockResolvedValue(undefined);
+    core.createSessionForServer.mockResolvedValue({ name: 'proj-r' });
+    core.sendInputForServer.mockResolvedValue(undefined);
+    const draft = await ready();
+    vi.useFakeTimers();
+    try {
+      draft.syncReserve(true);
+      await vi.advanceTimersByTimeAsync(599);
+      expect(core.prewarmSessionForServer).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(core.prewarmSessionForServer).toHaveBeenCalledWith(srv, expect.objectContaining({
+        cwd: '/home/u/proj', provider: 'claude', headless: true }), expect.any(String));
+
+      const r = await draft.send('oi');
+
+      expect(core.createSessionForServer).toHaveBeenCalledWith(srv, expect.objectContaining({ name: 'proj-r', prewarm: 'k1' }));
+      expect(r).toEqual({ serverId: 'pc', name: 'proj-r' });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(core.prewarmSessionForServer).toHaveBeenCalledTimes(1);
+      // A reserva virou a sessão: sair da tela não a solta.
+      draft.releaseReserve();
+      expect(core.releasePrewarmForServer).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('sair do modo compor libera a reserva', async () => {
+    core.prewarmSessionForServer.mockResolvedValue(ticket);
+    core.releasePrewarmForServer.mockResolvedValue(undefined);
+    const draft = await ready();
+    vi.useFakeTimers();
+    try {
+      draft.syncReserve(true);
+      await vi.advanceTimersByTimeAsync(600);
+      draft.syncReserve(false);
+      expect(core.releasePrewarmForServer).toHaveBeenCalledWith(srv, 'k1', core.prewarmSessionForServer.mock.calls[0][2]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('com terminal não reserva', async () => {
+    core.getConfigForServer.mockResolvedValue({ campos: { headless_default: { valor: false } } });
+    const draft = await ready();
+    vi.useFakeTimers();
+    try {
+      draft.syncReserve(true);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(core.prewarmSessionForServer).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
   });
 });

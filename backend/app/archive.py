@@ -27,7 +27,8 @@ _SID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 
 class ArchiveFolder(BaseModel):
     # Nivel 1 (pastas): agregado barato — nao abre os transcripts (so 1 leitura de cabecalho por
-    # pasta pro cwd real). O preview das conversas so e pago ao ENTRAR na pasta.
+    # pasta pro cwd real; arquivo sem 1ª msg no índice é varrido até a 1ª linha de usuário, ver
+    # _tem_usuario). O preview das conversas so e pago ao ENTRAR na pasta.
     project: str                 # nome do dir em projects/ (cwd sanitizado)
     cwd: Optional[str] = None    # cwd real, lido do transcript mais recente
     count: int                   # quantas conversas na pasta
@@ -181,6 +182,44 @@ def conversation_files(proj: Path) -> list[Path]:
     return [f for f in proj.glob("*.jsonl") if _SID_RE.match(f.stem)]
 
 
+# Transcript sem nenhuma linha `type: "user"` não é conversa: o Claude Code grava os `attachment`
+# dos hooks de SessionStart antes da 1ª mensagem (a reserva pré-aquecida da nova conversa).
+# Quem já teve linha de usuário não a perde (append-only): o positivo fica guardado.
+_COM_USUARIO: set[str] = set()
+# O negativo vale só para o arquivo como foi lido: mudou o tamanho ou o mtime, lê de novo.
+_SEM_USUARIO: dict[str, tuple[int, int]] = {}
+
+
+def _tem_usuario(jsonl: Path, preview: str) -> bool:
+    """`preview` é a 1ª msg já lida do cabeçalho (índice ou _head_info): com ela, nenhuma leitura a
+    mais. Sem ela, varre até a 1ª linha de usuário — o arquivo inteiro só quando não há nenhuma."""
+    if preview:
+        return True
+    chave = str(jsonl)
+    if chave in _COM_USUARIO:
+        return True
+    try:
+        st = jsonl.stat()
+        marca = (st.st_mtime_ns, st.st_size)
+        if _SEM_USUARIO.get(chave) == marca:
+            return False
+        with open(jsonl, "rb") as fh:
+            for raw in fh:
+                if b'"user"' not in raw:
+                    continue
+                obj = _obj_da_linha(raw)
+                if obj is not None and obj.get("type") == "user":
+                    _COM_USUARIO.add(chave)
+                    _SEM_USUARIO.pop(chave, None)
+                    return True
+    except OSError:
+        # Sem conseguir ler, a conversa segue listada como antes: esconder seria sumir com ela calado.
+        _log.warning("arquivo: nao consegui ler %s", jsonl, exc_info=True)
+        return True
+    _SEM_USUARIO[chave] = marca
+    return False
+
+
 def _folder_files(proj: Path) -> list[tuple[float, Path]]:
     files: list[tuple[float, Path]] = []
     for f in conversation_files(proj):
@@ -278,7 +317,8 @@ def list_folders(config_dir: Optional[str] = None) -> list[ArchiveFolder]:
         except OSError:
             continue
         for proj in projdirs:
-            files = _folder_files(proj)
+            files = [(mt, f) for mt, f in _folder_files(proj)
+                     if _tem_usuario(f, (heads.get(str(f)) or ("", None))[0])]
             if not files:
                 continue
             # cwd real do transcript mais recente (1 leitura/pasta quando o indice ainda nao tem)
@@ -353,8 +393,12 @@ def list_conversations(project: str, live_realpaths: set[str], cap: int = 100,
     heads = _heads() if linhas else {}
     if closed is None:
         closed = closed_names.names() if linhas or outras else {}
-    for mt, f, cfg, rotulo in linhas[:cap]:
+    for mt, f, cfg, rotulo in linhas:
+        if len(out) >= cap:
+            break
         preview, cwd = heads.get(str(f)) or _head_info(f)
+        if not _tem_usuario(f, preview):
+            continue
         real = os.path.realpath(str(f))
         out.append(ArchiveEntry(
             project=project, cwd=cwd, session_id=f.stem, mtime=mt,

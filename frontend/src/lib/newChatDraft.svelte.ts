@@ -7,7 +7,8 @@ import {
   uniqueSessionName, basename, effortLevels, defaultCodexAccount, SESSION_PROVIDERS,
   getEnginesForServer, getConfigForServer, contextModel, setClaudeDefaultsForServer,
   getWorktreesForServer, getCreationProgress, uploadFileForServer,
-  type WorktreeStatus, type CreationProgress,
+  PrewarmReserve, prewarmSessionForServer, releasePrewarmForServer,
+  type WorktreeStatus, type CreationProgress, type CreateSessionBody,
   type CodexAccount, type ConfigDirInfo, type FolderBranches, type FsRoot, type ModelOption, type Provider,
   type WorktreeChoice, type Motor, type CliProxyAccount,
 } from '@hangar/core';
@@ -119,6 +120,8 @@ export class NewChatDraft {
   // desde que nenhuma escolha tenha mudado desde então.
   // `uploaded`: anexo já enviado a esta sessão → caminho no servidor; o reenvio não duplica a cópia.
   #created: { choices: string; name: string; uploaded: Map<File, string> } | null = null;
+  // Claude sem terminal já iniciado no servidor enquanto a tela compõe; o envio o adota.
+  #reserve = new PrewarmReserve({ reserve: prewarmSessionForServer, release: releasePrewarmForServer });
 
   get serverObj(): Server | null { return this.servers.find((s) => s.id === this.server) ?? null; }
   get #choices(): string {
@@ -179,6 +182,7 @@ export class NewChatDraft {
   }
 
   pickServer(id: string) {
+    this.#reserve.release();
     this.#providerPicked = false;
     this.#modelTouched = false;
     this.server = id;
@@ -564,36 +568,19 @@ export class NewChatDraft {
       const choices = this.#choices;
       let name = this.#created?.choices === choices ? this.#created.name : '';
       if (!name) {
-        const taken = new Set((await fetchSessionsForServer(server)).map((s) => s.name));
+        // Antes do POST: renovação atrasada subiria outra reserva depois da adoção.
+        const ticket = this.#reserve.take();
+        const taken = ticket ? new Set<string>() : new Set((await fetchSessionsForServer(server)).map((s) => s.name));
         // Memória antes de criar, como a folha: a escolha não se perde se a criação falhar.
         const key = this.memoryKey();
         writeStorage(key, this.bodyModel ?? '');
         writeStorage(`${key}:effort`, this.effort);
-        const target = this.existing ?? cwd;
-        const sessionName = uniqueSessionName(basename(target), taken);
+        // A reserva já segura o nome dela no servidor.
+        const sessionName = ticket?.name ?? uniqueSessionName(basename(this.existing ?? cwd), taken);
         if (this.newBranch && !this.branchName.trim()) this.branchName = sessionName;
-        // Corpo do nativo (create.rs, create): motor, conta ChatGPT, Fast, execução e permissão.
-        const claude = this.provider === 'claude', codex = this.provider === 'codex';
-        const tier = this.fastAvailable ? this.fastChoice : null;
         const stopProgress = this.#followCreation(sessionName, server);
         const info = await createSessionForServer(server, {
-          name: sessionName, cwd: target, provider: this.provider,
-          // Sonda falhada deixa o Claude por omissão, e isso não é escolha a lembrar.
-          remember_provider: this.#providerPicked || Object.keys(this.providers).length > 0,
-          // D-003: a conta que ninguém escolheu não vai, e o servidor troca a que estiver a 95% ou mais;
-          // a troca automática da esgotada é essa mesma regra, então também não conta como escolha.
-          config_dir: claude && (this.#accountPicked || this.#accountSuggested) ? this.configDir : null,
-          codex_account: codex ? this.codexAccount : undefined,
-          engine: claude ? this.engine || null : null,
-          ...(claude && this.engine && this.engineAccount ? { engine_account: this.engineAccount } : {}),
-          model: this.bodyModel, effort: this.effort || null,
-          ...(tier ? { service_tier: tier } : {}),
-          ...((claude || codex) && this.headless !== null ? { headless: this.headless } : {}),
-          ...(claude && this.permission ? { permission_mode: this.permission } : {}),
-          // O backend só aceita permissão no Codex sem terminal (api.py, _create_session_owned).
-          ...(codex && this.headless === true && this.permission ? { permission_mode: this.permission } : {}),
-          // Worktree existente já é o cwd: branch nova ou outra branch não se somam a ela.
-          ...(this.existing ? {} : (worktreeChoiceOf(this) ?? {})),
+          ...this.#body(cwd), name: sessionName, ...(ticket ? { prewarm: ticket.id } : {}),
         }).finally(stopProgress);
         // O nome que vale é o devolvido pelo backend: ele pode desempatar de novo.
         name = info.name;
@@ -617,11 +604,47 @@ export class NewChatDraft {
       return { serverId: server.id, name };
     } catch (e) {
       this.sendError = errText(e, m.criar_sessao_erro());
+      // Sem sessão criada para reaproveitar, a próxima tentativa cria de novo: vale reservar.
+      if (this.#created?.choices !== this.#choices) this.#reserve.resume();
       throw e;
     } finally {
       this.sending = false;
     }
   }
+
+  // Corpo do nativo (create.rs, create): motor, conta ChatGPT, Fast, execução e permissão.
+  #body(cwd: string): Omit<CreateSessionBody, 'name'> {
+    const claude = this.provider === 'claude', codex = this.provider === 'codex';
+    const tier = this.fastAvailable ? this.fastChoice : null;
+    return {
+      cwd: this.existing ?? cwd, provider: this.provider,
+      // Sonda falhada deixa o Claude por omissão, e isso não é escolha a lembrar.
+      remember_provider: this.#providerPicked || Object.keys(this.providers).length > 0,
+      // D-003: a conta que ninguém escolheu não vai, e o servidor troca a que estiver a 95% ou mais;
+      // a troca automática da esgotada é essa mesma regra, então também não conta como escolha.
+      config_dir: claude && (this.#accountPicked || this.#accountSuggested) ? this.configDir : null,
+      codex_account: codex ? this.codexAccount : undefined,
+      engine: claude ? this.engine || null : null,
+      ...(claude && this.engine && this.engineAccount ? { engine_account: this.engineAccount } : {}),
+      model: this.bodyModel, effort: this.effort || null,
+      ...(tier ? { service_tier: tier } : {}),
+      ...((claude || codex) && this.headless !== null ? { headless: this.headless } : {}),
+      ...(claude && this.permission ? { permission_mode: this.permission } : {}),
+      // O backend só aceita permissão no Codex sem terminal (api.py, _create_session_owned).
+      ...(codex && this.headless === true && this.permission ? { permission_mode: this.permission } : {}),
+      // Worktree existente já é o cwd: branch nova ou outra branch não se somam a ela.
+      ...(this.existing ? {} : (worktreeChoiceOf(this) ?? {})),
+    };
+  }
+
+  /** Reserva do corpo pronto enquanto `composing`; fora disso, ou inelegível, solta. Roda num `$effect`. */
+  syncReserve(composing: boolean) {
+    const server = this.serverObj, cwd = this.cwd;
+    const ready = composing && server && cwd && !this.loading && this.providerAvailable ? { server, cwd } : null;
+    this.#reserve.update(ready?.server ?? null, ready ? this.#body(ready.cwd) : null);
+  }
+
+  releaseReserve() { this.#reserve.release(); }
 }
 
 function stepLabel(p: CreationProgress): string {

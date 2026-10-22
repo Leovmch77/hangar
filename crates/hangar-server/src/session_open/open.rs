@@ -58,6 +58,8 @@ pub trait OpenHost: Send + Sync {
     /// A sessão sem terminal recém-criada sobe em segundo plano (os hooks de SessionStart rodam enquanto
     /// a pessoa digita) e entrega o que está na fila. Não espera.
     fn wake(&self, name: &str);
+    /// As reservas pré-aquecidas deste servidor; `None` onde não há (comando de terminal, harness).
+    fn prewarm(&self) -> Option<&crate::prewarm::Store>;
 }
 
 /// UUID v4 de 16 bytes aleatórios em hexadecimal.
@@ -68,6 +70,9 @@ pub fn uuid4(hex: &str) -> String {
     let s: String = h.into_iter().collect();
     format!("{}-{}-{}-{}-{}", &s[..8], &s[8..12], &s[12..16], &s[16..20], &s[20..32])
 }
+
+/// Um id de conversa novo.
+pub(crate) fn new_session_id() -> String { uuid4(&crate::mods::state::random_hex(16)) }
 
 /// Os eventos do diário de uma criação, na ordem do `registry.create` (`@diag.rastrear`).
 struct Diary { events: Vec<Value>, op: String, started: Instant, name: String, provider: &'static str }
@@ -201,29 +206,52 @@ pub fn progress(name: &str) -> Value {
     progress_map().get(&crate::list::discover_other::sanitize_session_name(name)).cloned().unwrap_or_else(|| json!({"step": null, "params": {}}))
 }
 
-/// Nomes com abertura em curso neste processo, por casa (`home`).
-static OPENING: std::sync::Mutex<std::collections::BTreeSet<(PathBuf, String)>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+/// Nomes com abertura em curso neste processo, por casa (`home`); `true` = quem segura é uma reserva
+/// pré-aquecida.
+static OPENING: std::sync::Mutex<BTreeMap<(PathBuf, String), bool>> = std::sync::Mutex::new(BTreeMap::new());
 
-/// A reserva do nome enquanto a abertura corre: a segunda abertura do mesmo nome é recusada.
-pub(crate) struct NameClaim((PathBuf, String));
+fn opening_names() -> std::sync::MutexGuard<'static, BTreeMap<(PathBuf, String), bool>> {
+    OPENING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A reserva do nome enquanto a abertura corre: a segunda abertura do mesmo nome é recusada. A vazia
+/// (`Default`) não segura nada.
+#[derive(Default)]
+pub(crate) struct NameClaim(Option<(PathBuf, String)>);
 
 impl NameClaim {
-    pub(crate) fn take(home: &Path, name: &str) -> Result<Self, OpenError> {
+    pub(crate) fn take(home: &Path, name: &str) -> Result<Self, OpenError> { Self::hold(home, name, false) }
+
+    /// O nome da reserva pré-aquecida: a derivação do dono o trata como livre e a abertura descarta a reserva.
+    pub(crate) fn reserve(home: &Path, name: &str) -> Result<Self, OpenError> { Self::hold(home, name, true) }
+
+    fn hold(home: &Path, name: &str, reserve: bool) -> Result<Self, OpenError> {
         let key = (home.to_owned(), name.to_owned());
-        if !OPENING.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key.clone()) {
-            return Err(name_in_use());
-        }
-        Ok(Self(key))
+        let mut names = opening_names();
+        if names.contains_key(&key) { return Err(name_in_use()); }
+        names.insert(key.clone(), reserve);
+        Ok(Self(Some(key)))
     }
 
-    /// Há abertura em curso com esse nome, em qualquer casa deste processo.
-    pub(crate) fn opening(name: &str) -> bool {
-        OPENING.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(|(_, n)| n == name)
+    /// O nome da reserva adotada (ou descartada no meio da abertura) passa a ser de uma abertura comum.
+    pub(crate) fn promote(&self) {
+        if let Some(key) = &self.0 && let Some(reserve) = opening_names().get_mut(key) { *reserve = false; }
+    }
+
+    /// O nome segurado, se há.
+    pub(crate) fn name(&self) -> Option<&str> { self.0.as_ref().map(|(_, name)| name.as_str()) }
+
+    /// Há abertura (ou reserva) em curso com esse nome, em qualquer casa deste processo.
+    pub(crate) fn opening(name: &str) -> bool { opening_names().keys().any(|(_, n)| n == name) }
+
+    /// Como `opening`, sem contar as reservas pré-aquecidas.
+    pub(crate) fn opening_without_reserves(name: &str) -> bool {
+        opening_names().iter().any(|((_, n), reserve)| n == name && !reserve)
     }
 }
 
 impl Drop for NameClaim {
-    fn drop(&mut self) { OPENING.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&self.0); }
+    fn drop(&mut self) { if let Some(key) = self.0.take() { opening_names().remove(&key); } }
 }
 
 /// `orq_readonly.prepare`: o envelope `bwrap` que deixa o código só leitura, provado com `/bin/true`.
@@ -347,8 +375,24 @@ pub fn opens_here(spec: &SessionSpec) -> bool {
 
 /// Abre a sessão do spec resolvido: com terminal de todo provedor, ou o Claude e o Codex sem terminal.
 pub async fn open_session(host: &dyn OpenHost, resolved: Resolved, caller: &OpenCaller) -> Result<Opened, OpenError> {
+    open_adopting(host, resolved, caller, None).await
+}
+
+/// A reserva pré-aquecida que segura o nome sai antes: a pessoa não a vê, e ela nunca vira "nome em uso".
+async fn claim_name(host: &dyn OpenHost, name: &str) -> Result<NameClaim, OpenError> {
+    if let Some(store) = host.prewarm() { store.discard_name(name, "nome_pedido").await; }
+    NameClaim::take(host.home(), name)
+}
+
+/// `open_session` com a reserva pré-aquecida tirada para este pedido: o Claude sem terminal a adota se
+/// ela ainda cabe; senão ela sai e a abertura segue como sempre. Quem chama fecha com `Adopting::finish`.
+pub async fn open_adopting(host: &dyn OpenHost, resolved: Resolved, caller: &OpenCaller, mut adopting: Option<&mut super::adopt::Adopting>)
+    -> Result<Opened, OpenError> {
     let Resolved { mut spec, mut warnings, provider_source, initial_prompt, remember_provider, previous_non_plan, resume, restore } = resolved;
-    let _claim = NameClaim::take(host.home(), &spec.name)?;
+    let _claim = match adopting.as_deref_mut().and_then(|a| a.claim_for(&spec.name)) {
+        Some(claim) => claim,
+        None => claim_name(host, &spec.name).await?,
+    };
     let runtime =crate::runtime::codex_launch::runtime_config(&crate::accounts::environment::AccountEnvironment::from_map(host.env().clone()));
     let codex_home = match &spec.account {
         Account::Codex { account_id } => Some(super::codex::home(host.env(), account_id)?),
@@ -391,7 +435,7 @@ pub async fn open_session(host: &dyn OpenHost, resolved: Resolved, caller: &Open
         }
     }
     match launch(host, &mut spec, read_only, warnings, initial_prompt.as_deref(), remember_provider, previous_non_plan, &runtime, codex_home.as_deref(),
-                 resume.as_deref(), restore).await {
+                 resume.as_deref(), restore, adopting).await {
         Ok((jsonl, warnings, route)) => {
             // O Codex sem terminal já subiu dentro da abertura (`warm_codex`).
             if spec.surface == Surface::Headless && spec.provider == AgentProvider::Claude { host.wake(&spec.name); }
@@ -408,17 +452,47 @@ pub async fn open_session(host: &dyn OpenHost, resolved: Resolved, caller: &Open
 #[allow(clippy::too_many_arguments)]
 async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: Option<Vec<String>>, warnings: Vec<String>, initial_prompt: Option<&str>,
                 remember_provider: bool, previous_non_plan: Option<PermissionMode>, runtime: &Value, codex_home: Option<&str>,
-                resume: Option<&str>, restore: bool) -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
-    let config_dir = spec.account.config_dir().map(str::to_owned);
+                resume: Option<&str>, restore: bool, adopting: Option<&mut super::adopt::Adopting>)
+                -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
     // `ciclo_conta`: a guarda compartilhada da conta vale da reconciliação ao pane, e a exclusão dela
-    // (exclusiva) espera a sessão que está subindo.
-    let account_home = config_dir.clone().map(PathBuf::from).or_else(|| host.env().get("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()).map(PathBuf::from))
+    // (exclusiva) espera a sessão que está subindo. Também na adoção: o `--prep` pode mudar a
+    // configuração que a reserva leu, e a guarda segura a conta até o sidecar existir.
+    let (_guard, mut avisos) = prepare_account(host, spec, codex_home).await?;
+    avisos.extend(warnings);
+    progress_step(&spec.name, "criando", json!({}));
+    let mut diary = Diary::new(crate::mods::state::random_hex(8), &spec.name, spec.provider.name());
+    let result = match (spec.surface, codex_home) {
+        (Surface::Terminal, _) => terminal_life(host, spec, read_only.as_deref(), initial_prompt, &mut diary, remember_provider, runtime, codex_home, resume, restore).await,
+        (Surface::Headless, Some(home)) =>
+            codex_headless_life(host, spec, home, initial_prompt, &mut diary, remember_provider, resume).await.map(|w| (None, w, None)),
+        (Surface::Headless, None) => headless_life(host, spec, previous_non_plan, initial_prompt, &mut diary, remember_provider, resume, adopting).await,
+    };
+    let events = diary.end(result.as_ref().err());
+    host.diary(events);
+    let (jsonl, mut born_warnings, route) = result?;
+    avisos.append(&mut born_warnings);
+    Ok((jsonl, avisos, route))
+}
+
+/// A conta que a sessão lê, como a trava das contas a identifica.
+pub(crate) fn account_key(host: &dyn OpenHost, spec: &SessionSpec, codex_home: Option<&str>) -> Result<crate::accounts::AccountKey, OpenError> {
+    let account_home = spec.account.config_dir().map(PathBuf::from)
+        .or_else(|| host.env().get("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()).map(PathBuf::from))
         .unwrap_or_else(|| host.home().join(".claude"));
-    let locks = crate::accounts::AccountLocks::new(host.home().join(".hangar").join("account-locks"));
-    let key = match codex_home {
+    match codex_home {
         Some(home) => crate::accounts::AccountKey::new(crate::accounts::Provider::Codex, Path::new(home)),
         None => crate::accounts::AccountKey::new(crate::accounts::Provider::Claude, &account_home),
-    }.map_err(|e| creation(format!("conta inválida: {e}")))?;
+    }.map_err(|e| creation(format!("conta inválida: {e}")))
+}
+
+/// O começo de toda abertura e da reserva pré-aquecida: login da conta do Hangar, guarda compartilhada
+/// da conta (vale até quem chamou soltá-la) e a reconciliação `hangar-conta --prep`. Devolve a guarda
+/// e os avisos da reconciliação.
+pub(crate) async fn prepare_account(host: &dyn OpenHost, spec: &SessionSpec, codex_home: Option<&str>)
+    -> Result<(Option<crate::accounts::AccountGuard>, Vec<String>), OpenError> {
+    let config_dir = spec.account.config_dir().map(str::to_owned);
+    let locks = crate::accounts::AccountLocks::new(host.home().join(".hangar").join("account-locks"));
+    let key = account_key(host, spec, codex_home)?;
     let hangar_account = config_dir.as_deref().filter(|dir| claude::hangar_account(Path::new(dir)).is_some());
     // O Kimi não lê a conta Claude: nem trava nem reconciliação.
     let reads_account = spec.provider != AgentProvider::Kimi;
@@ -430,7 +504,7 @@ async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: Option<V
         return Err(OpenError { params: json!({"conta": label}),
             ..OpenError::new(409, "erro_conta_sem_login", format!("a conta {label} não está logada; faça login nela antes de abrir uma sessão")) });
     }
-    let _guard = match reads_account {
+    let guard = match reads_account {
         true => Some(crate::accounts::claude_refresh::acquire_for_session(&locks, &key, Instant::now() + Duration::from_secs(5)).await
             .map_err(|e| match e {
                 crate::accounts::LockError::Busy => OpenError::new(409, "account_busy", "a conta está ocupada por outra operação"),
@@ -448,20 +522,7 @@ async fn launch(host: &dyn OpenHost, spec: &mut SessionSpec, read_only: Option<V
         let out = host.run(claude::prep_argv(&account, &spec.cwd), Duration::from_secs(120)).await;
         avisos = claude::prep_result(&account, out.code, &out.stderr)?;
     }
-    avisos.extend(warnings);
-    progress_step(&spec.name, "criando", json!({}));
-    let mut diary = Diary::new(crate::mods::state::random_hex(8), &spec.name, spec.provider.name());
-    let result = match (spec.surface, codex_home) {
-        (Surface::Terminal, _) => terminal_life(host, spec, read_only.as_deref(), initial_prompt, &mut diary, remember_provider, runtime, codex_home, resume, restore).await,
-        (Surface::Headless, Some(home)) =>
-            codex_headless_life(host, spec, home, initial_prompt, &mut diary, remember_provider, resume).await.map(|w| (None, w, None)),
-        (Surface::Headless, None) => headless_life(host, spec, previous_non_plan, initial_prompt, &mut diary, remember_provider, resume).await,
-    };
-    let events = diary.end(result.as_ref().err());
-    host.diary(events);
-    let (jsonl, mut born_warnings, route) = result?;
-    avisos.append(&mut born_warnings);
-    Ok((jsonl, avisos, route))
+    Ok((guard, avisos))
 }
 
 /// Com motor: o `hangar-engine` no PATH (sem ele a sessão nasce e morre calada) e a conta ChatGPT fixa,
@@ -482,7 +543,7 @@ fn engine_route(host: &dyn OpenHost, spec: &SessionSpec) -> Result<Option<claude
 
 /// O pane do Claude, o transcript da conversa nova e a rota da conta ChatGPT fixa do motor.
 /// As escolhas de plugins e skills da conversa: as pedidas e, na retomada, as que ela já tinha guardado.
-async fn conversation_settings(host: &dyn OpenHost, spec: &SessionSpec, sid: &str, resume: bool) -> Result<Option<Value>, OpenError> {
+pub(crate) async fn conversation_settings(host: &dyn OpenHost, spec: &SessionSpec, sid: &str, resume: bool) -> Result<Option<Value>, OpenError> {
     if spec.customizations.is_none() && !resume { return Ok(None); }
     let effective_dir = spec.account.config_dir().map(str::to_owned).or_else(|| host.env().get("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()).cloned())
         .unwrap_or_else(|| host.home().join(".claude").to_string_lossy().into_owned());
@@ -558,9 +619,12 @@ fn enqueue_first(queue_dir: &Path, key: &str, name: &str, text: &str) -> std::io
 }
 
 /// Do `validar` ao `sessao.criada` do Claude sem terminal: grava a primeira mensagem, o registro e o
-/// sidecar. O processo sobe depois (`OpenHost::wake`), pelo spec.
+/// sidecar. O processo sobe depois (`OpenHost::wake`), pelo spec; com a reserva adotada, o sidecar já
+/// aponta o cano vivo dela e a subida só conecta.
+#[allow(clippy::too_many_arguments)]
 async fn headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, previous_non_plan: Option<PermissionMode>, initial_prompt: Option<&str>,
-                       diary: &mut Diary, remember_provider: bool, resume: Option<&str>) -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
+                       diary: &mut Diary, remember_provider: bool, resume: Option<&str>, adopting: Option<&mut super::adopt::Adopting>)
+                       -> Result<(Option<String>, Vec<String>, Option<claude::EngineRoute>), OpenError> {
     diary.step("validar");
     let sidecars = host.home().join(".hangar");
     let taken = |kind: &str| crate::runtime::codex_sidecar::path(&sidecars.join(kind), &spec.name).exists();
@@ -572,9 +636,23 @@ async fn headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, previous_non
         return Err(name_in_use());
     }
     let left = host.leave_old_group(&spec.name).await?;
+    // Depois do `--prep`: a configuração que ele mexeu entra na comparação com a da reserva.
+    let mut adopting = match adopting {
+        Some(adopting) if resume.is_none() => adopting.confirm(spec).await.then_some(adopting),
+        _ => None,
+    };
+    // A reserva já roda com a chave e a conversa dela (estão no ambiente do processo): a sessão nasce nelas.
     // Retomada: o processo sobe com `--resume`, porque o transcript dessa conversa já existe.
-    let sid = resume.map_or_else(|| host.new_session_id(), str::to_owned);
-    let settings = conversation_settings(host, spec, &sid, resume.is_some()).await?;
+    // Adotada, as escolhas da conversa são as que a reserva gravou ao nascer (o processo subiu com elas);
+    // a comparação do spec garantiu a mesma seleção pedida.
+    let (sid, settings) = match adopting.as_deref().and_then(super::adopt::Adopting::reserve) {
+        Some(reserve) => { spec.key = reserve.key.clone(); (reserve.session_id.clone(), reserve.settings.clone()) }
+        None => {
+            let sid = resume.map_or_else(|| host.new_session_id(), str::to_owned);
+            let settings = conversation_settings(host, spec, &sid, resume.is_some()).await?;
+            (sid, settings)
+        }
+    };
     let route = engine_route(host, spec)?;
     spec.conversation = Some(sid.clone());
     diary.step("confiar_pasta");
@@ -596,8 +674,14 @@ async fn headless_life(host: &dyn OpenHost, spec: &mut SessionSpec, previous_non
             return Err(OpenError::new(500, "erro_criacao_sessao", format!("a primeira mensagem não entrou na fila: {error}")));
         }
     }
-    let meta = headless_sidecar(spec, &sid, previous_non_plan, settings.as_ref(), route.as_ref()).as_object().cloned().unwrap_or_default();
+    let mut meta = headless_sidecar(spec, &sid, previous_non_plan, settings.as_ref(), route.as_ref()).as_object().cloned().unwrap_or_default();
+    if let Some(reserve) = adopting.as_deref().and_then(super::adopt::Adopting::reserve) {
+        // O `cano` inteiro, como a subida grava: o `wake` acha o processo vivo e conecta sem subir outro.
+        let cano = serde_json::to_value(&reserve.cano).map_err(|e| OpenError::new(500, "erro_criacao_sessao", format!("o processo da reserva não foi gravado: {e}")))?;
+        meta.insert("cano".into(), cano);
+    }
     persist(host, spec, diary, "sidecar_gravado", &sidecars.join("claude-headless"), &meta)?;
+    if let Some(adopting) = adopting.as_deref_mut() { adopting.adopted().await; }
     let jsonl = claude::transcript(spec, &sid, &host.server_projects()).to_string_lossy().into_owned();
     let born = Born { name: spec.name.clone(), provider: spec.provider, jsonl: Some(jsonl.clone()), remember_provider, codex_terminal: None, restored: false };
     let mut warnings = left;
