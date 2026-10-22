@@ -600,6 +600,9 @@ pub fn start(runtime: Arc<Runtime>, cx: &mut App) {
         }) else { return };
         cx.background_executor().timer(EVERY).await;
     }).detach();
+    cx.observe(&entity, |entity, cx| {
+        if entity.read(cx).survey.pending && !entity.read(cx).busy() { entity.update(cx, |this, cx| this.refresh_machine_updates(cx)); }
+    }).detach();
     cx.set_global(Handle(entity));
 }
 
@@ -896,6 +899,9 @@ impl Updater {
             window.push_notification(Notification::error(tr("app_restart_busy")), cx);
             return;
         }
+        // Atualização só desta máquina: a linha dela na tela de Servidores reconsulta quando terminar.
+        // Na rodada de todas, as linhas ficam com o desfecho.
+        if self.batch.is_none() { self.survey.pending = true; }
         cx.notify();
         let task = read_state(&self.runtime, &api, &[("procurar", "1")], 150);
         let handle = window.window_handle();
