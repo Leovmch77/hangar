@@ -582,6 +582,9 @@ pub fn start(runtime: Arc<Runtime>, cx: &mut App) {
         }) else { return };
         cx.background_executor().timer(EVERY).await;
     }).detach();
+    cx.observe(&entity, |entity, cx| {
+        if entity.read(cx).survey.pending && !entity.read(cx).busy() { entity.update(cx, |this, cx| this.refresh_machine_updates(cx)); }
+    }).detach();
     cx.set_global(Handle(entity));
 }
 
@@ -731,7 +734,12 @@ impl Updater {
     }
 
     /// Mesma ação do botão do topo: atualiza o servidor desta máquina se estiver atrás e depois o app.
-    pub fn start_update(&mut self, window: &mut Window, cx: &mut Context<Self>) { if !self.suspended { self.run(window, cx) } }
+    pub fn start_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.suspended { return; }
+        // A linha desta máquina na tela de Servidores reconsulta quando a atualização terminar.
+        self.survey.pending = true;
+        self.run(window, cx)
+    }
 
     /// Ligado pelo assistente enquanto o script roda; ao desligar, a procura que ficou para trás sai agora.
     pub fn set_suspended(&mut self, on: bool, cx: &mut Context<Self>) {

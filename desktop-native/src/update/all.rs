@@ -143,7 +143,7 @@ impl Row {
 }
 
 #[derive(Default)]
-pub(super) struct Survey { rows: Vec<Row>, aliases: HashMap<String, String>, generation: u64, from_round: bool }
+pub(super) struct Survey { rows: Vec<Row>, aliases: HashMap<String, String>, generation: u64, from_round: bool, pub(super) pending: bool }
 
 impl Survey {
     fn prepare(&mut self, machines: &[Machine], mut aliases: HashMap<String, String>) {
@@ -179,9 +179,11 @@ impl Survey {
     }
 }
 
-fn idle_visible(plan: &Plan, count: usize, rows: &[Row]) -> bool {
-    plan.visible() || (count >= 2 && rows.iter().any(|row| !row.local && row.status == Status::Available))
+fn remote_available(count: usize, rows: &[Row]) -> bool {
+    count >= 2 && rows.iter().any(|row| !row.local && row.status == Status::Available)
 }
+
+fn idle_visible(plan: &Plan, count: usize, rows: &[Row]) -> bool { plan.visible() || remote_available(count, rows) }
 
 #[derive(Default)]
 struct Progress { rows: Vec<Row>, preparing: bool, deferred_app: bool }
@@ -320,7 +322,9 @@ impl Updater {
     }
 
     pub(crate) fn refresh_machine_updates(&mut self, cx: &mut Context<Self>) {
-        if self.busy() { return; }
+        // Ocupado, a consulta espera: o observador de `update::start` a roda quando o atualizador fica ocioso.
+        if self.busy() { self.survey.pending = true; return; }
+        self.survey.pending = false;
         self.survey.generation += 1;
         let generation = self.survey.generation;
         let machines = self.all_machines();
@@ -363,7 +367,7 @@ impl Updater {
     }
 
     pub(crate) fn render_machine_update_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        (self.update_all_count() >= 2).then(|| Button::new("machines-update-all").outline().small()
+        (self.all_running || remote_available(self.update_all_count(), &self.survey.rows)).then(|| Button::new("machines-update-all").outline().small()
             .label(tr_shared("update_all_short", &[])).icon(IconName::Download)
             .tooltip(tr_shared("update_all_button", &[("n", &self.update_all_count().to_string())]))
             .loading(self.all_running).disabled(self.busy())
