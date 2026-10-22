@@ -52,6 +52,24 @@ fn newer(remote: &str, local: &str) -> bool {
     matches!((parse(remote), parse(local)), (Some(r), Some(l)) if r > l)
 }
 
+fn installed_restart_needed(mark: &Path, exe: Option<&Path>, installed: Option<&Path>, current: &str,
+    built: Option<&str>, channel: &str, busy: bool, attempted: &mut Option<String>) -> bool {
+    if busy || channel != "main" || built.is_some_and(|built| !built.is_empty() && built != "main") { return false; }
+    let (Some(exe), Some(installed)) = (exe, installed) else { return false };
+    // Não resolve o arquivo: um atalho para um build de desenvolvimento continua fora da instalação.
+    #[cfg(windows)]
+    let same = exe.to_string_lossy().trim_start_matches(r"\\?\").eq_ignore_ascii_case(installed.to_string_lossy().trim_start_matches(r"\\?\"));
+    #[cfg(not(windows))]
+    let same = exe == installed;
+    if !same { return false; }
+    let Some(mark) = std::fs::read(mark).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()) else { return false };
+    let Some(version) = mark["version"].as_str() else { return false };
+    if mark["sem_build"].as_bool() == Some(true) || !newer(version, current) || attempted.as_deref() == Some(version) { return false; }
+    // Relançamento que falha mantém a janela: não tenta o mesmo arquivo quebrado a cada conferência.
+    *attempted = Some(version.to_owned());
+    true
+}
+
 /// Versão mais nova da mesma release, ou qualquer versão de outra: trocar de canal (inclusive a volta para a main, que
 /// costuma ter menos commits que a branch de teste) não pode esperar a contagem passar a do app instalado. Compara pela
 /// release, não pelo nome: `a/b` e `a-b` publicam na mesma e não podem se oferecer uma à outra para sempre.
@@ -746,6 +764,18 @@ impl Updater {
 
     pub fn is_busy(&self) -> bool { self.busy() }
 
+    pub(crate) fn installed_update_ready(&self, attempted: &mut Option<String>) -> bool {
+        if !cfg!(any(target_os = "linux", windows)) { return false; }
+        let Some(home) = std::env::home_dir() else { return false };
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        let installed = crate::app::setup::installed_app_target(cfg!(windows), &home, local.as_deref());
+        installed_restart_needed(&home.join(".hangar/native/release.json"), self.exe.as_deref(), installed.as_deref(), CURRENT,
+            BUILT_CHANNEL, &self.channel(), self.restart_held(), attempted)
+    }
+
+    /// Atualizando ou com o assistente aberto: o reinício por troca externa espera.
+    pub(crate) fn restart_held(&self) -> bool { self.busy() || self.suspended }
+
     pub fn restart_desktop(&mut self, cx: &mut Context<Self>) -> Result<tokio::task::JoinHandle<Result<(), String>>, String> {
         if self.busy() { return Err(tr("app_restart_busy")); }
         let exe = self.exe.clone().ok_or_else(|| tr("app_restart_failed"))?;
@@ -1225,6 +1255,61 @@ mod tests {
         assert!(!newer("0.1.0.2500", "0.1.0.2533"));
         assert!(!newer("lixo", "0.1.0.1"));
         assert!(!newer("0.1.0.1", "2026.09.27-abc"));
+    }
+
+    #[test]
+    fn installed_restart_requires_a_newer_mark_and_an_idle_installed_stable_app() {
+        let dir = intent_dir("installed-restart");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mark = dir.join("release.json");
+        let installed = dir.join("hangar-native");
+        let development = dir.join("target/debug/hangar-native");
+        std::fs::write(&mark, r#"{"version":"0.1.0.110","files":{},"requires_api":1}"#).unwrap();
+        assert!(installed_restart_needed(&mark, Some(&installed), Some(&installed), APP, Some("main"), "main", false, &mut None));
+        assert!(!installed_restart_needed(&mark, Some(&installed), Some(&installed), APP, Some("main"), "main", true, &mut None));
+        assert!(!installed_restart_needed(&mark, Some(&development), Some(&installed), APP, Some("main"), "main", false, &mut None));
+        assert!(!installed_restart_needed(&mark, None, Some(&installed), APP, Some("main"), "main", false, &mut None));
+        assert!(!installed_restart_needed(&mark, Some(&installed), None, APP, Some("main"), "main", false, &mut None));
+        assert!(!installed_restart_needed(&mark, Some(&installed), Some(&installed), APP, Some("beta"), "main", false, &mut None));
+        assert!(!installed_restart_needed(&mark, Some(&installed), Some(&installed), APP, Some("main"), "beta", false, &mut None));
+        assert!(installed_restart_needed(&mark, Some(&installed), Some(&installed), APP, None, "main", false, &mut None));
+        assert!(!installed_restart_needed(&mark, Some(&installed), Some(&installed), "0.1.0.110", Some("main"), "main", false, &mut None), "o processo novo não reinicia de novo");
+        assert!(!installed_restart_needed(&mark, Some(&installed), Some(&installed), "0.1.0.120", Some("main"), "main", false, &mut None));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn installed_restart_attempts_each_version_once_but_waits_while_busy() {
+        let dir = intent_dir("installed-restart-once");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mark = dir.join("release.json");
+        let installed = dir.join("hangar-native");
+        std::fs::write(&mark, r#"{"version":"0.1.0.110"}"#).unwrap();
+        let mut attempted = None;
+        assert!(!installed_restart_needed(&mark, Some(&installed), Some(&installed), APP, Some("main"), "main", true, &mut attempted));
+        assert_eq!(attempted, None, "ocupado apenas adia a tentativa");
+        assert!(installed_restart_needed(&mark, Some(&installed), Some(&installed), APP, Some("main"), "main", false, &mut attempted));
+        assert!(!installed_restart_needed(&mark, Some(&installed), Some(&installed), APP, Some("main"), "main", false, &mut attempted), "falha não relança a mesma versão indefinidamente");
+        std::fs::write(&mark, r#"{"version":"0.1.0.120"}"#).unwrap();
+        assert!(installed_restart_needed(&mark, Some(&installed), Some(&installed), APP, Some("main"), "main", false, &mut attempted));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn installed_restart_ignores_missing_incomplete_or_unsupported_marks() {
+        let dir = intent_dir("installed-restart-marks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mark = dir.join("release.json");
+        let installed = dir.join("hangar-native");
+        assert!(!installed_restart_needed(&mark, Some(&installed), Some(&installed), APP, Some("main"), "main", false, &mut None));
+        for text in ["", "{", "{}", r#"{"version":110}"#, r#"{"version":"invalid"}"#,
+            r#"{"sem_build":true}"#, r#"{"version":"0.1.0.110","sem_build":true}"#] {
+            std::fs::write(&mark, text).unwrap();
+            assert!(!installed_restart_needed(&mark, Some(&installed), Some(&installed), APP, Some("main"), "main", false, &mut None), "{text}");
+        }
+        std::fs::write(&mark, r#"{"version":"0.1.0.110"}"#).unwrap();
+        assert!(installed_restart_needed(&mark, Some(&installed), Some(&installed), APP, Some("main"), "main", false, &mut None), "a próxima leitura retoma depois da gravação completa");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -838,6 +838,7 @@ impl Hangar {
         }
         Self::watch_system(window, cx);
         Self::watch_dictation(window, cx);
+        Self::watch_installed_update(window, cx);
         let (tray_tx, tray_rx) = async_channel::unbounded::<crate::tray::TrayEvent>();
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(event) = tray_rx.recv().await {

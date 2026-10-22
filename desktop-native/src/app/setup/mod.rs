@@ -23,6 +23,7 @@ mod tail;
 mod wizard;
 
 pub(super) use wizard::SetupWizard;
+pub(crate) use app_copy::target as installed_app_target;
 
 /// O assistente existe onde há script de instalação com modo `--app`.
 pub(super) fn supported() -> bool { cfg!(any(target_os = "linux", target_os = "windows")) }

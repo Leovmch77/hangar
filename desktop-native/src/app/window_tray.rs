@@ -26,6 +26,43 @@ fn is_bounce(since_last: Option<Duration>) -> bool { since_last.is_some_and(|gap
 pub(super) fn hides_on_close(keep: bool, icon_online: Option<bool>) -> bool { keep && icon_online == Some(true) }
 
 impl Hangar {
+    /// A marca só muda quando o instalador termina: o vigia acorda nessa hora, sem ler o arquivo à toa.
+    pub(super) fn watch_installed_update(window: &mut Window, cx: &mut Context<Self>) {
+        use notify::Watcher as _;
+        let Some(dir) = std::env::home_dir().map(|home| home.join(".hangar/native")) else { return };
+        let _ = std::fs::create_dir_all(&dir);
+        let (tx, rx) = async_channel::bounded::<()>(1);
+        let first = tx.clone();
+        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            if event.is_ok_and(|event| !matches!(event.kind, notify::EventKind::Access(_))) { let _ = tx.try_send(()); }
+        }).and_then(|mut watcher| watcher.watch(&dir, notify::RecursiveMode::NonRecursive).map(|()| watcher));
+        let watcher = match watcher {
+            Ok(watcher) => watcher,
+            Err(error) => { crate::log_line(&format!("reinício por troca do app desligado: vigia de {} falhou: {error}", dir.display())); return }
+        };
+        // Uma troca gravada antes de o vigia ficar de pé não gera evento: confere uma vez agora.
+        let _ = first.try_send(());
+        cx.spawn_in(window, async move |this, cx| {
+            let _watcher = watcher;
+            let mut attempted = None;
+            while rx.recv().await.is_ok() {
+                // Ocupado (atualizando, rodada), reconfere a cada 5 s até poder reiniciar.
+                loop {
+                    let Ok(waiting) = this.update_in(cx, |this, window, cx| {
+                        let (busy, ready) = {
+                            let updater = cx.global::<crate::update::Handle>().0.read(cx);
+                            (updater.restart_held(), updater.installed_update_ready(&mut attempted))
+                        };
+                        if ready { this.restart_from_tray(window, cx); }
+                        !ready && busy
+                    }) else { return };
+                    if !waiting { break; }
+                    cx.background_executor().timer(Duration::from_secs(5)).await;
+                }
+            }
+        }).detach();
+    }
+
     /// Põe o ícone de acordo com a opção: cria quando liga, remove quando desliga.
     pub(super) fn sync_tray(&mut self, cx: &mut Context<Self>) {
         if !(crate::tray::SUPPORTED && appearance::get().keep_in_tray) {
