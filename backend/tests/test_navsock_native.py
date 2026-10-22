@@ -202,3 +202,27 @@ async def test_recusa_e_troca_pelo_celular_nao_deixam_tamanho_preso(monkeypatch)
     layout["atual"] = "mobile"   # o celular trocou o layout no meio
     await navsock._devolver_layout("s", a)
     assert (layout["atual"], navsock._imposto) == ("mobile", {}), "a escolha de depois fica, e nada sobra guardado"
+
+
+async def test_print_em_laco_sem_esperar_screencast_a_cada_quadro(monkeypatch):
+    """Sem compositor, a espera pelo screencast é paga uma vez; o print segue no ritmo dele."""
+    monkeypatch.setattr(navsock, "ESPERA_SCREENCAST", 0.3)
+    monkeypatch.setattr(navsock, "INTERVALO_PRINT", 0.05)
+
+    class Cdp:
+        eventos: asyncio.Queue = asyncio.Queue()
+        pedidos: list[tuple[str, dict]] = []
+
+        async def cmd(self, metodo, params=None, espera=10):
+            self.pedidos.append((metodo, params or {}))
+            return {"result": {"data": "QUJD"}} if metodo == "Page.captureScreenshot" else {"result": {}}
+
+    cdp, tela = Cdp(), _Tela()
+    estado = {"w": 1280, "h": 800, "pedida": 1200, "qualidade": 80}
+    fluxo = asyncio.create_task(navsock._fluxo_de_quadros(cdp, tela, estado))
+    await asyncio.sleep(1.0)
+    fluxo.cancel()
+    prints = [m for m in tela.enviados if m.get("t") == "q" and m.get("lento")]
+    assert len(prints) >= 6, f"{len(prints)} prints em 1 s"
+    qualidades = {p.get("quality") for m, p in cdp.pedidos if m in ("Page.startScreencast", "Page.captureScreenshot")}
+    assert qualidades == {80}, "quem olha numa tela grande pede a qualidade"

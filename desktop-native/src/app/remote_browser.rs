@@ -12,6 +12,7 @@ use crate::{api::Api, ws::{self, TextEvent, TextSocket}};
 const MOVE_EVERY: Duration = Duration::from_millis(40);
 /// Largura máxima do quadro pedido, a mesma que o servidor aceita.
 const MAX_WIDTH: f32 = 1400.;
+const QUALITY: u32 = 80;
 /// Tamanho do painel repassado à página no máximo a cada este tempo, enquanto ele é arrastado.
 const RESIZE_EVERY: Duration = Duration::from_millis(500);
 
@@ -77,7 +78,8 @@ impl RemoteBrowser {
         let seq = self.seq;
         let width = f32::from(self.bounds.get().size.width) * self.scale.get();
         let width = if width > 0. { width.min(MAX_WIDTH) } else { MAX_WIDTH };
-        let path = format!("/api/sessions/{}/nav-remoto?w={}", self.name, width.round() as u32);
+        // Tela de computador: qualidade acima da do celular, que paga a banda no túnel.
+        let path = format!("/api/sessions/{}/nav-remoto?w={}&q={QUALITY}", self.name, width.round() as u32);
         let socket = TextSocket::open(&self.runtime, &self.api, &path, self.token.clone());
         let events = socket.events();
         self.socket = Some(socket);

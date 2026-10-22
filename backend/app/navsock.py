@@ -266,23 +266,27 @@ async def _fluxo_de_quadros(cdp: _Cdp, ws: WebSocket, estado: dict) -> None:
     await cdp.cmd("Page.enable")
     # O quadro sai no tamanho que a tela de quem olha aguenta, não no tamanho da página: mandar
     # 1400px de largura pra um iPhone é pagar banda por pixel que a tela dele não mostra, e a conta
-    # é paga no túnel da VPS. `quality` 45 já é o suficiente pra ler texto nesse tamanho.
+    # é paga no túnel da VPS. A qualidade padrão (45) já basta pra ler texto nesse tamanho.
     largura = int(estado.get("pedida") or 0) or 1400
     # Um quadro a cada 5 (12 por segundo a 60 Hz), o ritmo que o laço abaixo envia: o resto o Chromium nem
     # codificaria, e no app nativo atravessaria o pipe à toa.
-    await cdp.cmd("Page.startScreencast", {"format": "jpeg", "quality": 45,
+    await cdp.cmd("Page.startScreencast", {"format": "jpeg", "quality": _qualidade(estado),
                                            "maxWidth": largura, "maxHeight": largura,
                                            "everyNthFrame": 5})
     ultimo_envio = 0.0
+    espera = ESPERA_SCREENCAST
     while True:
         try:
-            msg = await asyncio.wait_for(cdp.eventos.get(), timeout=ESPERA_SCREENCAST)
+            msg = await asyncio.wait_for(cdp.eventos.get(), timeout=espera)
         except asyncio.TimeoutError:
-            # Sem compositor: o print é o único caminho, e ele é caro — por isso só entra aqui.
+            # Sem compositor: o print é o único caminho, e ele é caro — por isso só entra aqui. A espera
+            # pelo screencast já foi paga: dali em diante só se confere a fila entre um print e outro.
             await _print_avulso(cdp, ws, estado)
+            espera = 0.01
             continue
         metodo = msg.get("method")
         if metodo == "Page.screencastFrame":
+            espera = ESPERA_SCREENCAST
             p = msg.get("params") or {}
             # O ACK é obrigatório: sem ele o Chromium para de emitir. Vai SEMPRE, mesmo no quadro
             # que a gente descarta por taxa — descartar é decisão nossa, não motivo pra travar.
@@ -307,7 +311,8 @@ async def _fluxo_de_quadros(cdp: _Cdp, ws: WebSocket, estado: dict) -> None:
 
 async def _print_avulso(cdp: _Cdp, ws: WebSocket, estado: dict) -> None:
     try:
-        r = await cdp.cmd("Page.captureScreenshot", {"format": "jpeg", "quality": 55}, espera=20)
+        r = await cdp.cmd("Page.captureScreenshot", {"format": "jpeg", "quality": max(55, _qualidade(estado))},
+                          espera=20)
     except websockets.ConnectionClosed as e:
         # CDP morreu (o navegador fechou). Sem relevantar, o laço ficava tentando pra sempre: sem
         # quadro, sem erro na tela e sem nunca terminar o handler.
@@ -343,6 +348,18 @@ async def _autorizado(ws: WebSocket) -> bool:
         return False
     # Sem Origin: ela barra credencial ambiente, e página estranha não tem o `?token=`.
     return True
+
+
+def _qualidade(estado: dict) -> int:
+    """JPEG pedido por quem olha (`q`); sem pedido, o 45 que basta ao celular e poupa o túnel."""
+    return int(estado.get("qualidade") or 45)
+
+
+def _qualidade_pedida(ws: WebSocket) -> int:
+    try:
+        return max(30, min(90, int(ws.query_params.get("q", "0")))) if ws.query_params.get("q") else 0
+    except ValueError:
+        return 0
 
 
 def _largura_pedida(ws: WebSocket) -> int:
@@ -388,7 +405,7 @@ async def nav_ws(ws: WebSocket, name: str,
         await ws.close(code=1008, reason="sessao sem navegador")
         return
     await ws.accept()
-    estado = {"w": 1280, "h": 800, "pedida": _largura_pedida(ws)}
+    estado = {"w": 1280, "h": 800, "pedida": _largura_pedida(ws), "qualidade": _qualidade_pedida(ws)}
     try:
         async with conexao as cdp:
             # A url do sidecar é a da última vez que o shell gravou; quem sabe a de agora é a
