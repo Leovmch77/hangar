@@ -289,6 +289,11 @@ impl Batch {
 }
 
 /// Um pedido por worktree, com a semântica do lote: perde arquivos só a que a confirmação mostrou perdendo.
+/// O servidor respondeu: a recusa tem motivo e mostra ele; "não confirmou" é só quando não veio resposta.
+fn answered_failure(e: Failure) -> String {
+    Hangar::failure(&Failure { uncertain: e.uncertain && e.status.is_none(), ..e })
+}
+
 fn one_path_body(repo: &str, w: &WorktreeStatus) -> Value {
     json!({"repo": repo, "confirm": true, "paths": [&w.path], "lossy": if loses(w) { vec![&w.path] } else { vec![] }})
 }
@@ -844,7 +849,7 @@ impl Hangar {
                     match joined {
                         Ok(Ok(_)) if action == "delete" => Ok(vec![w.path.clone()]),
                         Ok(Ok(v)) => v.get("removed").and_then(|r| serde_json::from_value::<Vec<String>>(r.clone()).ok()).ok_or_else(|| tr("invalid_response")),
-                        Ok(Err(e)) => Err(Self::failure(&e)),
+                        Ok(Err(e)) => Err(answered_failure(e)),
                         Err(_) => Err(tr("delivery_uncertain")),
                     }
                 } else {
@@ -959,7 +964,7 @@ impl Hangar {
                 let result = match joined {
                     Ok(Ok(v)) if session => serde_json::from_value::<SessionInfo>(v).map(Ok).map_err(|_| tr("invalid_response")),
                     Ok(Ok(v)) => v.get("path").and_then(Value::as_str).map(|p| Err(p.to_owned())).ok_or_else(|| tr("invalid_response")),
-                    Ok(Err(e)) => Err(Self::failure(&e)),
+                    Ok(Err(e)) => Err(answered_failure(e)),
                     Err(_) => Err(tr("delivery_uncertain")),
                 };
                 if let Some(c) = this.worktrees.create.as_mut() { c.busy = false; }

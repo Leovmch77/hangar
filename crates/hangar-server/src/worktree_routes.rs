@@ -288,21 +288,6 @@ pub(crate) async fn fresh_context(st: &AppState) -> hangar_workspace::Result<Con
     let mut ctx = context(st)
         .await
         .map_err(|_| hangar_workspace::error(503, "fatos de worktrees indisponíveis"))?;
-    if ctx.sessions.iter().any(|s| {
-        [
-            s.cwd.as_deref(),
-            s.git_cwd.as_deref(),
-            s.worktree_path.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .all(|p| p.is_empty())
-    }) {
-        return Err(hangar_workspace::error(
-            503,
-            "pasta de sessão desconhecida; remoção conservada",
-        ));
-    }
     let (panes, problem) = st
         .list
         .env()
@@ -310,18 +295,55 @@ pub(crate) async fn fresh_context(st: &AppState) -> hangar_workspace::Result<Con
         .list_panes_checked()
         .await
         .map_err(|_| hangar_workspace::error(503, "terminais de worktrees indisponíveis"))?;
-    if problem.is_some() || panes.iter().any(|p| p.cwd.is_empty()) {
+    if problem.is_some() {
         return Err(hangar_workspace::error(
             503,
             "terminais de worktrees ilegíveis",
         ));
     }
+    let panes = live_panes(&ctx.sessions, panes)?;
     ctx.sessions.extend(panes.into_iter().map(|p| Session {
         name: p.session,
         cwd: Some(p.cwd),
         ..Session::default()
     }));
     Ok(ctx)
+}
+
+/// Pasta desconhecida trava a remoção. Terminal morto não tem processo nem pasta e não prende nada,
+/// nem a sessão que só tem terminais mortos.
+fn live_panes(
+    sessions: &[Session],
+    panes: Vec<crate::list::mux::Pane>,
+) -> hangar_workspace::Result<Vec<crate::list::mux::Pane>> {
+    let only_dead = |name: &str| {
+        let mut own = panes.iter().filter(|p| p.session == name).peekable();
+        own.peek().is_some() && own.all(|p| p.dead)
+    };
+    if sessions.iter().any(|s| {
+        !only_dead(&s.name)
+            && [
+                s.cwd.as_deref(),
+                s.git_cwd.as_deref(),
+                s.worktree_path.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .all(|p| p.is_empty())
+    }) {
+        return Err(hangar_workspace::error(
+            503,
+            "pasta de sessão desconhecida; remoção conservada",
+        ));
+    }
+    let panes: Vec<_> = panes.into_iter().filter(|p| !p.dead).collect();
+    if panes.iter().any(|p| p.cwd.is_empty()) {
+        return Err(hangar_workspace::error(
+            503,
+            "terminais de worktrees ilegíveis",
+        ));
+    }
+    Ok(panes)
 }
 
 pub(crate) fn final_context(
@@ -549,4 +571,35 @@ async fn mutation(st: Arc<AppState>, req: Request) -> Response {
     }
     st.list.invalidate();
     response(json!({"removed":removed}), 200)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::list::mux::Pane;
+
+    fn pane(session: &str, cwd: &str, dead: bool) -> Pane {
+        Pane { session: session.into(), cwd: cwd.into(), dead, ..Pane::default() }
+    }
+
+    fn session(name: &str, cwd: &str) -> Session {
+        Session { name: name.into(), cwd: Some(cwd.into()), ..Session::default() }
+    }
+
+    #[test]
+    fn dead_terminals_do_not_block_removal() {
+        let sessions = [session("viva", "/w"), session("morta", "")];
+        let panes = vec![pane("viva", "/w", false), pane("morta", "", true), pane("atalho", "", true)];
+        let live = live_panes(&sessions, panes).unwrap();
+        assert_eq!(live.iter().map(|p| p.session.as_str()).collect::<Vec<_>>(), ["viva"]);
+    }
+
+    #[test]
+    fn unknown_folder_still_blocks_removal() {
+        let headless = [session("sem-terminal", "")];
+        assert_eq!(live_panes(&headless, vec![]).unwrap_err().status, 503);
+        let alive = [session("viva", "")];
+        assert_eq!(live_panes(&alive, vec![pane("viva", "", false)]).unwrap_err().status, 503);
+        assert_eq!(live_panes(&[], vec![pane("solto", "", false)]).unwrap_err().status, 503);
+    }
 }

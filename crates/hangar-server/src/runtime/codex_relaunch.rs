@@ -826,7 +826,7 @@ mod tests {
     #[test]
     fn only_a_codex_pane_without_sidecar_is_still_opening() {
         let pane = |provider:Option<&str>| crate::list::mux::Pane { session:"s".into(), active:true, pid:Some(1), cwd:"/w".into(),
-            pane_id:"%1".into(), hidden:false, provider:provider.map(str::to_owned), session_created:Some(1), window_index:Some(0), pane_index:Some(0) };
+            pane_id:"%1".into(), hidden:false, provider:provider.map(str::to_owned), session_created:Some(1), window_index:Some(0), pane_index:Some(0), dead:false };
         assert!(codex_opening(&[pane(Some("codex"))],"s"));
         for other in [Some("claude"),Some("pi"),None] {
             assert!(!codex_opening(&[pane(other)],"s"),"{other:?}: não é a TUI do Codex abrindo");

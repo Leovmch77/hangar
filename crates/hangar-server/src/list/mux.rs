@@ -5,7 +5,7 @@ use std::time::Duration;
 use super::discover::DiscoveryProblem;
 
 /// Os 8 campos de `list_panes_all` e o endereço do pane no psmux, numa chamada só.
-pub const LIST_PANES_FORMAT: &str = "#{session_name}\t#{pane_active}\t#{pane_pid}\t#{pane_current_path}\t#{pane_id}\t#{@cp_hidden}\t#{CP_PROVIDER}\t#{session_created}\t#{window_index}\t#{pane_index}";
+pub const LIST_PANES_FORMAT: &str = "#{session_name}\t#{pane_active}\t#{pane_pid}\t#{pane_current_path}\t#{pane_id}\t#{@cp_hidden}\t#{CP_PROVIDER}\t#{session_created}\t#{window_index}\t#{pane_index}\t#{pane_dead}";
 const PROVIDERS: [&str; 5] = ["claude", "codex", "pi", "omp", "kimi"];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -20,6 +20,7 @@ pub struct Pane {
     pub session_created: Option<u64>,
     pub window_index: Option<u32>,
     pub pane_index: Option<u32>,
+    pub dead: bool,
 }
 
 impl Pane {
@@ -67,6 +68,7 @@ pub fn parse_list_panes(output: &str) -> (Vec<Pane>, usize) {
             session_created: if digits(field(7)) { field(7).parse().ok().filter(|n| *n > 0) } else { None },
             window_index: if digits(field(8)) { field(8).parse().ok() } else { None },
             pane_index: if digits(field(9)) { field(9).parse().ok() } else { None },
+            dead: field(10) == "1",
         })
     }).collect();
     (panes, dropped)
@@ -186,6 +188,12 @@ mod tests {
         let (panes, _) = parse_list_panes(&out);
         assert_eq!(panes[0].cwd, "/sumiu/wt-PM-1");
         assert_eq!(panes[1].cwd, real.display().to_string(), "pasta que existe com esse nome fica");
+    }
+
+    #[test]
+    fn dead_pane_is_marked() {
+        let (panes, _) = parse_list_panes("morto\t1\t\t\t%9\t\t\t1\t0\t0\t1\nvivo\t1\t5\t/w\t%1\t\t\t1\t0\t0\t0\n");
+        assert_eq!((panes[0].dead, panes[1].dead), (true, false));
     }
 
     #[test]
