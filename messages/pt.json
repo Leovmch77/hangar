@@ -4862,6 +4862,7 @@
   "native_browser_reload": "Recarregar",
   "native_browser_address": "Endereço ou localhost:3000",
   "native_browser_empty": "Digite um endereço acima para abrir uma página.",
+  "native_browser_remote_no_browser": "A sessão ainda não abriu o navegador na máquina dela, ou essa máquina recusou o acesso.",
   "native_browser_failed": "O navegador não abriu: {error}",
   "native_browser_address_empty": "Digite um site ou um endereço localhost.",
   "native_browser_address_invalid_chars": "Este endereço tem caracteres inválidos.",

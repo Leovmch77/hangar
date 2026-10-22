@@ -412,6 +412,7 @@ async def nav_ws(ws: WebSocket, name: str,
         with contextlib.suppress(Exception):
             await ws.send_text(json.dumps({"t": "erro", "m": str(e)}))
     finally:
+        await _devolver_layout(name, estado)
         with contextlib.suppress(Exception):
             await ws.close()
 
@@ -427,10 +428,61 @@ async def _ler_cliente(cdp: _Cdp, ws: WebSocket, estado: dict, name: str) -> Non
             continue
         if not isinstance(msg, dict):
             continue
+        if msg.get("t") == "layout" and ("w" in msg or "h" in msg):
+            await _layout_do_espectador(name, msg, estado, ws)
+            continue
         if msg.get("t") == "layout":
             await _trocar_layout(name, str(msg.get("modo") or ""), ws)
             continue
         await _aplicar_entrada(cdp, msg, estado["w"], estado["h"])
+
+
+TETO_LAYOUT = 8192
+# Layout da sessão antes de um espectador impor o tamanho da tela dele. Por sessão, não por conexão:
+# o espectador que assume no lugar de outro não pode guardar como "de antes" o tamanho do anterior.
+_layout_original: dict[str, str] = {}
+
+
+async def _layout_do_espectador(name: str, msg: dict, estado: dict, ws: WebSocket) -> None:
+    """A página toma o tamanho da tela de quem olha; o fim da conexão devolve o de antes."""
+    try:
+        w, h = int(msg.get("w") or 0), int(msg.get("h") or 0)
+    except (TypeError, ValueError):
+        return
+    if not (1 <= w <= TETO_LAYOUT and 1 <= h <= TETO_LAYOUT):
+        return
+    from app import navshell
+    try:
+        if name not in _layout_original:
+            atual = await asyncio.to_thread(navshell.verbo, name, "layout", [])
+            if not atual.startswith("layout: "):
+                await ws.send_text(json.dumps({"t": "erro", "m": atual}))
+                return
+            _layout_original[name] = atual.removeprefix("layout: ").strip()
+        resposta = await asyncio.to_thread(navshell.verbo, name, "layout", [str(w), str(h)])
+    except Exception as e:
+        await ws.send_text(json.dumps({"t": "erro", "m": str(e)}))
+        return
+    if resposta.startswith("layout:"):
+        # No modo de print o screencast não atualiza o tamanho, e o clique é convertido por ele.
+        estado["w"], estado["h"], estado["imposto"] = w, h, f"{w}x{h}"
+    await ws.send_text(json.dumps({"t": "layout", "resposta": resposta}))
+
+
+async def _devolver_layout(name: str, estado: dict) -> None:
+    """Só quem impôs o tamanho que está valendo devolve o de antes: outro espectador pode ter assumido."""
+    imposto = estado.get("imposto")
+    if not imposto or name not in _layout_original:
+        return
+    from app import navshell
+    try:
+        atual = await asyncio.to_thread(navshell.verbo, name, "layout", [])
+        if atual.removeprefix("layout: ").strip() != imposto:
+            return
+        antes = _layout_original.pop(name)
+        await asyncio.to_thread(navshell.verbo, name, "layout", antes.split("x") if "x" in antes else [antes])
+    except Exception as e:
+        _log.warning("navsock %s: layout de antes não voltou: %r", name, e)
 
 
 async def _trocar_layout(name: str, modo: str, ws: WebSocket) -> None:

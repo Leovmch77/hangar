@@ -1636,6 +1636,10 @@ fn describe_activity(key: &str, a: &crate::browser::control::Activity) -> String
 impl Hangar {
     /// Linha Navegador do menu do painel: abre o navegador na primeira vez e leva à aba dele.
     pub(super) fn open_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session_is_remote() {
+            if self.remote_browser_for(cx).is_some() { self.show_browser_tab(window, cx); }
+            return;
+        }
         let Some(key) = self.browser_key() else { return };
         #[cfg(target_os = "linux")]
         { self.side.warm = Engine::warm(window, cx).inspect_err(|e| eprintln!("[nav] Chromium nao subiu antes do endereco: {e}")).ok(); }
@@ -1689,9 +1693,38 @@ impl Hangar {
         (in_view && !covered, in_view && covered)
     }
 
+    /// A sessão aberta é de outra máquina: o navegador dela mora no app de lá, e aqui só se vê a tela dele.
+    pub(super) fn session_is_remote(&self) -> bool { self.session_api().is_some_and(|api| !api.is_loopback()) }
+
+    /// Tela remota da sessão aberta, criada na primeira vez com a conexão e o token da máquina dela.
+    fn remote_browser_for(&mut self, cx: &mut Context<Self>) -> Option<Entity<super::remote_browser::RemoteBrowser>> {
+        let key = self.side_key()?;
+        if let Some(remote) = self.side.remote_browsers.get(&key) { return Some(remote.clone()); }
+        let (api, name, server) = (self.session_api()?, self.selected.as_ref()?.name.clone(), self.open_server());
+        // O token vai na URL do socket: é o da máquina da sessão, não o do servidor ativo.
+        let token = if self.is_active_key(&server) { self.active_token.clone() }
+            else { self.server_entry(&server).map(|s| s.token.clone()).unwrap_or_default() };
+        let runtime = self.runtime.handle().clone();
+        let remote = cx.new(|cx| super::remote_browser::RemoteBrowser::new(name, api, token, runtime, cx));
+        self.side.remote_browsers.insert(key, remote.clone());
+        Some(remote)
+    }
+
+    /// A tela remota da sessão aberta, quando ela é de outra máquina e já foi aberta.
+    pub(super) fn remote_browser_shown(&self) -> Option<Entity<super::remote_browser::RemoteBrowser>> {
+        if !self.session_is_remote() { return None; }
+        self.side.remote_browsers.get(&self.side_key()?).cloned()
+    }
+
     /// A cada quadro da janela, antes das áreas guardadas desenharem.
     pub(super) fn sync_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (visible, covered) = self.browser_visible(window, cx);
+        // A tela remota é desenhada pela GPUI: camada por cima não a esconde, só sair de vista a desconecta.
+        let remote = self.remote_browser_shown().map(|r| r.entity_id());
+        for (_, view) in self.side.remote_browsers.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>() {
+            let shown = (visible || covered) && remote == Some(view.entity_id());
+            view.update(cx, |view, cx| view.set_shown(shown, cx));
+        }
         let current = self.browser_key();
         for (key, browser) in self.side.browsers.iter().map(|(k, b)| (k.clone(), b.clone())).collect::<Vec<_>>() {
             let mine = current.as_deref() == Some(key.as_str());

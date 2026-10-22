@@ -17,6 +17,7 @@ mod backdrop;
 mod baton;
 mod links;
 mod browser;
+mod remote_browser;
 mod accounts;
 pub(crate) mod chrome;
 mod computer;

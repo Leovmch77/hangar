@@ -155,3 +155,28 @@ def test_token_do_dono_abre_de_qualquer_origem(monkeypatch):
                                        headers={"origin": "https://evil.com"}):
             pass
     assert (e.value.code, e.value.reason) == (1008, "sessao nao existe")
+
+
+async def test_espectador_impoe_o_tamanho_dele_e_devolve_o_de_antes(monkeypatch):
+    layout = {"atual": "desktop"}
+
+    def verbo(name, v, args=None, aba=None, teto_s=0):
+        assert (name, v) == ("s", "layout")
+        if args:
+            layout["atual"] = "x".join(args) if len(args) == 2 else args[0]
+        return f"layout: {layout['atual']}"
+
+    monkeypatch.setattr(navshell, "verbo", verbo)
+    monkeypatch.setattr(navsock, "_layout_original", {})
+    a, b, tela = {"w": 1280, "h": 800}, {"w": 1280, "h": 800}, _Tela()
+
+    await navsock._layout_do_espectador("s", {"t": "layout", "w": 900, "h": 700}, a, tela)
+    assert (layout["atual"], a["w"], a["h"]) == ("900x700", 900, 700)
+    # Outro espectador assume: o "de antes" continua sendo o da sessão, não o tamanho do primeiro.
+    await navsock._layout_do_espectador("s", {"t": "layout", "w": 600, "h": 500}, b, tela)
+    await navsock._devolver_layout("s", a)
+    assert layout["atual"] == "600x500", "quem saiu não desfaz o tamanho de quem está olhando"
+    await navsock._devolver_layout("s", b)
+    assert layout["atual"] == "desktop"
+    await navsock._layout_do_espectador("s", {"t": "layout", "w": 0, "h": 700}, a, tela)
+    assert layout["atual"] == "desktop", "tamanho inválido não chega ao navegador"

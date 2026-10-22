@@ -158,6 +158,8 @@ pub(super) struct Side {
     /// No Windows, um navegador por sessão (chave `servidor::sessão`), como o do Electron, para o hangar-preview
     /// dirigir o da sessão certa. Nos outros sistemas a chave é uma só: no Linux um segundo motor não nasce no processo.
     pub(super) browsers: HashMap<String, Entity<super::browser::BrowserPanel>>,
+    /// Tela do navegador de sessões de outra máquina, pela chave `servidor::sessão`.
+    pub(super) remote_browsers: HashMap<String, Entity<super::remote_browser::RemoteBrowser>>,
     /// Sessões (chave de `browser_key`) com a aba Navegador na fileira. Fechar só esconde a página.
     pub(super) browser_open: HashSet<String>,
     /// Aba escolhida por sessão (chave de `browser_key`); sessão sem escolha usa a última preferência gravada.
@@ -171,7 +173,7 @@ impl Default for Side {
     fn default() -> Self {
         let saved = appearance::get();
         Self { open: true, menu: false, width: saved.side_width, browser_width: saved.side_browser_width, drag: None, shortcuts: None, project: ProjectShortcuts::default(), cost: None, cost_task: None, cost_gen: 0, orq: Default::default(),
-            files: None, diff: None, reloading: HashSet::new(), run_code_pending: HashSet::new(), git: None, run: None, browsers: HashMap::new(), browser_open: HashSet::new(), tabs: HashMap::new(),
+            files: None, diff: None, reloading: HashSet::new(), run_code_pending: HashSet::new(), git: None, run: None, browsers: HashMap::new(), remote_browsers: HashMap::new(), browser_open: HashSet::new(), tabs: HashMap::new(),
             #[cfg(target_os = "linux")] warm: None,
             shortcut_terms: HashMap::new(), shortcut_focus: HashMap::new(), shortcut_running: HashMap::new(), shortcut_recheck: HashMap::new() }
     }
@@ -975,6 +977,7 @@ impl Hangar {
 
     // Nesta máquina o motor roda (no Linux, há um Chrome ou Chromium).
     fn side_menu_browser(&self) -> bool {
+        if self.session_is_remote() { return true; }
         let available = crate::browser::Engine::available();
         // A linha some sem dizer por quê: o motivo vai ao log, uma vez só (isto roda a cada desenho).
         static LOGGED: std::sync::Once = std::sync::Once::new();
@@ -1006,7 +1009,7 @@ impl Hangar {
                 .when(browser, |el| el.child(row("side-menu-browser", IconName::Globe, tr("browser"), cx)
                     .on_click(cx.listener(|this, _, window, cx| this.open_browser(window, cx)))))
                 // Sem Chrome nem Chromium a linha fica, desligada, e diz o que falta: sumir calada fazia a pessoa procurar.
-                .when_some(crate::browser::Engine::available().err(), |el, error| el
+                .when_some(crate::browser::Engine::available().err().filter(|_| !browser), |el, error| el
                     .child(row("side-menu-browser", IconName::Globe, tr("browser"), cx).disabled(true).opacity(0.5))
                     .child(div().px(px(4.)).text_size(px(11.)).text_color(theme::muted()).whitespace_normal()
                         .child(if error.starts_with("HANGAR_CHROMIUM") { error } else { tr("browser_unavailable") })))
@@ -1124,7 +1127,10 @@ impl Hangar {
                     Some(SideTab::Files) => div().flex_1().min_h_0().child(self.render_tree(cx)).into_any_element(),
                     Some(SideTab::Activity) => div().flex_1().min_h_0().child(self.activity_view()).into_any_element(),
                     Some(SideTab::Git) => div().flex_1().min_h_0().children(self.side_git(window, cx)).into_any_element(),
-                    Some(SideTab::Browser) => div().flex_1().min_h_0().children(self.browser_key().and_then(|k| self.side.browsers.get(&k).cloned())).into_any_element(),
+                    Some(SideTab::Browser) => match self.remote_browser_shown() {
+                        Some(remote) => div().flex_1().min_h_0().child(remote).into_any_element(),
+                        None => div().flex_1().min_h_0().children(self.browser_key().and_then(|k| self.side.browsers.get(&k).cloned())).into_any_element(),
+                    },
                     Some(SideTab::Context) => {
                         let scroll = div().id("side-scroll").min_h_0().overflow_y_scroll().child(if orq { orq_body } else { content.into_any_element() });
                         // Com chamada de voz, a rolagem encolhe ao conteúdo e a sobra embaixo recebe o cartão da voz.

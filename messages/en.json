@@ -4862,6 +4862,7 @@
   "native_browser_reload": "Reload",
   "native_browser_address": "Address or localhost:3000",
   "native_browser_empty": "Enter an address above to open a page.",
+  "native_browser_remote_no_browser": "The session has not opened the browser on its machine yet, or that machine refused access.",
   "native_browser_failed": "The browser couldn't start: {error}",
   "native_browser_address_empty": "Enter a website or localhost address.",
   "native_browser_address_invalid_chars": "This address contains invalid characters.",
