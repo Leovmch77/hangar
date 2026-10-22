@@ -126,6 +126,13 @@ async fn check(client: &reqwest::Client, channel: &str) -> Result<Option<Offer>,
         url: format!("{base}/{name}"), sha256: sha256.to_lowercase(), channel: channel.to_owned(), requires_api: manifest.requires_api }))
 }
 
+fn modified(path: &Path) -> Option<std::time::SystemTime> { std::fs::metadata(path).and_then(|m| m.modified()).ok() }
+
+/// O arquivo instalado mudou depois que este processo abriu. Sem uma das datas, não dá para provar que mudou.
+fn replaced_since(opened: Option<std::time::SystemTime>, installed_now: Option<std::time::SystemTime>) -> bool {
+    matches!((opened, installed_now), (Some(opened), Some(now)) if opened != now)
+}
+
 fn sibling(exe: &Path, suffix: &str) -> PathBuf {
     let mut name: OsString = exe.as_os_str().to_owned();
     name.push(suffix);
@@ -535,6 +542,8 @@ pub struct Updater {
     client: reqwest::Client,
     /// Lido ao abrir: depois da primeira troca o Linux passa a responder "<caminho> (deleted)" para este processo.
     exe: Option<PathBuf>,
+    /// Data de modificação do executável quando este processo abriu.
+    exe_stamp: Option<std::time::SystemTime>,
     offer: Option<Offer>,
     /// O servidor desta máquina (endereço de loopback), dado pelo app sempre que a lista de servidores muda.
     local: Option<Api>,
@@ -588,7 +597,9 @@ impl Global for Handle {}
 pub fn start(runtime: Arc<Runtime>, cx: &mut App) {
     let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).user_agent(concat!("hangar-native/", env!("HANGAR_NATIVE_RELEASE")))
         .build().unwrap_or_default();
-    let entity = cx.new(|_| Updater { runtime, client, exe: std::env::current_exe().ok(), offer: None, local: None, server: None,
+    let exe = std::env::current_exe().ok();
+    let exe_stamp = exe.as_deref().and_then(modified);
+    let entity = cx.new(|_| Updater { runtime, client, exe, exe_stamp, offer: None, local: None, server: None,
         server_api: None, server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0, run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None, suspended: false, intent_lock: None, all_servers: Vec::new(), survey: all::Survey::default(), batch: None, all_running: false });
     let weak = entity.downgrade();
     cx.spawn(async move |cx| loop {
@@ -769,6 +780,9 @@ impl Updater {
         let Some(home) = std::env::home_dir() else { return false };
         let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
         let installed = crate::app::setup::installed_app_target(cfg!(windows), &home, local.as_deref());
+        // Relançar o mesmo arquivo que já está rodando não atualiza nada: um build local mais velho que a release
+        // reabriria para sempre.
+        if !replaced_since(self.exe_stamp, installed.as_deref().and_then(modified)) { return false; }
         installed_restart_needed(&home.join(".hangar/native/release.json"), self.exe.as_deref(), installed.as_deref(), CURRENT,
             BUILT_CHANNEL, &self.channel(), self.restart_held(), attempted)
     }
@@ -1210,7 +1224,7 @@ mod tests {
     #[test]
     fn update_channel_draft_holds_only_its_local_server_update() {
         let local = Api::new("http://127.0.0.1:8765", "synthetic-token").unwrap();
-        let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None,
+        let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None, exe_stamp: None,
             offer: Some(Offer { version: "9999.0.0.0".into(), url: String::new(), sha256: String::new(), channel: "main".into(), requires_api: 2 }),
             local: Some(local.clone()), server: Some(server(serde_json::json!({"atualizacao_disponivel": true}))), server_api: Some(2),
             server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0, run: Run::Idle, checking: false, checked: None,
@@ -1234,7 +1248,7 @@ mod tests {
 
     #[test]
     fn remote_only_uses_the_active_server_api() {
-        let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None,
+        let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None, exe_stamp: None,
             offer: Some(Offer { version: "9999.0.0.0".into(), url: String::new(), sha256: String::new(), channel: "main".into(), requires_api: REQUIRED_API }),
             local: None, server: None, server_api: None, server_seq: 0, active: None, active_state: None, active_api: Some(REQUIRED_API), active_seq: 0,
             run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None, suspended: false, intent_lock: None, all_servers: Vec::new(), survey: all::Survey::default(), batch: None, all_running: false };
@@ -1274,6 +1288,11 @@ mod tests {
         assert!(!installed_restart_needed(&mark, Some(&installed), Some(&installed), APP, Some("main"), "beta", false, &mut None));
         assert!(installed_restart_needed(&mark, Some(&installed), Some(&installed), APP, None, "main", false, &mut None));
         assert!(!installed_restart_needed(&mark, Some(&installed), Some(&installed), "0.1.0.110", Some("main"), "main", false, &mut None), "o processo novo não reinicia de novo");
+        // Build local mais velho que a release no caminho instalado: sem o arquivo ter mudado, nada a relançar.
+        let t0 = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        assert!(!replaced_since(Some(t0), Some(t0)), "o mesmo arquivo que está rodando não relança");
+        assert!(replaced_since(Some(t0), Some(t0 + Duration::from_secs(1))), "arquivo trocado relança");
+        assert!(!replaced_since(None, Some(t0)) && !replaced_since(Some(t0), None), "sem data não relança");
         assert!(!installed_restart_needed(&mark, Some(&installed), Some(&installed), "0.1.0.120", Some("main"), "main", false, &mut None));
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1334,7 +1353,7 @@ mod tests {
 
     #[test]
     fn channel_follows_the_last_state_read_from_the_local_server() {
-        let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None, offer: None,
+        let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None, exe_stamp: None, offer: None,
             local: None, server: None, server_api: None, server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0,
             run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: Some("hangar-server-parte1".into()),
             channel_blocked: None, suspended: false, intent_lock: None, all_servers: Vec::new(), survey: all::Survey::default(), batch: None, all_running: false };

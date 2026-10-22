@@ -811,7 +811,7 @@ mod tests {
 
     #[gpui::test]
     fn update_all_machine_registry_change_keeps_running_aliases(cx: &mut gpui::TestAppContext) {
-        let updater = cx.new(|_| Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None, offer: None,
+        let updater = cx.new(|_| Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None, exe_stamp: None, offer: None,
             local: None, server: None, server_api: None, server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0,
             run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None,
             suspended: false, intent_lock: None, all_servers: vec![entry("local"), entry("remote")], survey: Survey::default(), batch: None, all_running: true });
@@ -831,7 +831,7 @@ mod tests {
     #[test]
     fn update_all_review_idle_button_names_all_machines_without_a_local_offer() {
         crate::i18n::english_in_this_thread(false);
-        let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None, offer: None,
+        let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None, exe_stamp: None, offer: None,
             local: None, server: None, server_api: None, server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0,
             run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None,
             suspended: false, intent_lock: None, all_servers: vec![entry("local"), entry("remote")], survey: Survey::default(), batch: None, all_running: false };
