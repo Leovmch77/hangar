@@ -6,8 +6,8 @@ export function orientationFor({ width, height }: { width: number; height: numbe
   return Math.min(width, height) < TABLET_MIN_SIDE ? 'portrait' : 'free';
 }
 
-export async function applyOrientationLock(): Promise<void> {
-  if (orientationFor(Dimensions.get('screen')) === 'portrait') {
+export async function applyOrientationLock(screen = Dimensions.get('screen')): Promise<void> {
+  if (orientationFor(screen) === 'portrait') {
     await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
   } else {
     await ScreenOrientation.unlockAsync();

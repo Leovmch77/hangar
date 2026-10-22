@@ -10,7 +10,7 @@ import { GitPanel } from '../git/GitPanel';
 import { ContextTab } from './ContextTab';
 import * as m from '../../paraglide/messages';
 
-type Props = { serverId: string; name: string; onPick?: (session: AggSession) => void };
+type Props = { serverId: string; name: string; focused: boolean; onPick?: (session: AggSession) => void };
 type Tab = 'context' | 'files' | 'background' | 'git';
 const tabs: { value: Tab; label: () => string }[] = [
   { value: 'context', label: () => m.tablet_tab_context() },
@@ -19,7 +19,7 @@ const tabs: { value: Tab; label: () => string }[] = [
   { value: 'git', label: () => m.tablet_tab_git() },
 ];
 
-export function ContextPanel({ serverId, name, onPick }: Props) {
+export function ContextPanel({ serverId, name, focused, onPick }: Props) {
   const sessionKey = `${serverId}::${name}`;
   const [selection, setSelection] = useState<{ key: string; tab: Tab }>({ key: sessionKey, tab: 'context' });
   if (selection.key !== sessionKey) setSelection({ key: sessionKey, tab: 'context' });
@@ -41,7 +41,7 @@ export function ContextPanel({ serverId, name, onPick }: Props) {
           : !ready ? <View style={styles.feedback}><ActivityIndicator accessibilityLabel={m.comum_carregando()} /></View>
           : !server ? <View style={styles.feedback}><Text style={styles.error} accessibilityRole="alert">{m.chat_servidor_removido()}</Text></View>
           : tab === 'files' ? <FilesPanel serverId={serverId} name={name} />
-          : tab === 'background' ? <ActivityPanel serverId={serverId} name={name} />
+          : tab === 'background' ? <ActivityPanel serverId={serverId} name={name} focused={focused && tab === 'background'} />
           : <GitPanel server={server} name={name} />}
       </View>
     </Glass>

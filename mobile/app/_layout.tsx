@@ -69,9 +69,14 @@ export default function Layout() {
   const limparAviso = useServers((s) => s.limparAviso);
 
   useEffect(() => {
-    applyOrientationLock().catch((e: unknown) => {
-      registrarDiag({ evento: 'orientation.lock_failed', nivel: 'erro', codigo: 'orientation_lock_failed', detalhe: e instanceof Error ? e.message : String(e) });
-    });
+    const apply = (screen = Dimensions.get('screen')) => {
+      applyOrientationLock(screen).catch((e: unknown) => {
+        registrarDiag({ evento: 'orientation.lock_failed', nivel: 'erro', codigo: 'orientation_lock_failed', detalhe: e instanceof Error ? e.message : String(e) });
+      });
+    };
+    apply();
+    const subscription = Dimensions.addEventListener('change', ({ screen }) => apply(screen));
+    return () => subscription.remove();
   }, []);
 
   useEffect(() => {

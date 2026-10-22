@@ -3,12 +3,14 @@ import { act, createElement, useEffect, useRef, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { SessionsBarPlacement } from '../../stores/tabletPrefs';
+import * as ScreenOrientation from 'expo-screen-orientation';
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const h = vi.hoisted(() => ({
   placement: 'bottom' as SessionsBarPlacement, panelOpen: true, collapsed: false, toggleCollapsed: vi.fn(),
   size: { width: 1180, height: 820, scale: 1, fontScale: 1 },
   pathname: '/s/srv/a', params: { server: 'srv', name: 'a' }, barMounts: 0, panelMounts: 0,
+  dimensionsListener: vi.fn(), removeDimensionsListener: vi.fn(),
   router: { replace: vi.fn(), push: vi.fn(), dismissTo: vi.fn(), setParams: vi.fn(), canGoBack: () => true, back: vi.fn() },
 }));
 vi.mock('expo-router', () => ({
@@ -26,11 +28,14 @@ vi.mock('expo-router', () => ({
   }, { Screen: ({ name, options }: { name: string; options?: unknown }) => createElement('i', { 'data-screen': name, 'data-options': JSON.stringify(options) }) }),
   useFocusEffect: (effect: () => void | (() => void)) => useEffect(effect, [effect]),
 }));
-vi.mock('react-native', async (original) => ({
-  ...await original<typeof import('react-native')>(),
-  useWindowDimensions: () => h.size,
-  PanResponder: { create: () => ({ panHandlers: {} }) },
-}));
+vi.mock('react-native', async (original) => {
+  const native = await original<typeof import('react-native')>();
+  return { ...native,
+    Dimensions: { ...native.Dimensions, addEventListener: h.dimensionsListener },
+    useWindowDimensions: () => h.size,
+    PanResponder: { create: () => ({ panHandlers: {} }) },
+  };
+});
 vi.mock('../../stores/tabletPrefs', () => ({ useTabletPrefs: (select: (s: typeof h) => unknown) => select(h) }));
 vi.mock('../../stores/servers', () => {
   const state = { activeId: 'srv', ready: true, servers: [{ id: 'srv' }], aviso: null, limparAviso: () => {}, load: async () => {} };
@@ -84,10 +89,10 @@ vi.mock('./SessionsBar', () => ({ SessionsBar: ({ onPick, onNew, selected }: {
     createElement('button', { onClick: () => onPick({ serverId: 'srv', name: 'b' }) }, 'pick-b'),
     createElement('button', { onClick: onNew }, 'new-session'));
 } }));
-vi.mock('./ContextPanel', () => ({ ContextPanel: ({ name, onPick }: { name: string; onPick: (s: unknown) => void }) => {
+vi.mock('./ContextPanel', () => ({ ContextPanel: ({ name, focused, onPick }: { name: string; focused: boolean; onPick: (s: unknown) => void }) => {
   const instance = useRef<number | null>(null);
   if (instance.current === null) instance.current = ++h.panelMounts;
-  return createElement('aside', { 'data-instance': instance.current, 'data-selected': name }, 'session-context',
+  return createElement('aside', { 'data-instance': instance.current, 'data-selected': name, 'data-focused': focused }, 'session-context',
     createElement('button', { onClick: () => onPick({ serverId: 'other-machine', name: 'pair name' }) }, 'pick-group-member'));
 } }));
 import { TabletShell } from './TabletShell';
@@ -99,6 +104,7 @@ let root: Root;
 let host: HTMLDivElement;
 beforeEach(() => {
   vi.clearAllMocks(); h.placement = 'bottom'; h.panelOpen = true; h.collapsed = false;
+  h.dimensionsListener.mockReturnValue({ remove: h.removeDimensionsListener });
   h.pathname = '/s/srv/a'; h.params = { server: 'srv', name: 'a' }; h.barMounts = 0; h.panelMounts = 0;
   h.size = { width: 1180, height: 820, scale: 1, fontScale: 1 };
   host = document.createElement('div'); root = createRoot(host);
@@ -111,6 +117,33 @@ function click(label: string) {
   const button = [...host.querySelectorAll('button')].find(b => b.textContent === label || b.getAttribute('aria-label') === label)!;
   expect(button).toBeDefined(); act(() => button.click());
 }
+it('reaplica a orientação pela tela física ao abrir e fechar o dobrável e remove o observador', async () => {
+  const lock = vi.spyOn(ScreenOrientation, 'lockAsync');
+  const unlock = vi.spyOn(ScreenOrientation, 'unlockAsync');
+  await act(async () => root.render(createElement(Layout)));
+  expect(lock).toHaveBeenCalledExactlyOnceWith(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+  expect(h.dimensionsListener).toHaveBeenCalledWith('change', expect.any(Function));
+  const change = h.dimensionsListener.mock.calls[0][1];
+  const phone = { width: 390, height: 844, scale: 1, fontScale: 1 };
+  const tablet = { ...phone, width: 1280, height: 800 };
+  await act(async () => change({ screen: tablet, window: phone }));
+  expect(unlock).toHaveBeenCalledOnce();
+  await act(async () => change({ screen: phone, window: tablet }));
+  expect(lock).toHaveBeenCalledTimes(2);
+  act(() => root.unmount());
+  expect(h.removeDimensionsListener).toHaveBeenCalledOnce();
+});
+
+it.each(['/s/srv/a/files', '/s/srv/a/ask', '/s/srv/a/activity', '/config'])('pausa o painel quando %s cobre a conversa e retoma ao voltar', pathname => {
+  render();
+  const panel = host.querySelector('aside')!;
+  expect(panel.getAttribute('data-focused')).toBe('true');
+  h.pathname = pathname; render();
+  expect(panel.getAttribute('data-focused')).toBe('false');
+  h.pathname = '/s/srv/a'; render();
+  expect(host.querySelector('aside')).toBe(panel);
+  expect(panel.getAttribute('data-focused')).toBe('true');
+});
 it.each(['left', 'bottom', 'top'] as const)('%s ordena as áreas como no mock e mantém o centro transparente', placement => {
   h.placement = placement; render();
   const center = host.querySelector('main')!;
@@ -290,13 +323,13 @@ it('só o chat no tablet deitado desliga a animação de navegação', async () 
 
 it('o painel real mantém a estrutura ao trocar de sessão e volta a Contexto', async () => {
   const { ContextPanel } = await vi.importActual<typeof import('./ContextPanel')>('./ContextPanel');
-  await act(async () => root.render(createElement(ContextPanel, { serverId: 'srv', name: 'a' })));
+  await act(async () => root.render(createElement(ContextPanel, { serverId: 'srv', name: 'a', focused: true })));
   const tabs = host.querySelector('[role="tablist"]');
   const panel = host.querySelector('aside');
   click(m.tablet_tab_git());
   const content = host.querySelector('[data-git-session="a"]');
   expect(content).not.toBeNull();
-  await act(async () => root.render(createElement(ContextPanel, { serverId: 'srv', name: 'b' })));
+  await act(async () => root.render(createElement(ContextPanel, { serverId: 'srv', name: 'b', focused: true })));
   expect(host.querySelector('aside')).toBe(panel);
   expect(host.querySelector('[role="tablist"]')).toBe(tabs);
   expect(host.querySelector('[data-context-session="b"]')).not.toBeNull();

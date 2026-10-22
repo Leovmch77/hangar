@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { BackHandler, Platform } from 'react-native';
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useUnistyles } from 'react-native-unistyles';
@@ -10,6 +10,11 @@ export default function ActivitySheet() {
   const params = useLocalSearchParams<{ server: string; name: string }>();
   const serverId = Array.isArray(params.server) ? params.server[0] : (params.server ?? '');
   const name = Array.isArray(params.name) ? params.name[0] : (params.name ?? '');
+  const [focused, setFocused] = useState(false);
+  useFocusEffect(useCallback(() => {
+    setFocused(true);
+    return () => setFocused(false);
+  }, []));
   const backRequest = useRef<() => boolean>(() => false);
   const registerBack = useCallback((handler: () => boolean) => { backRequest.current = handler; }, []);
 
@@ -35,7 +40,7 @@ export default function ActivitySheet() {
   return (
     <>
       <Stack.Screen options={headerOptions} />
-      <ActivityPanel serverId={serverId} name={name} onBackRequest={registerBack} onClose={close} />
+      <ActivityPanel serverId={serverId} name={name} focused={focused} onBackRequest={registerBack} onClose={close} />
     </>
   );
 }

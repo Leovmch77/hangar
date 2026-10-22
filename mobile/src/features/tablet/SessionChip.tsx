@@ -133,7 +133,7 @@ export const SessionChip = memo(function SessionChip({ session, members = [], la
 });
 
 const styles = StyleSheet.create((theme) => ({
-  slot: { width: 240, flexShrink: 0, paddingTop: theme.base.space[2], paddingBottom: theme.base.space[2] },
+  slot: { position: 'relative', width: 240, flexShrink: 0, paddingTop: theme.base.space[2], paddingBottom: theme.base.space[2] + 14 },
   tab: { position: 'relative', height: 44, borderRadius: theme.base.radius.md, borderWidth: 1 },
   fullTab: { height: 52 },
   body: { flex: 1, flexDirection: 'row', alignItems: 'center', paddingHorizontal: theme.base.space[1] },
@@ -152,7 +152,7 @@ const styles = StyleSheet.create((theme) => ({
   agents: { flexDirection: 'row', flexWrap: 'wrap', flexShrink: 1 },
   agent: { flexDirection: 'row', alignItems: 'center', gap: theme.base.space[0.5] },
   count: { fontSize: theme.base.text.xxxs, color: theme.tokens.accent.base },
-  children: { position: 'absolute', bottom: -14, left: 6, right: 6, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1] },
+  children: { position: 'absolute', bottom: 0, left: 6, right: 6, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[1] },
   childTarget: { width: 56, minHeight: 44, justifyContent: 'center' },
   child: { minHeight: 16, flexDirection: 'row', alignItems: 'center', gap: theme.base.space[0.5], borderRadius: theme.base.radius.full, borderWidth: 1, paddingHorizontal: theme.base.space[0.5], backgroundColor: theme.tokens.bg.base },
   childName: { flexShrink: 1, fontSize: theme.base.text.xxxs, color: theme.tokens.text.secondary },

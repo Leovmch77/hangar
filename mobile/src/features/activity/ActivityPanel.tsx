@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
-import { useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { formatElapsed, getSubagents, getWorkflow, getWorkflowAgent, getWorkflows } from '@hangar/core';
@@ -25,11 +24,12 @@ type Level = 'list' | 'workflow' | 'agent' | 'subagent';
 interface Props {
   serverId: string;
   name: string;
+  focused: boolean;
   onBackRequest?: (handler: () => boolean) => void;
   onClose?: () => void;
 }
 
-export function ActivityPanel({ serverId, name, onBackRequest, onClose }: Props) {
+export function ActivityPanel({ serverId, name, focused, onBackRequest, onClose }: Props) {
   const { theme } = useUnistyles();
   const insets = useSafeAreaInsets();
   const readActivity = useActivityRequest();
@@ -41,12 +41,13 @@ export function ActivityPanel({ serverId, name, onBackRequest, onClose }: Props)
   // Processos vivos lidos do sistema pelo backend (vêm no `state` do stream que o chat já mantém).
   const processos = chat.use((s) => s.stateEvent?.shells) ?? [];
   const activity = useActivity(events, eventsRevision);
-  // Relógio do "há N" dos shells enquanto o painel está montado.
+  // Relógio do "há N" dos shells enquanto o painel está visível.
   const [agora, setAgora] = useState(Date.now() / 1000);
   useEffect(() => {
+    if (!focused) return;
     const t = setInterval(() => setAgora(Date.now() / 1000), 20_000);
     return () => clearInterval(t);
-  }, []);
+  }, [focused]);
 
   const server = useServers((s: any) => s.servers.find((x: any) => x.id === serverId) ?? null);
 
@@ -157,11 +158,11 @@ export function ActivityPanel({ serverId, name, onBackRequest, onClose }: Props)
     if (previous.key === listKey && previous.signature !== agentSignature) void refreshSubs();
   }, [agentSignature, listKey, refreshSubs]);
 
-  useFocusEffect(useCallback(() => {
-    if (level !== 'list') return;
+  useEffect(() => {
+    if (!focused || level !== 'list') return;
     const timer = setInterval(() => void refreshSubs(false), 5_000);
     return () => clearInterval(timer);
-  }, [level, refreshSubs]));
+  }, [focused, level, refreshSubs]);
 
   const agentIds = useMemo(() => agentIdentities(events), [events, eventsRevision]);
   const matchSub = useCallback((agent: AgentRun) => matchAgentSubagent(subs, agent, agentIds), [subs, agentIds]);

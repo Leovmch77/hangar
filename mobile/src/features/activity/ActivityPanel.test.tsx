@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { act, createElement, useEffect } from 'react';
+import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Activity, ChatEvent, Server, WorkflowSummary } from '@hangar/core';
@@ -24,7 +24,6 @@ vi.mock('@hangar/core', async (original) => ({
   getSubagents: vi.fn().mockResolvedValue([]),
 }));
 vi.mock('expo-router', () => ({
-  useFocusEffect: (effect: () => void | (() => void)) => useEffect(effect, [effect]),
   Stack: { Screen: () => null },
 }));
 vi.mock('expo-blur', () => ({ BlurView: () => null }));
@@ -42,7 +41,7 @@ let root: Root | undefined;
 async function mount(onBackRequest?: (handler: () => boolean) => void) {
   const el = document.createElement('div');
   root = createRoot(el);
-  await act(async () => root!.render(createElement(ActivityPanel, { serverId: 'a', name: 'sess', onBackRequest })));
+  await act(async () => root!.render(createElement(ActivityPanel, { serverId: 'a', name: 'sess', focused: true, onBackRequest })));
   return el;
 }
 
@@ -53,6 +52,26 @@ beforeEach(() => {
 afterEach(async () => {
   if (root) await act(async () => root!.unmount());
   root = undefined;
+  vi.useRealTimers();
+});
+
+it('pausa o polling ao perder foco explícito e retoma sem recarregar os workflows', async () => {
+  vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+  const { getSubagents, getWorkflows } = await import('@hangar/core');
+  vi.mocked(getSubagents).mockClear();
+  vi.mocked(getWorkflows).mockClear();
+  await mount();
+  expect(getSubagents).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+  expect(getSubagents).toHaveBeenCalledTimes(2);
+  await act(async () => root!.render(createElement(ActivityPanel, { serverId: 'a', name: 'sess', focused: false })));
+  await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+  expect(getSubagents).toHaveBeenCalledTimes(2);
+  expect(vi.getTimerCount()).toBe(0);
+  await act(async () => root!.render(createElement(ActivityPanel, { serverId: 'a', name: 'sess', focused: true })));
+  await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+  expect(getSubagents).toHaveBeenCalledTimes(3);
+  expect(getWorkflows).toHaveBeenCalledTimes(1);
 });
 
 it('mostra os dois shells em execução sem oferecer navegação de folha', async () => {

@@ -22,7 +22,8 @@ vi.mock('../../stores/servers', () => ({
 }));
 vi.mock('../../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 vi.mock('../files/FilesPanel', () => ({ FilesPanel: ({ name }: { name: string }) => createElement('div', null, `files-${name}`) }));
-vi.mock('../activity/ActivityPanel', () => ({ ActivityPanel: ({ name }: { name: string }) => createElement('div', null, `background-${name}`) }));
+vi.mock('../activity/ActivityPanel', () => ({ ActivityPanel: ({ name, focused }: { name: string; focused: boolean }) =>
+  createElement('div', { 'data-activity-focused': focused }, `background-${name}`) }));
 vi.mock('../git/GitPanel', () => ({ GitPanel: ({ server, name }: { server: Server; name: string }) => createElement('div', null, `git-${server.id}-${name}`) }));
 vi.mock('../../stores/chat', () => ({ chatStore: () => ({
   use: (select: (s: typeof state) => unknown) => select(state),
@@ -55,7 +56,7 @@ const session = (name: string, extra: Partial<AggSession> = {}): AggSession => (
   name, serverId: 'srv', serverLabel: 'Casa', serverColor: '#999', state: 'idle', last_activity: 1, ...extra,
 });
 
-const renderPanel = (name = 'sess', serverId = 'srv') => act(() => root.render(createElement(ContextPanel, { serverId, name })));
+const renderPanel = (name = 'sess', serverId = 'srv', focused = true) => act(() => root.render(createElement(ContextPanel, { serverId, name, focused })));
 const selectTab = (label: string) => {
   const tab = container.querySelector<HTMLButtonElement>(`[role="tab"][aria-label="${label}"]`);
   expect(tab).not.toBeNull();
@@ -63,6 +64,21 @@ const selectTab = (label: string) => {
 };
 
 describe('ContextPanel', () => {
+  it('repassa o foco à atividade só na aba ativa e conserva a aba quando a conversa é coberta', () => {
+    renderPanel();
+    expect(container.querySelector('[data-activity-focused]')).toBeNull();
+    selectTab(m.tablet_tab_background());
+    const activity = container.querySelector('[data-activity-focused]')!;
+    expect(activity.getAttribute('data-activity-focused')).toBe('true');
+    renderPanel('sess', 'srv', false);
+    expect(activity.getAttribute('data-activity-focused')).toBe('false');
+    renderPanel();
+    expect(container.querySelector('[data-activity-focused]')).toBe(activity);
+    expect(activity.getAttribute('data-activity-focused')).toBe('true');
+    selectTab(m.tablet_tab_context());
+    expect(container.querySelector('[data-activity-focused]')).toBeNull();
+  });
+
   it('monta só a aba ativa e deixa as outras abas acessíveis', () => {
     renderPanel();
     expect(container.textContent).toContain('action-srv-sess');
@@ -188,7 +204,7 @@ describe('ContextTab', () => {
 
   it('o painel passa ao grupo a mesma navegação da barra e desaparece ao trocar para sessão sem grupo', () => {
     state.rows = [session('sess', { pair_gid: 'g' }), session('par', { pair_gid: 'g' }), session('sozinha')];
-    act(() => root.render(createElement(ContextPanel, { serverId: 'srv', name: 'sess', onPick })));
+    act(() => root.render(createElement(ContextPanel, { serverId: 'srv', name: 'sess', focused: true, onPick })));
     const member = container.querySelector<HTMLButtonElement>('button[aria-label^="' + m.linked_children_open() + '"]')!;
     act(() => member.click());
     expect(onPick).toHaveBeenCalledWith(state.rows[1]);

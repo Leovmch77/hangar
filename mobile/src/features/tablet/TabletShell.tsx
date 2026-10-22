@@ -67,7 +67,8 @@ export function TabletShell({ selected, children, active = true }: Props) {
       <View style={[styles.row, active && styles.tabletRow]}>
         {bar('left')}
         <View key="conversation" style={styles.center}>{children}</View>
-        {active && selected && panelOpen ? <ContextPanel serverId={selected.serverId} name={selected.name} onPick={pickSession} /> : null}
+        {active && selected && panelOpen ? <ContextPanel serverId={selected.serverId} name={selected.name}
+          focused={/^\/s\/[^/]+\/[^/]+\/?$/.test(pathname)} onPick={pickSession} /> : null}
       </View>
       <View style={active && placement === 'bottom' ? styles.horizontal : undefined}>{bar('bottom')}</View>
     </Screen>

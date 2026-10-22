@@ -125,7 +125,7 @@ export function ChatHeader({
           <Icon name="Ellipsis" size={18} color={theme.tokens.text.secondary} />
         </Pressable>
       </View>
-      {chipLoop ? <View style={[styles.chips, header === 'phone' && onHome && styles.chipsHome]}>{chipLoop}</View> : null}
+      {chipLoop ? <View style={[styles.chips, header === 'tablet' && styles.chipsTablet, header === 'phone' && onHome && styles.chipsHome]}>{chipLoop}</View> : null}
     </View>
   );
 }
@@ -152,6 +152,7 @@ const styles = StyleSheet.create((theme) => ({
     paddingRight: theme.base.space[2],
     paddingBottom: theme.base.space[1],
   },
+  chipsTablet: { paddingLeft: theme.base.space[10] + theme.base.space[1] + theme.base.space[0.5] },
   chipsHome: { paddingLeft: theme.base.space[10] * 3 + theme.base.space[2] + theme.base.space[0.5] },
   marca: { width: 30, height: 30, alignItems: 'center', justifyContent: 'center' },
   titulo: {

@@ -212,17 +212,17 @@ it.each(['top', 'bottom'] as const)('%s tem abas de 240 pt, máquina na borda e 
   const tabs = [...container.querySelectorAll<HTMLElement>('[data-testid="session-tab"]')];
   expect(tabs).toHaveLength(2);
   expect(tabs.map(tab => tab.style.width)).toEqual(['240px', '240px']);
-  expect(container.querySelector<HTMLElement>('[data-glass]')!.style.height).toBe('60px');
+  expect(container.querySelector<HTMLElement>('[data-glass]')!.style.height).toBe('74px');
   expect(tabs[0].firstElementChild!.getAttribute('style')).toContain('height: 44px');
   expect(tabs[0].style.paddingTop).toBe('8px');
-  expect(tabs[0].style.paddingBottom).toBe('8px');
+  expect(tabs[0].style.paddingBottom).toBe('22px');
   expect(container.querySelector('[data-size="22"]')).not.toBeNull();
   expect([...tabs[0].querySelectorAll('span')].find(el => el.textContent === session.name)!.style.fontSize)
     .toBe(`${useUnistyles().theme.base.text.sm}px`);
   expect(container.querySelector<HTMLElement>('[data-testid="machine-legend"]')!.style.position).toBe('absolute');
   expect(container.textContent).not.toContain('feat/tablet');
   state.tabsDetail = 'full'; render(placement);
-  expect(container.querySelector<HTMLElement>('[data-glass]')!.style.height).toBe('68px');
+  expect(container.querySelector<HTMLElement>('[data-glass]')!.style.height).toBe('82px');
   expect(tabs[0].firstElementChild!.getAttribute('style')).toContain('height: 52px');
   for (const text of ['hangar', 'feat/tablet', '↑2', '↓3']) expect(container.textContent).toContain(text);
   expect(container.querySelector('button[aria-label^="api,"]')!.getAttribute('aria-label')).toContain(m.git_sync_titulo({ ahead: 2, behind: 3 }));
@@ -272,6 +272,27 @@ it('oferece três filhas com prioridade a perguntas e acesso a todas pelo contad
   act(() => hidden.click());
   expect(onPick).toHaveBeenCalledWith(state.rows[3]);
   expect(container.querySelector('[role="dialog"]')).toBeNull();
+});
+
+it.each(['compact', 'full'])('%s conserva os alvos das filhas dentro do slot e da barra com o visual na borda', detail => {
+  state.tabsDetail = detail;
+  state.rows = [session, { ...session, name: 'api-child', linked_by: 'api' }];
+  const { onPick } = render('bottom');
+  const slot = container.querySelector<HTMLElement>('[data-testid="session-tab"]')!;
+  const tab = slot.firstElementChild as HTMLElement;
+  const child = slot.querySelector<HTMLButtonElement>('[data-testid="child-chip"]')!;
+  const targets = child.parentElement!;
+  const slotHeight = parseFloat(slot.style.paddingTop) + parseFloat(tab.style.height) + parseFloat(slot.style.paddingBottom);
+  const targetHeight = parseFloat(child.style.minHeight);
+  const bottom = parseFloat(targets.style.bottom);
+  expect(targetHeight).toBeGreaterThanOrEqual(44);
+  expect(parseFloat(child.style.width)).toBeGreaterThanOrEqual(44);
+  expect(bottom).toBeGreaterThanOrEqual(0);
+  expect(slotHeight - bottom - targetHeight).toBeGreaterThanOrEqual(0);
+  expect(slotHeight).toBeLessThanOrEqual(parseFloat(container.querySelector<HTMLElement>('[data-glass]')!.style.height));
+  expect(slotHeight - bottom - targetHeight / 2).toBe(parseFloat(slot.style.paddingTop) + parseFloat(tab.style.height));
+  act(() => child.click());
+  expect(onPick).toHaveBeenCalledExactlyOnceWith(state.rows[1]);
 });
 
 it('toque longo revela nome completo, máquina e estado; selecionar uma filha realça a aba do grupo', () => {
