@@ -157,26 +157,48 @@ def test_token_do_dono_abre_de_qualquer_origem(monkeypatch):
     assert (e.value.code, e.value.reason) == (1008, "sessao nao existe")
 
 
-async def test_espectador_impoe_o_tamanho_dele_e_devolve_o_de_antes(monkeypatch):
-    layout = {"atual": "desktop"}
+def _layout_falso(monkeypatch, inicial: str = "desktop", recusa: str = "") -> dict:
+    layout = {"atual": inicial}
 
     def verbo(name, v, args=None, aba=None, teto_s=0):
         assert (name, v) == ("s", "layout")
         if args:
-            layout["atual"] = "x".join(args) if len(args) == 2 else args[0]
+            pedido = "x".join(args) if len(args) == 2 else args[0]
+            if pedido == recusa:
+                return f"erro: layout {pedido}: recusado"
+            layout["atual"] = pedido
         return f"layout: {layout['atual']}"
 
     monkeypatch.setattr(navshell, "verbo", verbo)
-    monkeypatch.setattr(navsock, "_layout_original", {})
+    monkeypatch.setattr(navsock, "_imposto", {})
+    return layout
+
+
+async def test_espectador_impoe_o_tamanho_dele_e_devolve_o_de_antes(monkeypatch):
+    layout = _layout_falso(monkeypatch, inicial="mobile")
     a, b, tela = {"w": 1280, "h": 800}, {"w": 1280, "h": 800}, _Tela()
 
     await navsock._layout_do_espectador("s", {"t": "layout", "w": 900, "h": 700}, a, tela)
     assert (layout["atual"], a["w"], a["h"]) == ("900x700", 900, 700)
-    # Outro espectador assume: o "de antes" continua sendo o da sessão, não o tamanho do primeiro.
-    await navsock._layout_do_espectador("s", {"t": "layout", "w": 600, "h": 500}, b, tela)
+    # Reconexão com o mesmo tamanho: a conexão velha cai depois e não desfaz o da nova.
+    await navsock._layout_do_espectador("s", {"t": "layout", "w": 900, "h": 700}, b, tela)
     await navsock._devolver_layout("s", a)
-    assert layout["atual"] == "600x500", "quem saiu não desfaz o tamanho de quem está olhando"
+    assert layout["atual"] == "900x700", "quem saiu não desfaz o tamanho de quem está olhando"
     await navsock._devolver_layout("s", b)
-    assert layout["atual"] == "desktop"
+    assert (layout["atual"], navsock._imposto) == ("mobile", {}), "o de antes é o da sessão, não o do primeiro espectador"
     await navsock._layout_do_espectador("s", {"t": "layout", "w": 0, "h": 700}, a, tela)
-    assert layout["atual"] == "desktop", "tamanho inválido não chega ao navegador"
+    assert layout["atual"] == "mobile", "tamanho inválido não chega ao navegador"
+
+
+async def test_recusa_e_troca_pelo_celular_nao_deixam_tamanho_preso(monkeypatch):
+    layout = _layout_falso(monkeypatch, recusa="900x700")
+    a, tela = {"w": 1280, "h": 800}, _Tela()
+
+    await navsock._layout_do_espectador("s", {"t": "layout", "w": 900, "h": 700}, a, tela)
+    assert (layout["atual"], navsock._imposto, tela.enviados[-1]["t"]) == ("desktop", {}, "layout")
+    assert tela.enviados[-1]["resposta"].startswith("erro:"), "a recusa chega a quem olha"
+
+    await navsock._layout_do_espectador("s", {"t": "layout", "w": 600, "h": 500}, a, tela)
+    layout["atual"] = "mobile"   # o celular trocou o layout no meio
+    await navsock._devolver_layout("s", a)
+    assert (layout["atual"], navsock._imposto) == ("mobile", {}), "a escolha de depois fica, e nada sobra guardado"

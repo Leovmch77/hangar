@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import json
 import logging
 import secrets
@@ -412,9 +413,10 @@ async def nav_ws(ws: WebSocket, name: str,
         with contextlib.suppress(Exception):
             await ws.send_text(json.dumps({"t": "erro", "m": str(e)}))
     finally:
-        await _devolver_layout(name, estado)
         with contextlib.suppress(Exception):
             await ws.close()
+        # Protegida: o servidor parando no meio não deixa a página presa no tamanho de quem saiu.
+        await asyncio.shield(_devolver_layout(name, estado))
 
 
 async def _ler_cliente(cdp: _Cdp, ws: WebSocket, estado: dict, name: str) -> None:
@@ -438,9 +440,19 @@ async def _ler_cliente(cdp: _Cdp, ws: WebSocket, estado: dict, name: str) -> Non
 
 
 TETO_LAYOUT = 8192
-# Layout da sessão antes de um espectador impor o tamanho da tela dele. Por sessão, não por conexão:
-# o espectador que assume no lugar de outro não pode guardar como "de antes" o tamanho do anterior.
-_layout_original: dict[str, str] = {}
+# Tamanho imposto por espectador, por sessão: (conexão dona, layout de antes, layout imposto). Uma
+# entrada só, de quem impôs por último; o "de antes" passa de um espectador ao seguinte.
+_imposto: dict[str, tuple[int, str, str]] = {}
+_travas: dict[str, asyncio.Lock] = {}
+_conexoes = itertools.count(1)
+
+
+def _rotulo(resposta: str) -> Optional[str]:
+    return resposta.removeprefix("layout:").strip() if resposta.startswith("layout:") else None
+
+
+def _args_layout(rotulo: str) -> list[str]:
+    return [rotulo] if rotulo in ("desktop", "mobile") else rotulo.split("x")
 
 
 async def _layout_do_espectador(name: str, msg: dict, estado: dict, ws: WebSocket) -> None:
@@ -452,35 +464,43 @@ async def _layout_do_espectador(name: str, msg: dict, estado: dict, ws: WebSocke
     if not (1 <= w <= TETO_LAYOUT and 1 <= h <= TETO_LAYOUT):
         return
     from app import navshell
+    estado.setdefault("dono", next(_conexoes))
     try:
-        if name not in _layout_original:
-            atual = await asyncio.to_thread(navshell.verbo, name, "layout", [])
-            if not atual.startswith("layout: "):
-                await ws.send_text(json.dumps({"t": "erro", "m": atual}))
-                return
-            _layout_original[name] = atual.removeprefix("layout: ").strip()
-        resposta = await asyncio.to_thread(navshell.verbo, name, "layout", [str(w), str(h)])
+        async with _travas.setdefault(name, asyncio.Lock()):
+            anterior = _imposto.get(name)
+            antes = anterior[1] if anterior else None
+            if antes is None:
+                atual = await asyncio.to_thread(navshell.verbo, name, "layout", [])
+                antes = _rotulo(atual)
+                if antes is None:
+                    await ws.send_text(json.dumps({"t": "erro", "m": atual}))
+                    return
+            resposta = await asyncio.to_thread(navshell.verbo, name, "layout", [str(w), str(h)])
+            if _rotulo(resposta) is not None:
+                _imposto[name] = (estado["dono"], antes, f"{w}x{h}")
+                # No modo de print o screencast não atualiza o tamanho, e o clique é convertido por ele.
+                estado["w"], estado["h"] = w, h
     except Exception as e:
         await ws.send_text(json.dumps({"t": "erro", "m": str(e)}))
         return
-    if resposta.startswith("layout:"):
-        # No modo de print o screencast não atualiza o tamanho, e o clique é convertido por ele.
-        estado["w"], estado["h"], estado["imposto"] = w, h, f"{w}x{h}"
     await ws.send_text(json.dumps({"t": "layout", "resposta": resposta}))
 
 
 async def _devolver_layout(name: str, estado: dict) -> None:
-    """Só quem impôs o tamanho que está valendo devolve o de antes: outro espectador pode ter assumido."""
-    imposto = estado.get("imposto")
-    if not imposto or name not in _layout_original:
-        return
+    """Só o dono do tamanho imposto devolve o de antes, e só se ninguém trocou o layout depois dele."""
     from app import navshell
     try:
-        atual = await asyncio.to_thread(navshell.verbo, name, "layout", [])
-        if atual.removeprefix("layout: ").strip() != imposto:
-            return
-        antes = _layout_original.pop(name)
-        await asyncio.to_thread(navshell.verbo, name, "layout", antes.split("x") if "x" in antes else [antes])
+        async with _travas.setdefault(name, asyncio.Lock()):
+            registro = _imposto.get(name)
+            if not registro or registro[0] != estado.get("dono"):
+                return
+            del _imposto[name]
+            atual = await asyncio.to_thread(navshell.verbo, name, "layout", [])
+            if _rotulo(atual) != registro[2]:
+                return
+            resposta = await asyncio.to_thread(navshell.verbo, name, "layout", _args_layout(registro[1]))
+            if _rotulo(resposta) is None:
+                _log.warning("navsock %s: layout de antes (%s) não voltou: %s", name, registro[1], resposta)
     except Exception as e:
         _log.warning("navsock %s: layout de antes não voltou: %r", name, e)
 

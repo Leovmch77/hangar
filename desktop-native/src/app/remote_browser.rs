@@ -35,7 +35,9 @@ pub(super) struct RemoteBrowser {
     last_move: Option<Instant>,
     /// Tamanho do painel já imposto à página da outra máquina, e quando.
     sent_size: Option<((u32, u32), Instant)>,
-    /// Recusa da outra máquina ao tamanho pedido.
+    /// Reenvio do tamanho agendado para depois do intervalo, enquanto o painel é arrastado.
+    resize_pending: bool,
+    /// Erro ou recusa que a outra máquina mandou sem fechar a conexão.
     notice: Option<String>,
     /// Sobe a cada conexão: evento de uma conexão anterior que chega atrasado é descartado.
     seq: u64,
@@ -45,26 +47,33 @@ pub(super) struct RemoteBrowser {
 impl RemoteBrowser {
     pub(super) fn new(name: String, api: Api, token: String, runtime: tokio::runtime::Handle, cx: &mut Context<Self>) -> Self {
         Self { name, api, token, runtime, socket: None, status: Status::Idle, url: None, frame: None, slow: false, shown: false,
-            focus: cx.focus_handle(), bounds: Rc::default(), scale: Rc::new(Cell::new(1.)), last_move: None, sent_size: None, notice: None, seq: 0, _read: Task::ready(()) }
+            focus: cx.focus_handle(), bounds: Rc::default(), scale: Rc::new(Cell::new(1.)), last_move: None, sent_size: None, resize_pending: false, notice: None, seq: 0, _read: Task::ready(()) }
     }
 
     /// Só conectado enquanto está na tela: o canal aceita um espectador por vez, e fechado ele volta a quem precisar.
+    /// Chamado a cada quadro da janela, que é quando o painel muda de tamanho.
     pub(super) fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
-        if shown == self.shown { return; }
+        if shown == self.shown {
+            if shown { self.sync_size(cx); }
+            return;
+        }
         self.shown = shown;
-        if shown { self.connect(cx) } else { self.disconnect() }
+        if shown { self.connect(cx) } else { self.disconnect(cx) }
         cx.notify();
     }
 
-    fn disconnect(&mut self) {
+    /// Fecha a conexão e solta o último quadro: reaberta, a aba não mostra uma tela velha como se fosse a atual.
+    fn disconnect(&mut self, cx: &mut Context<Self>) {
         self.seq += 1;
         if let Some(mut socket) = self.socket.take() { socket.close(); }
         self._read = Task::ready(());
         self.status = Status::Idle;
+        self.url = None;
+        if let Some(old) = self.frame.take() { cx.drop_image(old, None); }
     }
 
     fn connect(&mut self, cx: &mut Context<Self>) {
-        self.disconnect();
+        self.disconnect(cx);
         let seq = self.seq;
         let width = f32::from(self.bounds.get().size.width) * self.scale.get();
         let width = if width > 0. { width.min(MAX_WIDTH) } else { MAX_WIDTH };
@@ -73,13 +82,13 @@ impl RemoteBrowser {
         let events = socket.events();
         self.socket = Some(socket);
         self.status = Status::Connecting;
-        (self.sent_size, self.notice) = (None, None);
+        (self.sent_size, self.resize_pending, self.notice) = (None, false, None);
         self._read = cx.spawn(async move |this, cx| {
             let mut said: Option<String> = None;
             while let Ok(event) = events.recv().await {
                 let text = match event {
                     Ok(TextEvent::Connected) => {
-                        if this.update(cx, |this, cx| if this.seq == seq { this.status = Status::Live; this.sync_size(); cx.notify(); }).is_err() { return; }
+                        if this.update(cx, |this, cx| if this.seq == seq { this.status = Status::Live; this.sync_size(cx); cx.notify(); }).is_err() { return; }
                         continue;
                     }
                     Ok(TextEvent::Text(text)) => text,
@@ -94,12 +103,11 @@ impl RemoteBrowser {
                             let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
                             crate::media::decode(&bytes, 4096, 4096, None)
                         }).await;
-                        let Some(image) = image else { continue };
+                        let Some(image) = image else { eprintln!("[nav] tela remota: quadro ilegível descartado"); continue };
                         let kept = this.update(cx, |this, cx| {
                             if this.seq != seq { return cx.drop_image(image, None); }
                             if let Some(old) = this.frame.replace(image) { cx.drop_image(old, None); }
                             this.slow = slow;
-                            this.sync_size();
                             cx.notify();
                         });
                         if kept.is_err() { return; }
@@ -112,13 +120,20 @@ impl RemoteBrowser {
                         let refused = msg["resposta"].as_str().filter(|r| !r.starts_with("layout:")).map(str::to_owned);
                         if this.update(cx, |this, cx| if this.seq == seq { this.notice = refused; cx.notify(); }).is_err() { return; }
                     }
-                    Some("erro") => said = msg["m"].as_str().map(str::to_owned),
+                    // O servidor manda erro sem fechar quando o tamanho não pôde ser aplicado: aparece já, na linha
+                    // de aviso, e vira o motivo se a conexão cair logo em seguida.
+                    Some("erro") => {
+                        said = msg["m"].as_str().map(str::to_owned);
+                        let text = said.clone();
+                        if this.update(cx, |this, cx| if this.seq == seq { this.notice = text; cx.notify(); }).is_err() { return; }
+                    }
                     _ => {}
                 }
             }
             let reason = said.unwrap_or_else(|| tr_shared("nav_remoto_caiu", &[]));
             let _ = this.update(cx, |this, cx| if this.seq == seq {
                 this.socket = None;
+                this.notice = None;
                 this.status = Status::Down(reason);
                 cx.notify();
             });
@@ -126,30 +141,46 @@ impl RemoteBrowser {
     }
 
     /// A página da outra máquina toma o tamanho deste painel; ela devolve o de antes quando a conexão fecha.
-    fn sync_size(&mut self) {
+    fn sync_size(&mut self, cx: &mut Context<Self>) {
         let size = self.bounds.get().size;
         let (w, h) = (f32::from(size.width).round() as u32, f32::from(size.height).round() as u32);
         if w < 50 || h < 50 || !matches!(self.status, Status::Live) { return; }
-        if let Some(((sw, sh), at)) = self.sent_size
-            && ((sw.abs_diff(w) < 16 && sh.abs_diff(h) < 16) || at.elapsed() < RESIZE_EVERY) { return; }
-        self.sent_size = Some(((w, h), Instant::now()));
-        self.send(json!({"t": "layout", "w": w, "h": h}));
+        if let Some(((sw, sh), at)) = self.sent_size {
+            if sw.abs_diff(w) < 16 && sh.abs_diff(h) < 16 { return; }
+            // Arrastando: o último tamanho sai quando o intervalo passar, mesmo sem outro quadro da janela.
+            if at.elapsed() < RESIZE_EVERY {
+                if !std::mem::replace(&mut self.resize_pending, true) {
+                    let wait = RESIZE_EVERY - at.elapsed();
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(wait).await;
+                        let _ = this.update(cx, |this, cx| { this.resize_pending = false; this.sync_size(cx); });
+                    }).detach();
+                }
+                return;
+            }
+        }
+        if self.send(json!({"t": "layout", "w": w, "h": h})) { self.sent_size = Some(((w, h), Instant::now())); }
     }
 
-    fn send(&self, msg: Value) {
-        if let (Some(socket), Status::Live) = (&self.socket, &self.status) { let _ = socket.send(&msg.to_string()); }
+    /// `false` = não saiu (sem conexão ou fila cheia).
+    fn send(&self, msg: Value) -> bool {
+        match (&self.socket, &self.status) {
+            (Some(socket), Status::Live) => socket.send(&msg.to_string()).is_ok(),
+            _ => false,
+        }
     }
 
-    /// Ponto da tela em fração (0..1) do quadro desenhado; fora dele, `None`.
-    fn at(&self, p: Point<Pixels>) -> Option<(f32, f32)> {
+    /// Ponto da tela em fração (0..1) do quadro desenhado; fora dele, `None`, ou a borda mais perto com `clamp`.
+    fn at(&self, p: Point<Pixels>, clamp: bool) -> Option<(f32, f32)> {
         // A proporção desenhada é a da imagem: no modo de print o tamanho anunciado não é o da página.
         let size = self.frame.as_ref()?.size(0);
-        fraction(self.bounds.get(), (size.width.0 as f32, size.height.0 as f32), p)
+        fraction(self.bounds.get(), (size.width.0 as f32, size.height.0 as f32), p, clamp)
     }
 
     fn mouse(&mut self, action: &str, button: MouseButton, p: Point<Pixels>, modifiers: &Modifiers) {
-        let Some((x, y)) = self.at(p) else { return };
-        let b = match button { MouseButton::Right => "right", MouseButton::Middle => "middle", _ => "left" };
+        let b = match button { MouseButton::Left => "left", MouseButton::Right => "right", MouseButton::Middle => "middle", _ => return };
+        // Soltar fora da imagem ainda solta o botão na página: senão ele fica apertado lá.
+        let Some((x, y)) = self.at(p, action == "release") else { return };
         self.send(json!({"t": "m", "acao": action, "b": b, "x": x, "y": y, "mod": modifier_bits(modifiers)}));
     }
 
@@ -172,13 +203,16 @@ impl RemoteBrowser {
             .on_mouse_up(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, _, _| this.mouse("release", e.button, e.position, &e.modifiers)))
             .on_mouse_up(MouseButton::Right, cx.listener(|this, e: &MouseUpEvent, _, _| this.mouse("release", e.button, e.position, &e.modifiers)))
             .on_mouse_up(MouseButton::Middle, cx.listener(|this, e: &MouseUpEvent, _, _| this.mouse("release", e.button, e.position, &e.modifiers)))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, e: &MouseUpEvent, _, _| this.mouse("release", e.button, e.position, &e.modifiers)))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(|this, e: &MouseUpEvent, _, _| this.mouse("release", e.button, e.position, &e.modifiers)))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(|this, e: &MouseUpEvent, _, _| this.mouse("release", e.button, e.position, &e.modifiers)))
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, _| {
                 if this.last_move.is_some_and(|t| t.elapsed() < MOVE_EVERY) { return; }
                 this.last_move = Some(Instant::now());
                 this.mouse("move", MouseButton::Left, e.position, &e.modifiers);
             }))
             .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _, _| {
-                let Some((x, y)) = this.at(e.position) else { return };
+                let Some((x, y)) = this.at(e.position, false) else { return };
                 // Mesma conta do navegador local: 17,78 px por linha, e o sinal oposto ao da página.
                 let d = e.delta.pixel_delta(px(17.78));
                 this.send(json!({"t": "w", "x": x, "y": y, "dx": -f32::from(d.x), "dy": -f32::from(d.y)}));
@@ -187,8 +221,8 @@ impl RemoteBrowser {
                 let k = &e.keystroke;
                 let paste = (k.modifiers.control && !k.modifiers.alt && k.key == "v") || (k.modifiers.shift && k.key == "insert");
                 match paste.then(|| cx.read_from_clipboard().and_then(|item| item.text())).flatten() {
-                    Some(text) => this.send(json!({"t": "txt", "s": text})),
-                    None => if let Some(msg) = key_message(k) { this.send(msg) },
+                    Some(text) => { this.send(json!({"t": "txt", "s": text})); }
+                    None => if let Some(msg) = key_message(k) { this.send(msg); },
                 }
                 cx.stop_propagation();
             }))
@@ -232,13 +266,14 @@ fn modifier_bits(m: &Modifiers) -> u8 {
 }
 
 /// Ponto da tela em fração do quadro desenhado com `ObjectFit::Contain` (centrado, sem esticar).
-fn fraction(bounds: Bounds<Pixels>, (fw, fh): (f32, f32), p: Point<Pixels>) -> Option<(f32, f32)> {
+fn fraction(bounds: Bounds<Pixels>, (fw, fh): (f32, f32), p: Point<Pixels>, clamp: bool) -> Option<(f32, f32)> {
     let (bw, bh) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     if fw <= 0. || fh <= 0. || bw <= 0. || bh <= 0. { return None; }
     let s = (bw / fw).min(bh / fh);
     let (dw, dh) = (fw * s, fh * s);
     let x = (f32::from(p.x - bounds.origin.x) - (bw - dw) / 2.) / dw;
     let y = (f32::from(p.y - bounds.origin.y) - (bh - dh) / 2.) / dh;
+    if clamp { return Some((x.clamp(0., 1.), y.clamp(0., 1.))); }
     ((0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y)).then_some((x, y))
 }
 
@@ -275,10 +310,11 @@ mod tests {
     fn fraction_follows_the_centered_frame() {
         // Painel 1000×400 com página 1280×800: o quadro ocupa 640×400, centrado com 180 px de cada lado.
         let card = Bounds { origin: point(px(10.), px(20.)), size: size(px(1000.), px(400.)) };
-        assert_eq!(fraction(card, (1280., 800.), point(px(190.), px(20.))), Some((0., 0.)));
-        assert_eq!(fraction(card, (1280., 800.), point(px(510.), px(220.))), Some((0.5, 0.5)));
-        assert_eq!(fraction(card, (1280., 800.), point(px(100.), px(220.))), None, "faixa vazia ao lado não é página");
-        assert_eq!(fraction(card, (0., 800.), point(px(510.), px(220.))), None);
+        assert_eq!(fraction(card, (1280., 800.), point(px(190.), px(20.)), false), Some((0., 0.)));
+        assert_eq!(fraction(card, (1280., 800.), point(px(510.), px(220.)), false), Some((0.5, 0.5)));
+        assert_eq!(fraction(card, (1280., 800.), point(px(100.), px(220.)), false), None, "faixa vazia ao lado não é página");
+        assert_eq!(fraction(card, (1280., 800.), point(px(100.), px(220.)), true), Some((0., 0.5)), "soltar fora cai na borda");
+        assert_eq!(fraction(card, (0., 800.), point(px(510.), px(220.)), true), None);
     }
 
     fn stroke(key: &str, key_char: Option<&str>, control: bool) -> Keystroke {
