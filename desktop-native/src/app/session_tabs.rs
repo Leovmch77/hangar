@@ -16,6 +16,9 @@ pub(super) fn reveal_offset(current: f32, viewport: (f32, f32), tab: (f32, f32))
     else { current }
 }
 
+/// Espera a pessoa: pergunta, permissão ou menu aberto. Na ordem da barra vem antes das que trabalham, como na lista.
+fn waits(s: &SessionInfo) -> bool { s.state == "awaiting_input" || s.pending_questions > 0 }
+
 pub(super) fn bar_height() -> f32 { if appearance::get().tabs_full { 64. } else { 56. } }
 /// 8 px de folga em cima e embaixo: a máquina fica montada na borda de cima e as filhas do grupo na de baixo, metade para fora.
 pub(super) fn tab_height() -> f32 { bar_height() - 16. }
@@ -153,18 +156,22 @@ impl Hangar {
         for (t, s) in &entries {
             (t, &s.pair_gid, &s.pair_owner, s.peers(), &s.pair_task, s.orq(), &s.linked_by).hash(&mut hasher);
             let busy = super::sidebar::working(s);
-            if split { busy.hash(&mut hasher); }
+            if split { (busy, waits(s)).hash(&mut hasher); }
             // A data de quem trabalha não entra: resposta nova no meio do turno não mexe na barra.
             if recent_first && !busy { s.last_reply_at.map(f64::to_bits).hash(&mut hasher); }
         }
         super::grouping::memo(&self.sidebar.grouping.tabs, hasher.finish(), || {
             let busy: std::collections::HashSet<Target> = entries.iter().filter(|(_, s)| super::sidebar::working(s)).map(|(t, _)| t.clone()).collect();
+            let waiting: std::collections::HashSet<Target> = entries.iter().filter(|(_, s)| waits(s)).map(|(t, _)| t.clone()).collect();
             let at: HashMap<Target, f64> = entries.iter().map(|(t, s)| (t.clone(), s.last_reply_at.unwrap_or(0.))).collect();
             let mut out = groups(entries, &self.identities());
             if split {
-                // Grupos, depois as que trabalham, depois as paradas; sem a ordem por data, cada parte fica como estava.
-                let section = |g: &TabGroup| if g.mother { 0 } else if g.members.iter().any(|t| busy.contains(t)) { 1 } else { 2 };
-                let recency = |g: &TabGroup| if recent_first && section(g) == 2 {
+                // Como a lista lateral: grupos, as que esperam a pessoa, as que trabalham, depois as paradas; sem a ordem
+                // por data, cada parte fica como estava.
+                let section = |g: &TabGroup| if g.mother { 0 }
+                    else if g.members.iter().any(|t| waiting.contains(t)) { 1 }
+                    else if g.members.iter().any(|t| busy.contains(t)) { 2 } else { 3 };
+                let recency = |g: &TabGroup| if recent_first && section(g) == 3 {
                     g.members.iter().filter_map(|t| at.get(t)).copied().fold(0., f64::max)
                 } else { 0. };
                 out.sort_by(|a, b| section(a).cmp(&section(b)).then_with(|| recency(b).total_cmp(&recency(a))));
