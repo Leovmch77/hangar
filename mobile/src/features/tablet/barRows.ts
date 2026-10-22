@@ -4,8 +4,10 @@ import { buildSessionSections } from '../sessions/sessionSections';
 export type BarItem = { kind: 'single'; session: AggSession } | { kind: 'group'; key: string; label: string | null; members: AggSession[] };
 
 const keyOf = (s: AggSession) => `${s.serverId}::${s.name}`;
+export const isWorking = (s: AggSession) => s.state === 'working' && !s.limited;
+type TabOrder = { tabsWorkingFirst?: boolean; tabsRecentFirst?: boolean };
 
-export function barRows(rows: AggSession[], identities: ReadonlyMap<string, string>, groupsFirst = true): BarItem[] {
+export function barRows(rows: AggSession[], identities: ReadonlyMap<string, string>, groupsFirst = true, order: TabOrder = {}): BarItem[] {
   const ordered = buildSessionSections(rows, 'none', '', new Set()).flatMap(s => s.data);
   const byKey = new Map(ordered.map(s => [keyOf(s), s]));
   type Group = { key: string | null; members: Set<AggSession> };
@@ -57,5 +59,11 @@ export function barRows(rows: AggSession[], identities: ReadonlyMap<string, stri
     const label = sorted.map(s => s.pair_task?.trim()).find(Boolean) || null;
     return [{ kind: 'group', key, label, members: sorted }];
   });
+  if (order.tabsWorkingFirst || order.tabsRecentFirst) {
+    const section = (item: BarItem) => item.kind === 'group' ? 0 : isWorking(item.session) ? 1 : 2;
+    const recency = (item: BarItem) => order.tabsRecentFirst && item.kind === 'single' && section(item) === 2
+      ? Math.max(0, item.session.last_reply_at ?? 0) : 0;
+    return items.sort((a, b) => section(a) - section(b) || recency(b) - recency(a));
+  }
   return groupsFirst ? items.sort((a, b) => Number(b.kind === 'group') - Number(a.kind === 'group')) : items;
 }

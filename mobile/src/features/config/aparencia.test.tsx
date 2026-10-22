@@ -39,7 +39,7 @@ let root: Root;
 let container: HTMLDivElement;
 beforeEach(() => {
   memory.clear();
-  useTabletPrefs.setState({ placement: 'bottom', collapsed: false, tabsDetail: 'compact' });
+  useTabletPrefs.setState({ placement: 'bottom', collapsed: false, tabsDetail: 'compact', tabsWorkingFirst: false, tabsRecentFirst: false });
   container = document.createElement('div'); root = createRoot(container);
 });
 
@@ -67,6 +67,34 @@ it.each(['pt', 'en'] as const)('Aparência permite guardar Compacto/Completa só
   }
 });
 afterEach(() => act(() => root.unmount()));
+
+it.each(['pt', 'en'] as const)('Aparência guarda as duas opções independentes de ordem do tablet (%s)', async locale => {
+  const resolveLocale = getLocale;
+  overwriteGetLocale(() => locale);
+  try {
+    await act(async () => root.render(createElement(Aparencia)));
+    for (const [label, hint, key, field] of [
+      [m.native_settings_tabs_working_first(), m.native_settings_tabs_working_first_hint(), 'tablet.tabsWorkingFirst', 'tabsWorkingFirst'],
+      [m.native_settings_tabs_recent_first(), m.native_settings_tabs_recent_first_hint(), 'tablet.tabsRecentFirst', 'tabsRecentFirst'],
+    ] as const) {
+      const group = container.querySelector(`[role="radiogroup"][aria-label="${label}"]`)!;
+      expect(group).not.toBeNull();
+      expect(container.textContent).toContain(hint);
+      const buttons = [...group.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+      expect(buttons.map(b => b.textContent)).toEqual([m.native_settings_tab_preview_off(), m.native_settings_tab_preview_on()]);
+      for (const button of buttons) expect(parseFloat(button.style.minHeight)).toBeGreaterThanOrEqual(44);
+      expect(buttons[0].getAttribute('aria-selected')).toBe('true');
+      await act(async () => buttons[1].click());
+      expect(useTabletPrefs.getState()[field]).toBe(true);
+      expect(memory.get(key)).toBe(true);
+      await act(async () => buttons[0].click());
+      expect(memory.get(key)).toBe(false);
+    }
+    expect(useTabletPrefs.getState()).toMatchObject({ placement: 'bottom', tabsDetail: 'compact' });
+  } finally {
+    overwriteGetLocale(resolveLocale);
+  }
+});
 
 it.each(['pt', 'en'] as const)('Aparência oferece três posições em Tablet deitado e grava a escolha (%s)', async locale => {
   const resolveLocale = getLocale;

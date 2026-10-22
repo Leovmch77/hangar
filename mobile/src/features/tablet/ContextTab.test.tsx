@@ -6,11 +6,13 @@ import type { AggSession, Server, StateEvent } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 import { ContextTab } from './ContextTab';
 import { ContextPanel } from './ContextPanel';
+import { getLocale, overwriteGetLocale } from '../../paraglide/runtime';
 
 const state = vi.hoisted(() => ({ statusLine: null as string | null, stateEvent: null as StateEvent | null, rows: [] as AggSession[] }));
 const servers = vi.hoisted(() => ({ ready: true, servers: [
   { id: 'srv', label: 'Casa', baseUrl: 'https://casa.test', token: 'test' },
 ] as Server[] }));
+vi.mock('../pair/identities', () => ({ useIdentities: () => ({ identities: new Map([['srv', 'casa'], ['remote', 'escritorio']]) }) }));
 vi.mock('../../stores/servers', () => ({
   useServers: (select: (s: typeof servers) => unknown) => select(servers),
 }));
@@ -41,7 +43,11 @@ beforeEach(() => {
   root = createRoot(container);
 });
 afterEach(() => act(() => root.unmount()));
-const render = () => act(() => root.render(createElement(ContextTab, { serverId: 'srv', name: 'sess' })));
+const onPick = vi.fn();
+const render = (name = 'sess') => act(() => root.render(createElement(ContextTab, { serverId: 'srv', name, onPick })));
+const session = (name: string, extra: Partial<AggSession> = {}): AggSession => ({
+  name, serverId: 'srv', serverLabel: 'Casa', serverColor: '#999', state: 'idle', last_activity: 1, ...extra,
+});
 
 const renderPanel = (name = 'sess', serverId = 'srv') => act(() => root.render(createElement(ContextPanel, { serverId, name })));
 const selectTab = (label: string) => {
@@ -92,6 +98,71 @@ describe('ContextPanel', () => {
   });
 });
 describe('ContextTab', () => {
+  it.each(['pt', 'en'] as const)('mostra grupo entre máquinas, vínculos locais e membros sem acesso (%s)', locale => {
+    const resolveLocale = getLocale;
+    overwriteGetLocale(() => locale);
+    onPick.mockClear();
+    try {
+      const pair = { pair_gid: 'g', pair_owner: 'casa', pair_task: 'PM-123 tela',
+        pair_peers: ['desligado::ausente'], pair_external: { alias: 'visitante', owner: 'Outra pessoa', session: 'externa' } };
+      state.rows = [
+        session('sess', { ...pair, state: 'working' }),
+        session('filha', { ...pair, linked_by: 'sess', state: 'working', provider: 'codex', model: 'gpt-6', last_reply: 'resposta-filha' }),
+        session('neta', { ...pair, linked_by: 'filha', state: 'working', limited: true }),
+        session('remota', { ...pair, serverId: 'remote', serverLabel: 'Escritório', linked_by: 'sess', state: 'working' }),
+      ];
+      render();
+      expect(container.textContent).toContain(m.native_group_panel_title({ count: 6 }));
+      expect(container.textContent).toContain(m.native_group_panel_working({ count: 2 }));
+      expect(container.textContent).toContain('PM-123 tela');
+      expect(container.textContent).toContain('Escritório');
+      expect(container.textContent).toContain('resposta-filha');
+      expect(container.textContent).toContain('gpt-6');
+      expect(container.textContent).toContain(m.native_group_panel_child_of_here());
+      expect(container.textContent).toContain(m.native_group_panel_child_of({ name: 'filha' }));
+      expect(container.textContent).toContain('desligado::ausente');
+      expect(container.textContent).toContain('visitante::externa');
+      const members = [...container.querySelectorAll<HTMLButtonElement>('button[aria-label]')];
+      expect(members).toHaveLength(3);
+      expect(members.map(button => button.textContent)).toEqual([
+        expect.stringContaining('filha'), expect.stringContaining('neta'), expect.stringContaining('remota'),
+      ]);
+      expect(members[2].textContent).not.toContain(m.native_group_panel_child_of_here());
+      act(() => members[2].click());
+      expect(onPick).toHaveBeenCalledWith(state.rows[3]);
+      render('filha');
+      expect(container.textContent).toContain(m.native_group_panel_parent_of_here());
+      expect(container.textContent).toContain(m.native_group_panel_child_of_here());
+    } finally {
+      overwriteGetLocale(resolveLocale);
+    }
+  });
+
+  it('não mostra painel sem grupo e conta os inacessíveis mesmo sem outro membro abrível', () => {
+    state.rows = [session('sess')];
+    render();
+    expect(container.textContent).not.toContain(m.native_group_panel_title({ count: 2 }));
+    state.rows = [session('sess', { pair_gid: 'g', pair_peers: ['desligado::ausente'] })];
+    render();
+    expect(container.textContent).toContain(m.native_group_panel_title({ count: 2 }));
+    expect(container.textContent).toContain('desligado::ausente');
+    expect(container.textContent).not.toContain(m.native_group_panel_working({ count: 0 }));
+    expect(container.querySelector('button[aria-label]')).toBeNull();
+    state.rows = [session('sess', { pair_gid: 'g' })];
+    render();
+    expect(container.textContent).not.toContain(m.native_group_panel_title({ count: 1 }));
+  });
+
+  it('o painel passa ao grupo a mesma navegação da barra e desaparece ao trocar para sessão sem grupo', () => {
+    state.rows = [session('sess', { pair_gid: 'g' }), session('par', { pair_gid: 'g' }), session('sozinha')];
+    act(() => root.render(createElement(ContextPanel, { serverId: 'srv', name: 'sess', onPick })));
+    const member = container.querySelector<HTMLButtonElement>('button[aria-label^="' + m.linked_children_open() + '"]')!;
+    act(() => member.click());
+    expect(onPick).toHaveBeenCalledWith(state.rows[1]);
+    renderPanel('sozinha');
+    expect(container.textContent).not.toContain(m.native_group_panel_title({ count: 2 }));
+  });
+
   it('mostra o contexto, custo, cotas, repositório e branch da statusline', () => {
     state.statusLine = '💬 ctx 940k/1M │ 💵 $12.34 │ ⚡5h:23% ↺1h55m │ 📅7d:74% │ 📁 hangar [tab/t7]';
     render();

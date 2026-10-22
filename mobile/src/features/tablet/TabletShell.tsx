@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { usePathname, useRouter } from 'expo-router';
+import type { AggSession } from '@hangar/core';
 import { useTabletPrefs } from '../../stores/tabletPrefs';
 import { useServers } from '../../stores/servers';
 import { Screen } from '../../ui/Screen';
@@ -25,14 +26,15 @@ export function TabletShell({ selected, children, active = true }: Props) {
   const panelOpen = useTabletPrefs(s => s.panelOpen);
   const activeId = useServers(s => s.activeId);
   const voiceServer = selected?.serverId ?? activeId;
+  const pickSession = (s: AggSession) => {
+    const path = `/s/${encodeURIComponent(s.serverId)}/${encodeURIComponent(s.name)}` as never;
+    if (selected && /^\/s\/[^/]+\/[^/]+\/?$/.test(pathname)) router.replace(path);
+    else if (selected) router.dismissTo(path);
+    else router.push(path);
+  };
   const bar = (position: typeof placement) => active && placement === position && (position === 'left' || !collapsed) ? (
     <SessionsBar placement={placement} selected={selected}
-      onPick={s => {
-        const path = `/s/${encodeURIComponent(s.serverId)}/${encodeURIComponent(s.name)}` as never;
-        if (selected && /^\/s\/[^/]+\/[^/]+\/?$/.test(pathname)) router.replace(path);
-        else if (selected) router.dismissTo(path);
-        else router.push(path);
-      }}
+      onPick={pickSession}
       onNew={() => router.push('/create')} />
   ) : null;
 
@@ -65,7 +67,7 @@ export function TabletShell({ selected, children, active = true }: Props) {
       <View style={[styles.row, active && styles.tabletRow]}>
         {bar('left')}
         <View key="conversation" style={styles.center}>{children}</View>
-        {active && selected && panelOpen ? <ContextPanel serverId={selected.serverId} name={selected.name} /> : null}
+        {active && selected && panelOpen ? <ContextPanel serverId={selected.serverId} name={selected.name} onPick={pickSession} /> : null}
       </View>
       <View style={active && placement === 'bottom' ? styles.horizontal : undefined}>{bar('bottom')}</View>
     </Screen>

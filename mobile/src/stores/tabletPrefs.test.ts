@@ -17,6 +17,21 @@ vi.mock('./prefs', () => ({ prefs: {
 describe('useTabletPrefs', () => {
   beforeEach(() => { memory.clear(); vi.resetModules(); });
 
+  it('começa com as duas ordens desligadas e restaura as escolhas independentes', async () => {
+    const { useTabletPrefs } = await import('./tabletPrefs');
+    expect(useTabletPrefs.getState()).toMatchObject({ tabsWorkingFirst: false, tabsRecentFirst: false });
+    useTabletPrefs.getState().setTabsWorkingFirst(true);
+    useTabletPrefs.getState().setTabsRecentFirst(true);
+    expect(memory.get('tablet.tabsWorkingFirst')).toBe(true);
+    expect(memory.get('tablet.tabsRecentFirst')).toBe(true);
+    useTabletPrefs.getState().setTabsWorkingFirst(false);
+    vi.resetModules();
+    const reopened = await import('./tabletPrefs');
+    expect(reopened.useTabletPrefs.getState()).toMatchObject({ tabsWorkingFirst: false, tabsRecentFirst: true, placement: 'bottom' });
+    reopened.useTabletPrefs.getState().setTabsRecentFirst(false);
+    expect(memory.get('tablet.tabsRecentFirst')).toBe(false);
+  });
+
   it('sem nada gravado: bottom, barra expandida e painel aberto', async () => {
     const { useTabletPrefs } = await import('./tabletPrefs');
     expect(useTabletPrefs.getState()).toMatchObject({ placement: 'bottom', collapsed: false, panelOpen: true });

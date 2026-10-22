@@ -9,7 +9,7 @@ import { Alert } from 'react-native';
 const state = vi.hoisted(() => ({
   rows: [] as AggSession[], byServer: [] as ServerBucket[], loading: false, keyboardVisible: false,
   retain: vi.fn(), release: vi.fn(), collapsed: false, toggleCollapsed: vi.fn(),
-  tabsDetail: 'compact',
+  tabsDetail: 'compact', tabsWorkingFirst: false, tabsRecentFirst: false,
 }));
 vi.mock('../../stores/sessions', () => ({ useSessions: Object.assign(
   (selector: (s: typeof state) => unknown) => selector(state), { getState: () => state },
@@ -59,6 +59,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   state.rows = [session]; state.byServer = []; state.loading = false; state.keyboardVisible = false; state.collapsed = false;
   state.tabsDetail = 'compact';
+  state.tabsWorkingFirst = false; state.tabsRecentFirst = false;
   state.retain.mockReturnValue(state.release);
   container = document.createElement('div'); root = createRoot(container);
 });
@@ -74,6 +75,27 @@ const click = (label: string) => {
 };
 
 describe('SessionsBar', () => {
+  it.each(['left', 'bottom', 'top'] as const)('%s aplica as preferências de ordem ao vivo', placement => {
+    state.rows = [
+      { ...session, name: 'pergunta', state: 'awaiting_input', last_reply_at: 2 },
+      { ...session, name: 'ocupada', state: 'working', last_reply_at: 1 },
+      { ...session, name: 'limite', state: 'working', limited: true, last_reply_at: 50 },
+      { ...session, name: 'recente', last_reply_at: 30 },
+    ];
+    const names = () => [...container.querySelectorAll('button')].flatMap(button => {
+      const label = `${button.getAttribute('aria-label') ?? ''} ${button.textContent}`;
+      return state.rows.filter(s => label.includes(s.name)).map(s => s.name);
+    });
+    render(placement);
+    expect(names()[0]).toBe('pergunta');
+    state.tabsWorkingFirst = true;
+    render(placement);
+    expect(names()).toEqual(['ocupada', 'pergunta', 'limite', 'recente']);
+    state.tabsWorkingFirst = false; state.tabsRecentFirst = true;
+    render(placement);
+    expect(names()).toEqual(['ocupada', 'limite', 'recente', 'pergunta']);
+  });
+
   it('não monta a barra de baixo com o teclado visível e volta ao fechar', () => {
     state.keyboardVisible = true;
     render('bottom'); expect(container.innerHTML).toBe('');

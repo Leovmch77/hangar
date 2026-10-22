@@ -84,10 +84,11 @@ vi.mock('./SessionsBar', () => ({ SessionsBar: ({ onPick, onNew, selected }: {
     createElement('button', { onClick: () => onPick({ serverId: 'srv', name: 'b' }) }, 'pick-b'),
     createElement('button', { onClick: onNew }, 'new-session'));
 } }));
-vi.mock('./ContextPanel', () => ({ ContextPanel: ({ name }: { name: string }) => {
+vi.mock('./ContextPanel', () => ({ ContextPanel: ({ name, onPick }: { name: string; onPick: (s: unknown) => void }) => {
   const instance = useRef<number | null>(null);
   if (instance.current === null) instance.current = ++h.panelMounts;
-  return createElement('aside', { 'data-instance': instance.current, 'data-selected': name }, 'session-context');
+  return createElement('aside', { 'data-instance': instance.current, 'data-selected': name }, 'session-context',
+    createElement('button', { onClick: () => onPick({ serverId: 'other-machine', name: 'pair name' }) }, 'pick-group-member'));
 } }));
 import { TabletShell } from './TabletShell';
 import Index from '../../../app/index';
@@ -165,6 +166,14 @@ it('troca a sessão sem empilhar e abre criação, busca, configuração e Iníc
   click(m.lista_buscar()); expect(h.router.push).toHaveBeenCalledWith('/search');
   click(m.config_modal_titulo()); expect(h.router.push).toHaveBeenCalledWith('/config');
   click(m.chat_ir_inicio()); expect(h.router.dismissTo).toHaveBeenCalledWith('/');
+});
+
+it.each(['/s/srv/a', '/s/srv/a/files'])('o membro do painel usa a navegação da barra a partir de %s', pathname => {
+  h.pathname = pathname;
+  render();
+  click('pick-group-member');
+  const navigate = pathname.endsWith('/files') ? h.router.dismissTo : h.router.replace;
+  expect(navigate).toHaveBeenCalledExactlyOnceWith('/s/other-machine/pair%20name');
 });
 
 it('abrir uma sessão pelo Início conserva o Início na pilha para o voltar', () => {

@@ -78,6 +78,10 @@ export default function Aparencia() {
   const setPlacement = useTabletPrefs((s) => s.setPlacement);
   const tabsDetail = useTabletPrefs((s) => s.tabsDetail);
   const setTabsDetail = useTabletPrefs((s) => s.setTabsDetail);
+  const tabsWorkingFirst = useTabletPrefs((s) => s.tabsWorkingFirst);
+  const setTabsWorkingFirst = useTabletPrefs((s) => s.setTabsWorkingFirst);
+  const tabsRecentFirst = useTabletPrefs((s) => s.tabsRecentFirst);
+  const setTabsRecentFirst = useTabletPrefs((s) => s.setTabsRecentFirst);
   const ap = useAparencia.getState;
 
   const scroll = useRef<ScrollView>(null);
@@ -153,6 +157,10 @@ export default function Aparencia() {
   const TAB_DETAILS: ReadonlyArray<Option<TabsDetail>> = [
     { v: 'compact', label: m.native_settings_style_compact() },
     { v: 'full', label: m.native_settings_tabs_full() },
+  ];
+  const TAB_ORDER: ReadonlyArray<Option<'off' | 'on'>> = [
+    { v: 'off', label: m.native_settings_tab_preview_off() },
+    { v: 'on', label: m.native_settings_tab_preview_on() },
   ];
   const TABLET_PLACEMENTS: ReadonlyArray<Option<SessionsBarPlacement>> = [
     { v: 'left', label: m.tablet_bar_left() },
@@ -490,6 +498,14 @@ export default function Aparencia() {
         </SettingsRow>
         <SettingsRow title={m.native_settings_tabs_detail()} description={m.native_settings_tabs_only()}>
           <Segmented options={TAB_DETAILS} value={tabsDetail} onChange={setTabsDetail} label={m.native_settings_tabs_detail()} minHeight={44} />
+        </SettingsRow>
+        <SettingsRow title={m.native_settings_tabs_working_first()} description={m.native_settings_tabs_working_first_hint()}>
+          <Segmented options={TAB_ORDER} value={tabsWorkingFirst ? 'on' : 'off'} onChange={v => setTabsWorkingFirst(v === 'on')}
+            label={m.native_settings_tabs_working_first()} minHeight={44} />
+        </SettingsRow>
+        <SettingsRow title={m.native_settings_tabs_recent_first()} description={m.native_settings_tabs_recent_first_hint()}>
+          <Segmented options={TAB_ORDER} value={tabsRecentFirst ? 'on' : 'off'} onChange={v => setTabsRecentFirst(v === 'on')}
+            label={m.native_settings_tabs_recent_first()} minHeight={44} />
         </SettingsRow>
       </SectionCard>
     </Pagina>

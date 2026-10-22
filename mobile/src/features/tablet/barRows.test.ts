@@ -8,6 +8,44 @@ const session = (name: string, serverId = 'nb', extra: Partial<AggSession> = {})
 const identities = new Map([['nb', 'notebook'], ['vm', 'casa']]);
 
 describe('barRows', () => {
+  it.each([true, false])('separa grupos, trabalhando e paradas com gruposFirst=%s e ignora limite de uso', groupsFirst => {
+    const waiting = session('pergunta', 'nb', { state: 'awaiting_input' });
+    const limited = session('limite', 'nb', { state: 'working', limited: true });
+    const working = session('ocupada', 'nb', { state: 'working' });
+    const parent = session('mae');
+    const child = session('filha', 'nb', { linked_by: 'mae' });
+    const items = barRows([waiting, limited, working, parent, child], identities, groupsFirst, { tabsWorkingFirst: true });
+    expect(items.map(item => item.kind === 'group' ? item.members.map(s => s.name) : item.session.name))
+      .toEqual([['mae', 'filha'], 'ocupada', 'pergunta', 'limite']);
+  });
+
+  it('recentes separa trabalhando mesmo sem a outra opção e ordena só paradas por last_reply_at', () => {
+    const rows = [
+      session('a', 'nb', { state: 'working', last_reply_at: 1 }),
+      session('b', 'nb', { state: 'working', last_reply_at: 90 }),
+      session('limite', 'nb', { state: 'working', limited: true, last_reply_at: 50 }),
+      session('pergunta', 'nb', { state: 'awaiting_input', last_reply_at: 2 }),
+      session('recente', 'nb', { last_reply_at: 30 }),
+      session('empate', 'nb', { last_reply_at: 30 }),
+      session('sem-data'),
+    ];
+    const names = (items: ReturnType<typeof barRows>) => items.map(item => item.kind === 'single' && item.session.name);
+    const options = { tabsRecentFirst: true };
+    expect(names(barRows(rows, identities, true, options))).toEqual(['a', 'b', 'limite', 'empate', 'recente', 'pergunta', 'sem-data']);
+    const updated = rows.map(s => s.name === 'a' ? { ...s, last_reply_at: 100 } : s);
+    expect(names(barRows(updated, identities, true, options))).toEqual(names(barRows(rows, identities, true, options)));
+    const finished = updated.map(s => s.name === 'a' ? { ...s, state: 'idle' as const } : s);
+    expect(names(barRows(finished, identities, true, options))).toEqual(['b', 'a', 'limite', 'empate', 'recente', 'pergunta', 'sem-data']);
+  });
+
+  it('a data de um grupo não o troca de lugar nem muda a mãe', () => {
+    const rows = [session('mae', 'nb', { pair_gid: 'g' }),
+      session('filha', 'nb', { pair_gid: 'g', linked_by: 'mae', last_reply_at: 500 }),
+      session('par-a', 'nb', { pair_gid: 'h', last_reply_at: 1000 }), session('par-b', 'nb', { pair_gid: 'h' })];
+    expect(barRows(rows, identities, true, { tabsRecentFirst: true }).map(item => item.kind === 'group' && item.members.map(s => s.name)))
+      .toEqual([['mae', 'filha'], ['par-a', 'par-b']]);
+  });
+
   it('coloca grupos antes das sessões soltas, preservando a ordem da barra à esquerda', () => {
     const single = session('pergunta', 'vm', { state: 'awaiting_input' });
     const parent = session('mae');

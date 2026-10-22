@@ -9,6 +9,10 @@ type TabletPrefs = {
   collapsed: boolean;
   panelOpen: boolean;
   tabsDetail: TabsDetail;
+  tabsWorkingFirst: boolean;
+  tabsRecentFirst: boolean;
+  setTabsWorkingFirst: (value: boolean) => void;
+  setTabsRecentFirst: (value: boolean) => void;
   setTabsDetail: (detail: TabsDetail) => void;
   setPlacement: (placement: SessionsBarPlacement) => void;
   toggleCollapsed: () => void;
@@ -20,6 +24,8 @@ const PLACEMENT_KEY = 'tablet.sessionsBar';
 const COLLAPSED_KEY = 'tablet.sessionsBarCollapsed';
 const PANEL_KEY = 'tablet.panelOpen';
 const DETAIL_KEY = 'tablet.tabsDetail';
+const WORKING_KEY = 'tablet.tabsWorkingFirst';
+const RECENT_KEY = 'tablet.tabsRecentFirst';
 
 function readPlacement(): SessionsBarPlacement {
   const value = prefs.getString(PLACEMENT_KEY) as SessionsBarPlacement | undefined;
@@ -36,6 +42,16 @@ export const useTabletPrefs = create<TabletPrefs>((set, get) => {
     collapsed: prefs.getBoolean(COLLAPSED_KEY) ?? false,
     panelOpen: prefs.getBoolean(PANEL_KEY) ?? true,
     tabsDetail: prefs.getString(DETAIL_KEY) === 'compact' ? 'compact' : 'full',
+    tabsWorkingFirst: prefs.getBoolean(WORKING_KEY) ?? false,
+    tabsRecentFirst: prefs.getBoolean(RECENT_KEY) ?? false,
+    setTabsWorkingFirst(tabsWorkingFirst) {
+      prefs.set(WORKING_KEY, tabsWorkingFirst);
+      set({ tabsWorkingFirst });
+    },
+    setTabsRecentFirst(tabsRecentFirst) {
+      prefs.set(RECENT_KEY, tabsRecentFirst);
+      set({ tabsRecentFirst });
+    },
     setTabsDetail(tabsDetail) {
       prefs.set(DETAIL_KEY, tabsDetail);
       set({ tabsDetail });

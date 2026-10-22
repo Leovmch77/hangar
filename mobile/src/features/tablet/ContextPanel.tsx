@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
+import type { AggSession } from '@hangar/core';
 import { Glass } from '../../ui/Glass';
 import { useServers } from '../../stores/servers';
 import { FilesPanel } from '../files/FilesPanel';
@@ -9,7 +10,7 @@ import { GitPanel } from '../git/GitPanel';
 import { ContextTab } from './ContextTab';
 import * as m from '../../paraglide/messages';
 
-type Props = { serverId: string; name: string };
+type Props = { serverId: string; name: string; onPick?: (session: AggSession) => void };
 type Tab = 'context' | 'files' | 'background' | 'git';
 const tabs: { value: Tab; label: () => string }[] = [
   { value: 'context', label: () => m.tablet_tab_context() },
@@ -18,7 +19,7 @@ const tabs: { value: Tab; label: () => string }[] = [
   { value: 'git', label: () => m.tablet_tab_git() },
 ];
 
-export function ContextPanel({ serverId, name }: Props) {
+export function ContextPanel({ serverId, name, onPick }: Props) {
   const sessionKey = `${serverId}::${name}`;
   const [selection, setSelection] = useState<{ key: string; tab: Tab }>({ key: sessionKey, tab: 'context' });
   if (selection.key !== sessionKey) setSelection({ key: sessionKey, tab: 'context' });
@@ -36,7 +37,7 @@ export function ContextPanel({ serverId, name }: Props) {
         </Pressable>)}
       </View>
       <View key={sessionKey} style={styles.body}>
-        {tab === 'context' ? <ContextTab serverId={serverId} name={name} />
+        {tab === 'context' ? <ContextTab serverId={serverId} name={name} onPick={onPick} />
           : !ready ? <View style={styles.feedback}><ActivityIndicator accessibilityLabel={m.comum_carregando()} /></View>
           : !server ? <View style={styles.feedback}><Text style={styles.error} accessibilityRole="alert">{m.chat_servidor_removido()}</Text></View>
           : tab === 'files' ? <FilesPanel serverId={serverId} name={name} />
