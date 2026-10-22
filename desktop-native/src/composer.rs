@@ -147,6 +147,8 @@ fn close_path(text: &str, start: usize, spaces: bool) -> Option<usize> {
     for (i, ch) in text[start..].char_indices() {
         let at = start + i;
         if ch == '\n' || ch == '`' || (!spaces && ch.is_whitespace()) { return None; }
+        // Nome do Windows não tem `:`: outra unidade no meio abre outro caminho, e a linha não é varrida a cada `X:\`.
+        if at > start && drive(&text[at..]) { return None; }
         // Espaço seguido de `/` (ou de outra unidade do Windows) abre outro caminho: "/tmp/app.ts e /tmp/a.png" são dois.
         if ch.is_whitespace() && { let next = &text[at + ch.len_utf8()..]; next.starts_with('/') || next.starts_with("~/") || drive(next) } { return None; }
         if ch != '.' || at == start { continue; }
@@ -184,7 +186,7 @@ pub fn cited_paths(text: &str) -> Vec<String> {
             if let Some(end) = close_path(text, i, true) { push(&text[i..end], end); skip_to = end; continue; }
         }
         let word = |c: char| c.is_alphanumeric() || "_.-".contains(c);
-        if word(ch) && prev(i).is_none_or(|p| !(p.is_alphanumeric() || "_/~.:*-".contains(p))) {
+        if word(ch) && prev(i).is_none_or(|p| !(p.is_alphanumeric() || "_/~.:*-\\".contains(p))) {
             if let Some(end) = close_path(text, i, false) {
                 let candidate = &text[i..end];
                 if candidate.contains('/') && candidate.chars().all(|c| word(c) || c == '/') && !candidate.contains("//") {
@@ -725,6 +727,11 @@ mod tests {
         let (a, b) = (r"C:\Users\Admin\Temp\1-externo-card.png", r"C:\Users\Admin\Área de trabalho\2-documento aberto.png");
         assert_eq!(cited_paths(&format!("Card: {a} {b}. Não: x{a}")), vec![a, b]);
         assert_eq!(basename(b), "2-documento aberto.png");
+        assert_eq!(cited_paths(r"Print: C:\Users\Admin\shots/a.png"), vec![r"C:\Users\Admin\shots/a.png"], "barra misturada é um caminho só");
+        assert!(cited_paths("file:///C:/a/b.png https://x.com/C:/a.png").is_empty(), "dentro de URL não é caminho");
+        let started = std::time::Instant::now();
+        cited_paths(&r"C:\".repeat(10000));
+        assert!(started.elapsed() < std::time::Duration::from_millis(500), "linha cheia de unidades não é quadrática");
     }
 
     #[test]

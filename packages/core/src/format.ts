@@ -392,10 +392,11 @@ const _PATH_RE = new RegExp(`(?<![\\w.~:/*])(~?/(?:[^\\s\`]|[^\\S\\n](?!~?/))*?\
 // arquivo que criou no cwd. Exige >=1 segmento "dir/" -> NAO casa nome puro "x.png" (ruido de prosa).
 // O backend resolve contra o cwd da sessao. Lookbehind tira word/`/`/~/./:/- (nao pega pedaco de path
 // absoluto nem de dentro de URL).
-const _REL_RE = new RegExp(`(?<![\\w/~.:*-])((?:[\\w.-]+/)+[\\w.-]+\\.(${_EXTS}))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*>])`, 'gi');
+const _REL_RE = new RegExp(`(?<![\\w/~.:*\\\\-])((?:[\\w.-]+/)+[\\w.-]+\\.(${_EXTS}))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*>])`, 'gi');
 // Caminho absoluto do WINDOWS (`C:\...`), que a sessão numa máquina Windows cita: mesmas regras do
-// absoluto, e espaço seguido de outra letra de unidade abre outro caminho.
-const _WIN_RE = new RegExp(`(?<![\\w*])([A-Za-z]:[\\\\/](?:[^\\s\`]|[^\\S\\n](?![A-Za-z]:[\\\\/]|~?/))*?\\.(${_EXTS}))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*>])`, 'gi');
+// absoluto, e espaço seguido de outra letra de unidade abre outro caminho. Nome do Windows não tem
+// `:`: outra unidade no meio também encerra, e a varredura não atravessa a linha a cada `X:\`.
+const _WIN_RE = new RegExp(`(?<![\\w*/])([A-Za-z]:[\\\\/](?:(?![A-Za-z]:[\\\\/])[^\\s\`]|[^\\S\\n](?![A-Za-z]:[\\\\/]|~?/))*?\\.(${_EXTS}))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*>])`, 'gi');
 
 export interface FileRef { path: string; name: string; kind: FileKind; url?: string; }
 

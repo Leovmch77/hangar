@@ -1102,6 +1102,14 @@ describe('parseFilePaths', () => {
       { path: b, name: '2-documento aberto.png', kind: 'image' },
     ]);
     expect(hideAttachmentPaths(`Card: ${a}`, parseFilePaths(a))).toBe('Card: 1-externo-card.png');
+    // Barra misturada: o pedaço depois da contrabarra não vira um caminho relativo à parte.
+    const mixed = String.raw`C:\Users\Admin\shots/a.png`;
+    expect(parseFilePaths(`Print: ${mixed}`).map((r) => r.path)).toEqual([mixed]);
+    expect(parseFilePaths('file:///C:/a/b.png https://x.com/C:/a.png')).toEqual([]);
+    const started = performance.now();
+    parseFilePaths('C:\\'.repeat(10000));
+    // Teto largo: a varredura quadrática levava ~1,4 s; a linear, poucos ms.
+    expect(performance.now() - started).toBeLessThan(500);
   });
 
   it('reconhece documentos para baixar sem transformar código em anexo', () => {

@@ -357,9 +357,10 @@ def _qualidade(estado: dict) -> int:
 
 def _qualidade_pedida(ws: WebSocket) -> int:
     try:
-        return max(30, min(90, int(ws.query_params.get("q", "0")))) if ws.query_params.get("q") else 0
+        pedida = int(ws.query_params.get("q", "0"))
     except ValueError:
         return 0
+    return max(30, min(90, pedida)) if pedida > 0 else 0
 
 
 def _largura_pedida(ws: WebSocket) -> int:

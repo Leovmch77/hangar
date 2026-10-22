@@ -280,22 +280,28 @@ impl Hangar {
     }
 
     /// Rola a faixa o quanto a aba `index` andou desde `from` (onde ela estava antes da ordem nova), na curva do deslize
-    /// dela: as duas andam juntas e ela não sai do lugar na tela. `span` = rolagem de partida e de chegada.
-    fn follow_open_tab(&mut self, index: usize, from: Pixels, start: std::time::Instant, span: Option<(f32, f32)>,
+    /// dela: as duas andam juntas e ela não sai do lugar na tela. `span` = rolagem de partida e de chegada, e a última
+    /// gravada por este laço. Para quando outra ordem começa outro (`seq`) ou quando alguém rolou a faixa no meio.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_open_tab(&mut self, seq: u64, index: usize, from: Pixels, start: std::time::Instant, span: Option<(f32, f32, f32)>,
         window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar.tab_follow.get() != seq { return; }
         let offset = self.tabs_scroll.offset();
-        let Some((begin, end)) = span.or_else(|| {
+        if span.is_some_and(|(_, _, wrote)| (f32::from(offset.x) - wrote).abs() > 0.5) { return; }
+        let Some((begin, end, _)) = span.or_else(|| {
             let now = self.tabs_scroll.bounds_for_item(index)?;
             let max = f32::from(self.tabs_scroll.max_offset().x);
-            Some((f32::from(offset.x), (f32::from(offset.x) + f32::from(from - now.left())).clamp(-max, 0.)))
+            let begin = f32::from(offset.x);
+            Some((begin, (begin + f32::from(from - now.left())).clamp(-max, 0.), begin))
         }) else { return };
         // Sem animação (pedido do sistema, janela fora de foco) a aba pula, e a faixa pula junto.
         let still = cx.reduce_motion() || !window.is_window_active();
         let raw = if still { 1. } else { motion::REORDER.raw_at(start, std::time::Instant::now()) };
-        self.tabs_scroll.set_offset(point(px(begin + (end - begin) * motion::REORDER.ease(raw)), offset.y));
+        let wrote = begin + (end - begin) * motion::REORDER.ease(raw);
+        self.tabs_scroll.set_offset(point(px(wrote), offset.y));
         cx.notify();
         if raw < 1. {
-            cx.on_next_frame(window, move |this, window, cx| this.follow_open_tab(index, from, start, Some((begin, end)), window, cx));
+            cx.on_next_frame(window, move |this, window, cx| this.follow_open_tab(seq, index, from, start, Some((begin, end, wrote)), window, cx));
         }
     }
 
@@ -315,7 +321,9 @@ impl Hangar {
         // A aba aberta mudou de lugar: a faixa rola junto com ela, que fica parada onde a pessoa estava olhando.
         if let Some((old, new)) = moved && let Some(before) = self.tabs_scroll.bounds_for_item(old) {
             let (from, start) = (before.left(), std::time::Instant::now());
-            cx.on_next_frame(window, move |this, window, cx| this.follow_open_tab(new, from, start, None, window, cx));
+            let seq = self.sidebar.tab_follow.get() + 1;
+            self.sidebar.tab_follow.set(seq);
+            cx.on_next_frame(window, move |this, window, cx| this.follow_open_tab(seq, new, from, start, None, window, cx));
         }
         bands.iter().zip(keys).map(|(group, key)| {
             let first = order;
