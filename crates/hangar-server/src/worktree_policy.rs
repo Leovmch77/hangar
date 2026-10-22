@@ -88,7 +88,9 @@ fn readable_sources(st: &AppState, ctx: &Context) -> Result<Vec<(PathBuf, u64)>>
         Ok(profiles) => {
             for profile in profiles {
                 let profile = profile.map_err(|_| error(503, "fonte de conversas ilegível"))?;
-                sources.push(profile.path().join("agent/sessions"));
+                if profile.path().is_dir() {
+                    sources.push(profile.path().join("agent/sessions"));
+                }
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -130,10 +132,12 @@ fn readable_sources(st: &AppState, ctx: &Context) -> Result<Vec<(PathBuf, u64)>>
             meta
         };
         if meta.is_symlink() {
-            // Link quebrado não tem conversa; link para dentro de outra fonte é lido lá.
+            // Link quebrado não tem conversa; `memory` compartilhada só guarda notas e é lida na
+            // fonte dela. Outro link pode levar conversa de uma worktree para a chave de outra.
+            let memory = path.file_name().is_some_and(|name| name == "memory");
             match std::fs::canonicalize(&path) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Ok(target) if roots.iter().any(|root| target.starts_with(root)) => continue,
+                Ok(target) if memory && roots.iter().any(|root| target.starts_with(root)) => continue,
                 _ => return Err(error(503, "fonte de conversas indireta sem leitura segura")),
             }
         }
