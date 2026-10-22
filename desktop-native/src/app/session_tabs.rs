@@ -143,19 +143,32 @@ impl Hangar {
         use std::hash::{DefaultHasher, Hash, Hasher};
         let entries: Vec<(Target, &SessionInfo)> = self.ungrouped_tab_targets().into_iter()
             .filter_map(|target| self.target_session(&target).map(|session| (target, session))).collect();
-        let working_first = appearance::get().tabs_working_first;
+        let order = appearance::get();
+        let recent_first = order.tabs_recent_first;
+        // A ordem por data também separa as que trabalham: assim a aba só muda de lugar quando o turno acaba.
+        let split = order.tabs_working_first || recent_first;
         let mut hasher = DefaultHasher::new();
         self.hash_identities(&mut hasher);
-        working_first.hash(&mut hasher);
+        (split, recent_first).hash(&mut hasher);
         for (t, s) in &entries {
             (t, &s.pair_gid, &s.pair_owner, s.peers(), &s.pair_task, s.orq(), &s.linked_by).hash(&mut hasher);
-            if working_first { super::sidebar::working(s).hash(&mut hasher); }
+            let busy = super::sidebar::working(s);
+            if split { busy.hash(&mut hasher); }
+            // A data de quem trabalha não entra: resposta nova no meio do turno não mexe na barra.
+            if recent_first && !busy { s.last_reply_at.map(f64::to_bits).hash(&mut hasher); }
         }
         super::grouping::memo(&self.sidebar.grouping.tabs, hasher.finish(), || {
-            let working: std::collections::HashSet<Target> = entries.iter().filter(|(_, s)| super::sidebar::working(s)).map(|(t, _)| t.clone()).collect();
+            let busy: std::collections::HashSet<Target> = entries.iter().filter(|(_, s)| super::sidebar::working(s)).map(|(t, _)| t.clone()).collect();
+            let at: HashMap<Target, f64> = entries.iter().map(|(t, s)| (t.clone(), s.last_reply_at.unwrap_or(0.))).collect();
             let mut out = groups(entries, &self.identities());
-            // Grupos na frente como sempre; das soltas, as que trabalham vêm antes, cada parte na ordem em que estava.
-            if working_first { out.sort_by_key(|g| !g.mother && !g.members.iter().any(|t| working.contains(t))); }
+            if split {
+                // Grupos, depois as que trabalham, depois as paradas; sem a ordem por data, cada parte fica como estava.
+                let section = |g: &TabGroup| if g.mother { 0 } else if g.members.iter().any(|t| busy.contains(t)) { 1 } else { 2 };
+                let recency = |g: &TabGroup| if recent_first && section(g) == 2 {
+                    g.members.iter().filter_map(|t| at.get(t)).copied().fold(0., f64::max)
+                } else { 0. };
+                out.sort_by(|a, b| section(a).cmp(&section(b)).then_with(|| recency(b).total_cmp(&recency(a))));
+            }
             out
         })
     }
