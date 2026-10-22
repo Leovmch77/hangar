@@ -80,10 +80,20 @@ fn readable_sources(st: &AppState, ctx: &Context) -> Result<Vec<(PathBuf, u64)>>
     sources.extend([
         dirs.codex_home.join("sessions"),
         dirs.pi_sessions,
-        dirs.omp_config,
-        dirs.omp_agent,
+        dirs.omp_agent.join("sessions"),
         dirs.kimi_home.join("sessions"),
     ]);
+    // Do omp só as sessões: o resto da pasta são extensões e perfis de navegador, não conversas.
+    match std::fs::read_dir(dirs.omp_config.join("profiles")) {
+        Ok(profiles) => {
+            for profile in profiles {
+                let profile = profile.map_err(|_| error(503, "fonte de conversas ilegível"))?;
+                sources.push(profile.path().join("agent/sessions"));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(error(503, "fonte de conversas ilegível")),
+    }
     for account in st
         .accounts
         .snapshot(crate::accounts::Provider::Codex)
@@ -94,6 +104,10 @@ fn readable_sources(st: &AppState, ctx: &Context) -> Result<Vec<(PathBuf, u64)>>
     // A existência dos provedores é opcional; arquivo que existe e não pode ser lido é incerteza.
     sources.sort();
     sources.dedup();
+    let roots = sources
+        .iter()
+        .filter_map(|p| std::fs::canonicalize(p).ok())
+        .collect::<Vec<_>>();
     let mut sources = sources.into_iter().map(|p| (p, true)).collect::<Vec<_>>();
     let start = Instant::now();
     let mut count = 0;
@@ -116,7 +130,12 @@ fn readable_sources(st: &AppState, ctx: &Context) -> Result<Vec<(PathBuf, u64)>>
             meta
         };
         if meta.is_symlink() {
-            return Err(error(503, "fonte de conversas indireta sem leitura segura"));
+            // Link quebrado não tem conversa; link para dentro de outra fonte é lido lá.
+            match std::fs::canonicalize(&path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Ok(target) if roots.iter().any(|root| target.starts_with(root)) => continue,
+                _ => return Err(error(503, "fonte de conversas indireta sem leitura segura")),
+            }
         }
         let modified = meta
             .modified()
