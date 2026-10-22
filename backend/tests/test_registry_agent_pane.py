@@ -5,7 +5,9 @@ quando o teste falha), e o predicado _pane_do_agente monkeypatchado (nao depende
 verdade rodando).
 """
 import logging
+import os
 import subprocess
+import time
 import uuid
 import pytest
 import app.api as api_mod
@@ -32,8 +34,21 @@ def sessao(tmp_path):
     matar_sessao(SESS)
     subprocess.run(["tmux", "new-session", "-d", "-s", SESS, "-c", str(tmp_path),
                     "-x", "200", "-y", "50", "sleep 600"], check=True)
-    yield SESS
-    matar_sessao(SESS)
+    # Recém-criado, o pane ainda responde a pasta de quem chamou o tmux até o filho entrar na dele;
+    # duas leituras nesse intervalo discordam do cwd.
+    try:
+        alvo = os.path.realpath(tmp_path)
+        prazo = time.monotonic() + 10
+        while True:
+            lido = subprocess.run(["tmux", "display-message", "-p", "-t", f"={SESS}:", "#{pane_current_path}"],
+                                  capture_output=True, text=True)
+            if lido.stdout.strip() and os.path.realpath(lido.stdout.strip()) == alvo:
+                break
+            assert time.monotonic() < prazo, f"o pane não chegou a {alvo}: {lido.stdout.strip() or lido.stderr.strip()!r}"
+            time.sleep(0.02)
+        yield SESS
+    finally:
+        matar_sessao(SESS)
 
 
 def _segunda_janela(nome, cwd):
