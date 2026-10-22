@@ -579,6 +579,7 @@ impl Hangar {
         self.start_remote_lists();
         // A entrada que levava um par externo some: o par volta na entrada só dele.
         self.apply_external_pairs(cx);
+        self.sync_updater(cx);
     }
 
     /// Máquina que só o servidor conhecia: usa o token que ele guarda para os recados, testa, e respondendo ela entra neste
@@ -1459,9 +1460,6 @@ impl Hangar {
                 if !entry_ids.is_empty() {
                     this.follow_line(&entry_ids, *on);
                     this.sync_updater(cx);
-                    if let Some(updater) = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone()) {
-                        updater.update(cx, |updater, cx| updater.refresh_machine_updates(cx));
-                    }
                     cx.notify();
                 }
                 else if let Some(id) = adopt_id.clone().filter(|_| *on) { this.adopt_token(id, cx); }

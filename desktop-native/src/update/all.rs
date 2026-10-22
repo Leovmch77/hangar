@@ -283,12 +283,13 @@ async fn run_machine(machine: Machine, mut publish: impl FnMut(Status, Vec<Strin
 }
 
 impl Updater {
-    pub(crate) fn set_update_all_servers(&mut self, servers: Vec<ServerEntry>, cx: &mut Context<Self>) {
+    pub(crate) fn set_update_all_servers(&mut self, servers: Vec<ServerEntry>, cx: &mut Context<Self>) -> bool {
         let servers = own_servers(&servers);
-        if self.all_servers == servers { return; }
+        if self.all_servers == servers { return false; }
         self.all_servers = servers;
-        self.survey = Survey { generation: self.survey.generation + 1, ..Survey::default() };
+        self.survey.generation += 1;
         cx.notify();
+        true
     }
 
     pub(super) fn update_all_count(&self) -> usize { self.all_servers.len() }
@@ -336,7 +337,9 @@ impl Updater {
 
     pub(crate) fn machine_update_text(&self, api: &Api) -> Option<String> { self.survey.text(&api.identity()) }
 
-    pub(crate) fn machine_entry_update_text(&self, id: &str) -> Option<String> { self.survey.text(id) }
+    pub(crate) fn machine_entry_update_text(&self, id: &str) -> Option<String> {
+        self.all_servers.iter().any(|s| s.id == id).then(|| self.survey.text(id)).flatten()
+    }
 
     pub(crate) fn render_machine_update_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         (self.update_all_count() >= 2).then(|| Button::new("machines-update-all").outline().small()
@@ -762,6 +765,25 @@ mod tests {
         let status = Runtime::new().unwrap().block_on(read_machine(&machine));
         server.join().unwrap();
         assert!(matches!(status, Status::Offline(_)));
+    }
+
+    #[gpui::test]
+    fn update_all_machine_registry_change_keeps_running_aliases(cx: &mut gpui::TestAppContext) {
+        let updater = cx.new(|_| Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None, offer: None,
+            local: None, server: None, server_api: None, server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0,
+            run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None,
+            suspended: false, intent_lock: None, all_servers: vec![entry("local"), entry("remote")], survey: Survey::default(), batch: None, all_running: true });
+        updater.update(cx, |this, cx| {
+            let machine = Machine::from_entry(&entry("remote"), None);
+            this.survey.prepare(&[machine.clone()], HashMap::from([("alias".into(), machine.key.clone())]));
+            this.survey.change(&machine.key, Status::Running { step: 2, total: 9, text: "fixture-step".into() }, vec![]);
+            this.set_update_all_servers(vec![entry("local"), entry("remote"), entry("added")], cx);
+            assert_eq!(this.machine_entry_update_text("remote").as_deref(), Some("fixture-step (2/9)"));
+            assert_eq!(this.survey.text("alias").as_deref(), Some("fixture-step (2/9)"));
+            this.set_update_all_servers(vec![entry("local")], cx);
+            assert_eq!(this.update_all_count(), 1, "cadastro removido não participa do próximo lote");
+            assert_eq!(this.machine_entry_update_text("remote"), None);
+        });
     }
 
     #[test]
