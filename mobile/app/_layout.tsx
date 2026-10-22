@@ -1,6 +1,6 @@
 import 'react-native-url-polyfill/auto';
 import '../src/theme/unistyles';
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { AppState, Dimensions, Platform, type AppStateStatus } from 'react-native';
 import { Stack, ThemeProvider, useGlobalSearchParams, usePathname, useRouter, useSegments, useTheme } from 'expo-router';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -50,7 +50,11 @@ export default function Layout() {
   const params = useGlobalSearchParams<{ server?: string | string[]; name?: string | string[] }>();
   const tablet = useTabletLandscape();
   const navigationTheme = useTheme();
-  const windowTheme = tablet ? { ...navigationTheme, colors: { ...navigationTheme.colors, background: 'transparent' } } : navigationTheme;
+  // Objeto estável: o Layout redesenha a cada navegação e um tema novo redesenharia a pilha inteira.
+  const windowTheme = useMemo(
+    () => tablet ? { ...navigationTheme, colors: { ...navigationTheme.colors, background: 'transparent' } } : navigationTheme,
+    [tablet, navigationTheme],
+  );
   const sheetOptions = {
     presentation: 'formSheet' as const, headerShown: false, sheetAllowedDetents: [0.92], sheetGrabberVisible: true,
     ...(tablet ? { contentStyle: { backgroundColor: navigationTheme.colors.background } } : {}),
