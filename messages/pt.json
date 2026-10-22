@@ -9102,6 +9102,8 @@
   "update_all_running": "{texto} ({passo}/{total})",
   "update_all_waiting": "Aguardando a máquina responder…",
   "update_all_up_to_date": "Em dia",
+  "update_all_available": "Atualização disponível",
+  "update_all_short": "Atualizar todas",
   "update_all_held_branch": "Não atualizou: está numa branch de trabalho.",
   "update_all_held_changes": "Não atualizou: há mudanças locais ou commits não publicados.",
   "update_all_held_running": "Não atualizou: já há uma atualização em curso.",

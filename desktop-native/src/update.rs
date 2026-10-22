@@ -543,6 +543,7 @@ pub struct Updater {
     /// Trava da intenção que este processo acompanha; com ela, só ele apaga o arquivo.
     intent_lock: Option<std::fs::File>,
     all_servers: Vec<crate::app::ServerEntry>,
+    survey: all::Survey,
     batch: Option<all::Batch>,
     all_running: bool,
 }
@@ -570,7 +571,7 @@ pub fn start(runtime: Arc<Runtime>, cx: &mut App) {
     let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).user_agent(concat!("hangar-native/", env!("HANGAR_NATIVE_RELEASE")))
         .build().unwrap_or_default();
     let entity = cx.new(|_| Updater { runtime, client, exe: std::env::current_exe().ok(), offer: None, local: None, server: None,
-        server_api: None, server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0, run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None, suspended: false, intent_lock: None, all_servers: Vec::new(), batch: None, all_running: false });
+        server_api: None, server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0, run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None, suspended: false, intent_lock: None, all_servers: Vec::new(), survey: all::Survey::default(), batch: None, all_running: false });
     let weak = entity.downgrade();
     cx.spawn(async move |cx| loop {
         let Ok(()) = weak.update(cx, |this, cx| {
@@ -1056,7 +1057,7 @@ impl Updater {
 
     /// Rótulo curto e explicação do botão parado, conforme o plano.
     fn idle_texts(&self, plan: &Plan) -> (String, String) {
-        if !plan.visible() && self.update_all_count() >= 2 {
+        if !plan.visible() && self.idle_visible(plan) {
             return (tr_shared("update_all_button", &[("n", &self.update_all_count().to_string())]), tr_shared("update_all_title", &[]));
         }
         let version = self.offer.as_ref().map(|o| o.version.clone()).unwrap_or_default();
@@ -1073,10 +1074,10 @@ impl Updater {
 
 impl Render for Updater {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.batch.is_some() { return self.render_batch_button(cx); }
+        if self.all_running { return self.render_batch_button(cx); }
         let plan = self.plan();
         let (id, label, tip, color) = match &self.run {
-            Run::Idle if !plan.visible() && self.update_all_count() < 2 => return div().into_any_element(),
+            Run::Idle if !self.idle_visible(&plan) => return div().into_any_element(),
             Run::Idle => { let (label, tip) = self.idle_texts(&plan); ("topbar-update", label, tip, theme::accent()) }
             Run::Searching => ("topbar-update", tr("app_update_searching"), tr("app_update_searching"), theme::accent()),
             Run::Server { step, total, text } if *total > 0 => ("topbar-update",
@@ -1176,7 +1177,7 @@ mod tests {
             offer: Some(Offer { version: "9999.0.0.0".into(), url: String::new(), sha256: String::new(), channel: "main".into(), requires_api: 2 }),
             local: Some(local.clone()), server: Some(server(serde_json::json!({"atualizacao_disponivel": true}))), server_api: Some(2),
             server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0, run: Run::Idle, checking: false, checked: None,
-            checked_channel: None, known_channel: None, channel_blocked: Some(local.identity()), suspended: false, intent_lock: None, all_servers: Vec::new(), batch: None, all_running: false };
+            checked_channel: None, known_channel: None, channel_blocked: Some(local.identity()), suspended: false, intent_lock: None, all_servers: Vec::new(), survey: all::Survey::default(), batch: None, all_running: false };
         assert_eq!(updater.plan(), Plan { server: ServerStep::Held(Hold::ChannelDraft), app: true });
         assert!(!Hold::ChannelDraft.stops());
         updater.channel_blocked = Some("http://other-machine:8765".into());
@@ -1199,7 +1200,7 @@ mod tests {
         let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None,
             offer: Some(Offer { version: "9999.0.0.0".into(), url: String::new(), sha256: String::new(), channel: "main".into(), requires_api: REQUIRED_API }),
             local: None, server: None, server_api: None, server_seq: 0, active: None, active_state: None, active_api: Some(REQUIRED_API), active_seq: 0,
-            run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None, suspended: false, intent_lock: None, all_servers: Vec::new(), batch: None, all_running: false };
+            run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None, suspended: false, intent_lock: None, all_servers: Vec::new(), survey: all::Survey::default(), batch: None, all_running: false };
         assert!(updater.plan().app);
         assert!(!updater.server_outdated());
         updater.active_api = Some(REQUIRED_API - 1);
@@ -1244,7 +1245,7 @@ mod tests {
         let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None, offer: None,
             local: None, server: None, server_api: None, server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0,
             run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: Some("hangar-server-parte1".into()),
-            channel_blocked: None, suspended: false, intent_lock: None, all_servers: Vec::new(), batch: None, all_running: false };
+            channel_blocked: None, suspended: false, intent_lock: None, all_servers: Vec::new(), survey: all::Survey::default(), batch: None, all_running: false };
         assert_eq!(updater.channel(), "main", "sem servidor local não há canal");
         updater.local = Some(Api::new("http://127.0.0.1:8765", "synthetic-token").unwrap());
         assert_eq!(updater.channel(), "hangar-server-parte1", "leitura que falhou mantém o último canal");

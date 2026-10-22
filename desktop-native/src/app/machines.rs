@@ -513,6 +513,7 @@ impl Hangar {
 
     /// Página aberta: relê identificador e alcance. Como o web remonta a tela, o resultado de um reinício anterior sai.
     pub(super) fn machines_opened(&mut self, cx: &mut Context<Self>) {
+        self.sync_updater(cx);
         let m = &mut self.machines;
         if let Some(task) = m.restart.task.take() { task.abort(); }
         m.restart = Restart { seq: m.restart.seq + 1, ..Restart::default() };
@@ -528,6 +529,9 @@ impl Hangar {
         self.load_reach(cx);
         self.load_saved_ids(cx);
         self.load_peers(cx);
+        if let Some(updater) = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone()) {
+            updater.update(cx, |updater, cx| updater.refresh_machine_updates(cx));
+        }
     }
 
     /// Pergunta o identificador a cada entrada deste aparelho, com o token dela. Os lembrados ficam até a resposta: a lista abre
@@ -1242,9 +1246,11 @@ impl Hangar {
         let id = m.id_loaded().to_owned();
         let name = self.server_label(cx);
         let no_id = m.id.ok().is_some_and(String::is_empty);
+        let update = cx.try_global::<crate::update::Handle>().and_then(|handle|
+            self.api.as_ref().filter(|_| !self.active_invite()).and_then(|api| handle.0.read(cx).machine_update_text(api)));
         // O nome do botão substitui o conteúdo para o leitor de tela: o estado que o farol pinta vai junto.
         let spoken = [Some(tr("machines_open").replace("{nome}", &name)), (!id.is_empty()).then(|| id.clone()),
-            Some(format!("{} · {summary}", tr("machines_this_server"))), no_id.then(|| tr("machines_no_id_short"))]
+            Some(format!("{} · {summary}", tr("machines_this_server"))), no_id.then(|| tr("machines_no_id_short")), update.clone()]
             .into_iter().flatten().collect::<Vec<_>>().join(". ");
         // Buscar um ajuste: identificador e origens moram no detalhe, e a busca (como no web) só abre a página e aponta o cartão.
         let card_hit = self.search_hit("machines_id") || self.search_hit("server_term_origins");
@@ -1261,6 +1267,7 @@ impl Hangar {
                         .when(!id.is_empty(), |el| el.child(div().px(px(8.)).rounded_full().border_1().border_color(theme::border())
                             .font_family(theme::MONO).text_size(px(11.)).text_color(theme::muted()).child(id.clone()))))
                     .child(div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(summary))
+                    .when_some(update, |el, text| el.child(div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(text)))
                     .when(no_id, |el| el.child(div().text_size(px(12.5)).text_color(theme::warning())
                         .child(tr("machines_no_id_short")))))
                 .child(chrome::small_icon(IconName::ChevronRight, 16., if this_selected { theme::accent_text() } else { theme::muted() })));
@@ -1311,7 +1318,9 @@ impl Hangar {
         let error = m.peers.value.as_ref().and_then(|v| v.as_ref().err()).filter(|_| !m.peers.loading).cloned();
         let note = |text: String| div().px(px(10.)).py(px(12.)).text_size(px(12.5)).text_color(theme::muted()).child(text);
         let count = (total > 0).then(|| tr("machines_count").replace("{n}", &total.to_string()).replace("{m}", &showing.to_string()));
-        let head = self.mark(section_head(IconName::Server, tr("machines_others"), count, None, px(16.)), "machines_others");
+        let update = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone())
+            .and_then(|updater| updater.update(cx, |updater, cx| updater.render_machine_update_button(cx)));
+        let head = self.mark(section_head(IconName::Server, tr("machines_others"), count, update, px(16.)), "machines_others");
         let rows = div().px(px(6.)).pb(px(6.)).flex().flex_col().gap(px(2.))
             .when_some(error, |el, error| el.child(div().id("machines-peers-error").role(Role::Alert).flex().items_center().gap(px(10.)).px(px(10.)).py(px(10.))
                 .child(div().flex_1().text_size(px(12.5)).text_color(theme::danger()).whitespace_normal().child(error))
@@ -1356,6 +1365,8 @@ impl Hangar {
         let chip = line.ident.clone().filter(|ident| *ident != name);
         let repeated = (line.entries.len() > 1).then(|| tr("machines_row_saved_times").replace("{n}", &line.entries.len().to_string()));
         let invite = line.entry.as_ref().is_some_and(|e| e.invite);
+        let update = cx.try_global::<crate::update::Handle>().and_then(|handle|
+            line.entries.iter().find_map(|entry| handle.0.read(cx).machine_entry_update_text(&entry.id)));
         let face = if invite { chrome::small_icon(IconName::Link, 17., theme::muted()).into_any_element() }
             else { div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(theme::muted()).child(initial(&name)).into_any_element() };
         let key = SharedString::from(format!("machines-peer-{id}"));
@@ -1363,7 +1374,7 @@ impl Hangar {
             .custom(ButtonCustomVariant::new(cx).color(if selected { theme::accent_dim() } else { transparent_black() })
                 .foreground(theme::text()).hover(theme::hover()).active(theme::hover()))
             .w_full().h_auto().min_h(px(60.)).px(px(12.)).py(px(10.)).rounded(px(10.))
-            .accessibility_label([Some(tr("machines_open").replace("{nome}", &name)), chip.clone(), Some(phrase.clone()), repeated.clone()]
+            .accessibility_label([Some(tr("machines_open").replace("{nome}", &name)), chip.clone(), Some(phrase.clone()), repeated.clone(), update.clone()]
                 .into_iter().flatten().collect::<Vec<_>>().join(". "))
             .child(div().w_full().flex().items_center().gap(px(12.))
                 .child(tile(face, 38., theme::raised(), Some(dot)))
@@ -1372,6 +1383,7 @@ impl Hangar {
                         .when_some(chip, |el, chip| el.child(div().px(px(8.)).rounded_full().border_1().border_color(theme::border())
                             .font_family(theme::MONO).text_size(px(11.)).text_color(theme::muted()).child(chip))))
                     .child(div().text_size(px(12.5)).text_color(color).whitespace_normal().child(phrase))
+                    .when_some(update, |el, text| el.child(div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(text)))
                     .when_some(repeated, |el, text| el.child(div().text_size(px(12.5)).text_color(theme::warning()).child(text))))
                 .when(!silent, |el| el.child(chrome::small_icon(IconName::ChevronRight, 16., if selected { theme::accent_text() } else { theme::muted() }))));
         let this = cx.entity().downgrade();
@@ -1444,7 +1456,14 @@ impl Hangar {
             .disabled(adopting || (!saved && adopt_id.is_none()))
             .accessibility_label(format!("{}. {legend}", tr("machines_peer_show_sessions")))
             .on_click(cx.listener(move |this, on: &bool, _, cx| {
-                if !entry_ids.is_empty() { this.follow_line(&entry_ids, *on); cx.notify(); }
+                if !entry_ids.is_empty() {
+                    this.follow_line(&entry_ids, *on);
+                    this.sync_updater(cx);
+                    if let Some(updater) = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone()) {
+                        updater.update(cx, |updater, cx| updater.refresh_machine_updates(cx));
+                    }
+                    cx.notify();
+                }
                 else if let Some(id) = adopt_id.clone().filter(|_| *on) { this.adopt_token(id, cx); }
             }));
         let entries = line.entries.iter().map(|s| {

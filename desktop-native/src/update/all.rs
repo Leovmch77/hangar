@@ -15,7 +15,7 @@ fn classify(snapshot: &Value) -> Classification {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Status {
     Checking, Starting, Running { step: u64, total: u64, text: String }, Waiting,
-    Current, Held(Hold), Offline(String), Updated, UpdatedManual, Failed(String), Silent, Timeout,
+    Available, Current, Held(Hold), Offline(String), Updated, UpdatedManual, Failed(String), Silent, Timeout,
 }
 
 impl Status {
@@ -26,7 +26,7 @@ impl Status {
             Self::Checking => "update_all_checking", Self::Starting => "update_all_starting",
             Self::Running { step, total, text } => return tr_shared("update_all_running",
                 &[("texto", text), ("passo", &step.to_string()), ("total", &total.to_string())]),
-            Self::Waiting => "update_all_waiting", Self::Current => "update_all_up_to_date",
+            Self::Waiting => "update_all_waiting", Self::Available => "update_all_available", Self::Current => "update_all_up_to_date",
             Self::Held(Hold::WorkBranch(..)) => "update_all_held_branch",
             Self::Held(Hold::LocalChanges) => "update_all_held_changes",
             Self::Held(Hold::Running) => "update_all_held_running",
@@ -41,6 +41,14 @@ impl Status {
             }
         };
         tr_shared(key, &[])
+    }
+}
+
+fn snapshot_status(snapshot: &Value) -> Status {
+    match classify(snapshot) {
+        Classification::Start => Status::Available,
+        Classification::Current => Status::Current,
+        Classification::Held(hold) => Status::Held(hold),
     }
 }
 
@@ -79,14 +87,14 @@ fn own_servers(servers: &[ServerEntry]) -> Vec<ServerEntry> {
 }
 
 #[derive(Clone)]
-struct Machine { key: String, label: String, api: Result<Api, Failure>, local: bool }
+struct Machine { key: String, entry_id: String, label: String, api: Result<Api, Failure>, local: bool }
 
 impl Machine {
     fn from_entry(entry: &ServerEntry, local: Option<&Api>) -> Self {
         let api = Api::new(&entry.address, &entry.token);
         let key = api.as_ref().map(Api::identity).unwrap_or_else(|_| entry.address.clone());
         let local = local.is_some_and(|api| api.identity() == key);
-        Self { key, label: entry.label.clone(), api, local }
+        Self { key, entry_id: entry.id.clone(), label: entry.label.clone(), api, local }
     }
 }
 
@@ -115,6 +123,49 @@ fn unique_machines(machines: Vec<Machine>, identities: &[String]) -> Vec<Machine
 
 #[derive(Clone, Debug, PartialEq)]
 struct Row { key: String, label: String, local: bool, status: Status, warnings: Vec<String> }
+
+impl Row {
+    fn text(&self) -> String {
+        let mut parts = vec![self.status.text()];
+        match &self.status {
+            Status::Held(Hold::WorkBranch(branch, target)) => parts.push(format!("{branch} → {target}")),
+            Status::Held(Hold::Missing(what)) => parts.push(what.clone()),
+            Status::Offline(error) => parts.push(error.clone()),
+            _ => {}
+        }
+        if !self.warnings.is_empty() {
+            parts.push(format!("{}: {}", tr_shared("update_all_warnings", &[]), self.warnings.join("; ")));
+        }
+        parts.join(" · ")
+    }
+}
+
+#[derive(Default)]
+pub(super) struct Survey { rows: Vec<Row>, aliases: HashMap<String, String>, generation: u64 }
+
+impl Survey {
+    fn prepare(&mut self, machines: &[Machine], mut aliases: HashMap<String, String>) {
+        self.rows = machines.iter().map(|m| Row { key: m.key.clone(), label: m.label.clone(), local: m.local,
+            status: Status::Checking, warnings: Vec::new() }).collect();
+        for machine in machines.iter().filter(|m| !m.entry_id.is_empty()) {
+            aliases.insert(machine.entry_id.clone(), machine.key.clone());
+        }
+        self.aliases = aliases;
+    }
+
+    fn change(&mut self, key: &str, status: Status, warnings: Vec<String>) {
+        if let Some(row) = self.rows.iter_mut().find(|row| row.key == key) { row.status = status; row.warnings = warnings; }
+    }
+
+    fn text(&self, key: &str) -> Option<String> {
+        let key = self.aliases.get(key).map(String::as_str).unwrap_or(key);
+        self.rows.iter().find(|row| row.key == key).map(Row::text)
+    }
+}
+
+fn idle_visible(plan: &Plan, count: usize, rows: &[Row]) -> bool {
+    plan.visible() || (count >= 2 && rows.iter().any(|row| !row.local && row.status == Status::Available))
+}
 
 #[derive(Default)]
 struct Progress { rows: Vec<Row>, preparing: bool, deferred_app: bool }
@@ -153,7 +204,31 @@ impl Render for Progress {
 
 pub(super) struct Batch { progress: Entity<Progress> }
 
-enum Event { Prepared(Vec<Machine>), Changed(String, Status, Vec<String>) }
+enum Event { Prepared(Vec<Machine>, HashMap<String, String>), Changed(String, Status, Vec<String>) }
+
+async fn prepare_machines(machines: Vec<Machine>) -> (Vec<Machine>, HashMap<String, String>) {
+    let identities = futures::future::join_all(machines.iter().map(identify)).await;
+    let unique = unique_machines(machines.clone(), &identities);
+    let canonical: HashMap<_, _> = machines.iter().zip(&identities)
+        .filter(|(m, id)| !id.is_empty() && unique.iter().any(|u| u.key == m.key))
+        .map(|(m, id)| (id.clone(), m.key.clone())).collect();
+    let aliases = machines.iter().zip(&identities).flat_map(|(m, id)| {
+        let key = canonical.get(id).cloned().unwrap_or_else(|| m.key.clone());
+        [(m.key.clone(), key.clone()), (m.entry_id.clone(), key)]
+    }).filter(|(alias, _)| !alias.is_empty()).collect();
+    (unique, aliases)
+}
+
+async fn read_machine(machine: &Machine) -> Status {
+    let result = match &machine.api {
+        Ok(api) => api.server_read(&["atualizacao"], &[], 20).await,
+        Err(error) => Err(error.clone()),
+    };
+    match result {
+        Ok(snapshot) => snapshot_status(&snapshot),
+        Err(error) => Status::Offline(failure_text(&error)),
+    }
+}
 
 async fn run_machine(machine: Machine, mut publish: impl FnMut(Status, Vec<String>)) {
     let mut previous = None;
@@ -212,10 +287,67 @@ impl Updater {
         let servers = own_servers(&servers);
         if self.all_servers == servers { return; }
         self.all_servers = servers;
+        self.survey = Survey { generation: self.survey.generation + 1, ..Survey::default() };
         cx.notify();
     }
 
     pub(super) fn update_all_count(&self) -> usize { self.all_servers.len() }
+
+    fn all_machines(&self) -> Vec<Machine> {
+        let mut machines: Vec<_> = self.all_servers.iter().map(|entry| Machine::from_entry(entry, self.local.as_ref())).collect();
+        if let Some(api) = self.local.clone().filter(|api| !machines.iter().any(|m| m.key == api.identity())) {
+            machines.insert(0, Machine { key: api.identity(), entry_id: String::new(), label: api.identity(), api: Ok(api), local: true });
+        }
+        machines
+    }
+
+    pub(crate) fn refresh_machine_updates(&mut self, cx: &mut Context<Self>) {
+        if self.busy() { return; }
+        self.survey.generation += 1;
+        let generation = self.survey.generation;
+        let machines = self.all_machines();
+        self.survey.prepare(&machines, HashMap::new());
+        cx.notify();
+        let (tx, rx) = async_channel::unbounded();
+        self.runtime.spawn(async move {
+            let (machines, aliases) = prepare_machines(machines).await;
+            if tx.send(Event::Prepared(machines.clone(), aliases)).await.is_err() { return; }
+            futures::future::join_all(machines.into_iter().map(|machine| {
+                let tx = tx.clone();
+                async move { let status = read_machine(&machine).await;
+                    let _ = tx.send(Event::Changed(machine.key, status, Vec::new())).await; }
+            })).await;
+        });
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = rx.recv().await {
+                let result = this.update(cx, |this, cx| {
+                    if this.survey.generation != generation { return false; }
+                    match event {
+                        Event::Prepared(machines, aliases) => this.survey.prepare(&machines, aliases),
+                        Event::Changed(key, status, warnings) => this.survey.change(&key, status, warnings),
+                    }
+                    cx.notify();
+                    true
+                });
+                if !matches!(result, Ok(true)) { break; }
+            }
+        }).detach();
+    }
+
+    pub(crate) fn machine_update_text(&self, api: &Api) -> Option<String> { self.survey.text(&api.identity()) }
+
+    pub(crate) fn machine_entry_update_text(&self, id: &str) -> Option<String> { self.survey.text(id) }
+
+    pub(crate) fn render_machine_update_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        (self.update_all_count() >= 2).then(|| Button::new("machines-update-all").outline().small()
+            .label(tr_shared("update_all_short", &[])).icon(IconName::Download)
+            .tooltip(tr_shared("update_all_button", &[("n", &self.update_all_count().to_string())]))
+            .loading(self.all_running).disabled(self.busy())
+            .on_click(cx.listener(|this, _, window, cx| { if !this.busy() { this.start_all(window, cx); } }))
+            .into_any_element())
+    }
+
+    pub(super) fn idle_visible(&self, plan: &Plan) -> bool { idle_visible(plan, self.update_all_count(), &self.survey.rows) }
 
     pub(super) fn confirm_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let all = Rc::new(Cell::new(false));
@@ -245,10 +377,9 @@ impl Updater {
     }
 
     fn start_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mut machines: Vec<_> = self.all_servers.iter().map(|entry| Machine::from_entry(entry, self.local.as_ref())).collect();
-        if let Some(api) = self.local.clone().filter(|api| !machines.iter().any(|m| m.key == api.identity())) {
-            machines.insert(0, Machine { key: api.identity(), label: api.identity(), api: Ok(api), local: true });
-        }
+        let machines = self.all_machines();
+        self.survey.generation += 1;
+        self.survey.prepare(&machines, HashMap::new());
         let progress = cx.new(|_| Progress { preparing: true, ..Progress::default() });
         self.batch = Some(Batch { progress });
         self.all_running = true;
@@ -256,9 +387,8 @@ impl Updater {
         self.open_batch(window, cx);
         let (tx, rx) = async_channel::unbounded();
         self.runtime.spawn(async move {
-            let identities = futures::future::join_all(machines.iter().map(identify)).await;
-            let machines = unique_machines(machines, &identities);
-            if tx.send(Event::Prepared(machines.clone())).await.is_err() { return; }
+            let (machines, aliases) = prepare_machines(machines).await;
+            if tx.send(Event::Prepared(machines.clone(), aliases)).await.is_err() { return; }
             futures::future::join_all(machines.into_iter().filter(|m| !m.local).map(|machine| {
                 let tx = tx.clone();
                 let key = machine.key.clone();
@@ -271,8 +401,9 @@ impl Updater {
                 let _ = handle.update(cx, |_, window, cx| { let _ = this.update(cx, |this, cx| {
                     let Some(batch) = &this.batch else { return };
                     match event {
-                        Event::Prepared(machines) => {
+                        Event::Prepared(machines, aliases) => {
                             let local = machines.iter().any(|m| m.local);
+                            this.survey.prepare(&machines, aliases);
                             batch.progress.update(cx, |p, cx| {
                                 p.preparing = false;
                                 p.rows = machines.into_iter().map(|m| Row { key: m.key, label: m.label, local: m.local,
@@ -306,6 +437,7 @@ impl Updater {
         let install = batch.progress.update(cx, |p, cx| {
             if p.deferred_app && !p.remote_busy() { p.deferred_app = false; cx.notify(); true } else { false }
         });
+        self.survey.rows = batch.progress.read(cx).rows.clone();
         self.all_running = batch.progress.read(cx).busy();
         cx.notify();
         if install { self.install_app(window, cx); }
@@ -317,6 +449,7 @@ impl Updater {
             if let Some(row) = p.rows.iter_mut().find(|r| r.local) { row.status = status; }
             cx.notify();
         });
+        self.survey.rows = batch.progress.read(cx).rows.clone();
         self.all_running = batch.progress.read(cx).busy();
         cx.notify();
     }
@@ -347,6 +480,7 @@ impl Updater {
             }
             cx.notify();
         });
+        self.survey.rows = batch.progress.read(cx).rows.clone();
         self.all_running = batch.progress.read(cx).busy();
         cx.notify();
     }
@@ -454,7 +588,7 @@ mod tests {
     fn update_all_labels_are_shared_in_both_languages() {
         for source in [include_str!("../../../messages/pt.json"), include_str!("../../../messages/en.json")] {
             let dict: Value = serde_json::from_str(source).unwrap();
-            for key in ["button", "title", "checking", "starting", "running", "waiting", "up_to_date", "held_branch",
+            for key in ["button", "title", "short", "available", "checking", "starting", "running", "waiting", "up_to_date", "held_branch",
                 "held_changes", "held_running", "held_missing", "offline", "updated", "updated_manual", "failed", "silent", "timeout", "warnings"] {
                 assert!(dict[format!("update_all_{key}")].as_str().is_some(), "{key}");
             }
@@ -471,7 +605,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = format!("http://{}", listener.local_addr().unwrap());
-        let machine = Machine { key: address.clone(), label: address.clone(), local: false, api: Api::new(&address, "synthetic-token") };
+        let machine = Machine { key: address.clone(), entry_id: String::new(), label: address.clone(), local: false, api: Api::new(&address, "synthetic-token") };
         let thread = std::thread::spawn(move || {
             for (path, status, body) in responses {
                 loop {
@@ -564,13 +698,82 @@ mod tests {
     }
 
     #[test]
+    fn update_all_machine_bar_requires_an_available_remote() {
+        let row = |local, status| Row { key: "fixture".into(), label: "fixture".into(), local, status, warnings: vec![] };
+        let hidden = Plan { server: ServerStep::Skip, app: false };
+        assert!(!idle_visible(&hidden, 2, &[]), "cadastros sem consulta não justificam o botão");
+        for status in [Status::Current, Status::Held(Hold::LocalChanges), Status::Offline("offline".into()),
+            Status::Checking, Status::Updated, Status::Failed("failure".into())] {
+            assert!(!idle_visible(&hidden, 2, &[row(false, status)]));
+        }
+        assert!(!idle_visible(&hidden, 2, &[row(true, Status::Available)]));
+        assert!(!idle_visible(&hidden, 1, &[row(false, Status::Available)]));
+        assert!(idle_visible(&hidden, 2, &[row(false, Status::Available)]));
+        for visible in [Plan { server: ServerStep::Skip, app: true }, Plan { server: ServerStep::Update, app: false },
+            Plan { server: ServerStep::Held(Hold::Running), app: false }] {
+            assert!(idle_visible(&visible, 1, &[]), "preserva o plano local");
+        }
+    }
+
+    #[test]
+    fn update_all_machine_snapshot_text_uses_existing_classification() {
+        crate::i18n::english_in_this_thread(false);
+        for (snapshot, expected) in [
+            (json!({"atualizacao_disponivel":true}), "Atualização disponível"),
+            (json!({"atualizacao_disponivel":false}), "Em dia"),
+            (json!({"atualizacao_disponivel":true,"pre_voo":{"sujo":1}}), "Não atualizou: há mudanças locais ou commits não publicados."),
+            (json!({"atualizacao_disponivel":true,"pre_voo":{"branch_de_trabalho":true,"branch":"feature","alvo":"main"}}),
+                "Não atualizou: está numa branch de trabalho."),
+            (json!({"atualizacao_disponivel":true,"estado":{"fase":"rodando"}}), "Não atualizou: já há uma atualização em curso."),
+            (json!({"atualizacao_disponivel":true,"pre_voo":{"pode":false,"faltando":["git"]}}), "Não atualizou: faltam requisitos para atualizar."),
+        ] {
+            assert_eq!(snapshot_status(&snapshot).text(), expected);
+        }
+        assert_eq!(Status::Offline("connection refused".into()).text(), "Fora do ar");
+        assert_eq!(Status::Checking.text(), "Procurando atualizações…");
+        assert_eq!(Status::Updated.text(), "Atualizado");
+        assert_eq!(Status::UpdatedManual.text(), "Atualizado; reinicie o servidor manualmente.");
+    }
+
+    #[test]
+    fn update_all_machine_row_keeps_the_remote_reason_and_outcome() {
+        crate::i18n::english_in_this_thread(false);
+        let mut survey = Survey::default();
+        survey.aliases.insert("alias".into(), "remote".into());
+        survey.rows.push(Row { key: "remote".into(), label: "remote".into(), local: false,
+            status: Status::Held(Hold::WorkBranch("feature".into(), "main".into())), warnings: vec![] });
+        assert_eq!(survey.text("alias").as_deref(), Some("Não atualizou: está numa branch de trabalho. · feature → main"));
+        survey.change("remote", Status::Held(Hold::Missing("git".into())), vec![]);
+        assert_eq!(survey.text("alias").as_deref(), Some("Não atualizou: faltam requisitos para atualizar. · git"));
+        survey.change("remote", Status::Running { step: 2, total: 9, text: "fixture-step".into() }, vec![]);
+        assert_eq!(survey.text("alias").as_deref(), Some("fixture-step (2/9)"));
+        survey.change("remote", Status::Updated, vec!["fixture-warning".into()]);
+        assert_eq!(survey.text("alias").as_deref(), Some("Atualizado · Avisos: fixture-warning"));
+        assert_eq!(survey.text("unknown"), None);
+    }
+
+    #[test]
+    fn update_all_machine_survey_reads_cached_state_without_starting() {
+        let (machine, server) = mock(vec![("GET /api/atualizacao ", 200, json!({"atualizacao_disponivel":true}))]);
+        let status = Runtime::new().unwrap().block_on(read_machine(&machine));
+        server.join().unwrap();
+        assert_eq!(status, Status::Available);
+        let (machine, server) = mock(vec![("GET /api/atualizacao ", 503, json!({"detail":"fixture-unavailable"}))]);
+        let status = Runtime::new().unwrap().block_on(read_machine(&machine));
+        server.join().unwrap();
+        assert!(matches!(status, Status::Offline(_)));
+    }
+
+    #[test]
     fn update_all_review_idle_button_names_all_machines_without_a_local_offer() {
         crate::i18n::english_in_this_thread(false);
         let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None, offer: None,
             local: None, server: None, server_api: None, server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0,
             run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None,
-            suspended: false, intent_lock: None, all_servers: vec![entry("local"), entry("remote")], batch: None, all_running: false };
+            suspended: false, intent_lock: None, all_servers: vec![entry("local"), entry("remote")], survey: Survey::default(), batch: None, all_running: false };
         assert!(!updater.plan().visible());
+        assert!(!updater.idle_visible(&updater.plan()));
+        updater.survey.rows.push(Row { key: "remote".into(), label: "remote".into(), local: false, status: Status::Available, warnings: vec![] });
         assert_eq!(updater.idle_texts(&updater.plan()), ("Atualizar todas as máquinas (2)".into(), "Atualizar todas as máquinas".into()));
         updater.all_servers.push(entry("other"));
         assert_eq!(updater.idle_texts(&updater.plan()).0, "Atualizar todas as máquinas (3)");
