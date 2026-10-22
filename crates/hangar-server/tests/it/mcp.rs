@@ -107,6 +107,39 @@ impl Mcp {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn stateless_lists_include_required_cache_metadata() {
+    let s = scene().await;
+    for (method, field) in [("tools/list", "tools"), ("resources/list", "resources"),
+        ("resources/templates/list", "resourceTemplates"), ("prompts/list", "prompts")] {
+        let resp = client().post(format!("http://{}/mcp/", s.addr)).bearer_auth(OWNER)
+            .header("accept", "application/json, text/event-stream")
+            .header("content-type", "application/json")
+            .header("mcp-protocol-version", "2026-07-28").header("Mcp-Method", method)
+            .body(json!({"jsonrpc": "2.0", "id": 2, "method": method, "params": {"_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {}}}}).to_string())
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200, "{method}");
+        let text = resp.text().await.unwrap();
+        let reply: Value = text.lines().filter_map(|l| l.strip_prefix("data:"))
+            .filter_map(|d| serde_json::from_str(d.trim()).ok())
+            .chain(serde_json::from_str(&text).ok())
+            .find(|m: &Value| m["id"] == 2).unwrap_or_else(|| panic!("{method}: {text}"));
+        let result = &reply["result"];
+        assert_eq!(result["ttlMs"], 0, "{method}: {reply}");
+        assert_eq!(result["cacheScope"], "private", "{method}: {reply}");
+        assert_eq!(result["resultType"], "complete", "{method}: {reply}");
+        let items = result[field].as_array().unwrap_or_else(|| panic!("{method}: {reply}"));
+        if method == "tools/list" {
+            assert!(items.iter().any(|t| t["name"] == "who_am_i"));
+        } else {
+            assert!(items.is_empty(), "{method}: {reply}");
+        }
+    }
+    assert_eq!(s.python.hits_to("/mcp/"), 0);
+}
+
 fn failed(result: &Value) -> bool { result["isError"] == true }
 fn first_text(result: &Value) -> String { result["content"][0]["text"].as_str().unwrap_or_default().to_owned() }
 
