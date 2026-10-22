@@ -220,6 +220,8 @@ pub(super) struct Accounts {
     pub(super) card: bool,
     /// O cartão aberto veio da pílula da barra do topo: preso a ela, com a conta padrão do Claude em vez da da sessão.
     pub(super) card_top: bool,
+    /// Quando o cartão abriu: as barras dele sobem do zero a partir daí.
+    pub(super) card_since: Option<Instant>,
     filter: Filter,
     /// Coluna e sentido escolhidos (`name`, `reset` ou o rótulo da janela); `None` = em uso primeiro. Lida do disco uma vez.
     sort: Option<(String, i8)>,

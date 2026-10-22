@@ -26,16 +26,16 @@ pub(super) fn anchor_bounds(id: &str) -> Option<Bounds<Pixels>> { ANCHORS.with(|
 /// Ciclo do painel: o estado do app diz se está aberto; aqui fica a última cópia desenhada, para a saída animar o
 /// mesmo conteúdo depois que o app já fechou. `from` é quanto dele aparecia (0 a 1) quando a direção virou em `since`:
 /// a entrada anda no tempo do `menu-in` e a saída, mais curta, no do `menu-out`.
-struct Presence<T> { shown: Option<T>, since: Instant, from: f32, leaving: bool }
+struct Presence<T> { shown: Option<T>, since: Instant, from: f32, leaving: bool, enter: motion::Spec }
 
 impl<T> Default for Presence<T> {
-    fn default() -> Self { Self { shown: None, since: Instant::now(), from: 0., leaving: false } }
+    fn default() -> Self { Self { shown: None, since: Instant::now(), from: 0., leaving: false, enter: motion::MENU_IN } }
 }
 
 impl<T: Clone> Presence<T> {
     /// Quanto aparece agora, sem curva.
     fn visible(&self) -> f32 {
-        let (spec, sign) = if self.leaving { (motion::MENU_OUT, -1.) } else { (motion::MENU_IN, 1.) };
+        let (spec, sign) = if self.leaving { (motion::MENU_OUT, -1.) } else { (self.enter, 1.) };
         (self.from + sign * self.since.elapsed().as_secs_f32() / spec.total().as_secs_f32()).clamp(0., 1.)
     }
 
@@ -117,8 +117,12 @@ impl Hangar {
         let live = self.floating();
         let still = cx.reduce_motion();
         let presence = window.use_keyed_state("composer-popup", cx, |_, _| Presence::<Floating>::default());
-        let (shown, visible, leaving) = presence.update(cx, |presence, _| presence.frame(live, still))?;
-        if visible < 1. { motion::request_frame(window, cx); }
+        let enter = if matches!(live, Some(Floating::Usage)) { motion::CARD_OPEN } else { motion::MENU_IN };
+        let (shown, visible, leaving) = presence.update(cx, |presence, _| { presence.enter = enter; presence.frame(live, still) })?;
+        let card = matches!(shown, Floating::Usage);
+        // As barras do cartão sobem depois que ele já apareceu: os quadros seguem até elas chegarem.
+        let filling = card && !still && self.accounts.card_since.is_some_and(|at| at.elapsed() < motion::BAR_FILL.total());
+        if visible < 1. || filling { motion::request_frame(window, cx); }
         let mut placement = Placement::Bottom;
         let (anchor, align, narrow, content) = match shown {
             Floating::WorktreeCleanup => ("topbar-worktree-cleanup".to_owned(), Align::End, true, self.render_worktree_cleanup_panel(cx)),
@@ -156,8 +160,10 @@ impl Hangar {
             }
         };
         let trigger = anchor_bounds(&anchor)?;
-        let surface = chrome::popover(content?, narrow && anchor != "machines-tray-toggle");
-        let surface = if narrow { surface } else { div().w(trigger.size.width).child(surface).into_any_element() };
+        let surface = chrome::popover(content?, narrow && !card && anchor != "machines-tray-toggle");
+        // O de contas é mais largo que os outros: o email inteiro e o reset semanal cabem na linha.
+        let surface = if card { div().w(px(480.)).child(surface).into_any_element() }
+            else if narrow { surface } else { div().w(trigger.size.width).child(surface).into_any_element() };
         let dismiss = cx.listener(|this, _: &MouseDownEvent, _, cx| {
             this.close_popups();
             cx.stop_propagation();
@@ -167,15 +173,17 @@ impl Hangar {
             this.close_popups();
             cx.notify();
         });
-        Some(layer(trigger, placement, align, surface, visible, leaving, dismiss, close))
+        Some(layer(trigger, placement, align, surface, visible, leaving, card, dismiss, close))
     }
 }
 
 /// Cortina que fecha no clique fora sem deixar o clique chegar ao que está atrás, e a superfície presa ao gatilho,
 /// abaixo dele ou virada para cima quando não cabe. Saindo, nada ali responde ao ponteiro.
-fn layer(trigger: Bounds<Pixels>, placement: Placement, align: Align, surface_content: AnyElement, visible: f32, leaving: bool,
+#[allow(clippy::too_many_arguments)]
+fn layer(trigger: Bounds<Pixels>, placement: Placement, align: Align, surface_content: AnyElement, visible: f32, leaving: bool, card: bool,
     dismiss: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static, close: impl Fn(&(), &mut Window, &mut App) + 'static) -> AnyElement {
     let surface = if leaving { motion::menu_out(div(), motion::MENU_OUT.ease(1. - visible)) }
+        else if card { motion::card_open(div(), motion::CARD_OPEN.ease(visible)) }
         else { motion::menu_in(div(), motion::MENU_IN.ease(visible)) };
     let surface = surface.child(surface_content).when(leaving, |el| el.child(div().absolute().inset_0().occlude()));
     let placed = Positioner::side(trigger).placement(placement).align(align).offset(px(8.)).margin(px(8.));
