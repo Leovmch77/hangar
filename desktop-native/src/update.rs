@@ -734,12 +734,7 @@ impl Updater {
     }
 
     /// Mesma ação do botão do topo: atualiza o servidor desta máquina se estiver atrás e depois o app.
-    pub fn start_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.suspended { return; }
-        // A linha desta máquina na tela de Servidores reconsulta quando a atualização terminar.
-        self.survey.pending = true;
-        self.run(window, cx)
-    }
+    pub fn start_update(&mut self, window: &mut Window, cx: &mut Context<Self>) { if !self.suspended { self.run(window, cx) } }
 
     /// Ligado pelo assistente enquanto o script roda; ao desligar, a procura que ficou para trás sai agora.
     pub fn set_suspended(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -877,6 +872,9 @@ impl Updater {
             window.push_notification(Notification::error(tr("app_restart_busy")), cx);
             return;
         }
+        // Atualização só desta máquina: a linha dela na tela de Servidores reconsulta quando terminar.
+        // Na rodada de todas, as linhas ficam com o desfecho.
+        if self.batch.is_none() { self.survey.pending = true; }
         cx.notify();
         let task = read_state(&self.runtime, &api, &[("procurar", "1")], 150);
         let handle = window.window_handle();
