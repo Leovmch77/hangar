@@ -26,15 +26,33 @@ fn is_bounce(since_last: Option<Duration>) -> bool { since_last.is_some_and(|gap
 pub(super) fn hides_on_close(keep: bool, icon_online: Option<bool>) -> bool { keep && icon_online == Some(true) }
 
 impl Hangar {
+    /// A marca só muda quando o instalador termina: o vigia acorda nessa hora, sem ler o arquivo à toa.
     pub(super) fn watch_installed_update(window: &mut Window, cx: &mut Context<Self>) {
+        use notify::Watcher as _;
+        let Some(dir) = std::env::home_dir().map(|home| home.join(".hangar/native")) else { return };
+        let _ = std::fs::create_dir_all(&dir);
+        let (tx, rx) = async_channel::bounded::<()>(1);
+        let Ok(mut watcher) = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            if event.is_ok_and(|event| !matches!(event.kind, notify::EventKind::Access(_))) { let _ = tx.try_send(()); }
+        }) else { return };
+        if watcher.watch(&dir, notify::RecursiveMode::NonRecursive).is_err() { return; }
         cx.spawn_in(window, async move |this, cx| {
+            let _watcher = watcher;
             let mut attempted = None;
-            loop {
-                cx.background_executor().timer(Duration::from_secs(5)).await;
-                if this.update_in(cx, |this, window, cx| {
-                    let ready = cx.global::<crate::update::Handle>().0.read(cx).installed_update_ready(&mut attempted);
-                    if ready { this.restart_from_tray(window, cx); }
-                }).is_err() { break; }
+            while rx.recv().await.is_ok() {
+                // Ocupado (atualizando, rodada), reconfere a cada 5 s até poder reiniciar.
+                loop {
+                    let Ok(waiting) = this.update_in(cx, |this, window, cx| {
+                        let (busy, ready) = {
+                            let updater = cx.global::<crate::update::Handle>().0.read(cx);
+                            (updater.is_busy(), updater.installed_update_ready(&mut attempted))
+                        };
+                        if ready { this.restart_from_tray(window, cx); }
+                        !ready && busy
+                    }) else { return };
+                    if !waiting { break; }
+                    cx.background_executor().timer(Duration::from_secs(5)).await;
+                }
             }
         }).detach();
     }
