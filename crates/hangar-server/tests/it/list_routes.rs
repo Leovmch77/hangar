@@ -44,9 +44,18 @@ async fn error_then_recovery_reemits_same_list() {
     let dir = tempfile::tempdir().unwrap();
     let srv = server(dir.path(), 1).await;
     let mut es = open(srv.addr).await;
-    let first = next_named(&mut es, "sessions").await.data;
+    let mut first = next_named(&mut es, "sessions").await.data;
     std::fs::write(dir.path().join("fail"), "").unwrap();
-    let err = next_named(&mut es, "list_error").await;
+    // Sob carga a captura do pane chega depois da primeira lista e a reemite com a linha de status:
+    // a comparação é com a última lista antes do erro.
+    let err = loop {
+        let ev = fake::next_any(&mut es).await;
+        match ev.event.as_str() {
+            "sessions" => first = ev.data,
+            "list_error" => break ev,
+            _ => {}
+        }
+    };
     assert_eq!(serde_json::from_str::<Value>(&err.data).unwrap()["code"], "mux_unavailable");
     std::fs::remove_file(dir.path().join("fail")).unwrap();
     let again = next_named(&mut es, "sessions").await.data;
