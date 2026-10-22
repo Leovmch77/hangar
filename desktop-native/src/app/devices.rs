@@ -21,8 +21,7 @@ macro_rules! step {
 }
 
 /// Prints que ainda não existem: o passo aparece só com o texto.
-pub(super) const PENDING_CAPTURE: &[&str] = &["ios-00-confiar-computador.png", "ios-08b-reiniciar.png", "ios-08c-ativar.png", "ios-08d-codigo.png",
-    "ios-sidestore-30-adicionar-fonte.png", "ios-sidestore-31-instalar-hangar.png"];
+pub(super) const PENDING_CAPTURE: &[&str] = &["ios-00-confiar-computador.png", "ios-08b-reiniciar.png", "ios-08c-ativar.png", "ios-08d-codigo.png"];
 
 /// Antes da instalação pelo cabo: confiar no computador e, sem ele, o serviço da Apple.
 pub(super) const IOS_BEFORE: [GuideStep; 2] = [step!("ios_trust", "ios-00-confiar-computador.png"), step!("ios_service")];
@@ -59,13 +58,16 @@ pub(super) const IOS_AFTER: [GuideSection; 5] = [
         step!("ss20", "ios-sidestore-20-sidestore-pronto.png"),
     ] },
     GuideSection { title_key: "devices_sec_source", source_qr: true, steps: &[
-        step!("ss30", "ios-sidestore-30-adicionar-fonte.png"), step!("ss31", "ios-sidestore-31-instalar-hangar.png"),
-        step!("ss23", "ios-sidestore-23-hangar-instalado.png"), step!("ss24", "ios-sidestore-24-hangar-aberto.png"),
+        step!("ss30", "ios-sidestore-30-adicionar-fonte.png"), step!("ss31", "ios-sidestore-31-confirmar-fonte.png"),
+        step!("ss32", "ios-sidestore-32-obter-hangar.png"), step!("ss33", "ios-sidestore-33-confirmar-instalar.png"),
+        step!("ss34", "ios-sidestore-34-hangar-instalado-pela-fonte.png"), step!("ss24", "ios-sidestore-24-hangar-aberto.png"),
+        step!("ss23", "ios-sidestore-23-hangar-instalado.png"),
     ] },
 ];
 
-/// Só se o login do SideStore falhar com -80045 ou -45001: o anisette que o PC deixou pronto precisa ser refeito.
-pub(super) const IOS_RESERVE: GuideStep = step!("ios_reserve");
+/// Só se o SideStore der erro: -80045/-45001 no login pedem o anisette refeito; certificado revogado
+/// (pelo Hangar ou outra ferramenta) pede sair sem guardar o certificado e entrar de novo.
+pub(super) const IOS_RESERVE: [GuideStep; 2] = [step!("ios_reserve"), step!("ios_signout", "ios-sidestore-39-sair-sem-certificado.png")];
 
 pub(super) const ANDROID: [GuideStep; 20] = [
     step!("a01", "android-01-abrir-navegador.png"), step!("a02", "android-02-baixando.png"), step!("a03", "android-03-abrir-arquivo.png"),
@@ -95,17 +97,19 @@ const ERROR_CODES: &[&str] = &[
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Stage { Login, AwaitingCode, CheckingLimit, Downloading, Signing, Installing, Pairing, Verifying, Done, Failed }
+pub(super) enum Stage { Login, AwaitingCode, CheckingLimit, Downloading, Signing, AwaitingCertChoice, Installing, Pairing, Verifying, Done, Failed }
 
 impl Stage {
-    /// As etapas que a tela lista, na ordem do servidor.
+    /// As etapas que a tela lista, na ordem do servidor. A escolha de certificado só acontece com a
+    /// conta lotada: fica fora da lista e conta como a assinatura.
     pub(super) const SHOWN: [Stage; 8] = [Stage::Login, Stage::AwaitingCode, Stage::CheckingLimit, Stage::Downloading, Stage::Signing,
         Stage::Installing, Stage::Pairing, Stage::Verifying];
 
     pub(super) fn parse(stage: &str) -> Option<Stage> {
         Some(match stage {
             "login" => Stage::Login, "awaiting_code" => Stage::AwaitingCode, "checking_limit" => Stage::CheckingLimit,
-            "downloading" => Stage::Downloading, "signing" => Stage::Signing, "installing" => Stage::Installing, "pairing" => Stage::Pairing,
+            "downloading" => Stage::Downloading, "signing" => Stage::Signing, "awaiting_cert_choice" => Stage::AwaitingCertChoice,
+            "installing" => Stage::Installing, "pairing" => Stage::Pairing,
             "verifying" => Stage::Verifying, "done" => Stage::Done, "failed" => Stage::Failed,
             _ => return None,
         })
@@ -114,7 +118,8 @@ impl Stage {
     pub(super) fn label_key(self) -> &'static str {
         match self {
             Stage::Login => "devices_stage_login", Stage::AwaitingCode => "devices_stage_awaiting_code", Stage::CheckingLimit => "devices_stage_checking_limit",
-            Stage::Downloading => "devices_stage_downloading", Stage::Signing => "devices_stage_signing", Stage::Installing => "devices_stage_installing",
+            Stage::Downloading => "devices_stage_downloading", Stage::Signing => "devices_stage_signing",
+            Stage::AwaitingCertChoice => "devices_stage_awaiting_cert_choice", Stage::Installing => "devices_stage_installing",
             Stage::Pairing => "devices_stage_pairing", Stage::Verifying => "devices_stage_verifying", Stage::Done => "devices_stage_done",
             Stage::Failed => "devices_stage_failed",
         }
@@ -215,6 +220,8 @@ pub(in crate::app) struct Devices {
     job: Option<Job>,
     code_sending: bool,
     code_error: Option<String>,
+    certs_sending: bool,
+    certs_error: Option<String>,
     qr: Vec<(String, Arc<Image>)>,
     /// O print aberto em tamanho maior; um clique no print abre e fecha.
     enlarged: Option<&'static str>,
@@ -226,6 +233,7 @@ pub(super) enum DevicesReply {
     Started(Result<String, DeviceError>),
     Progress(String, Result<Progress, DeviceError>),
     Code(Result<(), DeviceError>),
+    Certs(Result<(), DeviceError>),
 }
 
 impl Hangar {
@@ -303,9 +311,32 @@ impl Hangar {
         cx.notify();
     }
 
+    /// `revoke`: revoga todos os certificados mostrados e segue; senão desiste do trabalho.
+    fn send_device_certs(&mut self, revoke: bool, cx: &mut Context<Self>) {
+        let Some(api) = self.devices_api() else { return };
+        let Some(job) = self.devices.job.as_ref() else { return };
+        if self.devices.certs_sending { return; }
+        let id = job.id.clone();
+        let serials = job.progress.as_ref().and_then(|p| p.certs.as_ref()).map(|c| c.iter().map(|c| c.serial.clone()).collect::<Vec<_>>());
+        let choice = if revoke { match serials { Some(s) if !s.is_empty() => Some(s), _ => return } } else { None };
+        (self.devices.certs_sending, self.devices.certs_error) = (true, None);
+        let done = self.devices_send_later();
+        self.runtime.spawn(async move { done(DevicesReply::Certs(api.device_certs(&id, choice).await)).await });
+        cx.notify();
+    }
+
+    fn confirm_revoke_certs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        chrome::confirm_alert(window, cx, tr("devices_certs_revoke"), tr("devices_certs_warning"),
+            tr("devices_certs_revoke"), ButtonVariant::Danger, move |_, cx| {
+                let _ = this.update(cx, |this, cx| this.send_device_certs(true, cx));
+                true
+            });
+    }
+
     fn restart_device_install(&mut self, cx: &mut Context<Self>) {
         let d = &mut self.devices;
-        (d.job, d.code_error, d.form_error) = (None, None, None);
+        (d.job, d.code_error, d.form_error, d.certs_error) = (None, None, None, None);
         self.scan_devices(cx);
     }
 
@@ -352,6 +383,10 @@ impl Hangar {
                     Ok(()) => if let Some(code) = &d.code { code.update(cx, |input, cx| input.set_value("", window, cx)); },
                     Err(error) => d.code_error = Some(error_message(&error)),
                 }
+            }
+            DevicesReply::Certs(result) => {
+                d.certs_sending = false;
+                if let Err(error) = result { d.certs_error = Some(error_message(&error)); }
             }
         }
         cx.notify();
@@ -423,7 +458,7 @@ impl Hangar {
                 page = page.child(steps_box(section.steps, number, enlarged, cx));
                 number += section.steps.len();
             }
-            page = page.child(self.heading("devices_reserve_heading")).child(steps_box(std::slice::from_ref(&IOS_RESERVE), number, enlarged, cx));
+            page = page.child(self.heading("devices_reserve_heading")).child(steps_box(&IOS_RESERVE, number, enlarged, cx));
         }
         page
     }
@@ -494,7 +529,8 @@ impl Hangar {
         let d = &self.devices;
         let Some(job) = &d.job else { return div() };
         let stage = job.stage();
-        let reached = Stage::SHOWN.iter().position(|s| *s == stage).unwrap_or(Stage::SHOWN.len());
+        let listed = if stage == Stage::AwaitingCertChoice { Stage::Signing } else { stage };
+        let reached = Stage::SHOWN.iter().position(|s| *s == listed).unwrap_or(Stage::SHOWN.len());
         let mut body = settings_box().child(section_head(IconName::Download, tr("devices_progress_heading"), None, None, px(16.)));
         if phase != Phase::Failed {
             body = body.child(div().px_4().pb(px(14.)).flex().flex_col().gap(px(8.)).children(Stage::SHOWN.iter().enumerate().map(|(n, s)| {
@@ -520,6 +556,21 @@ impl Hangar {
                         .on_click(cx.listener(|this, _, _, cx| this.send_device_code(false, cx))))
                     .child(Button::new("devices-code-resend").ghost().small().label(tr("devices_code_resend")).disabled(d.code_sending)
                         .on_click(cx.listener(|this, _, _, cx| this.send_device_code(true, cx))))));
+        }
+        if stage == Stage::AwaitingCertChoice {
+            let certs = job.progress.as_ref().and_then(|p| p.certs.clone()).unwrap_or_default();
+            body = body.child(div().border_t_1().border_color(theme::border()).p_4().flex().flex_col().gap(px(10.))
+                .child(div().text_size(px(13.)).whitespace_normal().child(tr("devices_certs_prompt")))
+                .children(certs.into_iter().map(|c| div().flex().flex_col().gap(px(2.))
+                    .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).child(format!("{} · {}", c.name, c.machine_name)))
+                    .child(div().font_family(theme::MONO).text_size(px(12.)).text_color(theme::muted()).child(c.serial))))
+                .child(div().text_size(px(12.5)).text_color(theme::warning_text()).whitespace_normal().child(tr("devices_certs_warning")))
+                .when_some(d.certs_error.clone(), |el, error| el.child(div().id("devices-certs-error").role(Role::Alert).text_size(px(13.)).text_color(theme::danger()).whitespace_normal().child(error)))
+                .child(div().flex().gap(px(8.))
+                    .child(Button::new("devices-certs-revoke").danger().small().label(tr("devices_certs_revoke")).loading(d.certs_sending).disabled(d.certs_sending)
+                        .on_click(cx.listener(|this, _, window, cx| this.confirm_revoke_certs(window, cx))))
+                    .child(Button::new("devices-certs-cancel").ghost().small().label(tr("devices_certs_cancel")).disabled(d.certs_sending)
+                        .on_click(cx.listener(|this, _, _, cx| this.send_device_certs(false, cx))))));
         }
         match phase {
             Phase::Done => body.child(note(tr("devices_done"), theme::success_text())),
@@ -577,7 +628,7 @@ mod tests {
     use core::prelude::v1::test;
 
     fn all_steps() -> Vec<GuideStep> {
-        IOS_BEFORE.iter().chain(IOS_AFTER.iter().flat_map(|s| s.steps)).chain([&IOS_RESERVE]).chain(ANDROID.iter()).copied().collect()
+        IOS_BEFORE.iter().chain(IOS_AFTER.iter().flat_map(|s| s.steps)).chain(IOS_RESERVE.iter()).chain(ANDROID.iter()).copied().collect()
     }
 
     fn scan(service: &str, devices: &[(&str, bool)]) -> Scan {
@@ -596,7 +647,7 @@ mod tests {
         let mut job = Job::new("j".into());
         for _ in 0..PROGRESS_TOLERATED_FAILURES - 1 { job.record(err("connection_failed")); }
         assert!(job.lost.is_none());
-        job.record(Ok(Progress { stage: "downloading".into(), error: None, source_url: String::new() }));
+        job.record(Ok(Progress { stage: "downloading".into(), error: None, source_url: String::new(), certs: None }));
         assert_eq!(job.failures, 0);
         for _ in 0..PROGRESS_TOLERATED_FAILURES { job.record(err("connection_failed")); }
         assert_eq!(job.lost.as_ref().map(|e| e.code.as_str()), Some("connection_failed"));
@@ -631,17 +682,28 @@ mod tests {
 
     #[test]
     fn devices_every_stage_maps_to_a_step() {
-        let all = ["login", "awaiting_code", "checking_limit", "downloading", "signing", "installing", "pairing", "verifying", "done", "failed"];
+        let all = ["login", "awaiting_code", "checking_limit", "downloading", "signing", "installing", "pairing", "verifying", "awaiting_cert_choice",
+            "done", "failed"];
         let parsed: Vec<Stage> = all.iter().map(|s| Stage::parse(s).unwrap_or_else(|| panic!("{s} sem etapa"))).collect();
         let keys: HashSet<&str> = parsed.iter().map(|s| s.label_key()).collect();
         assert_eq!(keys.len(), all.len(), "duas etapas com o mesmo rótulo");
         assert_eq!(Stage::parse("whatever"), None);
         let listed = scan("ok", &[("a", true)]);
-        for stage in &parsed[..8] { assert_eq!(ios_phase(Some(&listed), listed.devices.first(), Some(*stage)), Phase::Running, "{stage:?}"); }
+        for stage in &parsed[..9] { assert_eq!(ios_phase(Some(&listed), listed.devices.first(), Some(*stage)), Phase::Running, "{stage:?}"); }
         assert_eq!(ios_phase(Some(&listed), listed.devices.first(), Some(Stage::Done)), Phase::Done);
         assert_eq!(ios_phase(Some(&listed), listed.devices.first(), Some(Stage::Failed)), Phase::Failed);
         // O trabalho em curso vence o aparelho que saiu do cabo.
         assert_eq!(ios_phase(Some(&scan("ok", &[])), None, Some(Stage::Signing)), Phase::Running);
+    }
+
+    #[test]
+    fn devices_cert_choice_reads_the_listed_certificates() {
+        let p: Progress = serde_json::from_value(serde_json::json!({"stage": "awaiting_cert_choice", "error": null, "source_url": "u",
+            "certs": [{"name": "iPhone Developer", "machine_name": "SideStore", "serial": "AAA111"}]})).unwrap();
+        assert_eq!(Stage::parse(&p.stage), Some(Stage::AwaitingCertChoice));
+        assert_eq!(p.certs.unwrap()[0].serial, "AAA111");
+        let old: Progress = serde_json::from_value(serde_json::json!({"stage": "signing", "error": null, "source_url": "u"})).unwrap();
+        assert_eq!(old.certs, None);
     }
 
     #[test]
@@ -661,7 +723,7 @@ mod tests {
             .map(|s| serde_json::from_str::<serde_json::Map<String, Value>>(s).unwrap());
         let mut keys: Vec<String> = all_steps().iter().flat_map(|s| [s.title_key, s.why_key]).map(str::to_owned).collect();
         keys.extend(IOS_AFTER.iter().map(|s| s.title_key.to_owned()));
-        keys.extend(Stage::SHOWN.iter().chain([&Stage::Done, &Stage::Failed]).map(|s| s.label_key().to_owned()));
+        keys.extend(Stage::SHOWN.iter().chain([&Stage::AwaitingCertChoice, &Stage::Done, &Stage::Failed]).map(|s| s.label_key().to_owned()));
         keys.extend(ERROR_CODES.iter().map(|c| format!("devices_err_{c}")));
         keys.extend(WARNINGS.iter().chain(&HEADINGS).map(|k| (*k).to_owned()));
         keys.push("settings_page_devices".into());

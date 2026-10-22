@@ -97,7 +97,11 @@ impl UsbLink {
 impl DeviceLink for UsbLink {
     fn list(&self) -> BoxFuture<'_, Result<Vec<DeviceInfo>, DeviceError>> {
         Box::pin(async move {
-            let mut m = mux().await?;
+            let mut m = match mux().await {
+                Ok(m) => m,
+                Err(DeviceError::ServiceMissing) => return without_mux(cfg!(target_os = "linux"), usbmuxd_installed),
+                Err(e) => return Err(e),
+            };
             let mut out = Vec::new();
             for d in m.get_devices().await.map_err(from_idevice)? {
                 if !matches!(d.connection_type, Connection::Usb) {
@@ -320,6 +324,19 @@ async fn write_file(afc: &mut AfcClient, path: &str, bytes: &[u8]) -> Result<(),
     f.close().await.map_err(from_idevice)
 }
 
+/// No Linux o udev só sobe o usbmuxd com um aparelho Apple no cabo: sem o socket e com ele
+/// instalado, é só não ter aparelho ligado.
+fn without_mux(linux: bool, installed: impl FnOnce() -> bool) -> Result<Vec<DeviceInfo>, DeviceError> {
+    if linux && installed() { Ok(Vec::new()) } else { Err(DeviceError::ServiceMissing) }
+}
+
+fn usbmuxd_installed() -> bool {
+    const FIXED: [&str; 5] = ["/usr/sbin/usbmuxd", "/usr/bin/usbmuxd", "/usr/lib/systemd/system/usbmuxd.service",
+        "/lib/systemd/system/usbmuxd.service", "/etc/systemd/system/usbmuxd.service"];
+    let on_path = std::env::var_os("PATH").into_iter().flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).map(|d| d.join("usbmuxd"));
+    FIXED.iter().map(PathBuf::from).chain(on_path).any(|p| p.is_file())
+}
+
 pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     let mut b = std::fs::DirBuilder::new();
     b.recursive(true);
@@ -347,6 +364,13 @@ mod tests {
     async fn no_usbmuxd_is_service_missing() {
         let nobody = UsbmuxdAddr::TcpSocket("127.0.0.1:1".parse().unwrap());
         assert_eq!(mux_at(nobody).await.err(), Some(DeviceError::ServiceMissing));
+    }
+
+    #[test]
+    fn linux_without_socket_is_no_device_only_with_usbmuxd_installed() {
+        assert_eq!(without_mux(true, || true), Ok(vec![]));
+        assert_eq!(without_mux(true, || false), Err(DeviceError::ServiceMissing));
+        assert_eq!(without_mux(false, || panic!("fora do Linux não se procura o usbmuxd")), Err(DeviceError::ServiceMissing));
     }
 
     #[test]

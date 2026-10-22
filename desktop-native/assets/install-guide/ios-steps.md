@@ -85,6 +85,19 @@ O que tem que ser verdade para funcionar (achado nesta captura):
 | ios-sidestore-20-sidestore-pronto.png | Na aba "My Apps", o SideStore aparece com "7 DAYS" | Nada | A assinatura vale 7 dias e é renovada pelo SideStore. |
 | ios-sidestore-22-confirmar-instalar.png (fora do guia) | Ao instalar o Hangar, toque em "Install" | "Install" | |
 | ios-sidestore-23-hangar-instalado.png | O Hangar aparece em "My Apps" com "7 DAYS" | Nada | Instalado e assinado com a Apple ID. |
-| ios-sidestore-24-hangar-aberto.png | Abra o Hangar: tela "Conectar a um servidor" | Nada | Pronto para conectar ao PC. |
+| ios-sidestore-24-hangar-aberto.png | Abra o Hangar: tela "Conectar a um servidor" | Nada | Pronto para conectar ao PC. Recapturado em 2026-10-21, aberto pelo "OPEN" da fonte (por isso o "◀ SideStore" na barra). |
+
+# Instalar o Hangar pela fonte e sair sem o certificado
+
+Capturados em 2026-10-21 no mesmo iPad, via WebDriverAgent, com o link `sidestore://source?url=…` do QR da tela do PC. Os prints da fonte só mostram "Jefferson Felizardo", o nome público do desenvolvedor. No print de Sign Out o nome e o e-mail da conta foram cobertos de vez e trocados por "Seu nome" e `seu.email@exemplo.com`.
+
+| Arquivo | Passo | Onde tocar | Por quê |
+|---|---|---|---|
+| ios-sidestore-30-adicionar-fonte.png | Abra o link da fonte no SideStore e toque em "ADD" | "ADD", no canto de cima à direita | O SideStore mostra a prévia da fonte do Hangar antes de adicionar. |
+| ios-sidestore-31-confirmar-fonte.png | Confirme em "Add Source" | "Add Source", à direita no aviso | A fonte diz de onde baixar o Hangar e as atualizações. |
+| ios-sidestore-32-obter-hangar.png | No Hangar, toque em "FREE" | "FREE", à direita do Hangar | Com a fonte adicionada o botão de cima vira "REMOVE". |
+| ios-sidestore-33-confirmar-instalar.png | Confirme em "Install" | "Install", à direita no aviso | O SideStore baixa e assina o Hangar com a Apple ID. |
+| ios-sidestore-34-hangar-instalado-pela-fonte.png | Quando o botão virar "OPEN", toque nele | "OPEN" | "OPEN" no lugar do círculo girando = instalado. |
+| ios-sidestore-39-sair-sem-certificado.png (reserva) | Settings → SIGN OUT, desmarque "Keep signing certificate" e toque "Sign Out" | "Keep signing certificate", depois "Sign Out" | Depois de revogar o certificado (pelo Hangar ou outra ferramenta) o SideStore diz "sessão expirada" ou "certificado revogado"; sair sem guardar o certificado e entrar de novo com a Apple ID resolve. |
 
 Prints que mostram o caminho errado ou não entram no guia não ficam no repositório: `05`/`06` (arquivo combinado recusado), `16`/`18`/`19` (lockdown aceito no login, mas instalar falha), `15`, `21`, `22` e os antigos `ios-26`..`ios-28`.

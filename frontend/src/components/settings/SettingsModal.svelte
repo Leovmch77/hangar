@@ -397,7 +397,7 @@
       fallbackFocus={fecharEl} {store}
       onLogout={onLogout ?? (() => {})} />
   {:else if telaAtual === 'contas'}
-    <ContasSettings apiTarget={alvo} />
+    <ContasSettings apiTarget={alvo} desktop={isDesktop} />
   {:else if telaAtual === 'shared-config'}
     {#if resolvedServer}
       {#key identidade}<SharedConfigSettings server={resolvedServer} />{/key}

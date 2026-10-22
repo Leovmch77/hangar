@@ -283,7 +283,10 @@ const MAX_STALL_WAIT:Duration=Duration::from_secs(8);
 /// Id de operação que o pedido pode usar: os prefixos `call::` e `terminal-` são do próprio ator.
 fn valid_operation_id(id:&str)->bool {!id.is_empty() && !id.starts_with("call::") && !id.starts_with("terminal-")}
 /// Leituras da marca "ctrl+x ctrl+s to send now" depois de digitar a entrada orientada.
-const STEER_HINT_TRIES:usize=3;
+/// Quanto o Orientar espera a dica "ctrl+x ctrl+s to send now": o Claude Code só a desenha depois dos hooks de
+/// UserPromptSubmit da conta. Parado, a entrega já abre o turno e a dica não vem: espera menos.
+const STEER_HINT_WAIT:Duration=Duration::from_secs(5);
+const STEER_HINT_WAIT_IDLE:Duration=Duration::from_secs(2);
 /// Esperas normais (o Claude ocupado, uma pergunta na tela) não contam como entrega parada, nem a
 /// escrita desfeita (`input_unproved`), que já tem o teto de tentativas da fila, nem falha do
 /// diário (`write_journal`), que tem aviso próprio.
@@ -1457,18 +1460,27 @@ impl Executor {
         // A marca da fila pode demorar um quadro a aparecer depois do Enter; sem ela de vez, o Claude estava parado
         // (ou o turno acabou no meio) e já levou a mensagem: entregue igual, sem promover. Parado, a entrega abriu
         // o turno com ela: uma leitura basta, sem as esperas.
+        let deadline=tokio::time::Instant::now()+if idle {STEER_HINT_WAIT_IDLE} else {STEER_HINT_WAIT};
         let mut steered=driver.steer().await;
-        let tries=if idle {1} else {STEER_HINT_TRIES};
-        for _ in 1..tries {
-            if steered.disposition!=input::Disposition::Deferred {break;}
+        // Só o prazo esgotado é "a dica não veio": o turno acabando no meio entregou a mensagem como envio comum.
+        let mut turn_ended=false;
+        while steered.disposition==input::Disposition::Deferred && tokio::time::Instant::now()<deadline {
             tokio::time::sleep(self.options.limits.settle).await;
-            if !self.expected_work(payload) {break;}
+            if !self.expected_work(payload) {turn_ended=true; break;}
             steered=driver.steer().await;
         }
+        // O ctrl+x ctrl+s pode ter ido sem se comprovar: nem "orientou" nem "a dica não veio", e quem clicou confere.
         if steered.disposition==input::Disposition::Unknown {
             tracing::warn!(key=%self.target.key,session=%self.target.name,code=%steered.code,"a mensagem entrou na fila do Claude Code, mas o ctrl+x ctrl+s não se comprovou");
+            return Ok(reply(id,Disposition::Unknown,json!({"code":"queue_steer_uncertain"})));
         }
-        Ok(reply(id,Disposition::Accepted,json!({"steered":steered.disposition==input::Disposition::Accepted,"drained":1})))
+        let accepted=steered.disposition==input::Disposition::Accepted;
+        // Trabalhando e sem a dica no prazo: a mensagem espera a próxima pausa do Claude, e quem clicou precisa saber.
+        if steered.disposition==input::Disposition::Deferred && !turn_ended && !idle {
+            tracing::warn!(key=%self.target.key,session=%self.target.name,code=%steered.code,"Orientar: a dica do ctrl+x ctrl+s não apareceu no prazo");
+            return Ok(reply(id,Disposition::Accepted,json!({"steered":false,"drained":1,"code":"queue_steer_hint_missing"})));
+        }
+        Ok(reply(id,Disposition::Accepted,json!({"steered":accepted,"drained":1})))
     }
 
     fn working_revision(&self)->Option<u64> {

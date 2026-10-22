@@ -230,6 +230,14 @@ pub struct Appearance {
     /// Largura arrastada da barra cheia (`cp_sidebar_w` do web), uma só para Barra lateral e Conversas; `None` usa a do modo.
     pub sidebar_width: Option<f32>,
     pub sidebar_compact: bool,
+    /// Abas com pasta, branch e a marca do terminal sob o nome, numa faixa mais alta.
+    pub tabs_full: bool,
+    /// Com o mouse parado numa aba, a conversa dela e o compositor abrem por cima.
+    pub tab_preview: bool,
+    /// Depois dos grupos, as abas que estão trabalhando vêm antes das outras.
+    pub tabs_working_first: bool,
+    /// Depois dos grupos e das que trabalham, as abas paradas vêm da resposta mais recente para a mais antiga.
+    pub tabs_recent_first: bool,
     /// Caixa do "Ver ao vivo": distância da borda direita e da de baixo da janela, em px lógicos.
     pub live_corner: [f32; 2],
     /// Larguras arrastadas do painel lateral (abas comuns e Navegador; `None` no Navegador segue a fração da janela) e
@@ -241,6 +249,8 @@ pub struct Appearance {
     /// Lista de tarefas do agente (TaskCreate/TaskUpdate) como um bloco de progresso na conversa.
     pub task_list: bool,
     pub thinking_tools: ThinkingTools,
+    /// Na pele Terminal, o pensamento terminado chega numa linha e abre no clique.
+    pub thinking_collapsed: bool,
     /// Botão Gráfico sobre as tabelas numéricas das respostas.
     pub table_chart: bool,
     pub ask_highlight: AskHighlight,
@@ -277,9 +287,9 @@ const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeM
     desktop_text: DesktopText::Desktop, dark: MODE_COLORS, light: MODE_COLORS, transparency: 40, surface_material: SurfaceMaterial::Glass, solidity: 70,
     background: Background::Plain, background_effect: crate::effects::BackgroundEffect::None, background_scope: BackgroundScope::Everywhere, wallpaper: Wallpaper::Window, reading: Reading::Auto, sheet_solidity: 60, text_contrast: 30,
     font: Font::System, text_size: 100, line_height: 100, column: 100, sidebar_height: SidebarHeight::Full,
-    navigation: Navigation::Sidebar, show_remote_tabs: true, sidebar_width: None, sidebar_compact: false, live_corner: [16., 16.],
+    navigation: Navigation::Sidebar, show_remote_tabs: true, sidebar_width: None, sidebar_compact: false, tabs_full: false, tab_preview: false, tabs_working_first: false, tabs_recent_first: false, live_corner: [16., 16.],
     side_width: 300., side_browser_width: None, terminal_height: 260.,
-    tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false, ask_highlight: AskHighlight::Accent,
+    tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, thinking_collapsed: false, table_chart: false, ask_highlight: AskHighlight::Accent,
     language: Language::System, currency: Currency::Usd, hands_free: false, skip_chat_confirmations: false, steer_while_working: false, jev_delivery: false, accounts_compact: false, sidebar_group: SidebarGroup::None, side_tab: SideTab::Context,
     terminal_font: CodeFont::JetBrainsMono, terminal_size: 12, code_font: CodeFont::JetBrainsMono, code_size: 25, keep_in_tray: false, chrome_autofill: false, full_chrome: false };
 
@@ -403,6 +413,26 @@ pub fn last_root() -> Option<String> { std::fs::read_to_string(dir()?.join("last
 
 pub fn remember_root(path: &str) {
     if let Some(dir) = dir() { let _ = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join("last-root"), path)); }
+}
+
+/// Ordem escolhida na lista de Contas, no formato do `cp_accounts_sort` do web; ilegível volta à ordem padrão. Bloqueantes.
+pub fn accounts_sort() -> Option<(String, i8)> {
+    #[derive(Deserialize)]
+    struct Saved { key: String, dir: i8 }
+    let saved: Saved = serde_json::from_slice(&std::fs::read(dir()?.join("accounts-sort.json")).ok()?).ok()?;
+    matches!(saved.dir, 1 | -1).then_some((saved.key, saved.dir))
+}
+
+pub fn remember_accounts_sort(sort: Option<&(String, i8)>) {
+    let Some(dir) = dir() else { return };
+    let file = dir.join("accounts-sort.json");
+    let result = match sort {
+        Some((key, dir_)) => std::fs::create_dir_all(&dir)
+            .and_then(|_| std::fs::write(&file, serde_json::json!({"key": key, "dir": dir_}).to_string())),
+        None => std::fs::remove_file(&file).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }),
+    };
+    // Diagnóstico, não aviso: a ordem vale nesta abertura e o log do app guarda por que não ficou para a próxima.
+    if let Err(error) = result { crate::log_line(&format!("ordem das contas não gravou: {error}")); }
 }
 
 pub fn search_all_folders() -> Result<bool, String> {

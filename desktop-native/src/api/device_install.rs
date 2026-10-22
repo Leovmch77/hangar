@@ -21,7 +21,14 @@ pub struct Device {
 pub struct Scan { pub service: String, pub devices: Vec<Device> }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct Progress { pub stage: String, pub error: Option<DeviceError>, pub source_url: String }
+pub struct Progress {
+    pub stage: String, pub error: Option<DeviceError>, pub source_url: String,
+    /// Só em `awaiting_cert_choice`: os certificados que lotam a conta.
+    #[serde(default)] pub certs: Option<Vec<Cert>>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct Cert { pub name: String, pub machine_name: String, pub serial: String }
 
 fn lost() -> DeviceError { DeviceError { code: "connection_failed".into(), detail: None } }
 
@@ -66,6 +73,12 @@ impl Api {
     pub async fn device_code(&self, job: &str, code: Option<&str>) -> Result<(), DeviceError> {
         let body = match code { Some(code) => json!({"job": job, "code": code}), None => json!({"job": job, "resend": true}) };
         self.device_call(Method::POST, "code", &[], Some(body), 30).await.map(drop)
+    }
+
+    /// `None` desiste do trabalho; `Some(seriais)` revoga esses certificados e segue.
+    pub async fn device_certs(&self, job: &str, revoke: Option<Vec<String>>) -> Result<(), DeviceError> {
+        let body = match revoke { Some(revoke) => json!({"job": job, "revoke": revoke}), None => json!({"job": job, "cancel": true}) };
+        self.device_call(Method::POST, "certs", &[], Some(body), 30).await.map(drop)
     }
 
     pub async fn device_progress(&self, job: &str) -> Result<Progress, DeviceError> {

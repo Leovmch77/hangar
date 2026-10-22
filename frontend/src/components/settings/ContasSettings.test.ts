@@ -107,11 +107,11 @@ const DESLOGADA: Credencial = claude({
 // o caminho global (null) tem caso próprio no fim.
 const ALVO: Server = { id: 'srv-b', label: 'B', baseUrl: 'http://b', token: 't-b' };
 
-function montar(contas: Credencial[], alvo: Server | null = ALVO) {
+function montar(contas: Credencial[], alvo: Server | null = ALVO, desktop = false) {
   credMock.listarCredenciais.mockResolvedValue(contas);
   const el = document.createElement('div');
   document.body.appendChild(el);
-  const comp = mount(ContasSettings, { target: el, props: { apiTarget: alvo } });
+  const comp = mount(ContasSettings, { target: el, props: { apiTarget: alvo, desktop } });
   return { el, comp: comp as never };
 }
 
@@ -129,6 +129,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   clienteQuery.clear();
   localStorage.removeItem('cp_contas_compacta');
+  localStorage.removeItem('cp_accounts_sort');
 });
 
 describe('ContasSettings — a lista', () => {
@@ -168,16 +169,27 @@ describe('ContasSettings — a lista', () => {
     unmount(t.comp);
   });
 
-  it('mostra redefinições guardadas e desabilita o uso enquanto ainda há cota semanal', async () => {
-    const conta = codex({ cota: {
-      estado: 'lida', idade_s: 5,
-      janelas: [{ rotulo: '5h', pct: 100 }, { rotulo: '7d', pct: 83 }],
-      reset_credits: { available_count: 2, credits: [
-        { id: 'reset-1', expires_at: Math.floor(Date.now() / 1000) + 86400,
-          title: 'Reset', description: null, status: 'available' },
-      ] },
-    } } as Credencial);
-    const t = montar([conta]);
+  const COM_REDEFINICAO = () => codex({ cota: {
+    estado: 'lida', idade_s: 5,
+    janelas: [{ rotulo: '5h', pct: 100 }, { rotulo: '7d', pct: 83 }],
+    reset_credits: { available_count: 2, credits: [
+      { id: 'reset-1', expires_at: Math.floor(Date.now() / 1000) + 86400,
+        title: 'Reset', description: null, status: 'available' },
+    ] },
+  } } as Credencial);
+
+  it('no celular, redefinição guardada com a semana abaixo de 100% é só uma linha, sem botão', async () => {
+    const t = montar([COM_REDEFINICAO()]);
+    await tick(); await tick();
+    expect(t.el.querySelector('.ct-reset-btn')).toBeNull();
+    const linha = t.el.querySelector('.ct-reset-linha')!.textContent!;
+    expect(linha).toContain(m.codex_reset_many({ n: 2 }));
+    expect(linha).toContain(m.accounts_list_reset_next({ n: '' }).trim());
+    unmount(t.comp);
+  });
+
+  it('no desktop, mostra redefinições guardadas e desabilita o uso enquanto ainda há cota semanal', async () => {
+    const t = montar([COM_REDEFINICAO()], ALVO, true);
     await tick(); await tick();
     const botao = t.el.querySelector<HTMLButtonElement>('.ct-reset-btn')!;
     expect(botao.disabled).toBe(true);
@@ -1502,7 +1514,7 @@ describe('ContasSettings — as três seções da lista', () => {
   });
 
   it('os três títulos aparecem nesta ordem: Claude, modelos, outros agentes', async () => {
-    const t = montar(LISTA);
+    const t = montar(LISTA, ALVO, true);
     await tick(); await tick(); await tick();
     expect(secoes(t.el).map((s) => s.querySelector('.st-secao')!.textContent))
       .toEqual([m.contas_secao_claude(), m.contas_secao_modelos(), m.contas_secao_outros()]);
@@ -1510,7 +1522,7 @@ describe('ContasSettings — as três seções da lista', () => {
   });
 
   it('cada credencial cai na sua seção (chave com motor = modelo; kimi/codex = outros)', async () => {
-    const t = montar(LISTA);
+    const t = montar(LISTA, ALVO, true);
     await tick(); await tick(); await tick();
     const [claudes, modelos, outros] = secoes(t.el);
     expect(nomes(claudes)).toEqual(['jefferson', 'ChatGPT']);
@@ -1547,17 +1559,27 @@ describe('ContasSettings — as três seções da lista', () => {
       path: '/home/u/.codex-google', codex_sync: 'ready',
       login: { estado: 'ok', loggedIn: true, email: 'secondary@example.test', plano: 'plus' },
     } satisfies Credencial;
-    const t = montar([google]);
-    await tick(); await tick(); await tick();
-    const rows = [...cardDe(t.el, 'google').querySelectorAll<HTMLElement>('.ct-codex-meta')]
-      .map((row) => row.textContent?.replace(/\s+/g, ' ').trim());
+    const linhas = async (desktop: boolean) => {
+      const t = montar([google], ALVO, desktop);
+      await tick(); await tick(); await tick();
+      const rows = [...cardDe(t.el, 'google').querySelectorAll<HTMLElement>('.ct-codex-meta')]
+        .map((row) => row.textContent?.replace(/\s+/g, ' ').trim());
+      unmount(t.comp);
+      clienteQuery.clear();
+      return rows;
+    };
 
-    expect(rows).toEqual([
+    expect(await linhas(true)).toEqual([
       `${m.codex_ui_oauth()} · plus`,
       'secondary@example.test',
       `${m.codex_ui_inherited()} · .codex-google`,
     ]);
-    unmount(t.comp);
+    // Celular: o email vem logo abaixo do nome, antes do tipo de login.
+    expect(await linhas(false)).toEqual([
+      'secondary@example.test',
+      `${m.codex_ui_oauth()} · plus`,
+      `${m.codex_ui_inherited()} · .codex-google`,
+    ]);
   });
 
   it('a cópia do sync no Kimi não tem card próprio — é uma linha dentro do card do modelo', async () => {
@@ -1614,7 +1636,7 @@ describe('ContasSettings — as três seções da lista', () => {
 
   it('seção vazia não some: mostra o texto de vazio dela', async () => {
     apiMock.getEnginesForServer.mockResolvedValue({ motores: {}, arquivo_corrompido: false, arquivo_caminho: '' } as never);
-    const t = montar([LOGADA]);
+    const t = montar([LOGADA], ALVO, true);
     await tick(); await tick(); await tick();
     const [claudes, modelos, outros] = secoes(t.el);
     expect(claudes.querySelector('.ct-vazio')).toBeNull();
@@ -1648,6 +1670,77 @@ describe('ContasSettings — as três seções da lista', () => {
     const confirma = cardDe(t.el, 'Command Code').querySelector('.ct-confirma')!;
     expect(confirma.textContent).toContain(m.config_motores_sessoes_abertas());
     unmount(t.comp);
+  });
+
+  describe('celular: lista única', () => {
+    const filtroBtn = (el: HTMLElement, rotulo: string) => [...el.querySelectorAll<HTMLButtonElement>('.ct-filtros button')]
+      .find((b) => b.textContent?.startsWith(rotulo))!;
+    const digitar = async (el: HTMLElement, texto: string) => {
+      const busca = el.querySelector<HTMLInputElement>('.ct-busca')!;
+      busca.value = texto;
+      busca.dispatchEvent(new Event('input'));
+      await tick();
+    };
+
+    it('uma lista sem títulos de seção, na ordem das seções; provedor diz que roda no Claude Code', async () => {
+      const t = montar(LISTA);
+      await tick(); await tick(); await tick();
+      expect(t.el.querySelectorAll('.ct-grupo').length).toBe(0);
+      expect(nomes(t.el)).toEqual(['jefferson', 'ChatGPT', 'Kimi', 'Command Code', 'Kimi CLI']);
+      expect(cardDe(t.el, 'Kimi').textContent).toContain(m.accounts_list_runs_in_claude_code());
+      expect(cardDe(t.el, 'Kimi CLI').textContent).not.toContain(m.accounts_list_runs_in_claude_code());
+      unmount(t.comp);
+    });
+
+    it('o filtro mostra a contagem e esconde as outras', async () => {
+      const t = montar(LISTA);
+      await tick(); await tick(); await tick();
+      expect(filtroBtn(t.el, m.accounts_list_filter_other()).textContent).toBe(`${m.accounts_list_filter_other()}3`);
+      filtroBtn(t.el, m.accounts_list_filter_codex()).click();
+      await tick();
+      expect(nomes(t.el)).toEqual(['ChatGPT']);
+      expect(filtroBtn(t.el, m.accounts_list_filter_codex()).getAttribute('aria-pressed')).toBe('true');
+      unmount(t.comp);
+    });
+
+    it('a busca acha pelo email, destaca o trecho e, sem resultado, diz o termo', async () => {
+      const t = montar(LISTA);
+      await tick(); await tick(); await tick();
+      await digitar(t.el, 'PESSOA@');
+      expect(nomes(t.el)).toEqual(['jefferson']);
+      expect(t.el.querySelector('.ct-email mark')!.textContent).toBe('pessoa@');
+      await digitar(t.el, 'zzz');
+      expect(t.el.querySelectorAll('.ct-card').length).toBe(0);
+      expect(t.el.querySelector('.ct-vazio-lista')!.textContent).toBe(m.accounts_list_search_empty({ term: 'zzz' }));
+      unmount(t.comp);
+    });
+
+    it('ordenar por janela reordena, inverte o sentido e fica salvo', async () => {
+      const t = montar([claude({ id: 'a', nome: 'A', ativa: true, cota: { estado: 'lida', ts: 1, idade_s: 5, janelas: [{ rotulo: '5h', pct: 10 }] } }),
+        claude({ id: 'b', nome: 'B', ativa: false, cota: { estado: 'lida', ts: 1, idade_s: 5, janelas: [{ rotulo: '5h', pct: 90 }] } })]);
+      await tick(); await tick(); await tick();
+      expect(nomes(t.el)).toEqual(['A', 'B']);
+      const sel = t.el.querySelector<HTMLSelectElement>('.ct-ordem select')!;
+      sel.value = '5h';
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      await tick();
+      expect(nomes(t.el)).toEqual(['B', 'A']);
+      expect(JSON.parse(localStorage.getItem('cp_accounts_sort')!)).toEqual({ key: '5h', dir: -1 });
+      t.el.querySelector<HTMLButtonElement>('.ct-sentido')!.click();
+      await tick();
+      expect(nomes(t.el)).toEqual(['A', 'B']);
+      expect(JSON.parse(localStorage.getItem('cp_accounts_sort')!)).toEqual({ key: '5h', dir: 1 });
+      unmount(t.comp);
+    });
+
+    it('o email fica em linha própria; o prazo do login fica fora dela', async () => {
+      const exp = Math.floor(Date.now() / 1000) + 10 * 86400;
+      const t = montar([claude({ login: { estado: 'ok', loggedIn: true, email: 'pessoa@exemplo.com', plano: 'max', refreshExpiresAt: exp } })]);
+      await tick(); await tick(); await tick();
+      expect(t.el.querySelector('.ct-email')!.textContent).toBe('pessoa@exemplo.com');
+      expect(t.el.querySelector('.ct-vence-l')!.textContent).not.toContain('pessoa@exemplo.com');
+      unmount(t.comp);
+    });
   });
 });
 

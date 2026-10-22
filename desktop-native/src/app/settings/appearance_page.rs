@@ -573,6 +573,7 @@ impl Hangar {
         const LOOKS: [ToolLook; 4] = [ToolLook::Classic, ToolLook::Chips, ToolLook::Tree, ToolLook::Terminal];
         // Na Árvore o raciocínio já entra no grupo com todas as chamadas: a escolha do pensamento fica sem efeito.
         let thinking_on = a.tool_look != ToolLook::Tree;
+        let terminal_look = a.tool_look == ToolLook::Terminal;
         let tool_calls = tiles("tool-calls", &[tr("settings_tool_calls_classic"), tr("settings_tool_calls_chips"), tr("settings_tool_calls_tree"), tr("settings_tool_calls_terminal")],
             Vec::from(LOOKS.map(art_tools)), LOOKS.iter().position(|l| *l == a.tool_look).unwrap_or(0), LOOKS.len(), false, tr("settings_next_version"), live,
             |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.tool_look = LOOKS[index]; this.apply_appearance(next, true, cx); }, cx);
@@ -582,6 +583,10 @@ impl Hangar {
                 segmented("thinking", &[tr("settings_thinking_none"), tr("settings_thinking_search"), tr("settings_thinking_all")],
                     THINKING.iter().position(|t| *t == a.thinking_tools).unwrap_or(1), thinking_on,
                     |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.thinking_tools = THINKING[index]; this.apply_appearance(next, true, cx); }, cx),
+                true))
+            .child(self.line("settings_thinking_collapsed", Some(tr("settings_thinking_collapsed_hint")), terminal_look,
+                segmented("thinking-collapsed", &[tr("settings_thinking_open"), tr("settings_thinking_folded")], a.thinking_collapsed as usize, terminal_look,
+                    |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.thinking_collapsed = index == 1; this.apply_appearance(next, true, cx); }, cx),
                 true))
             .child(self.line("settings_task_list", None, true,
                 segmented("task-list", &[tr("settings_task_list_hide"), tr("settings_task_list_progress")], a.task_list as usize, true,
@@ -608,6 +613,7 @@ impl Hangar {
             tr("settings_next_version"), live,
             |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.navigation = NAVIGATION[index]; this.apply_appearance(next, true, cx); this.recents_sessions_changed(false, cx); }, cx);
         let conversations_nav = a.navigation == Navigation::Conversations;
+        let tabs_nav = a.navigation.tabs();
         let height = segmented("sidebar-height", &[tr("settings_sidebar_full"), tr("settings_sidebar_content")],
             if a.sidebar_height == SidebarHeight::Content { 1 } else { 0 }, floating,
             |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.sidebar_height = if index == 1 { SidebarHeight::Content } else { SidebarHeight::Full }; this.apply_appearance(next, true, cx); }, cx);
@@ -616,6 +622,22 @@ impl Hangar {
             .child(self.line("settings_sidebar_density", Some(tr("settings_sidebar_density_hint")), conversations_nav,
                 segmented("sidebar-density", &[tr("settings_sidebar_normal"), tr("settings_sidebar_compact")], a.sidebar_compact as usize, conversations_nav,
                     |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.sidebar_compact = index == 1; this.apply_appearance(next, true, cx); }, cx),
+                true))
+            .child(self.line("settings_tabs_detail", Some(tr("settings_tabs_only")), tabs_nav,
+                segmented("tabs-detail", &[tr("settings_sidebar_compact"), tr("settings_tabs_full")], a.tabs_full as usize, tabs_nav,
+                    |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.tabs_full = index == 1; this.apply_appearance(next, true, cx); }, cx),
+                true))
+            .child(self.line("settings_tab_preview", Some(tr("settings_tab_preview_hint")), tabs_nav,
+                segmented("tab-preview", &[tr("settings_tab_preview_off"), tr("settings_tab_preview_on")], a.tab_preview as usize, tabs_nav,
+                    |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.tab_preview = index == 1; this.apply_appearance(next, true, cx); }, cx),
+                true))
+            .child(self.line("settings_tabs_working_first", Some(tr("settings_tabs_working_first_hint")), tabs_nav,
+                segmented("tabs-working-first", &[tr("settings_tab_preview_off"), tr("settings_tab_preview_on")], a.tabs_working_first as usize, tabs_nav,
+                    |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.tabs_working_first = index == 1; this.apply_appearance(next, true, cx); }, cx),
+                true))
+            .child(self.line("settings_tabs_recent_first", Some(tr("settings_tabs_recent_first_hint")), tabs_nav,
+                segmented("tabs-recent-first", &[tr("settings_tab_preview_off"), tr("settings_tab_preview_on")], a.tabs_recent_first as usize, tabs_nav,
+                    |this: &mut Hangar, index, _: &mut Window, cx| { let mut next = appearance::get(); next.tabs_recent_first = index == 1; this.apply_appearance(next, true, cx); }, cx),
                 true))
             .child(self.line("settings_sidebar_height", Some(tr("settings_only_floating")), floating, height, false))
             .child(self.line("settings_sidebar_grouping", Some(tr("settings_sidebar_grouping_desc")), !a.navigation.tabs(),

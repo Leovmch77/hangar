@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use futures_util::future::BoxFuture;
+use serde::Serialize;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
@@ -23,6 +24,17 @@ pub enum CodeReply {
 
 /// Pede o código à tela. `true` = o último foi recusado. `None` = ninguém respondeu no prazo.
 pub type AskCode = Arc<dyn Fn(bool) -> BoxFuture<'static, Option<CodeReply>> + Send + Sync>;
+
+/// Certificado de desenvolvimento que já ocupa a vaga da conta; `serial` é o que se revoga.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CertInfo {
+    pub name: String,
+    pub machine_name: String,
+    pub serial: String,
+}
+
+/// Mostra os certificados à tela. `Some(seriais)` = revogar esses e seguir; `None` = desistiu ou o prazo venceu.
+pub type AskCerts = Arc<dyn Fn(Vec<CertInfo>) -> BoxFuture<'static, Option<Vec<String>>> + Send + Sync>;
 
 /// Sem `Debug`: leva a senha.
 pub struct Login {
@@ -58,7 +70,7 @@ pub struct Signed {
 }
 
 pub trait AppleSigner: Send + Sync {
-    fn login(&self, login: Login, ask: AskCode) -> BoxFuture<'_, Result<Box<dyn AppleSession>, Failure>>;
+    fn login(&self, login: Login, ask: AskCode, certs: AskCerts) -> BoxFuture<'_, Result<Box<dyn AppleSession>, Failure>>;
 }
 
 pub trait AppleSession: Send {
@@ -120,10 +132,13 @@ pub struct FakeSigner {
     pub logins: Mutex<Vec<String>>,
     pub resends: Mutex<u32>,
     pub signed: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+    /// Certificados que já lotam a conta: a assinatura para e pergunta quais revogar.
+    pub cert_limit: Vec<CertInfo>,
+    pub revoked: Arc<Mutex<Vec<String>>>,
 }
 
 impl AppleSigner for FakeSigner {
-    fn login(&self, login: Login, ask: AskCode) -> BoxFuture<'_, Result<Box<dyn AppleSession>, Failure>> {
+    fn login(&self, login: Login, ask: AskCode, certs: AskCerts) -> BoxFuture<'_, Result<Box<dyn AppleSession>, Failure>> {
         Box::pin(async move {
             let url = with_anisette(&login.anisette, |url| {
                 lock(&self.tried).push(url.clone());
@@ -152,6 +167,9 @@ impl AppleSigner for FakeSigner {
                 delay: self.sign_delay,
                 signing: self.signing.clone(),
                 signed: self.signed.clone(),
+                cert_limit: self.cert_limit.clone(),
+                revoked: self.revoked.clone(),
+                ask_certs: certs,
             };
             Ok(Box::new(session) as Box<dyn AppleSession>)
         })
@@ -165,6 +183,9 @@ struct FakeSession {
     delay: std::time::Duration,
     signing: Arc<(std::sync::atomic::AtomicUsize, std::sync::atomic::AtomicUsize)>,
     signed: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+    cert_limit: Vec<CertInfo>,
+    revoked: Arc<Mutex<Vec<String>>>,
+    ask_certs: AskCerts,
 }
 
 /// Onde o fake extrai: `<pasta acima do IPA>/<nome do IPA>_extracted`, como o isideload faz no temp.
@@ -185,6 +206,12 @@ impl AppleSession for FakeSession {
             self.signing.1.fetch_max(now, SeqCst);
             tokio::time::sleep(self.delay).await;
             self.signing.0.fetch_sub(1, SeqCst);
+            if !self.cert_limit.is_empty() {
+                let Some(serials) = (self.ask_certs)(self.cert_limit.clone()).await else {
+                    return Err(Failure::new(CERT_LIMIT));
+                };
+                lock(&self.revoked).extend(serials);
+            }
             let scratch = Scratch(fake_extract_dir(req.ipa));
             let app = scratch.0.join("Payload/SideStore.app");
             std::fs::create_dir_all(&app).map_err(|e| Failure::with(SIGN_FAILED, e.to_string()))?;
@@ -226,7 +253,7 @@ mod real {
     pub struct IsideloadSigner;
 
     impl AppleSigner for IsideloadSigner {
-        fn login(&self, login: Login, ask: AskCode) -> BoxFuture<'_, Result<Box<dyn AppleSession>, Failure>> {
+        fn login(&self, login: Login, ask: AskCode, ask_certs: AskCerts) -> BoxFuture<'_, Result<Box<dyn AppleSession>, Failure>> {
             Box::pin(async move {
                 static INIT: std::sync::Once = std::sync::Once::new();
                 INIT.call_once(|| if let Err(e) = isideload::init() { tracing::error!("isideload init failed: {e:?}"); });
@@ -250,10 +277,17 @@ mod real {
                 let dev = DeveloperSession::from_account(&mut account).await.map_err(|e| login_failure(&e))?;
                 let certs: Certs = Arc::default();
                 let seen = certs.clone();
-                // Limite de certificados: nada é revogado sozinho; a tela mostra quais existem.
+                // Limite de certificados: nada é revogado sem a pessoa escolher na tela.
                 let prompt: MaxCertsCallbackBox = Box::new(move |list: Vec<DevelopmentCertificate>| -> MaxCertsCallbackFuture {
+                    let shown = list.iter().filter_map(cert_info).collect();
                     *lock(&seen) = Some(list);
-                    Box::pin(async { Ok(None) })
+                    let (ask, seen) = (ask_certs.clone(), seen.clone());
+                    Box::pin(async move {
+                        let choice = ask(shown).await;
+                        // Revogou: um erro depois disso já não é o do limite.
+                        if choice.is_some() { lock(&seen).take(); }
+                        Ok(choice)
+                    })
                 });
                 let sideloader = SideloaderBuilder::new(dev, email)
                     .team_selection(TeamSelection::First)
@@ -316,6 +350,14 @@ mod real {
                 }
             })
         }
+    }
+
+    fn cert_info(c: &DevelopmentCertificate) -> Option<CertInfo> {
+        Some(CertInfo {
+            name: c.name.clone().unwrap_or_default(),
+            machine_name: c.machine_name.clone().unwrap_or_default(),
+            serial: c.serial_number.clone()?,
+        })
     }
 
     fn cert_list(certs: &[DevelopmentCertificate]) -> String {

@@ -346,7 +346,12 @@ pub(crate) fn queue_change_answer(outcome: &Result<Value, RuntimeError>, done: &
 pub(crate) fn queue_steer_terminal(reply: &Result<RuntimeReply, RuntimeError>) -> Answer {
     let reply = match reply { Ok(reply) => reply, Err(error) => return runtime_failed(error) };
     match (reply.disposition, payload_code(reply)) {
-        (Disposition::Accepted, _) => steered(reply.payload["steered"] == true),
+        // O código (`queue_steer_hint_missing`) vai junto: é ele que faz o app dizer que a mensagem espera a pausa.
+        (Disposition::Accepted, code) => {
+            let (status, mut body) = steered(reply.payload["steered"] == true);
+            if let Some(code) = code { body["code"] = json!(code); }
+            (status, body)
+        }
         (_, Some("queue_entry_gone")) => queue_gone(),
         (_, Some("queue_steer_question_open")) => queue_refused("queue_steer_question_open", MSG_STEER_QUESTION),
         (Disposition::Unknown, _) => queue_refused("queue_steer_uncertain", MSG_STEER_UNCERTAIN),
@@ -667,6 +672,8 @@ mod tests {
     fn terminal_steer_answers() {
         let r = |disposition, payload| -> Result<RuntimeReply, RuntimeError> { Ok(RuntimeReply { operation_id: "x".into(), disposition, payload }) };
         assert_eq!(queue_steer_terminal(&r(Disposition::Accepted, json!({"steered":true}))).1["steered"], true);
+        let late = queue_steer_terminal(&r(Disposition::Accepted, json!({"steered":false,"code":"queue_steer_hint_missing"}))).1;
+        assert_eq!((late["steered"].clone(), late["code"].clone()), (json!(false), json!("queue_steer_hint_missing")), "o código chega ao app");
         assert_eq!(queue_steer_terminal(&r(Disposition::Rejected, json!({"code":"queue_entry_gone"}))).1["detail"]["code"], "queue_entry_gone");
         assert_eq!(queue_steer_terminal(&r(Disposition::Rejected, json!({"code":"queue_steer_question_open"}))).1["detail"]["code"], "queue_steer_question_open");
         assert_eq!(queue_steer_terminal(&r(Disposition::Unknown, json!({"code":"queue_steer_uncertain"}))).1["detail"]["code"], "queue_steer_uncertain");

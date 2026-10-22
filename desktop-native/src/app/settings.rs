@@ -597,13 +597,15 @@ impl Hangar {
         appearance::set(next);
         theme::sync_kit(None, cx);
         // Quem muda as linhas ou o desenho delas refaz a conversa: a lista guarda a altura de cada linha.
-        if (before.tool_look, before.task_list, before.thinking_tools, before.table_chart, before.code_font, before.code_size)
-            != (next.tool_look, next.task_list, next.thinking_tools, next.table_chart, next.code_font, next.code_size) {
+        if (before.tool_look, before.task_list, before.thinking_tools, before.thinking_collapsed, before.table_chart, before.code_font, before.code_size)
+            != (next.tool_look, next.task_list, next.thinking_tools, next.thinking_collapsed, next.table_chart, next.code_font, next.code_size) {
             self.chat.invalidate();
             self.sync_rows(cx);
             self.list_state.remeasure();
             self.restyle_subagent(cx);
+            self.restyle_tab_preview(cx);
         }
+        if !next.tab_preview || !next.navigation.tabs() { self.close_tab_preview(cx); }
         if before.keep_in_tray != next.keep_in_tray { self.sync_tray(cx); }
         if save {
             let (connection, tx) = (self.connection, self.tx.clone());
@@ -901,8 +903,6 @@ impl Hangar {
         self.settings_ui.jump = Some(key);
         self.settings_ui.reveal.set(true);
     }
-
-    pub(super) fn jumped(&self) -> Option<&'static str> { self.settings_ui.jump }
 
     /// Destaque da linha levada pela busca, e a rolagem até ela quando o desenho já sabe onde ela está.
     pub(super) fn mark(&self, el: Div, key: &str) -> Div {

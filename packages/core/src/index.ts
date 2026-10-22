@@ -56,6 +56,7 @@ export * from './orquestracao';
 export * from './proposedPlan';
 export * from './slashCommands';
 export * from './credenciais';
+export * from './accountsList';
 export * from './pairDrop';
 export * from './pairGroups';
 export * from './linkedChildren';

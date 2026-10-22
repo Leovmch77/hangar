@@ -48,7 +48,7 @@ gpui_kit::assets::icon_assets!(ExtraIcons, [ArrowUp, GitBranch, RotateCcwClock, 
     Activity, Contrast, Droplet, Image, Keyboard, Layers, List, Mic, Monitor, RefreshCw, Server, SlidersHorizontal, Type, Users,
     SquarePen, FilePlus, Wrench, Circle, CircleDashed, ChartColumn, Table, ListChecks, Download, Clock, Languages, Banknote,
     Zap, Rocket, MessageCircle, Key, Pencil, GripVertical, AudioLines, Volume2, Hash, LogOut, Smartphone, FolderTree, ChevronsDownUp, FileCode,
-    RotateCcw, CornerDownRight, MessageSquare, Sparkles, CircleAlert, CircleCheck, TriangleAlert, Link, Wifi,
+    RotateCcw, CornerDownRight, MessageSquare, Square, Sparkles, CircleAlert, CircleCheck, TriangleAlert, Link, Wifi,
     CircleStop, Upload, Workflow, CloudDownload, ArrowDownToLine, ArrowUpFromLine, GitFork, Trash, MessageCircleQuestionMark, Brain,
     ListOrdered, CornerUpRight, TextQuote, MousePointerClick, Code, Hourglass]);
 
@@ -81,7 +81,9 @@ install_guide!("android-01-abrir-navegador.png", "android-02-baixando.png", "and
     "ios-sidestore-07-pasta-sidestore.png", "ios-sidestore-08-localdevvpn.png", "ios-sidestore-09-apple-id.png",
     "ios-sidestore-10-formulario-apple-id.png", "ios-sidestore-11-metodo-verificacao.png", "ios-sidestore-12-permitir-inicio-sessao.png",
     "ios-sidestore-13-codigo-apple.png", "ios-sidestore-14-digitar-codigo.png", "ios-sidestore-17-tudo-pronto.png",
-    "ios-sidestore-20-sidestore-pronto.png", "ios-sidestore-23-hangar-instalado.png", "ios-sidestore-24-hangar-aberto.png");
+    "ios-sidestore-20-sidestore-pronto.png", "ios-sidestore-23-hangar-instalado.png", "ios-sidestore-24-hangar-aberto.png",
+    "ios-sidestore-30-adicionar-fonte.png", "ios-sidestore-31-confirmar-fonte.png", "ios-sidestore-32-obter-hangar.png",
+    "ios-sidestore-33-confirmar-instalar.png", "ios-sidestore-34-hangar-instalado-pela-fonte.png", "ios-sidestore-39-sair-sem-certificado.png");
 
 struct AppAssets;
 

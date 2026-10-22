@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const { parsarSnapshot, montarPerguntas, montarEstado, decidir, rodar, pedidoDeTexto, valorDoCampo, cabecaDoValor, perguntaDeConfere, chegouNoEstado, destinoDoJev, NENHUM, SEM_SELECT, decidirPeloAuxiliar, pedidoDeAjuda } = require('./jev_objetivo.cjs');
+const { parsarSnapshot, montarPerguntas, montarEstado, decidir, rodar, pedidoDeTexto, valorDoCampo, cabecaDoValor, perguntaDeConfere, chegouNoEstado, destinoDoJev, NENHUM, SEM_SELECT, decidirPeloAuxiliar, pedidoDeAjuda, THRESHOLDS_WITH_SCREENSHOT } = require('./jev_objetivo.cjs');
 
 const SNAPSHOT = `- RootWebArea "Cadastro"
   - link "Ver ajuda" [ref=@e1]
@@ -623,15 +623,17 @@ test('confere: noul no piso da conclusao passa; abaixo, torto ou ausente nao', (
 
 test('destino do Jev: mesma regra do destino_jev do backend', () => {
   assert.deepEqual(destinoDoJev({}),
-    { url: 'https://api.typesafe.ai/v1/systemone', modelo: 'jev-latest' });
+    { url: 'https://api.typesafe.ai/v1/systemone', modelo: 'jev-latest', tipo: 'typesafe' });
   assert.deepEqual(destinoDoJev({ JEV_ENDPOINT: 'https://openrouter.ai/api/alpha/decisions', JEV_MODEL: 'typesafe/jev-1.13-20260917' }),
-    { url: 'https://openrouter.ai/api/alpha/decisions', modelo: 'typesafe/jev-1.13-20260917' });
+    { url: 'https://openrouter.ai/api/alpha/decisions', modelo: 'typesafe/jev-1.13-20260917', tipo: 'openrouter' });
   assert.deepEqual(destinoDoJev({ JEV_ENDPOINT: '  ', JEV_MODEL: '' }),
-    { url: 'https://api.typesafe.ai/v1/systemone', modelo: 'jev-latest' });
+    { url: 'https://api.typesafe.ai/v1/systemone', modelo: 'jev-latest', tipo: 'typesafe' });
   assert.deepEqual(destinoDoJev({ TYPESAFE_API_KEY: 'sk-or-x' }),
-    { url: 'https://openrouter.ai/api/alpha/decisions', modelo: '~typesafe/jev-latest' });
+    { url: 'https://openrouter.ai/api/alpha/decisions', modelo: '~typesafe/jev-latest', tipo: 'openrouter' });
   assert.deepEqual(destinoDoJev({ TYPESAFE_API_KEY: 'sk-or-x', JEV_MODEL: 'typesafe/jev-latest' }),
-    { url: 'https://openrouter.ai/api/alpha/decisions', modelo: '~typesafe/jev-latest' });
+    { url: 'https://openrouter.ai/api/alpha/decisions', modelo: '~typesafe/jev-latest', tipo: 'openrouter' });
+  assert.deepEqual(destinoDoJev({ TYPESAFE_API_KEY: 'sk-or-x', JEV_ENDPOINT: 'https://api.typesafe.ai/v1/systemone' }),
+    { url: 'https://api.typesafe.ai/v1/systemone', modelo: 'jev-latest', tipo: 'typesafe' });
 });
 
 const http = require('node:http');
@@ -674,6 +676,69 @@ test('askJev: devolve answers e manda modelo, estado e chave', async () => {
   } finally {
     srv.close();
   }
+});
+
+async function askJevRequest(args, sufixo = '') {
+  let pedido;
+  const { srv, url } = await jevServer((req, res) => {
+    let corpo = '';
+    req.on('data', (c) => { corpo += c; });
+    req.on('end', () => {
+      pedido = { corpo: JSON.parse(corpo), headers: req.headers };
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ answers: {} }));
+    });
+  });
+  try {
+    await askJev({ url: url + sufixo, modelo: 'm', chave: 'k', perguntas: {}, ...args });
+    return pedido;
+  } finally {
+    srv.close();
+  }
+}
+
+const IMAGE = { base64: 'iVBORw0KGgo=', width: 1280, height: 800 };
+
+test('askJev com imagem no OpenRouter: image_url no state, sem assets nem cabeçalho da Typesafe', async () => {
+  const { corpo, headers } = await askJevRequest({ estado: { pagina: 'arvore' }, imagem: IMAGE, tipo: 'openrouter' });
+  assert.deepEqual(corpo.state, {
+    pagina: 'arvore',
+    tela: { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } },
+  });
+  assert.equal('assets' in corpo, false);
+  assert.equal(headers['typesafe-danger-zone-images'], undefined);
+});
+
+test('askJev com imagem na Typesafe: ref no state, assets no topo e cabeçalho; estado string vira { pagina }', async () => {
+  const { corpo, headers } = await askJevRequest({ estado: 'arvore', imagem: IMAGE, tipo: 'typesafe' });
+  assert.equal(corpo.state.pagina, 'arvore');
+  assert.match(corpo.state.tela, /^img-[0-9a-f-]{36}$/);
+  assert.deepEqual(corpo.assets, { [corpo.state.tela]: { type: 'image', data_base64: 'iVBORw0KGgo=', format: 'png' } });
+  assert.equal(headers['typesafe-danger-zone-images'], 'true');
+});
+
+test('pngDimensions lê largura e altura do IHDR; o que não é PNG volta null', () => {
+  const { pngDimensions } = require('./jev_objetivo.cjs');
+  // Assinatura PNG + IHDR de 1280x800 (0x500 x 0x320), RGBA 8 bits.
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452000005000000032008060000005d6c2a3a', 'hex');
+  assert.deepEqual(pngDimensions(png), { width: 1280, height: 800 });
+  assert.equal(pngDimensions(Buffer.from('ffd8ffe000104a464946000101000001000100000000000000', 'hex')), null);
+  const semIhdr = Buffer.from(png);
+  semIhdr.write('IDAT', 12, 'latin1');
+  assert.equal(pngDimensions(semIhdr), null);
+  assert.equal(pngDimensions(png.subarray(0, 20)), null);
+});
+
+test('imageWithinLimits: cada lado entre 280 e 1568, limite da Typesafe', () => {
+  const { imageWithinLimits } = require('./jev_objetivo.cjs');
+  assert.equal(imageWithinLimits({ width: 280, height: 280 }), true);
+  assert.equal(imageWithinLimits({ width: 1568, height: 1568 }), true);
+  assert.equal(imageWithinLimits({ width: 1280, height: 800 }), true);
+  assert.equal(imageWithinLimits({ width: 279, height: 800 }), false);
+  assert.equal(imageWithinLimits({ width: 800, height: 279 }), false);
+  assert.equal(imageWithinLimits({ width: 1569, height: 800 }), false);
+  assert.equal(imageWithinLimits({ width: 800, height: 1569 }), false);
+  assert.equal(imageWithinLimits({ width: 2560, height: 1600 }), false);
 });
 
 test('askJev: status de erro vira "o Jev recusou"', async () => {
@@ -1436,4 +1501,309 @@ test('sem alvo com controles desabilitados na tela: espera a carga terminar ante
     perguntar: async () => resposta({ click: NENHUM }),
   });
   assert.ok(executados.includes('wait --idle --timeout 5000'), executados.join('\n'));
+});
+
+const SCREENSHOT = { base64: 'iVBORw0KGgo=', width: 1280, height: 800 };
+// Operação abaixo do piso: a decisão fraca que leva ao print.
+const fraca = () => resposta({ confOp: 0.2 });
+// O `perguntar` do CLI marca no próprio objeto como o pedido saiu; o falso faz o mesmo. Sem imagem
+// responde `semImagem`, com imagem `comImagem`.
+const askWithScreenshotStatus = (status, comImagem = () => resposta({ click: 'e2' }), vistos = [], semImagem = fraca) => async (estado) => {
+  vistos.push(estado.__image);
+  if (!estado.__image) return semImagem();
+  estado.__image.status = status;
+  return comImagem();
+};
+
+test('passo forte: nenhuma captura, pedido sem imagem nem pergunta de bloqueio, trajeto diz nao_precisou', async () => {
+  const eventos = [];
+  const pedidos = [];
+  let capturas = 0;
+  await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 1,
+    executar: navegador([]),
+    capture: async () => { capturas += 1; return SCREENSHOT; },
+    perguntar: async (estado, perguntas) => { pedidos.push({ estado, perguntas }); return resposta({ click: 'e2' }); },
+    registrar: (e) => eventos.push(e),
+  });
+  assert.equal(capturas, 0);
+  assert.equal(pedidos.length, 1);
+  assert.equal('__image' in pedidos[0].estado, false);
+  assert.equal(pedidos[0].perguntas.bloqueado, undefined);
+  const d = eventos.find((e) => e.tipo === 'decisao');
+  assert.equal(d.imagem, 'nao_precisou');
+  assert.equal(d.motivo, null);
+  assert.equal(d.bloqueado, null);
+  assert.equal(d.alvo, 'button "Iniciar cadastro"');
+});
+
+test('passo fraco: captura uma vez, refaz a mesma pergunta com a imagem e o bloqueio, decide pela resposta com imagem', async () => {
+  const eventos = [];
+  const pedidos = [];
+  const executados = [];
+  let capturas = 0;
+  await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 1,
+    executar: navegador(executados),
+    capture: async () => { capturas += 1; return { ...SCREENSHOT }; },
+    perguntar: async (estado, perguntas) => {
+      pedidos.push({ estado, perguntas });
+      if (!estado.__image) return fraca();
+      estado.__image.status = 'enviada';
+      return resposta({ click: 'e1' });
+    },
+    registrar: (e) => eventos.push(e),
+  });
+  assert.equal(capturas, 1);
+  assert.equal(pedidos.length, 2);
+  assert.equal(pedidos[1].estado.__image.base64, 'iVBORw0KGgo=');
+  assert.ok(pedidos[1].perguntas.bloqueado, 'a pergunta com imagem leva o bloqueio');
+  assert.deepEqual(Object.keys(pedidos[1].perguntas.operacao.criteria), Object.keys(pedidos[0].perguntas.operacao.criteria));
+  assert.equal(pedidos[1].estado.texto_da_pagina, pedidos[0].estado.texto_da_pagina);
+  assert.ok(executados.includes('click @e1'), executados.join('\n'));
+  const d = eventos.find((e) => e.tipo === 'decisao');
+  assert.equal(d.imagem, 'enviada');
+  assert.equal(d.motivo, null);
+  assert.equal(d.alvo, 'link "Ver ajuda"');
+});
+
+test('sem alvo: olha de novo sem print, depois uma captura com a mesma pergunta, ainda fraca vai ao auxiliar', async () => {
+  const eventos = [];
+  const pedidos = [];
+  const ajudas = [];
+  const executados = [];
+  let capturas = 0;
+  await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 1,
+    executar: navegador(executados),
+    capture: async () => { capturas += 1; return { ...SCREENSHOT }; },
+    perguntar: async (estado) => {
+      pedidos.push(Boolean(estado.__image));
+      if (estado.__image) estado.__image.status = 'enviada';
+      return resposta({ click: NENHUM });
+    },
+    ajudar: async (p) => { ajudas.push(p); return '{"acoes":[{"operacao":"CLICK","ref":"e2"}],"motivo":"abrir o cadastro"}'; },
+    registrar: (e) => eventos.push(e),
+  });
+  assert.deepEqual(pedidos, [false, false, true]);
+  assert.equal(capturas, 1);
+  assert.equal(ajudas.length, 1);
+  assert.ok(executados.includes('click @e2'), executados.join('\n'));
+  const d = eventos.find((e) => e.tipo === 'decisao');
+  assert.equal(d.imagem, 'enviada');
+  assert.equal(d.via, 'auxiliar');
+});
+
+test('pagina sem elemento acionavel: conclusao em duvida refaz com o print; confirmada de cara nem captura', async () => {
+  for (const [semImagem, capturasEsperadas, sucesso] of [[0.4, 1, true], [0.9, 0, true]]) {
+    const pedidos = [];
+    let capturas = 0;
+    const r = await rodar({
+      objetivo: 'salvar o cadastro',
+      maxPassos: 2,
+      executar: navegador([], SO_TEXTO),
+      capture: async () => { capturas += 1; return { ...SCREENSHOT }; },
+      perguntar: async (estado, perguntas) => {
+        pedidos.push(Object.keys(perguntas));
+        if (!estado.__image) return { concluido: { noul: semImagem } };
+        estado.__image.status = 'enviada';
+        return { concluido: { noul: 0.8 } };
+      },
+    });
+    assert.equal(capturas, capturasEsperadas, String(semImagem));
+    assert.equal(r.sucesso, sucesso);
+    assert.ok(pedidos.every((k) => k.length === 1 && k[0] === 'concluido'), JSON.stringify(pedidos));
+  }
+});
+
+test('passo fraco com print fora do limite ou ausente: segue com a decisao sem imagem e o trajeto diz por que', async () => {
+  for (const [capture, imagem, motivo] of [
+    [async () => ({ status: 'fora_do_limite', motivo: '2560x1600' }), 'fora_do_limite', '2560x1600'],
+    [async () => ({ status: 'sem_print', motivo: 'erro: janela minimizada' }), 'sem_print', 'erro: janela minimizada'],
+    [undefined, null, null],
+  ]) {
+    const eventos = [];
+    const vistos = [];
+    await rodar({
+      objetivo: 'iniciar o cadastro',
+      maxPassos: 1,
+      executar: navegador([]),
+      capture,
+      perguntar: askWithScreenshotStatus('enviada', undefined, vistos),
+      registrar: (e) => eventos.push(e),
+    });
+    assert.deepEqual(vistos, [undefined], 'sem imagem nao ha segunda pergunta');
+    const d = eventos.find((e) => e.tipo === 'decisao');
+    assert.equal(d.imagem, imagem);
+    assert.equal(d.motivo, motivo);
+    assert.match(d.parar, /^operacao indecisa/);
+  }
+});
+
+test('a pergunta de bloqueio so vai quando o passo leva o print', () => {
+  assert.equal(montarPerguntas(CANDIDATOS).bloqueado, undefined);
+  const p = montarPerguntas(CANDIDATOS, {}, new Set(), '', false, true);
+  assert.ok(p.bloqueado, 'com print a pergunta vai');
+  assert.equal(p.bloqueado.type, 'noul');
+  assert.match(p.bloqueado.instructions, /screenshot `tela`/);
+  assert.equal(THRESHOLDS_WITH_SCREENSHOT.bloqueado, 0.5);
+});
+
+const withBlock = (noul) => () => ({ ...resposta({ click: 'e2' }), bloqueado: { noul } });
+
+test('bloqueio no print: o auxiliar escreve o motivo e o laco para com ele', async () => {
+  const executados = [];
+  const eventos = [];
+  const pedidos = [];
+  const r = await rodar({
+    objetivo: 'iniciar o cadastro',
+    dados: { senha: 'S3gr3do!' },
+    maxPassos: 2,
+    executar: navegador(executados),
+    capture: async () => SCREENSHOT,
+    perguntar: askWithScreenshotStatus('enviada', withBlock(0.8)),
+    ajudar: async (p) => { pedidos.push(p); return '{"acoes":[],"motivo":"a pagina pede login com uma conta que nao temos"}'; },
+    registrar: (e) => eventos.push(e),
+  });
+  assert.equal(r.sucesso, false);
+  assert.equal(r.parou, 'bloqueado: a pagina pede login com uma conta que nao temos');
+  assert.ok(!executados.some((l) => l.startsWith('click')), 'nao clica');
+  assert.equal(pedidos.length, 1);
+  assert.match(pedidos[0], /iniciar o cadastro/);
+  assert.match(pedidos[0], /Cadastro de paciente/);
+  assert.ok(!pedidos[0].includes('S3gr3do!'));
+  const b = eventos.find((e) => e.tipo === 'bloqueio');
+  assert.equal(b.resultado, 'bloqueado');
+  assert.equal(b.motivo, 'a pagina pede login com uma conta que nao temos');
+  assert.equal(eventos.find((e) => e.tipo === 'decisao').bloqueado, 0.8);
+});
+
+test('bloqueio no print sem motivo do auxiliar, sem auxiliar ou com falha dele: o passo segue e o trajeto anota', async () => {
+  for (const [ajudar, resultado] of [
+    [async () => '{"acoes":[],"motivo":""}', 'auxiliar_discorda'],
+    [undefined, 'sem_auxiliar'],
+    [async () => { throw new Error('o modelo auxiliar recusou: 401'); }, 'auxiliar_falhou'],
+  ]) {
+    const executados = [];
+    const eventos = [];
+    await rodar({
+      objetivo: 'iniciar o cadastro',
+      maxPassos: 1,
+      executar: navegador(executados),
+      capture: async () => SCREENSHOT,
+      perguntar: askWithScreenshotStatus('enviada', withBlock(0.8)),
+      ajudar,
+      registrar: (e) => eventos.push(e),
+    });
+    assert.ok(executados.includes('click @e2'), `${resultado}: ${executados.join('\n')}`);
+    assert.equal(eventos.find((e) => e.tipo === 'bloqueio')?.resultado, resultado);
+  }
+});
+
+test('bloqueio de um pedido que nao levou o print e ignorado', async () => {
+  const executados = [];
+  let chamado = false;
+  await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 1,
+    executar: navegador(executados),
+    capture: async () => SCREENSHOT,
+    perguntar: askWithScreenshotStatus('falhou', withBlock(0.9)),
+    ajudar: async () => { chamado = true; return '{"acoes":[],"motivo":"x"}'; },
+  });
+  assert.equal(chamado, false);
+  assert.ok(executados.includes('click @e2'));
+});
+
+test('bloqueio no print nao vence uma conclusao confirmada: o auxiliar nem e chamado', async () => {
+  let chamado = false;
+  const r = await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 2,
+    executar: navegador([]),
+    capture: async () => SCREENSHOT,
+    perguntar: askWithScreenshotStatus('enviada', () => ({ ...resposta({ op: 'DONE', confOp: 0.95, concluido: 0.9 }), bloqueado: { noul: 0.8 } })),
+    ajudar: async () => { chamado = true; return '{"acoes":[],"motivo":"a pagina pede login"}'; },
+  });
+  assert.equal(r.sucesso, true);
+  assert.equal(chamado, false);
+});
+
+test('auxiliar que discordou nao e reperguntado na mesma pagina; pagina nova pergunta de novo', async () => {
+  const eventos = [];
+  let chamadas = 0;
+  let texto = 'Cadastro de paciente';
+  const base = navegador([]);
+  await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 3,
+    executar: async (verbo, args) => (verbo === 'text' ? texto : base(verbo, args)),
+    capture: async () => SCREENSHOT,
+    perguntar: askWithScreenshotStatus('enviada', withBlock(0.8)),
+    ajudar: async () => { chamadas += 1; return '{"acoes":[],"motivo":""}'; },
+    registrar: (e) => { eventos.push(e); if (e.tipo === 'bloqueio' && e.passo === 2) texto = 'Outra pagina'; },
+  });
+  assert.equal(chamadas, 2);
+  assert.deepEqual(eventos.filter((e) => e.tipo === 'bloqueio').map((e) => e.resultado),
+    ['auxiliar_discorda', 'auxiliar_discordou_antes', 'auxiliar_discorda']);
+});
+
+test('motivo do auxiliar vira uma linha de ate 200 caracteres no parou e no evento', async () => {
+  const eventos = [];
+  const r = await rodar({
+    objetivo: 'iniciar o cadastro',
+    maxPassos: 1,
+    executar: navegador([]),
+    capture: async () => SCREENSHOT,
+    perguntar: askWithScreenshotStatus('enviada', withBlock(0.8)),
+    ajudar: async () => JSON.stringify({ acoes: [], motivo: `  login\n  exigido ${'x'.repeat(300)}` }),
+    registrar: (e) => eventos.push(e),
+  });
+  const esperado = `login exigido ${'x'.repeat(186)}`;
+  assert.equal(r.parou, `bloqueado: ${esperado}`);
+  assert.equal(eventos.find((e) => e.tipo === 'bloqueio').motivo, esperado);
+});
+
+test('captura que passa do teto ou sem quadro: o passo segue sem imagem e os seguintes nem chamam a captura', { timeout: 5000 }, async () => {
+  const { withCaptureCeiling } = require('./jev_objetivo.cjs');
+  for (const [lenta, motivo] of [
+    // Nunca responde: só o teto devolve o passo.
+    [() => new Promise(() => {}), 'a captura passou de 50 ms'],
+    [async () => ({ status: 'sem_print', motivo: 'erro: o navegador desta sessao nao produziu quadro — text/snapshot/click funcionam' }),
+      'erro: o navegador desta sessao nao produziu quadro — text/snapshot/click funcionam'],
+  ]) {
+    let chamadas = 0;
+    const eventos = [];
+    const vistos = [];
+    // Sem alvo em todo passo: o auxiliar faz o passo andar depois da captura que não veio.
+    await rodar({
+      objetivo: 'iniciar o cadastro',
+      maxPassos: 3,
+      executar: navegador([]),
+      capture: withCaptureCeiling(() => { chamadas += 1; return lenta(); }, { timeoutMs: 50 }),
+      perguntar: askWithScreenshotStatus('enviada', undefined, vistos, () => resposta({ click: NENHUM })),
+      ajudar: async () => '{"acoes":[{"operacao":"CLICK","ref":"e2"}],"motivo":"abrir"}',
+      registrar: (e) => eventos.push(e),
+    });
+    assert.equal(chamadas, 1, motivo);
+    // Dois pedidos por passo (o segundo depois de olhar de novo), nenhum com imagem.
+    assert.deepEqual(vistos, Array(6).fill(undefined));
+    assert.deepEqual(eventos.filter((e) => e.tipo === 'decisao').map((e) => [e.imagem, e.motivo]), [
+      ['sem_print', motivo],
+      ['sem_print', 'captura desligada'],
+      ['sem_print', 'captura desligada'],
+    ]);
+  }
+});
+
+test('outro sem_print (arquivo nao gravado) nao desliga a captura', async () => {
+  const { withCaptureCeiling } = require('./jev_objetivo.cjs');
+  let chamadas = 0;
+  const capture = withCaptureCeiling(async () => { chamadas += 1; return { status: 'sem_print', motivo: 'o shot nao gravou o arquivo' }; }, { timeoutMs: 50 });
+  assert.deepEqual(await capture(), { status: 'sem_print', motivo: 'o shot nao gravou o arquivo' });
+  assert.deepEqual(await capture(), { status: 'sem_print', motivo: 'o shot nao gravou o arquivo' });
+  assert.equal(chamadas, 2);
 });

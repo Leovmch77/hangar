@@ -514,6 +514,7 @@ impl AvatarLook {
     pub fn ring(mut self, color: Hsla) -> Self { self.ring = Some(color); self }
 
     pub fn working(&self) -> bool { self.state == AvatarState::Working }
+    pub fn glyph(&self) -> &str { &self.glyph }
 }
 
 const AVATAR_PULSE: Duration = Duration::from_millis(1600);

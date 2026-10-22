@@ -13,8 +13,8 @@ use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use rmcp::model::{CallToolRequestParams, CallToolResponse, ListToolsResult, PaginatedRequestParams, ServerCapabilities,
-    ServerConfig, Tool};
+use rmcp::model::{CacheScope, CallToolRequestParams, CallToolResponse, ListPromptsResult, ListResourceTemplatesResult,
+    ListResourcesResult, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool};
 use rmcp::service::RequestContext;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
@@ -50,7 +50,19 @@ impl ServerHandler for Handler {
     }
 
     async fn list_tools(&self, _: Option<PaginatedRequestParams>, _: RequestContext<RoleServer>) -> Result<ListToolsResult, ErrorData> {
-        Ok(ListToolsResult::with_all_items(CATALOG.clone()))
+        Ok(ListToolsResult::with_all_items(CATALOG.clone()).with_ttl_ms(0).with_cache_scope(CacheScope::Private))
+    }
+
+    async fn list_resources(&self, _: Option<PaginatedRequestParams>, _: RequestContext<RoleServer>) -> Result<ListResourcesResult, ErrorData> {
+        Ok(ListResourcesResult::default().with_ttl_ms(0).with_cache_scope(CacheScope::Private))
+    }
+
+    async fn list_resource_templates(&self, _: Option<PaginatedRequestParams>, _: RequestContext<RoleServer>) -> Result<ListResourceTemplatesResult, ErrorData> {
+        Ok(ListResourceTemplatesResult::default().with_ttl_ms(0).with_cache_scope(CacheScope::Private))
+    }
+
+    async fn list_prompts(&self, _: Option<PaginatedRequestParams>, _: RequestContext<RoleServer>) -> Result<ListPromptsResult, ErrorData> {
+        Ok(ListPromptsResult::default().with_ttl_ms(0).with_cache_scope(CacheScope::Private))
     }
 
     async fn call_tool(&self, request: CallToolRequestParams, context: RequestContext<RoleServer>) -> Result<CallToolResponse, ErrorData> {

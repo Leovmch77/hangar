@@ -1,27 +1,42 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, Text, View } from 'react-native';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, ScrollView, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { codexCliAusente, credentialAuth, credentialGroup, deleteCodexAccountForServer, getCodexAccountsForServer,
-  getCredentialsForServer, accountDeletedNotice, motivoLoginIndisponivel, type CodexAccount, type Credencial, type Server } from '@hangar/core';
+import { ACCOUNT_FILTERS, accountInFilter, accountMatches, codexCliAusente, credentialAuth, credentialGroup, deleteCodexAccountForServer,
+  getCodexAccountsForServer, getCredentialsForServer, accountDeletedNotice, motivoLoginIndisponivel, parseAccountSort, sortAccounts,
+  type AccountFilter, type AccountSort, type CodexAccount, type Credencial, type Server } from '@hangar/core';
 import { Pagina } from '../../src/features/config/Pagina';
 import { PageHeader, Pill, type PageAction } from '../../src/features/config/PageHeader';
 import { SectionCard } from '../../src/features/config/SectionCard';
-import { SettingsRow } from '../../src/features/config/SettingsRow';
 import { InfoNotice } from '../../src/features/config/InfoNotice';
 import { CodexContaLogin } from '../../src/features/config/CodexContaLogin';
-import { AccountUsage } from '../../src/features/accounts/AccountUsage';
-import { AccountReset, ResetFeedback } from '../../src/features/accounts/CodexReset';
+import { ResetFeedback } from '../../src/features/accounts/CodexReset';
 import { EngineStatus, useEngines } from '../../src/features/accounts/Engines';
-import { ClaudeAccountActions } from '../../src/features/accounts/ClaudeAccountActions';
 import { ClaudeAccountCreate } from '../../src/features/accounts/ClaudeAccountCreate';
-import type { IconName } from '../../src/ui/Icon';
+import { AccountRow, type AccountRowData, type AccountRowHandlers } from '../../src/features/accounts/AccountRow';
+import { AccountSearch, FilterChips, SortControl, type SortOption } from '../../src/features/accounts/AccountsToolbar';
 import { useServers } from '../../src/stores/servers';
+import { prefs } from '../../src/stores/prefs';
 import * as m from '../../src/paraglide/messages';
 
 type CredentialGroup = ReturnType<typeof credentialGroup>;
-type IdentityRow = { key: string; group: CredentialGroup; title: string; description: string; account: CodexAccount | null; credential: Credencial | null; engineName?: string };
+type Subject = Pick<Credencial, 'tipo' | 'nome' | 'nome_natural' | 'login' | 'cota' | 'ativa'>;
+type IdentityRow = AccountRowData & { group: CredentialGroup; subject: Subject };
 const EngineEditor = lazy(() => import('../../src/features/accounts/EngineEditor').then(module => ({ default: module.EngineEditor })));
-const accountPlanMeta = (email: string, plan: string) => `${email} · ${plan.charAt(0).toUpperCase()}${plan.slice(1)}`;
+const capitalize = (plan: string | null | undefined) => plan ? `${plan.charAt(0).toUpperCase()}${plan.slice(1)}` : '';
+const SORT_KEY = 'accounts_sort';
+// A ordem dos grupos de antes vira a ordem recebida da lista única.
+const GROUP_ORDER: CredentialGroup[] = ['subscription', 'claude_engine', 'api_key', 'unknown'];
+const windowLabel = (label: string) => label === '5h' ? m.rate_5h() : label === '7d' ? m.accounts_window_week() : label;
+const windowRank = (label: string) => label === '5h' ? 0 : label === '7d' ? 1 : 2;
+const readSort = (): AccountSort => {
+  try { return parseAccountSort(prefs.getString(SORT_KEY)); } catch { return null; }
+};
+const providerOf = (credential: Credencial | null, account: CodexAccount | null): AccountRowData['provider'] => {
+  if (credential?.tipo === 'claude') return 'claude';
+  if (credential?.tipo === 'codex' || account) return 'codex';
+  if (credential && (credential.id.startsWith('kimi:') || credential.base_url?.includes('kimi'))) return 'kimi';
+  return '';
+};
 
 export default function Contas() {
   const server = useServers((state) => state.active());
@@ -42,6 +57,24 @@ function ServerAccounts({ server }: { server: Server | null }) {
   const generation = useRef(0);
   const controller = useRef<AbortController | null>(null);
   const alive = useRef(true);
+  const [filter, setFilter] = useState<AccountFilter>('all');
+  const [term, setTerm] = useState('');
+  const [sort, setSortState] = useState<AccountSort>(readSort);
+  const setSort = useCallback((next: AccountSort) => {
+    setSortState(next);
+    try { if (next) prefs.set(SORT_KEY, JSON.stringify(next)); else prefs.remove(SORT_KEY); } catch { /* preferência local: falhar só não lembra a ordem */ }
+  }, []);
+  const rowCache = useRef(new Map<string, { sig: string; row: IdentityRow }>());
+  const painted = useRef(false);
+  const handlersNow = useRef<AccountRowHandlers | null>(null);
+  // Mesmo objeto em toda pintura: as linhas memorizadas não redesenham por causa dele.
+  const handlers = useMemo<AccountRowHandlers>(() => ({
+    signIn: (id) => handlersNow.current?.signIn(id),
+    remove: (account) => handlersNow.current?.remove(account),
+    editEngine: (name) => handlersNow.current?.editEngine(name),
+    removeEngine: (name) => handlersNow.current?.removeEngine(name),
+    refreshClaude: () => handlersNow.current?.refreshClaude() ?? Promise.resolve(),
+  }), []);
 
   const load = useCallback(async (target: typeof server, force = false, propagate = false) => {
     if (!alive.current) return;
@@ -95,33 +128,36 @@ function ServerAccounts({ server }: { server: Server | null }) {
     return accounts.find((account) => account.id === credential.codex_account || account.credential_id === credential.id) ?? null;
   };
   // A conta Codex não traz a causa da falha; a linha da credencial dela traz.
+  // Email e plano têm lugar próprio na linha; a descrição fica com o resto.
   const accountStatus = (account: CodexAccount, credential?: Credencial) => {
     const auth = account.auth;
-    return auth.status === 'connected'
-      ? (auth.email && auth.plan ? accountPlanMeta(auth.email, auth.plan) : auth.email ?? m.codex_ui_account())
-      : auth.status === 'disconnected' ? m.contas_nao_conectada()
+    if (auth.status === 'connected') return { email: auth.email ?? '', plan: capitalize(auth.plan), description: auth.email ? '' : m.codex_ui_account() };
+    const description = auth.status === 'disconnected' ? m.contas_nao_conectada()
       : codexCliAusente(account) ? m.codex_ui_cli_ausente()
       : (credential && motivoLoginIndisponivel(credential)) || m.codex_ui_unknown();
+    return { email: '', plan: '', description };
   };
   const groupForAccount = (account: CodexAccount): CredentialGroup => (
     account.auth.method === 'oauth' ? 'subscription' : account.auth.method === 'api_key' ? 'api_key' : 'unknown'
   );
   const canSignIn = (account: CodexAccount) => account.auth.status !== 'connected' && !codexCliAusente(account);
-  const credentialStatus = (credential: Credencial) => {
+  const credentialStatus = (credential: Credencial, title: string) => {
     const auth = credentialAuth(credential);
     const naoConferido = motivoLoginIndisponivel(credential);
-    if (auth === 'unknown') return codexCliAusente(credential) ? m.codex_ui_cli_ausente() : naoConferido ?? m.codex_ui_unknown();
-    if (auth === 'none' || credential.login?.loggedIn === false) return m.contas_nao_conectada();
-    if (auth === 'api_key') return m.contas_tipo_chave();
-    const base = credential.login?.email && credential.login.plano
-      ? accountPlanMeta(credential.login.email, credential.login.plano)
-      : credential.apelido || credential.nome_natural || credential.nome;
+    const only = (description: string) => ({ email: '', plan: '', description });
+    if (auth === 'unknown') return only(codexCliAusente(credential) ? m.codex_ui_cli_ausente() : naoConferido ?? m.codex_ui_unknown());
+    if (auth === 'none' || credential.login?.loggedIn === false) return only(m.contas_nao_conectada());
+    if (auth === 'api_key') return only(m.contas_tipo_chave());
+    const email = credential.login?.email ?? '';
+    const name = credential.apelido || credential.nome_natural || credential.nome;
+    const parts = email || name === title ? [] : [name];
     // Sem a causa, o nome sozinho parece login conferido.
-    if (naoConferido) return `${base} · ${naoConferido}`;
-    const exp = credential.login?.refreshExpiresAt;
-    if (exp == null) return base;
-    const dias = Math.ceil((exp - Date.now() / 1000) / 86400);
-    return `${base} · ${dias > 0 ? m.contas_login_vence({ n: dias }) : m.contas_login_vencido()}`;
+    if (naoConferido) parts.push(naoConferido);
+    else if (credential.login?.refreshExpiresAt != null) {
+      const dias = Math.ceil((credential.login.refreshExpiresAt - Date.now() / 1000) / 86400);
+      parts.push(dias > 0 ? m.contas_login_vence({ n: dias }) : m.contas_login_vencido());
+    }
+    return { email, plan: capitalize(credential.login?.plano), description: parts.join(' · ') };
   };
   // Só conta adicional (~/.codex-<nome>); a padrão é o ~/.codex da máquina e o backend recusa.
   const removeAccount = (account: CodexAccount) => {
@@ -165,71 +201,79 @@ function ServerAccounts({ server }: { server: Server | null }) {
   const matchedAccountIds = new Set(
     credentials.map(accountForCredential).filter((id): id is CodexAccount => id !== null).map((account) => account.id),
   );
-  const identities: IdentityRow[] = [
+  const built: IdentityRow[] = [
     ...credentials.map((credential): IdentityRow => {
       const account = accountForCredential(credential);
+      const title = account?.name ?? credential.nome ?? credential.nome_natural;
+      const group = credentialGroup(credential);
+      const status = account ? accountStatus(account, credential) : credentialStatus(credential, title);
       return {
-        key: `credential:${credential.id}`,
-        group: credentialGroup(credential),
-        title: account?.name ?? credential.nome ?? credential.nome_natural,
-        description: account ? accountStatus(account, credential) : credentialStatus(credential),
+        key: `credential:${credential.id}`, group, title, ...status,
+        description: group === 'claude_engine' ? [m.accounts_list_runs_in_claude_code(), status.description].filter(Boolean).join(' · ') : status.description,
+        provider: providerOf(credential, account),
+        active: credential.ativa,
         account,
         credential,
         engineName: credential.tipo === 'chave' && credential.id.startsWith('chave:') ? credential.id.slice(6) : undefined,
+        canSignIn: !!account && canSignIn(account),
+        subject: { ...credential, nome: title, login: status.email ? { ...credential.login, estado: credential.login?.estado ?? 'ok', email: status.email } : credential.login },
       };
     }),
     ...accounts
       .filter((account) => !matchedAccountIds.has(account.id))
-      .map((account): IdentityRow => ({
-        key: `account:${account.id}`,
-        group: groupForAccount(account),
-        title: account.name,
-        description: accountStatus(account),
-        account,
-        credential: null,
-      })),
+      .map((account): IdentityRow => {
+        const status = accountStatus(account);
+        return {
+          key: `account:${account.id}`, group: groupForAccount(account), title: account.name, ...status,
+          provider: 'codex', active: false, account, credential: null, canSignIn: canSignIn(account),
+          subject: { tipo: 'codex', nome: account.name, nome_natural: account.name, ativa: false, cota: null,
+            login: status.email ? { estado: 'ok', email: status.email } : null },
+        };
+      }),
     ...(engines.ready ? Object.entries(engines.data!.motores)
       .filter(([name]) => !credentials.some(c => c.id === `chave:${name}`))
       .map(([name, engine]): IdentityRow => ({ key: `engine:${name}`, group: 'claude_engine', title: engine.label || name,
-        description: `${engine.model} · ${engine.base_url}`, account: null, credential: null, engineName: name })) : []),
+        email: '', plan: '', description: [m.accounts_list_runs_in_claude_code(), engine.model, engine.base_url].filter(Boolean).join(' · '),
+        provider: '', active: false, account: null, credential: null, engineName: name, canSignIn: false,
+        subject: { tipo: 'chave', nome: engine.label || name, nome_natural: name, ativa: false, cota: null, login: null } })) : []),
   ];
-  const subscriptions = identities.filter((identity) => identity.group === 'subscription');
-  const claudeEngines = identities.filter((identity) => identity.group === 'claude_engine');
-  const apiKeys = identities.filter((identity) => identity.group === 'api_key');
-  const unknown = identities.filter((identity) => identity.group === 'unknown');
-  const renderIdentity = (identity: IdentityRow) => (
-    <SettingsRow key={identity.key} icon="KeyRound" title={identity.title} description={identity.description}>
-      {identity.credential && (identity.credential.cota || identity.credential.tipo === 'claude' || identity.credential.tipo === 'codex')
-        ? <AccountUsage credential={identity.credential} /> : null}
-      {identity.credential && server ? <AccountReset server={server} credential={identity.credential} /> : null}
-      {identity.credential?.tipo === 'claude' && server ? (
-        <ClaudeAccountActions server={server} credential={identity.credential} onChanged={refreshClaude} />
-      ) : null}
-      {identity.engineName && engines.ready && engines.data?.motores[identity.engineName] ? (
-        <View style={styles.actions}>
-          <Pill label={m.mobile_accounts_engine_edit()} disabled={engines.deleting.has(identity.engineName)}
-            onPress={() => engines.setEditing(identity.engineName!)} />
-          <Pill label={m.mobile_accounts_engine_delete()} disabled={engines.deleting.has(identity.engineName)}
-            onPress={() => engines.remove(identity.engineName!)} />
-        </View>
-      ) : null}
-      {identity.account && (canSignIn(identity.account) || !identity.account.is_default) ? (
-        <View style={styles.actions}>
-          {canSignIn(identity.account) ? (
-            <Pill icon="LogIn" label={m.contas_entrar()} onPress={() => startLogin(identity.account!.id)}
-              disabled={deleting.has(identity.account.id)} />
-          ) : null}
-          {!identity.account.is_default ? (
-            <Pill icon="Trash2" label={m.lista_remover()} onPress={() => removeAccount(identity.account!)}
-              disabled={deleting.has(identity.account.id)} />
-          ) : null}
-        </View>
-      ) : null}
-    </SettingsRow>
-  );
-  // Seção vazia não aparece, e o título vai junto.
-  const section = (icon: IconName, title: string, subtitle: string, rows: IdentityRow[]) =>
-    rows.length ? <SectionCard icon={icon} title={title} subtitle={subtitle}>{rows.map(renderIdentity)}</SectionCard> : null;
+  // Linha que não mudou mantém o mesmo objeto: o memo do AccountRow só redesenha a que mudou.
+  const nextCache = new Map<string, { sig: string; row: IdentityRow }>();
+  const rows = GROUP_ORDER.flatMap((group) => built.filter((row) => row.group === group)).map((row) => {
+    const sig = JSON.stringify(row);
+    const old = rowCache.current.get(row.key);
+    const kept = old?.sig === sig ? old.row : row;
+    nextCache.set(row.key, { sig, row: kept });
+    return kept;
+  });
+  rowCache.current = nextCache;
+  const counts = Object.fromEntries(ACCOUNT_FILTERS.map((f) => [f, rows.filter((row) => accountInFilter(row.subject, f)).length])) as Record<AccountFilter, number>;
+  const visible = sortAccounts(
+    rows.filter((row) => accountInFilter(row.subject, filter) && accountMatches(row.subject, term))
+      .map((row) => ({ nome: row.subject.nome, cota: row.subject.cota, ativa: row.subject.ativa, row })),
+    sort,
+  ).map((item) => item.row);
+  const windows = [...new Set<string>(credentials.flatMap((c) => c.cota?.estado === 'lida' ? c.cota.janelas.map((w) => w.rotulo) : []))]
+    .sort((a, b) => windowRank(a) - windowRank(b));
+  const sortOptions: SortOption[] = [
+    { key: 'name', label: m.accounts_list_sort_name() },
+    ...windows.map((label) => ({ key: label, label: windowLabel(label) })),
+    ...(windows.includes('7d') ? [{ key: 'reset', label: m.accounts_list_sort_reset() }] : []),
+  ];
+  // A ordem salva continua escolhível mesmo quando a janela dela sumiu da lista.
+  if (sort && !sortOptions.some((o) => o.key === sort.key)) {
+    sortOptions.push({ key: sort.key, label: sort.key === 'reset' ? m.accounts_list_sort_reset() : windowLabel(sort.key) });
+  }
+  handlersNow.current = {
+    signIn: (id) => startLogin(id),
+    remove: (account) => removeAccount(account),
+    editEngine: (name) => engines.setEditing(name),
+    removeEngine: (name) => engines.remove(name),
+    refreshClaude: () => refreshClaude(),
+  };
+  // Entrada escalonada só na primeira lista pintada; quem aparece depois (filtro, busca) só surge.
+  const firstPaint = !painted.current && visible.length > 0;
+  useEffect(() => { if (visible.length) painted.current = true; });
   const actions: PageAction[] = [{ icon: 'RefreshCw', label: m.contas_atualizar(), onPress: () => { load(server); void engines.reload(); } }];
   if (server && engines.ready) actions.push({ label: m.mobile_accounts_engine_new(), onPress: () => engines.setEditing('') });
   // O rótulo já traz o "+"; ícone repetiria o sinal.
@@ -251,10 +295,28 @@ function ServerAccounts({ server }: { server: Server | null }) {
       {server ? <EngineStatus state={engines} /> : null}
       {server ? <ResetFeedback server={server} credentialIds={credentials.map(c => c.id)} onDefinitive={refreshQuota} /> : null}
 
-      {section('CreditCard', m.contas_secao_claude(), m.contas_secao_claude_leg(), subscriptions)}
-      {section('Cpu', m.contas_secao_modelos(), m.contas_secao_modelos_leg(), claudeEngines)}
-      {section('KeyRound', m.contas_secao_outros(), m.contas_secao_outros_leg(), apiKeys)}
-      {section('CircleHelp', m.codex_ui_unknown(), '', unknown)}
+      {server && rows.length ? (
+        <View style={styles.toolbar}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+            <FilterChips value={filter} counts={counts} onChange={setFilter} />
+          </ScrollView>
+          <AccountSearch value={term} onChange={setTerm} />
+          <View style={styles.sortLine}><SortControl sort={sort} options={sortOptions} onChange={setSort} /></View>
+        </View>
+      ) : null}
+      {server && (rows.length || (!loading && !error && !engines.loading)) ? (
+        <SectionCard>
+          {visible.map((row, index) => (
+            <AccountRow key={row.key} row={row} term={term} enterIndex={firstPaint ? index : null} server={server}
+              busy={!!row.account && deleting.has(row.account.id)}
+              engineReady={!!row.engineName && engines.ready && !!engines.data?.motores[row.engineName]}
+              engineBusy={!!row.engineName && engines.deleting.has(row.engineName)} handlers={handlers} />
+          ))}
+          {!visible.length ? (
+            <Text style={styles.empty}>{term.trim() ? m.accounts_list_search_empty({ term: term.trim() }) : m.accounts_list_empty()}</Text>
+          ) : null}
+        </SectionCard>
+      ) : null}
       {server && engines.editing !== null && engines.data ? (
         <Suspense fallback={<Text style={styles.muted}>{m.comum_carregando()}</Text>}>
           <EngineEditor key={engines.editing} server={server} name={engines.editing || undefined}
@@ -290,6 +352,8 @@ function ServerAccounts({ server }: { server: Server | null }) {
 const styles = StyleSheet.create((theme) => ({
   muted: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted, paddingHorizontal: theme.base.space[1] },
   error: { fontSize: theme.base.text.sm, color: theme.tokens.status.error, paddingHorizontal: theme.base.space[1] },
-  actions: { flexDirection: 'row', flexWrap: 'wrap', gap: theme.base.space[2] },
+  toolbar: { gap: theme.base.space[2] },
+  sortLine: { flexDirection: 'row' },
+  empty: { fontSize: theme.base.text.sm, color: theme.tokens.text.muted, textAlign: 'center', padding: theme.base.space[6] },
   login: { paddingHorizontal: theme.base.space[4], paddingBottom: theme.base.space[4] },
 }));

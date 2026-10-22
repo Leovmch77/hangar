@@ -20,6 +20,7 @@ impl Hangar {
         let open = !self.accounts.card || self.accounts.card_top;
         self.close_popups();
         (self.accounts.card, self.accounts.card_top) = (open, false);
+        if open { self.accounts.card_since = Some(Instant::now()); }
         if open { self.load_session_accounts(cx); }
         cx.notify();
     }
@@ -71,6 +72,7 @@ impl Hangar {
         let open = !(self.accounts.card && self.accounts.card_top);
         self.close_popups();
         (self.accounts.card, self.accounts.card_top) = (open, open);
+        if open { self.accounts.card_since = Some(Instant::now()); }
         if open { self.load_session_accounts(cx); }
         cx.notify();
     }
@@ -122,6 +124,7 @@ impl Hangar {
         let engine_session = session.is_some_and(|s| s.engine.as_deref().is_some_and(|e| !e.is_empty()) || s.uses_engine_account());
         let note = |text: String, color: Hsla| div().px(px(8.)).py(px(4.)).text_sm().text_color(color).whitespace_normal().child(text).into_any_element();
         let list = self.session_accounts();
+        let fill = if cx.reduce_motion() { 1. } else { self.accounts.card_since.map_or(1., |at| motion::BAR_FILL.ease(motion::BAR_FILL.raw(at))) };
         // Aberto pelo anel de uma sessão Claude na conta Anthropic: as outras contas Claude levam esta conversa para elas.
         let movable = (!self.accounts.card_top || proxy) && session.is_some_and(|s| s.provider == "claude"
             && (proxy || (s.engine.as_deref().is_none_or(|e| e.is_empty()) && s.conta.as_deref().is_some_and(|c| c.starts_with("claude:"))))
@@ -143,7 +146,7 @@ impl Hangar {
                         let pct = match &quota { QuotaView::Bars { bars, .. } => bars.iter().map(|b| b.pct).fold(None, |m: Option<f64>, p| Some(m.map_or(p, |m| m.max(p)))), _ => None };
                         let target = c.id.strip_prefix("claude:").map(str::to_owned)
                             .filter(|_| movable && idle && c.kind == "claude" && !in_use(c) && pct.is_none_or(|p| p < 99.));
-                        let row = account_row(c, in_use(c), proxy && c.kind == "codex", quota);
+                        let row = account_row(c, in_use(c), proxy && c.kind == "codex", quota, fill);
                         if proxy && c.kind == "codex" && movable && !in_use(c) {
                             let account = self.session_engine().filter(|e| e.cliproxy_error.is_none())
                                 .and_then(|e| e.cliproxy_accounts.as_ref()).and_then(|accounts| accounts.iter().find(|a|
@@ -227,7 +230,7 @@ impl Hangar {
     }
 }
 
-fn account_row(c: &Credential, in_use: bool, chatgpt: bool, quota: QuotaView) -> Div {
+fn account_row(c: &Credential, in_use: bool, chatgpt: bool, quota: QuotaView, fill: f32) -> Div {
     let login = c.login.as_ref().filter(|l| l.logged_in == Some(true));
     let email = login.and_then(|l| l.email.clone()).filter(|e| !e.is_empty());
     let title = c.alias.clone().filter(|a| !a.is_empty()).or_else(|| login.and_then(|l| l.email.clone())).unwrap_or_else(|| c.name.clone());
@@ -244,7 +247,7 @@ fn account_row(c: &Credential, in_use: bool, chatgpt: bool, quota: QuotaView) ->
         .when(in_use, |el| el.child(div().text_color(theme::accent()).child(tr("usage_card_in_use"))));
     let meters = match quota {
         QuotaView::Bars { bars, stale, cause } => div().flex().flex_col().gap(px(4.)).when(stale.is_some(), |el| el.opacity(0.6))
-            .children(bars.iter().take(2).map(meter))
+            .children(bars.iter().take(2).map(|bar| meter(bar, fill)))
             .children(stale.map(|text| div().text_size(px(11.)).text_color(theme::faint()).child(text)))
             .children(cause.map(|text| div().text_size(px(11.)).text_color(theme::warning()).whitespace_normal().child(text))),
         QuotaView::Note(text) => div().text_size(px(12.)).text_color(theme::muted()).whitespace_normal().child(text),
@@ -256,7 +259,7 @@ fn account_row(c: &Credential, in_use: bool, chatgpt: bool, quota: QuotaView) ->
             // Apelido não diz qual login é: o email vem embaixo, a menos que já seja o próprio título.
             .when_some(email.filter(|e| *e != title), |el, email| el.child(div().truncate().text_size(px(11.5)).text_color(theme::faint()).child(email)))
             .child(meta))
-        .child(div().w(px(176.)).flex_shrink_0().child(meters))
+        .child(div().w(px(236.)).flex_shrink_0().child(meters))
 }
 
 #[cfg(test)]
@@ -302,17 +305,20 @@ fn fullest<'a>(bars: &'a [Bar], model: Option<&str>) -> Option<&'a Bar> {
         })
 }
 
-/// Uma janela numa linha: rótulo, barra, % e, embaixo, quando ela renova ("↺ 1h20" na curta, "↺ sáb 27/09 15h" na
-/// longa), como o cartão da pílula do web.
-fn meter(bar: &Bar) -> Div {
+/// Uma janela numa linha: rótulo, barra, % e, embaixo, quando ela renova ("↺ 1h20" na curta, "↺ sáb 27/09 15h · 3 dias"
+/// na semanal, com os dias da coluna "Reset semanal" das Contas). `fill` (0 a 1) é quanto da barra já subiu ao abrir.
+fn meter(bar: &Bar, fill: f32) -> Div {
     let label = if bar.label == "5h" { tr("usage_card_session") } else { window_label(&bar.label) };
     div().flex().flex_col().gap(px(1.))
         .child(div().flex().items_center().gap(px(8.)).text_size(px(12.))
             .child(div().w(px(52.)).flex_shrink_0().truncate().text_color(theme::muted()).child(label))
             .child(div().flex_1().h(px(4.)).rounded_full().bg(theme::border_strong())
-                .child(div().h_full().rounded_full().bg(level(bar.pct)).w(relative((bar.pct.clamp(0., 100.) / 100.) as f32))))
+                .child(div().h_full().rounded_full().bg(level(bar.pct)).w(relative((bar.pct.clamp(0., 100.) / 100.) as f32 * fill))))
             .child(div().w(px(34.)).flex_shrink_0().flex().justify_end().text_color(if bar.pct > 80. { level(bar.pct) } else { theme::muted() })
                 .child(format!("{}%", bar.pct.round()))))
         .when(!bar.reset.is_empty(), |el| el.child(div().pl(px(60.)).truncate().text_size(px(11.)).text_color(theme::faint())
-            .child(format!("↺ {}", bar.reset))))
+            .child(match bar.reset_days.as_str() {
+                days if bar.label == "7d" && days != "—" => format!("↺ {} · {days}", bar.reset),
+                _ => format!("↺ {}", bar.reset),
+            })))
 }

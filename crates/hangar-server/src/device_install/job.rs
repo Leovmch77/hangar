@@ -10,7 +10,7 @@ use serde_json::Value;
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
-use super::apple::{AppleSigner, AskCode, CodeReply, Login, SignRequest, anisette_servers};
+use super::apple::{AppleSigner, AskCerts, AskCode, CertInfo, CodeReply, Login, SignRequest, anisette_servers};
 use super::device::create_private_dir;
 use super::{DeviceError, DeviceLink, lock};
 
@@ -64,6 +64,7 @@ pub const BUSY: &str = "device_install_busy";
 pub const FORBIDDEN: &str = "device_install_forbidden";
 pub const UNKNOWN_JOB: &str = "device_install_unknown_job";
 pub const NOT_WAITING: &str = "device_install_not_waiting";
+pub const BAD_REQUEST: &str = "device_install_bad_request";
 
 /// Erro que a tela explica: código fixo e, quando ajuda, o detalhe.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -101,6 +102,7 @@ pub enum Stage {
     CheckingLimit,
     Downloading,
     Signing,
+    AwaitingCertChoice,
     Installing,
     Pairing,
     Verifying,
@@ -113,6 +115,9 @@ pub struct Progress {
     pub stage: Stage,
     pub error: Option<Failure>,
     pub source_url: &'static str,
+    /// Só em `awaiting_cert_choice`: os certificados que lotam a conta.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certs: Option<Vec<CertInfo>>,
 }
 
 struct Job {
@@ -120,6 +125,8 @@ struct Job {
     progress: Mutex<Progress>,
     /// Quem espera o código: só existe enquanto o trabalho está em `awaiting_code`.
     code: Mutex<Option<oneshot::Sender<CodeReply>>>,
+    /// Quem espera a escolha dos certificados: só em `awaiting_cert_choice`.
+    cert_choice: Mutex<Option<oneshot::Sender<Option<Vec<String>>>>>,
     timed_out: std::sync::atomic::AtomicBool,
 }
 
@@ -128,6 +135,7 @@ impl Job {
         let mut p = lock(&self.progress);
         p.stage = stage;
         p.error = error;
+        p.certs = None;
     }
     fn running(&self) -> bool {
         !matches!(lock(&self.progress).stage, Stage::Done | Stage::Failed)
@@ -186,8 +194,9 @@ impl DeviceInstall {
         let id = crate::mods::state::random_hex(16);
         let job = Arc::new(Job {
             udid: start.udid.clone(),
-            progress: Mutex::new(Progress { stage: Stage::Login, error: None, source_url: SOURCE_URL }),
+            progress: Mutex::new(Progress { stage: Stage::Login, error: None, source_url: SOURCE_URL, certs: None }),
             code: Mutex::default(),
+            cert_choice: Mutex::default(),
             timed_out: Default::default(),
         });
         {
@@ -215,6 +224,7 @@ impl DeviceInstall {
                 }
             }
             lock(&job.code).take();
+            lock(&job.cert_choice).take();
         });
         Ok(id)
     }
@@ -231,6 +241,24 @@ impl DeviceInstall {
         tx.send(reply).map_err(|_| Failure::new(NOT_WAITING))
     }
 
+    /// `Some(seriais)` revoga esses certificados e segue a assinatura; `None` desiste do trabalho.
+    pub fn choose_certs(&self, id: &str, revoke: Option<Vec<String>>) -> Result<(), Failure> {
+        let job = lock(&self.jobs).get(id).cloned().ok_or_else(|| Failure::new(UNKNOWN_JOB))?;
+        let mut waiting = lock(&job.cert_choice);
+        if waiting.is_none() {
+            return Err(Failure::new(NOT_WAITING));
+        }
+        // Só se revoga o que a tela mostrou.
+        let listed = lock(&job.progress).certs.clone().unwrap_or_default();
+        if let Some(serials) = &revoke && (serials.is_empty() || !serials.iter().all(|s| listed.iter().any(|c| &c.serial == s))) {
+            return Err(Failure::new(BAD_REQUEST));
+        }
+        let tx = waiting.take().ok_or_else(|| Failure::new(NOT_WAITING))?;
+        drop(waiting);
+        job.set(Stage::Signing, None);
+        tx.send(revoke).map_err(|_| Failure::new(NOT_WAITING))
+    }
+
     async fn run(&self, job: &Arc<Job>, start: Start) -> Result<(), Failure> {
         let Start { udid, apple_id, password } = start;
         let device = self.link.list().await?.into_iter().find(|d| d.udid == udid).ok_or_else(|| Failure::new(DISCONNECTED))?;
@@ -242,7 +270,7 @@ impl DeviceInstall {
         create_private_dir(&self.dir).map_err(|e| Failure::with(DEVICE_ERROR, e.to_string()))?;
 
         let login = Login { apple_id, password, anisette: anisette_servers(&(self.config)()), storage: self.dir.join("apple") };
-        let mut session = self.signer.login(login, self.ask_code(job)).await.map_err(|f| {
+        let mut session = self.signer.login(login, self.ask_code(job), self.ask_certs(job)).await.map_err(|f| {
             if job.timed_out.load(std::sync::atomic::Ordering::Relaxed) { Failure::new(CODE_TIMEOUT) } else { f }
         })?;
 
@@ -298,6 +326,24 @@ impl DeviceInstall {
                         None
                     }
                 }
+            })
+        })
+    }
+
+    /// Ponte do limite de certificados: `awaiting_cert_choice` até a rota `/certs` responder ou o
+    /// prazo vencer. ponytail: espera com a trava de assinatura na mão; outro aparelho fica na fila.
+    fn ask_certs(&self, job: &Arc<Job>) -> AskCerts {
+        let (job, wait) = (job.clone(), self.code_wait);
+        Arc::new(move |certs: Vec<CertInfo>| {
+            let job = job.clone();
+            Box::pin(async move {
+                let (tx, rx) = oneshot::channel();
+                job.set(Stage::AwaitingCertChoice, None);
+                lock(&job.progress).certs = Some(certs);
+                *lock(&job.cert_choice) = Some(tx);
+                let choice = tokio::time::timeout(wait, rx).await.ok().and_then(Result::ok).flatten();
+                lock(&job.cert_choice).take();
+                choice
             })
         })
     }

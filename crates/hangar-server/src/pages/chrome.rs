@@ -37,7 +37,8 @@ impl Shot {
     pub fn cache(path: PathBuf) -> Self { Shot { path, draft: false } }
     pub fn draft(path: PathBuf) -> Self { Shot { path, draft: true } }
 }
-pub struct Rendered { pub heights: BTreeMap<u32, u32>, pub console: Vec<ConsoleLine> }
+/// `unpainted`: página de tema próprio que não pintou o fundo e ganhou o da reserva (`theme::OWN_FALLBACK`).
+pub struct Rendered { pub heights: BTreeMap<u32, u32>, pub console: Vec<ConsoleLine>, pub unpainted: bool }
 /// Desenho sem rede: o print recortado, ou o `error` que o próprio script devolveu; `blocked` conta as
 /// requisições recusadas.
 pub struct Offline { pub drawn: Result<Drawn, String>, pub blocked: u32 }
@@ -306,6 +307,12 @@ async fn drive(url: &str, html: &str, jobs: &[Job], own_theme: bool) -> Result<R
     // Tema próprio fica com o branco padrão do Chromium: o print mostra a página como foi desenhada.
     let (mut cdp, session) = load(url, html, "file:*", !own_theme).await?;
     let s = Some(session.as_str());
+    let unpainted = own_theme && {
+        let read = cdp.call(s, "Runtime.evaluate", json!({"expression": "document.documentElement.dataset.hangarFallback===\"1\"", "returnByValue": true})).await?;
+        let flag = read["result"]["value"].as_bool();
+        if flag.is_none() { tracing::warn!(code = "page_fallback_unread", "marca da reserva de fundo não lida; a página segue sem aviso"); }
+        flag.unwrap_or(false)
+    };
     let mut heights = BTreeMap::new();
     for job in jobs {
         cdp.call(s, "Emulation.setEmulatedMedia", json!({"features": [{"name": "prefers-color-scheme", "value": job.theme.as_str()}]})).await?;
@@ -326,7 +333,7 @@ async fn drive(url: &str, html: &str, jobs: &[Job], own_theme: bool) -> Result<R
             super::store::write_atomic(path, &bytes).map_err(|_| ChromeError::Failed("print não gravado"))?;
         }
     }
-    Ok(Rendered { heights, console: cdp.console })
+    Ok(Rendered { heights, console: cdp.console, unpainted })
 }
 
 async fn offline(url: &str, html: &str, width: u32, theme: Theme, expression: &str) -> Result<Offline, ChromeError> {

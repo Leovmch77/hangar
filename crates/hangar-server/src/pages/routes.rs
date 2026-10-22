@@ -171,6 +171,7 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
             (BTreeMap::new(), Vec::new())
         }
     };
+    let unpainted = rendered.as_ref().is_ok_and(|r| r.unpainted);
     let browser = rendered.as_ref().map_or_else(|e| e.status(), |_| "ok");
     let browser_reason = rendered.as_ref().err().map(|e| e.reason());
     if !heights.is_empty() {
@@ -184,14 +185,22 @@ async fn publish(st: &AppState, b: PublishBody) -> Value {
     if draft {
         // Caminho relativo e sem token: quem abre (o `browser_open`) completa endereço e credencial.
         let url = format!("/api/sessions/{}/pages/{id}", utf8_percent_encode(&b.session, NON_ALPHANUMERIC));
-        return json!({"ok": true, "result": {"draft": {"id": id, "url": url,
+        let mut out = json!({"ok": true, "result": {"draft": {"id": id, "url": url,
             "shot": rendered.is_ok().then(|| shot.map(|p| p.display().to_string())).flatten(),
             "heights": heights, "console": console, "missing_images": missing, "browser": browser,
             "browser_reason": browser_reason}}});
+        if unpainted { out["result"]["draft"]["warning"] = json!(UNPAINTED); }
+        return out;
     }
-    json!({"ok": true, "result": {"hangar_page": {"id": id, "title": title, "height": height, "heights": heights, "own_theme": own_theme},
-        "message": MESSAGE, "browser": browser, "browser_reason": browser_reason}})
+    let mut out = json!({"ok": true, "result": {"hangar_page": {"id": id, "title": title, "height": height, "heights": heights, "own_theme": own_theme},
+        "message": MESSAGE, "browser": browser, "browser_reason": browser_reason}});
+    if unpainted { out["result"]["warning"] = json!(UNPAINTED); }
+    out
 }
+
+/// Aviso a quem publicou: a página de tema próprio não pôs fundo, e o texto claro dela sumiria no branco.
+const UNPAINTED: &str = "own_theme sem fundo próprio: o texto claro sumia no branco e o servidor pôs o fundo escuro. \
+Ponha background e color no html/body, ou publique sem own_theme e use as variáveis do tema.";
 
 /// Largura e tema do print do rascunho: a coluna do desktop no escuro, ou o que o agente pedir para conferir a página
 /// no celular ou no tema claro. Só o rascunho tira print.

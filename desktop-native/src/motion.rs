@@ -46,6 +46,10 @@ pub const FADE_IN: Spec = Spec::new(500, EASE_OUT_EXPO);
 pub const FADE_QUICK: Spec = Spec::new(150, EASE);
 /// `menu-in`: popover abrindo, 0,14 s.
 pub const MENU_IN: Spec = Spec::new(140, EASE);
+/// O cartão de contas abrindo: mais longo que o `menu-in`, para a descida se ver.
+pub const CARD_OPEN: Spec = Spec::new(380, EASE_OUT_EXPO);
+/// As barras de limite do cartão subindo do zero, a partir do meio da abertura.
+pub const BAR_FILL: Spec = Spec::new(700, EASE_OUT_EXPO).after(190);
 /// Popover fechando: 0,1 s, mais curto que a entrada.
 pub const MENU_OUT: Spec = Spec::new(100, EASE);
 /// `dialog-in`: 0,18 s.
@@ -131,6 +135,8 @@ pub fn settle_down<E: Styled>(el: E, t: f32) -> E { el.relative().opacity(t).top
 pub fn fade_quick<E: Styled>(el: E, t: f32) -> E { el.opacity(t) }
 
 pub fn menu_in<E: Styled>(el: E, t: f32) -> E { el.relative().opacity(0.3 + 0.7 * t).top(px(-2. * (1. - t))) }
+
+pub fn card_open<E: Styled>(el: E, t: f32) -> E { el.relative().opacity(t).top(px(-14. * (1. - t))) }
 
 /// Saída do popover; `t` vai de 0 (inteiro) a 1 (sumido).
 pub fn menu_out<E: Styled>(el: E, t: f32) -> E { el.relative().opacity(1. - t).top(px(-2. * t)) }

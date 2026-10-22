@@ -104,6 +104,19 @@ fn terminal_thinking_text(view: &Entity<TextViewState>, cx: &App) -> Div {
         .child(div().flex_1().min_w_0().child(thinking_markdown(view, cx)))
 }
 
+/// Raciocínio recolhido: o brain e a primeira frase numa linha, num botão que abre o texto inteiro.
+fn terminal_thinking_fold(key: String, summary: String,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
+    let dim = theme::muted();
+    Button::new(SharedString::from(format!("term-thought-{key}"))).ghost().w_full().h_auto().p_0().justify_start()
+        .accessibility_label(format!("{}: {summary}", tr("thinking")))
+        .child(div().w_full().flex().items_center().gap(px(chrome::THINKING_GAP)).pl(px(INDENT - 8.)).text_color(dim)
+            .child(div().flex_none().h(px(conversation_line(false))).flex().items_center()
+                .child(chrome::small_icon(IconName::Brain, chrome::THINKING_ICON, dim)))
+            .child(div().flex_1().min_w_0().truncate().italic().child(summary)))
+        .on_click(on_click).into_any_element()
+}
+
 /// Raciocínio chegando na pele Terminal: "brain Pensando" com o brilho do T3 e, embaixo, o texto alinhado ao rótulo.
 fn terminal_live_thinking(view: &Entity<TextViewState>, focus: Option<AnyElement>, cx: &App) -> Div {
     div().flex().flex_col().gap(px(4.))
@@ -477,8 +490,20 @@ impl Hangar {
             if event.kind == "thinking" {
                 let (key, source) = (format!("{}:thought", event.id), safe_markdown(event.text.as_deref().unwrap_or("")));
                 if source.trim().is_empty() { continue; }
+                // A chave é o id do evento: o `toggle` acha a linha pelas partes do bloco.
+                let fold = event.id.clone();
+                if appearance::get().thinking_collapsed && !self.expanded.contains(&fold) {
+                    let summary = conversation::thought_summary(event.text.as_deref().unwrap_or(""));
+                    body.push(terminal_thinking_fold(fold.clone(), summary, cx.listener(move |this, _, _, cx| this.toggle(fold.clone(), cx))));
+                    continue;
+                }
                 let view = self.text_view(&key, row, source, cx);
-                body.push(terminal_thinking_text(&view, cx).into_any_element());
+                let text = terminal_thinking_text(&view, cx);
+                body.push(if appearance::get().thinking_collapsed {
+                    terminal_tool_body(fold, text, cx.listener(|this, key: &String, _, cx| {
+                        if this.expanded.contains(key) { this.toggle(key.clone(), cx); }
+                    })).into_any_element()
+                } else { text.into_any_element() });
             } else {
                 let result = self.conversation.paired.get(&i).copied();
                 body.push(self.render_tool(Tool { call: i, result }, row, cx));
