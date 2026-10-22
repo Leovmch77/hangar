@@ -38,9 +38,12 @@ def sessao(tmp_path):
     # duas leituras nesse intervalo discordam do cwd.
     alvo = os.path.realpath(tmp_path)
     prazo = time.monotonic() + 10
-    while os.path.realpath(subprocess.run(["tmux", "display-message", "-p", "-t", f"={SESS}:", "#{pane_current_path}"],
-                                          capture_output=True, text=True).stdout.strip() or ".") != alvo:
-        assert time.monotonic() < prazo, "o pane não chegou à pasta da sessão"
+    while True:
+        lido = subprocess.run(["tmux", "display-message", "-p", "-t", f"={SESS}:", "#{pane_current_path}"],
+                              capture_output=True, text=True)
+        if lido.stdout.strip() and os.path.realpath(lido.stdout.strip()) == alvo:
+            break
+        assert time.monotonic() < prazo, f"o pane não chegou a {alvo}: {lido.stdout.strip() or lido.stderr.strip()!r}"
         time.sleep(0.02)
     yield SESS
     matar_sessao(SESS)
