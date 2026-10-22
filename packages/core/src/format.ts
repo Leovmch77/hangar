@@ -393,6 +393,9 @@ const _PATH_RE = new RegExp(`(?<![\\w.~:/*])(~?/(?:[^\\s\`]|[^\\S\\n](?!~?/))*?\
 // O backend resolve contra o cwd da sessao. Lookbehind tira word/`/`/~/./:/- (nao pega pedaco de path
 // absoluto nem de dentro de URL).
 const _REL_RE = new RegExp(`(?<![\\w/~.:*-])((?:[\\w.-]+/)+[\\w.-]+\\.(${_EXTS}))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*>])`, 'gi');
+// Caminho absoluto do WINDOWS (`C:\...`), que a sessão numa máquina Windows cita: mesmas regras do
+// absoluto, e espaço seguido de outra letra de unidade abre outro caminho.
+const _WIN_RE = new RegExp(`(?<![\\w*])([A-Za-z]:[\\\\/](?:[^\\s\`]|[^\\S\\n](?![A-Za-z]:[\\\\/]|~?/))*?\\.(${_EXTS}))(?=$|\\.(?=\\s|$)|[\\s)\\]"'\`,;:*>])`, 'gi');
 
 export interface FileRef { path: string; name: string; kind: FileKind; url?: string; }
 
@@ -430,14 +433,14 @@ export function parseFilePaths(text: string): FileRef[] {
   const out: FileRef[] = [];
   const seen = new Set<string>();
   // Absoluto + relativo-com-dir. Os dois regexes nao se sobrepoem (lookbehind) -> dedup por string.
-  for (const re of [_PATH_RE, _REL_RE]) {
+  for (const re of [_PATH_RE, _REL_RE, _WIN_RE]) {
     for (const m of text.matchAll(re)) {
       const path = m[1];
       if (seen.has(path)) continue;
       if (isTextData(path) && /^:\d/.test(text.slice(m.index + path.length))) continue;
       seen.add(path);
       const kind = EXT_KIND[m[2].toLowerCase()];
-      out.push({ path, name: path.split('/').filter(Boolean).pop() || path, kind });
+      out.push({ path, name: basename(path), kind });
     }
   }
   return out;

@@ -1093,6 +1093,17 @@ describe('parseCanal', () => {
 });
 
 describe('parseFilePaths', () => {
+  it('reconhece caminho do Windows, inclusive dois seguidos e com espaço no nome', () => {
+    const a = String.raw`C:\Users\Admin\Temp\scratchpad\1-externo-card.png`;
+    const b = String.raw`C:\Users\Admin\Área de trabalho\2-documento aberto.png`;
+    const text = `Card: ${a} ${b}. Não: x${a}`;
+    expect(parseFilePaths(text).map(({ path, name, kind }) => ({ path, name, kind }))).toEqual([
+      { path: a, name: '1-externo-card.png', kind: 'image' },
+      { path: b, name: '2-documento aberto.png', kind: 'image' },
+    ]);
+    expect(hideAttachmentPaths(`Card: ${a}`, parseFilePaths(a))).toBe('Card: 1-externo-card.png');
+  });
+
   it('reconhece documentos para baixar sem transformar código em anexo', () => {
     const paths = parseFilePaths('[Relatório](</tmp/Relatório final.docx>) e docs/tabela.xlsx, /tmp/slides.odp. /tmp/app.ts /tmp/main.py /tmp/lib.rs');
     expect(paths.map(({ path, kind }) => ({ path, kind }))).toEqual([

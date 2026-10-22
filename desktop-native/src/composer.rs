@@ -147,8 +147,8 @@ fn close_path(text: &str, start: usize, spaces: bool) -> Option<usize> {
     for (i, ch) in text[start..].char_indices() {
         let at = start + i;
         if ch == '\n' || ch == '`' || (!spaces && ch.is_whitespace()) { return None; }
-        // Espaço seguido de `/` abre outro caminho: "/tmp/app.ts e /tmp/a.png" são dois, não um.
-        if ch.is_whitespace() && { let next = &text[at + ch.len_utf8()..]; next.starts_with('/') || next.starts_with("~/") } { return None; }
+        // Espaço seguido de `/` (ou de outra unidade do Windows) abre outro caminho: "/tmp/app.ts e /tmp/a.png" são dois.
+        if ch.is_whitespace() && { let next = &text[at + ch.len_utf8()..]; next.starts_with('/') || next.starts_with("~/") || drive(next) } { return None; }
         if ch != '.' || at == start { continue; }
         let tail = &text[at + 1..];
         for ext in EXTS {
@@ -160,7 +160,13 @@ fn close_path(text: &str, start: usize, spaces: bool) -> Option<usize> {
     None
 }
 
-/// Caminhos citados com extensão conhecida: absolutos (`/`, `~/`) e relativos com diretório.
+/// Começa com unidade do Windows (`C:\` ou `C:/`), o caminho que uma sessão numa máquina Windows cita.
+fn drive(text: &str) -> bool {
+    let b = text.as_bytes();
+    b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+}
+
+/// Caminhos citados com extensão conhecida: absolutos (`/`, `~/`, `C:\`) e relativos com diretório.
 pub fn cited_paths(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     // csv/txt seguido de `:linha` é referência a código (chip), não anexo.
@@ -172,7 +178,7 @@ pub fn cited_paths(text: &str) -> Vec<String> {
     let mut skip_to = 0;
     for (i, ch) in text.char_indices() {
         if i < skip_to { continue; }
-        let absolute = ch == '/' || (ch == '~' && text[i + 1..].starts_with('/'));
+        let absolute = ch == '/' || (ch == '~' && text[i + 1..].starts_with('/')) || drive(&text[i..]);
         // `*` antes vale: caminho em negrito (`**/tmp/x.jpg**`) também é citado.
         if absolute && prev(i).is_none_or(|p| !(p.is_alphanumeric() || "_.~:/".contains(p))) {
             if let Some(end) = close_path(text, i, true) { push(&text[i..end], end); skip_to = end; continue; }
@@ -712,6 +718,13 @@ mod tests {
         let code = "[fonte](src/main.rs) `/tmp/config.py:12`";
         assert!(cited_paths(code).is_empty());
         assert_eq!(citation_markdown(code).matches("hangar-file:").count(), 2);
+    }
+
+    #[test]
+    fn windows_paths_are_cited_like_the_core() {
+        let (a, b) = (r"C:\Users\Admin\Temp\1-externo-card.png", r"C:\Users\Admin\Área de trabalho\2-documento aberto.png");
+        assert_eq!(cited_paths(&format!("Card: {a} {b}. Não: x{a}")), vec![a, b]);
+        assert_eq!(basename(b), "2-documento aberto.png");
     }
 
     #[test]

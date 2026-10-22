@@ -814,7 +814,10 @@ def path_in_transcript(jsonl: str | Path, needle: str) -> bool:
 def citation_cwds(jsonl: str | Path, needles: list[str], *,
                   rows: Iterable[bytes] | None = None) -> dict[str, list[str]]:
     """Caminho citado -> cwd das linhas que o citaram, do mais recente ao mais antigo."""
-    wanted = {needle for needle in needles if needle}
+    # A linha é JSON cru: caminho do Windows aparece com a contrabarra dobrada. Procura-se a forma
+    # escapada e o achado volta com o caminho original.
+    original = {json.dumps(needle, ensure_ascii=False)[1:-1]: needle for needle in needles if needle}
+    wanted = set(original)
     if not wanted:
         return {}
     pattern = re.compile("(?=(" + "|".join(re.escape(x) for x in sorted(wanted, key=len, reverse=True)) + "))")
@@ -829,7 +832,7 @@ def citation_cwds(jsonl: str | Path, needles: list[str], *,
                 if not any(raw in raw_line for raw in encoded):
                     continue
                 line = raw_line.decode("utf-8", errors="replace")
-                matched = {m.group(1) for m in pattern.finditer(line)}
+                matched = {original[m.group(1)] for m in pattern.finditer(line)}
                 if not matched:
                     continue
                 seen.update(matched)

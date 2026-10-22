@@ -31,19 +31,25 @@ fn lines(source: Transcript<'_>, mut callback: impl FnMut(&str)) {
     }
 }
 pub fn cwds(jsonl: Transcript<'_>, needles: &[String]) -> Value {
-    let mut wanted = needles.iter().filter(|s| !s.is_empty()).collect::<Vec<_>>();
-    wanted.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
+    // A linha é JSON cru: caminho do Windows aparece com a contrabarra dobrada (`C:\\Users\\x.png`). Procura-se a
+    // forma escapada de cada caminho e o achado volta com o caminho original.
+    let mut wanted = needles
+        .iter()
+        .filter(|s| !s.is_empty())
+        .map(|s| (json_escaped(s), s.clone()))
+        .collect::<Vec<_>>();
+    wanted.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.cmp(b)));
     wanted.dedup();
     let mut seen = HashSet::new();
     let mut folders = HashMap::<String, Vec<String>>::new();
     lines(jsonl, |line| {
-        if !wanted.iter().any(|s| line.contains(s.as_str())) {
+        if !wanted.iter().any(|(s, _)| line.contains(s.as_str())) {
             return;
         }
         let mut matched = HashSet::new();
         for (pos, _) in line.char_indices() {
-            if let Some(needle) = wanted.iter().find(|s| line[pos..].starts_with(s.as_str())) {
-                matched.insert((*needle).clone());
+            if let Some((_, needle)) = wanted.iter().find(|(s, _)| line[pos..].starts_with(s.as_str())) {
+                matched.insert(needle.clone());
             }
         }
         let cwd = serde_json::from_str::<Value>(line)
@@ -65,6 +71,10 @@ pub fn cwds(jsonl: Transcript<'_>, needles: &[String]) -> Value {
         map.insert(needle, json!(list));
     }
     Value::Object(map)
+}
+fn json_escaped(text: &str) -> String {
+    let quoted = serde_json::to_string(text).unwrap_or_default();
+    quoted.get(1..quoted.len().saturating_sub(1)).unwrap_or_default().to_owned()
 }
 fn end_boundary(rest: &str) -> bool {
     let mut cs = rest.chars();
@@ -280,5 +290,20 @@ fn not_found() -> crate::WorkspaceError {
         status: 404,
         detail: json!({"code":"erro_arquivo_nao_encontrado","params":{},"msg":"file not found"}),
         code: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Transcript, cwds};
+    use serde_json::json;
+
+    #[test]
+    fn windows_path_is_found_with_its_backslashes_escaped() {
+        let path = r"C:\Users\Admin\Temp\shot 1.png".to_owned();
+        let line = json!({"cwd": r"C:\Sistemas\web", "message": {"content": format!("Print: {path}")}}).to_string();
+        assert!(line.contains(r"C:\\Users"), "o JSON da conversa dobra a contrabarra");
+        let rows = [line];
+        assert_eq!(cwds(Transcript::Rows(&rows), &[path.clone(), "/tmp/a.png".into()]), json!({path: [r"C:\Sistemas\web"]}));
     }
 }
