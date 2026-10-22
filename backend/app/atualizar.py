@@ -1282,7 +1282,10 @@ def _executar(porta: int) -> dict:
                            pre["topologia"], porta, branch=pre.get("branch", ""))
 
     _etapa("nativo")
-    _instalar_nativo(destino, porta)
+    try:
+        _instalar_nativo(destino, porta)
+    except Exception as e:                           # noqa: BLE001 — o servidor já está atualizado
+        _avisar(f"app nativo nao atualizou: {e or type(e).__name__}")
     _dist_velho_apagar()
     _escrever(fase="pronto", ok=True, texto="Atualizado")
     return estado()

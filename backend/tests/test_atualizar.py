@@ -2070,6 +2070,8 @@ def native_machine(repo, tmp_path, monkeypatch):
             raise subprocess.TimeoutExpired(args, 900)
         if data["failure"] == "launch":
             raise OSError("powershell ausente")
+        if data["failure"] == "unexpected":
+            raise RuntimeError("fixture-unexpected")
         if data["failure"] == "exit":
             return subprocess.CompletedProcess(args, 1, "##HANGAR-FALHA## arquivo preso\nfim", "")
         return subprocess.CompletedProcess(args, 0, "instalado", "")
@@ -2155,7 +2157,7 @@ def test_native_install_old_server_404_means_api_one(repo, native_machine):
 
 
 @pytest.mark.parametrize("topology", ["systemd", "windows", "manual"])
-@pytest.mark.parametrize("failure", [None, "exit", "timeout", "launch"])
+@pytest.mark.parametrize("failure", [None, "exit", "timeout", "launch", "unexpected"])
 def test_native_install_after_restart_keeps_update_success(repo, native_machine, monkeypatch,
                                                           topology, failure):
     data = native_machine
@@ -2195,5 +2197,7 @@ def test_native_install_after_restart_keeps_update_success(repo, native_machine,
             assert final["avisos"] == ["app nativo nao atualizou: arquivo preso"]
         elif failure == "timeout":
             assert "900" in final["avisos"][0]
+        elif failure == "unexpected":
+            assert final["avisos"] == ["app nativo nao atualizou: fixture-unexpected"]
         else:
             assert "powershell ausente" in final["avisos"][0]
