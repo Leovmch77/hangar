@@ -288,12 +288,12 @@ impl Batch {
     }
 }
 
-/// Um pedido por worktree, com a semântica do lote: perde arquivos só a que a confirmação mostrou perdendo.
-/// O servidor respondeu: a recusa tem motivo e mostra ele; "não confirmou" é só quando não veio resposta.
+/// O 503 é recusa do servidor antes de mexer em algo e mostra o motivo; sem resposta ou 500/502/504 a ação pode ter ocorrido.
 fn answered_failure(e: Failure) -> String {
-    Hangar::failure(&Failure { uncertain: e.uncertain && e.status.is_none(), ..e })
+    Hangar::failure(&Failure { uncertain: e.uncertain && e.status != Some(503), ..e })
 }
 
+/// Um pedido por worktree, com a semântica do lote: perde arquivos só a que a confirmação mostrou perdendo.
 fn one_path_body(repo: &str, w: &WorktreeStatus) -> Value {
     json!({"repo": repo, "confirm": true, "paths": [&w.path], "lossy": if loses(w) { vec![&w.path] } else { vec![] }})
 }

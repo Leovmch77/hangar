@@ -316,9 +316,11 @@ fn live_panes(
     sessions: &[Session],
     panes: Vec<crate::list::mux::Pane>,
 ) -> hangar_workspace::Result<Vec<crate::list::mux::Pane>> {
+    // Morto que ainda informa pasta continua protegendo essa pasta.
+    let gone = |p: &crate::list::mux::Pane| p.dead && p.cwd.is_empty();
     let only_dead = |name: &str| {
         let mut own = panes.iter().filter(|p| p.session == name).peekable();
-        own.peek().is_some() && own.all(|p| p.dead)
+        own.peek().is_some() && own.all(gone)
     };
     if sessions.iter().any(|s| {
         !only_dead(&s.name)
@@ -336,7 +338,7 @@ fn live_panes(
             "pasta de sessão desconhecida; remoção conservada",
         ));
     }
-    let panes: Vec<_> = panes.into_iter().filter(|p| !p.dead).collect();
+    let panes: Vec<_> = panes.into_iter().filter(|p| !gone(p)).collect();
     if panes.iter().any(|p| p.cwd.is_empty()) {
         return Err(hangar_workspace::error(
             503,
@@ -589,9 +591,9 @@ mod tests {
     #[test]
     fn dead_terminals_do_not_block_removal() {
         let sessions = [session("viva", "/w"), session("morta", "")];
-        let panes = vec![pane("viva", "/w", false), pane("morta", "", true), pane("atalho", "", true)];
+        let panes = vec![pane("viva", "/w", false), pane("morta", "", true), pane("atalho", "", true), pane("com-pasta", "/x", true)];
         let live = live_panes(&sessions, panes).unwrap();
-        assert_eq!(live.iter().map(|p| p.session.as_str()).collect::<Vec<_>>(), ["viva"]);
+        assert_eq!(live.iter().map(|p| p.session.as_str()).collect::<Vec<_>>(), ["viva", "com-pasta"]);
     }
 
     #[test]
