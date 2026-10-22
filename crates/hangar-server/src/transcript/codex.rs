@@ -45,6 +45,9 @@ pub(crate) fn parse_rollout_obj(line: &Value) -> Vec<ChatEvent> {
 
 fn parse_raw(line: &Value) -> Vec<ChatEvent> {
     let Some(obj) = line.as_object() else { return Vec::new() };
+    if obj.get("type").and_then(Value::as_str) == Some("event_msg") {
+        return page_call(line);
+    }
     if obj.get("type").and_then(Value::as_str) != Some("response_item") {
         return Vec::new();
     }
@@ -91,6 +94,44 @@ fn parse_raw(line: &Value) -> Vec<ChatEvent> {
         }
         _ => Vec::new(),
     }
+}
+
+const PAGE_TOOL: &str = "mcp__hangar__html_render";
+
+/// Página publicada de dentro de um `exec`; só no Rust, que serve o histórico. O script pode chamar várias
+/// tools, e só o registro `McpToolCall` do Codex diz qual delas publicou e o que voltou.
+fn page_call(line: &Value) -> Vec<ChatEvent> {
+    let payload = &line["payload"];
+    let item = &payload["item"];
+    if payload["type"] != "item_completed" || item["type"] != "McpToolCall" || item["server"] != "hangar"
+        || item["tool"] != "html_render" {
+        return Vec::new();
+    }
+    let args = item["arguments"].as_object().cloned().unwrap_or_default();
+    // Chamada direta (fora do `exec`) já chega como `function_call`; rascunho não vira cartão.
+    let Some(call_id) = item["id"].as_str().filter(|id| id.starts_with("exec-")) else { return Vec::new() };
+    if args.get("draft") == Some(&Value::Bool(true)) {
+        return Vec::new();
+    }
+    let result = &item["result"];
+    let base = event_id(line);
+    let tool_input = ["title", "url"].iter()
+        .filter_map(|k| args.get(*k).filter(|v| v.is_string()).map(|v| ((*k).to_string(), v.clone())))
+        .collect();
+    vec![
+        ChatEvent {
+            tool_name: Some(PAGE_TOOL.into()),
+            tool_use_id: Some(call_id.into()),
+            tool_input: Some(tool_input),
+            ..event(ChatKind::ToolUse, format!("{base}:use"))
+        },
+        ChatEvent {
+            tool_use_id: Some(call_id.into()),
+            result: Some(blocks_text(result.get("content"), "text")),
+            is_error: Some(result["isError"] == true || item["status"] == "failed"),
+            ..event(ChatKind::ToolResult, format!("{base}:result"))
+        },
+    ]
 }
 
 fn str_field(m: &Map<String, Value>, k: &str) -> Option<String> {
@@ -193,7 +234,8 @@ fn custom_tool_call(payload: &Map<String, Value>, id: String) -> ChatEvent {
     let calls: Vec<_> =
         if name.as_deref() == Some("exec") { TOOL_IN_CODE.captures_iter(code).collect() } else { Vec::new() };
     let inner = if calls.len() == 1 { calls.first() } else { None };
-    if let Some(c) = inner {
+    // A página sai do `McpToolCall` (`page_call`); com o nome dela aqui, o cartão sairia duas vezes.
+    if let Some(c) = inner.filter(|c| &c[1] != PAGE_TOOL) {
         name = Some(c[1].to_string());
     }
     let patch = match (name.as_deref(), inner) {
@@ -337,5 +379,48 @@ mod tests {
         assert_eq!(evs[0].text.as_deref(), Some("**Primeiro**\n\nSegundo"));
         let encrypted = json!({"type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"x"}});
         assert!(parse_rollout_obj(&encrypted).is_empty());
+    }
+
+    fn page_call(arguments: Value, result: Value, status: &str) -> Value {
+        json!({"timestamp":"2026-10-22T20:32:58.000Z","type":"event_msg","payload":{"type":"item_completed",
+            "thread_id":"t","turn_id":"u","item":{"type":"McpToolCall","id":"exec-1","server":"hangar","tool":"html_render",
+            "arguments":arguments,"status":status,"result":result}}})
+    }
+
+    #[test]
+    fn page_published_inside_exec_becomes_card() {
+        let page = json!({"hangar_page":{"id":"pag1","title":"Custos","height":null,"heights":{"728":880},"own_theme":false}});
+        let line = page_call(json!({"title":"Custos","html":"<p>x</p>"}),
+            json!({"content":[{"type":"text","text":page.to_string()}],"structuredContent":page}), "completed");
+        let evs = parse_rollout_obj(&line);
+        assert_eq!(evs.len(), 2);
+        assert!(matches!(evs[0].kind, ChatKind::ToolUse));
+        assert_eq!(evs[0].tool_name.as_deref(), Some("mcp__hangar__html_render"));
+        assert_eq!(evs[0].tool_use_id.as_deref(), Some("exec-1"));
+        assert_eq!(evs[0].tool_input.clone().map(Value::Object), Some(json!({"title":"Custos"})));
+        assert!(matches!(evs[1].kind, ChatKind::ToolResult));
+        assert_eq!(evs[1].tool_use_id.as_deref(), Some("exec-1"));
+        assert_eq!(evs[1].is_error, Some(false));
+        let parsed: Value = serde_json::from_str(evs[1].result.as_deref().unwrap()).unwrap();
+        assert_eq!(parsed["hangar_page"]["id"], "pag1");
+        assert_ne!(evs[0].id, evs[1].id);
+    }
+
+    #[test]
+    fn page_draft_and_refusal() {
+        let draft = page_call(json!({"title":"C","html":"x","draft":true}), json!({"content":[]}), "completed");
+        assert!(parse_rollout_obj(&draft).is_empty());
+        let refused = page_call(json!({"title":"C","html":"x","width":390}),
+            json!({"content":[{"type":"text","text":"erro_pagina_invalida: width e theme só valem com draft"}],"isError":true}), "failed");
+        let evs = parse_rollout_obj(&refused);
+        assert_eq!(evs[1].is_error, Some(true));
+        assert_eq!(evs[1].result.as_deref(), Some("erro_pagina_invalida: width e theme só valem com draft"));
+    }
+
+    #[test]
+    fn exec_with_only_html_render_keeps_wrapper_name() {
+        let line = json!({"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call_1",
+            "input":"const r=await tools.mcp__hangar__html_render({title:\"Custos\",html:h});"}});
+        assert_eq!(parse_rollout_obj(&line)[0].tool_name.as_deref(), Some("exec"));
     }
 }
