@@ -132,6 +132,14 @@ impl Hangar {
                         this.redraw(panes::Area::Nav, cx);
                     }))))
             .child(div().flex().items_center().gap_2()
+                .child(div().flex_1().min_w_0().text_xs().whitespace_normal().child(tr("settings_tabs_recent_first")))
+                .child(Switch::new("machines-tray-tabs-recent-first").checked(appearance::get().tabs_recent_first)
+                    .accessibility_label(tr("settings_tabs_recent_first"))
+                    .on_click(cx.listener(|this, on: &bool, _, cx| {
+                        this.apply_appearance(appearance::Appearance { tabs_recent_first: *on, ..appearance::get() }, true, cx);
+                        this.redraw(panes::Area::Nav, cx);
+                    }))))
+            .child(div().flex().items_center().gap_2()
                 .child(div().flex_1().min_w_0().text_xs().whitespace_normal().child(tr("settings_tabs_detail")))
                 .child(super::settings::segments("machines-tray-tabs-detail", &[tr("settings_sidebar_compact"), tr("settings_tabs_full")],
                     appearance::get().tabs_full as usize, 2, false, String::new(),
