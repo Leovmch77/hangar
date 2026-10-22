@@ -13,6 +13,7 @@ import { useSessions } from '../../src/stores/sessions';
 import { PairAcceptSheet, type PairAcceptTarget } from '../../src/features/pair/PairAcceptSheet';
 import { MachineSettingsSheet, useForgetMachine } from '../../src/features/machines/MachineSettingsSheet';
 import { AddMachineSheet } from '../../src/features/machines/AddMachineSheet';
+import { UpdateAllMachines } from '../../src/features/machines/UpdateAllMachines';
 import { ConnectionDot, Notice, useMachineAction } from '../../src/features/machines/parts';
 import * as m from '../../src/paraglide/messages';
 
@@ -47,6 +48,7 @@ export default function Maquinas() {
           ...(servers.length ? [{ icon: 'Link' as const, label: m.native_par_menu(), onPress: parear }] : []),
         ]}
       />
+      {ready ? <UpdateAllMachines servers={todos} /> : null}
       {!ready ? <InfoNotice text={m.native_server_loading()} /> : servers.length === 0 ? <InfoNotice text={m.maquinas_vazio()} /> : null}
       {servers.length > 0 ? (
         <SectionCard icon="Server" title={m.native_machines_others()}>

@@ -53,7 +53,7 @@ mod page_card;
 mod page_fullscreen;
 mod queue;
 mod linked_children;
-mod popup;
+pub(crate) mod popup;
 mod rail;
 mod rows;
 mod run;

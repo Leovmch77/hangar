@@ -5,12 +5,14 @@
 //! `<exe>.old` (no Windows, `<exe>.old-<horário>` se o `.old` ainda estiver preso). O processo velho continua de pé
 //! até o novo gravar o próprio pid em `<exe>.alive`: se ele morrer ou não der sinal a tempo, o anterior volta para o
 //! lugar e este processo segue aberto. Nunca fica sem app.
-use crate::{api::{Api, Failure}, i18n::tr, theme};
+use crate::{api::{Api, Failure}, i18n::{tr, tr_shared}, theme};
 use gpui_kit::{assets::IconName, component::{button::*, notification::Notification, *}, *};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{collections::HashMap, ffi::OsString, path::{Path, PathBuf}, sync::Arc, time::Duration};
 use tokio::runtime::Runtime;
+
+mod all;
 
 const RELEASES: &str = "https://github.com/jeffer1312/hangar/releases/download";
 /// Branch que o CI compilou (native.yml). Build local não sabe a dele: só versão mais nova o troca.
@@ -540,6 +542,9 @@ pub struct Updater {
     suspended: bool,
     /// Trava da intenção que este processo acompanha; com ela, só ele apaga o arquivo.
     intent_lock: Option<std::fs::File>,
+    all_servers: Vec<crate::app::ServerEntry>,
+    batch: Option<all::Batch>,
+    all_running: bool,
 }
 
 /// Linha "Canal de testes" da página Sobre: a main não mostra nada.
@@ -565,7 +570,7 @@ pub fn start(runtime: Arc<Runtime>, cx: &mut App) {
     let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).user_agent(concat!("hangar-native/", env!("HANGAR_NATIVE_RELEASE")))
         .build().unwrap_or_default();
     let entity = cx.new(|_| Updater { runtime, client, exe: std::env::current_exe().ok(), offer: None, local: None, server: None,
-        server_api: None, server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0, run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None, suspended: false, intent_lock: None });
+        server_api: None, server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0, run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None, suspended: false, intent_lock: None, all_servers: Vec::new(), batch: None, all_running: false });
     let weak = entity.downgrade();
     cx.spawn(async move |cx| loop {
         let Ok(()) = weak.update(cx, |this, cx| {
@@ -777,7 +782,7 @@ impl Updater {
         }).detach();
     }
 
-    fn busy(&self) -> bool { self.run.busy() }
+    fn busy(&self) -> bool { self.run.busy() || self.all_running }
 
     fn plan(&self) -> Plan {
         let need = self.offer.as_ref().map(|o| o.requires_api);
@@ -807,13 +812,20 @@ impl Updater {
     }
 
     fn fail(&mut self, reason: String, cx: &mut Context<Self>) {
+        self.local_batch_status(all::Status::Failed(reason.clone()), cx);
         self.end_intent();
         self.run = Run::Failed(reason);
         cx.notify();
     }
 
     fn run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.batch.is_some() { return self.open_batch(window, cx); }
         if self.busy() { return; }
+        if self.update_all_count() >= 2 { return self.confirm_all(window, cx); }
+        self.run_local(window, cx);
+    }
+
+    fn run_local(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let plan = self.plan();
         match &plan.server {
             ServerStep::Held(hold) if hold.stops() => self.fail(hold.text(), cx),
@@ -864,10 +876,12 @@ impl Updater {
                 Err(error) => this.fail(tr("update_failed").replace("{reason}", error.detail.trim_end_matches('.')), cx),
                 Ok(state) => {
                     this.run = Run::Idle;
+                    this.local_batch_snapshot(&state, cx);
                     this.receive_server(Some(state), cx);
-                    let plan = this.plan();
+                    let plan = if this.batch.is_some() { this.batch_plan() } else { this.plan() };
                     match &plan.server {
                         ServerStep::Update => this.start_server(api, window, cx),
+                        ServerStep::Held(hold) if this.batch.is_some() && hold.stops() => { this.end_intent(); cx.notify(); }
                         ServerStep::Held(hold) if hold.stops() => this.fail(hold.text(), cx),
                         _ if plan.app => this.install_app(window, cx),
                         _ => cx.notify(),
@@ -882,6 +896,7 @@ impl Updater {
         let baseline = self.server.as_ref().and_then(|s| s["estado"]["ts"].as_str()).map(str::to_owned);
         if self.begin_intent(&api, baseline.clone()).is_err() { return self.fail(tr("app_restart_busy"), cx); }
         self.run = Run::Server { step: 0, total: 0, text: String::new() };
+        self.local_batch_status(all::Status::Starting, cx);
         cx.notify();
         let task = { let api = api.clone(); self.runtime.spawn(async move { api.server_post(&["atualizacao", "iniciar"], 30).await }) };
         let handle = window.window_handle();
@@ -928,10 +943,13 @@ impl Updater {
             loop {
                 let Ok(task) = this.update(cx, |this, _| read_state(&this.runtime, &api, &[], 10)) else { return };
                 let read = task.await.unwrap_or_else(|e| Err(Failure::local(e.to_string())));
+                let _ = this.update(cx, |this, cx| this.local_batch_read(&read, baseline.as_deref(), cx));
                 silent = if read.is_ok() { 0 } else { silent + 1 };
                 let step = match &read {
                     Ok(value) => {
-                        let step = follow(&value["estado"], saw, baseline.as_deref());
+                        let combined = this.update(cx, |this, _| this.batch.is_some()).unwrap_or(false);
+                        let step = follow(&value["estado"], saw && !combined, baseline.as_deref());
+                        let step = if combined && step == Follow::NotStarted { Follow::Waiting } else { step };
                         Some(if resumed { resumed_step(step) } else { step })
                     }
                     Err(error) if matches!(error.status, Some(401 | 403)) => Some(Follow::Done(Outcome::Failed(tr("auth_error")))),
@@ -1001,6 +1019,8 @@ impl Updater {
     }
 
     fn install_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A troca encerra este processo; as outras máquinas precisam terminar de ser acompanhadas antes.
+        if self.defer_batch_app(cx) { return; }
         let Some(offer) = self.offer.clone() else { self.end_intent(); self.run = Run::Idle; cx.notify(); return };
         // Canal trocado depois da procura: a oferta é da branch anterior; procura de novo em vez de instalá-la.
         if offer.channel != self.channel() {
@@ -1036,6 +1056,9 @@ impl Updater {
 
     /// Rótulo curto e explicação do botão parado, conforme o plano.
     fn idle_texts(&self, plan: &Plan) -> (String, String) {
+        if !plan.visible() && self.update_all_count() >= 2 {
+            return (tr_shared("update_all_button", &[("n", &self.update_all_count().to_string())]), tr_shared("update_all_title", &[]));
+        }
         let version = self.offer.as_ref().map(|o| o.version.clone()).unwrap_or_default();
         let tip = match (&plan.server, plan.app) {
             (ServerStep::Held(hold), _) if hold.stops() => hold.text(),
@@ -1050,9 +1073,10 @@ impl Updater {
 
 impl Render for Updater {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.batch.is_some() { return self.render_batch_button(cx); }
         let plan = self.plan();
         let (id, label, tip, color) = match &self.run {
-            Run::Idle if !plan.visible() => return div().into_any_element(),
+            Run::Idle if !plan.visible() && self.update_all_count() < 2 => return div().into_any_element(),
             Run::Idle => { let (label, tip) = self.idle_texts(&plan); ("topbar-update", label, tip, theme::accent()) }
             Run::Searching => ("topbar-update", tr("app_update_searching"), tr("app_update_searching"), theme::accent()),
             Run::Server { step, total, text } if *total > 0 => ("topbar-update",
@@ -1152,7 +1176,7 @@ mod tests {
             offer: Some(Offer { version: "9999.0.0.0".into(), url: String::new(), sha256: String::new(), channel: "main".into(), requires_api: 2 }),
             local: Some(local.clone()), server: Some(server(serde_json::json!({"atualizacao_disponivel": true}))), server_api: Some(2),
             server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0, run: Run::Idle, checking: false, checked: None,
-            checked_channel: None, known_channel: None, channel_blocked: Some(local.identity()), suspended: false, intent_lock: None };
+            checked_channel: None, known_channel: None, channel_blocked: Some(local.identity()), suspended: false, intent_lock: None, all_servers: Vec::new(), batch: None, all_running: false };
         assert_eq!(updater.plan(), Plan { server: ServerStep::Held(Hold::ChannelDraft), app: true });
         assert!(!Hold::ChannelDraft.stops());
         updater.channel_blocked = Some("http://other-machine:8765".into());
@@ -1175,7 +1199,7 @@ mod tests {
         let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None,
             offer: Some(Offer { version: "9999.0.0.0".into(), url: String::new(), sha256: String::new(), channel: "main".into(), requires_api: REQUIRED_API }),
             local: None, server: None, server_api: None, server_seq: 0, active: None, active_state: None, active_api: Some(REQUIRED_API), active_seq: 0,
-            run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None, suspended: false, intent_lock: None };
+            run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None, suspended: false, intent_lock: None, all_servers: Vec::new(), batch: None, all_running: false };
         assert!(updater.plan().app);
         assert!(!updater.server_outdated());
         updater.active_api = Some(REQUIRED_API - 1);
@@ -1220,7 +1244,7 @@ mod tests {
         let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None, offer: None,
             local: None, server: None, server_api: None, server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0,
             run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: Some("hangar-server-parte1".into()),
-            channel_blocked: None, suspended: false, intent_lock: None };
+            channel_blocked: None, suspended: false, intent_lock: None, all_servers: Vec::new(), batch: None, all_running: false };
         assert_eq!(updater.channel(), "main", "sem servidor local não há canal");
         updater.local = Some(Api::new("http://127.0.0.1:8765", "synthetic-token").unwrap());
         assert_eq!(updater.channel(), "hangar-server-parte1", "leitura que falhou mantém o último canal");

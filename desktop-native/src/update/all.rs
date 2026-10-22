@@ -1,0 +1,578 @@
+//! Atualização conjunta: cada servidor conserva seu resultado e o app só reabre após os demais terminarem.
+use super::*;
+use crate::{app::ServerEntry, i18n::tr_shared};
+use gpui_kit::prelude::FluentBuilder;
+use std::{cell::Cell, collections::HashSet, rc::Rc};
+
+#[derive(Clone, Debug, PartialEq)]
+enum Classification { Start, Current, Held(Hold) }
+
+fn classify(snapshot: &Value) -> Classification {
+    if !behind(snapshot) { return Classification::Current; }
+    hold(snapshot).map_or(Classification::Start, Classification::Held)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Status {
+    Checking, Starting, Running { step: u64, total: u64, text: String }, Waiting,
+    Current, Held(Hold), Offline(String), Updated, UpdatedManual, Failed(String), Silent, Timeout,
+}
+
+impl Status {
+    fn busy(&self) -> bool { matches!(self, Self::Checking | Self::Starting | Self::Running { .. } | Self::Waiting) }
+
+    fn text(&self) -> String {
+        let key = match self {
+            Self::Checking => "update_all_checking", Self::Starting => "update_all_starting",
+            Self::Running { step, total, text } => return tr_shared("update_all_running",
+                &[("texto", text), ("passo", &step.to_string()), ("total", &total.to_string())]),
+            Self::Waiting => "update_all_waiting", Self::Current => "update_all_up_to_date",
+            Self::Held(Hold::WorkBranch(..)) => "update_all_held_branch",
+            Self::Held(Hold::LocalChanges) => "update_all_held_changes",
+            Self::Held(Hold::Running) => "update_all_held_running",
+            Self::Held(Hold::Missing(_)) => "update_all_held_missing",
+            Self::Held(Hold::ChannelDraft) => return tr("settings_channel_pending"),
+            Self::Offline(_) => "update_all_offline", Self::Updated => "update_all_updated",
+            Self::UpdatedManual => "update_all_updated_manual",
+            Self::Failed(error) => return tr_shared("update_all_failed", &[("erro", error)]),
+            Self::Silent | Self::Timeout => {
+                let reason = if matches!(self, Self::Silent) { "update_all_silent" } else { "update_all_timeout" };
+                return tr_shared("update_all_failed", &[("erro", &tr_shared(reason, &[]))]);
+            }
+        };
+        tr_shared(key, &[])
+    }
+}
+
+fn follow_status(state: &Value, baseline: Option<&str>) -> Status {
+    // A rodada conjunta exige o ts posterior mesmo depois de ter visto o motor rodando.
+    match follow(state, false, baseline) {
+        Follow::Running { step, total, text } => Status::Running { step, total, text },
+        Follow::Waiting | Follow::NotStarted => Status::Waiting,
+        Follow::Done(Outcome::Updated) => Status::Updated,
+        Follow::Done(Outcome::UpdatedManual) => Status::UpdatedManual,
+        Follow::Done(Outcome::Failed(error)) => Status::Failed(error),
+    }
+}
+
+fn limit_status(status: Option<&Status>, silent: u32, elapsed: Duration) -> Option<Status> {
+    let step = match status {
+        Some(status) if !status.busy() => Some(Follow::Done(Outcome::Updated)),
+        Some(_) => Some(Follow::Waiting),
+        None => None,
+    };
+    match follow_limit(step.as_ref(), silent, elapsed) {
+        Some("update_silent") => Some(Status::Silent),
+        Some(_) => Some(Status::Timeout),
+        None => None,
+    }
+}
+
+fn warnings(state: &Value) -> Vec<String> {
+    state["avisos"].as_array().map(|list| list.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default()
+}
+
+fn failure_text(error: &Failure) -> String { tr(&error.detail) }
+
+fn own_servers(servers: &[ServerEntry]) -> Vec<ServerEntry> {
+    servers.iter().filter(|s| !s.disabled && !s.invite && !s.ephemeral).cloned().collect()
+}
+
+#[derive(Clone)]
+struct Machine { key: String, label: String, api: Result<Api, Failure>, local: bool }
+
+impl Machine {
+    fn from_entry(entry: &ServerEntry, local: Option<&Api>) -> Self {
+        let api = Api::new(&entry.address, &entry.token);
+        let key = api.as_ref().map(Api::identity).unwrap_or_else(|_| entry.address.clone());
+        let local = local.is_some_and(|api| api.identity() == key);
+        Self { key, label: entry.label.clone(), api, local }
+    }
+}
+
+async fn identify(machine: &Machine) -> String {
+    let result = match &machine.api {
+        Ok(api) => api.server_read(&["peers", "identificador"], &[], 15).await,
+        Err(error) => Err(error.clone()),
+    };
+    match result {
+        Ok(value) => value["identificador"].as_str().unwrap_or("").trim().to_owned(),
+        Err(error) => {
+            crate::log_line(&format!("update_all: identificador indisponível ({:?})", error.status));
+            String::new()
+        }
+    }
+}
+
+fn unique_machines(machines: Vec<Machine>, identities: &[String]) -> Vec<Machine> {
+    let local_identity = machines.iter().zip(identities).find(|(m, _)| m.local).map(|(_, id)| id.as_str()).filter(|id| !id.is_empty());
+    let mut seen = HashSet::new();
+    machines.iter().zip(identities).filter(|(machine, id)| {
+        if !machine.local && local_identity == Some(id.as_str()) { return false; }
+        id.is_empty() || seen.insert((*id).clone())
+    }).map(|(machine, _)| machine.clone()).collect()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Row { key: String, label: String, local: bool, status: Status, warnings: Vec<String> }
+
+#[derive(Default)]
+struct Progress { rows: Vec<Row>, preparing: bool, deferred_app: bool }
+
+impl Progress {
+    fn busy(&self) -> bool { self.preparing || self.rows.iter().any(|row| row.status.busy()) || self.deferred_app }
+    fn remote_busy(&self) -> bool { self.preparing || self.rows.iter().any(|row| !row.local && row.status.busy()) }
+
+    fn change(&mut self, key: &str, status: Status, warnings: Vec<String>) {
+        if let Some(row) = self.rows.iter_mut().find(|row| row.key == key) { row.status = status; row.warnings = warnings; }
+    }
+}
+
+impl Render for Progress {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().flex().flex_col().gap_3().text_sm()
+            .when(self.preparing, |el| el.child(tr_shared("update_all_checking", &[])))
+            .when(!self.preparing && self.rows.is_empty(), |el| el.child(tr("search_no_machines")))
+            .children(self.rows.iter().map(|row| {
+                let color = match row.status {
+                    Status::Failed(_) | Status::Silent | Status::Timeout => theme::danger(),
+                    Status::Held(_) | Status::Offline(_) | Status::UpdatedManual => theme::warning(),
+                    _ => theme::muted(),
+                };
+                div().id(SharedString::from(format!("update-all-{}", row.key))).flex().flex_col().gap_1().min_w_0()
+                    .child(div().font_weight(FontWeight::SEMIBOLD).whitespace_normal().child(row.label.clone()))
+                    .child(div().text_color(color).whitespace_normal().child(row.status.text()))
+                    .when_some(match &row.status {
+                        Status::Held(hold) => Some(hold.text()), Status::Offline(error) => Some(error.clone()), _ => None,
+                    }, |el, detail| el.child(div().text_color(theme::muted()).whitespace_normal().child(detail)))
+                    .when(!row.warnings.is_empty(), |el| el.child(div().text_color(theme::warning()).whitespace_normal()
+                        .child(tr_shared("update_all_warnings", &[])).children(row.warnings.clone())))
+            }))
+    }
+}
+
+pub(super) struct Batch { progress: Entity<Progress> }
+
+enum Event { Prepared(Vec<Machine>), Changed(String, Status, Vec<String>) }
+
+async fn run_machine(machine: Machine, mut publish: impl FnMut(Status, Vec<String>)) {
+    let mut previous = None;
+    let mut publish = |status: Status, warnings: Vec<String>| {
+        let value = (status, warnings);
+        if previous.as_ref() != Some(&value) { publish(value.0.clone(), value.1.clone()); previous = Some(value); }
+    };
+    publish(Status::Checking, Vec::new());
+    let api = match machine.api {
+        Ok(api) => api,
+        Err(error) => { publish(Status::Failed(failure_text(&error)), Vec::new()); return; }
+    };
+    let snapshot = match api.server_read(&["atualizacao"], &[("procurar", "1")], 120).await {
+        Ok(value) => value,
+        Err(error) => {
+            let text = failure_text(&error);
+            publish(if error.status.is_some() { Status::Failed(text) } else { Status::Offline(text) }, Vec::new());
+            return;
+        }
+    };
+    match classify(&snapshot) {
+        Classification::Current => { publish(Status::Current, Vec::new()); return; }
+        Classification::Held(hold) => { publish(Status::Held(hold), Vec::new()); return; }
+        Classification::Start => {}
+    }
+    let baseline = snapshot["estado"]["ts"].as_str();
+    let started = std::time::Instant::now();
+    publish(Status::Starting, Vec::new());
+    match api.server_post(&["atualizacao", "iniciar"], 30).await {
+        Ok(value) if value["ok"].as_bool() == Some(true) => {}
+        Ok(_) => { publish(Status::Failed(tr("invalid_response")), Vec::new()); return; }
+        Err(error) => { publish(Status::Failed(failure_text(&error)), Vec::new()); return; }
+    }
+    let (mut silent, mut latest_warnings) = (0, Vec::new());
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let status = match api.server_read(&["atualizacao"], &[], 10).await {
+            Ok(value) => {
+                silent = 0;
+                latest_warnings = warnings(&value["estado"]);
+                Some(follow_status(&value["estado"], baseline))
+            }
+            Err(error) if matches!(error.status, Some(401 | 403)) => Some(Status::Failed(failure_text(&error))),
+            Err(_) => { silent += 1; None }
+        };
+        let limit = limit_status(status.as_ref(), silent, started.elapsed());
+        let status = limit.or(status).unwrap_or(Status::Waiting);
+        let done = !status.busy();
+        publish(status, latest_warnings.clone());
+        if done { return; }
+    }
+}
+
+impl Updater {
+    pub(crate) fn set_update_all_servers(&mut self, servers: Vec<ServerEntry>, cx: &mut Context<Self>) {
+        let servers = own_servers(&servers);
+        if self.all_servers == servers { return; }
+        self.all_servers = servers;
+        cx.notify();
+    }
+
+    pub(super) fn update_all_count(&self) -> usize { self.all_servers.len() }
+
+    pub(super) fn confirm_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let all = Rc::new(Cell::new(false));
+        let selected = all.clone();
+        let this = cx.entity().downgrade();
+        let plan = self.plan();
+        let (title, description) = if matches!(plan.server, ServerStep::Update) {
+            if plan.app { (tr("app_update_confirm_title"), tr("app_update_confirm_desc")) }
+            else { (tr("app_update_confirm_server_title"), tr("app_update_confirm_server_desc")) }
+        } else { (tr_shared("update_all_title", &[]), tr("update_confirm_desc")) };
+        crate::app::chrome::confirm_alert_with(window, cx, title, description,
+            Some((tr_shared("update_all_button", &[("n", &self.update_all_count().to_string())]), all)),
+            tr("update_confirm_ok"), ButtonVariant::Primary, move |window, _| {
+                let this = this.clone();
+                let all = selected.get();
+                // O alerta fecha antes de o modal de progresso abrir.
+                window.on_next_frame(move |window, cx| { let _ = this.update(cx, |this, cx| {
+                    if this.busy() { return; }
+                    if all { this.start_all(window, cx); }
+                    else { match this.plan().server {
+                        ServerStep::Update => this.search_server(window, cx),
+                        _ => this.run_local(window, cx),
+                    } }
+                }); });
+                true
+            });
+    }
+
+    fn start_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut machines: Vec<_> = self.all_servers.iter().map(|entry| Machine::from_entry(entry, self.local.as_ref())).collect();
+        if let Some(api) = self.local.clone().filter(|api| !machines.iter().any(|m| m.key == api.identity())) {
+            machines.insert(0, Machine { key: api.identity(), label: api.identity(), api: Ok(api), local: true });
+        }
+        let progress = cx.new(|_| Progress { preparing: true, ..Progress::default() });
+        self.batch = Some(Batch { progress });
+        self.all_running = true;
+        cx.notify();
+        self.open_batch(window, cx);
+        let (tx, rx) = async_channel::unbounded();
+        self.runtime.spawn(async move {
+            let identities = futures::future::join_all(machines.iter().map(identify)).await;
+            let machines = unique_machines(machines, &identities);
+            if tx.send(Event::Prepared(machines.clone())).await.is_err() { return; }
+            futures::future::join_all(machines.into_iter().filter(|m| !m.local).map(|machine| {
+                let tx = tx.clone();
+                let key = machine.key.clone();
+                run_machine(machine, move |status, warnings| { let _ = tx.try_send(Event::Changed(key.clone(), status, warnings)); })
+            })).await;
+        });
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = rx.recv().await {
+                let _ = handle.update(cx, |_, window, cx| { let _ = this.update(cx, |this, cx| {
+                    let Some(batch) = &this.batch else { return };
+                    match event {
+                        Event::Prepared(machines) => {
+                            let local = machines.iter().any(|m| m.local);
+                            batch.progress.update(cx, |p, cx| {
+                                p.preparing = false;
+                                p.rows = machines.into_iter().map(|m| Row { key: m.key, label: m.label, local: m.local,
+                                    status: Status::Checking, warnings: Vec::new() }).collect();
+                                cx.notify();
+                            });
+                            if local { this.search_server(window, cx); }
+                            else if this.plan().app { this.install_app(window, cx); }
+                        }
+                        Event::Changed(key, status, warnings) => batch.progress.update(cx, |p, cx| { p.change(&key, status, warnings); cx.notify(); }),
+                    }
+                    this.finish_batch(window, cx);
+                }); });
+            }
+        }).detach();
+    }
+
+    pub(super) fn open_batch(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(batch) = &self.batch else { return };
+        let progress = batch.progress.clone();
+        let weak = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, _| crate::app::popup::dialog(dialog)
+            .w(window.rem_size() * 30.).title(tr_shared("update_all_title", &[])).child(progress.clone())
+            .on_close({ let weak = weak.clone(); move |_, _, cx| { let _ = weak.update(cx, |this, cx| {
+                if !this.busy() { this.batch = None; cx.notify(); }
+            }); } }));
+    }
+
+    fn finish_batch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(batch) = &self.batch else { return };
+        let install = batch.progress.update(cx, |p, cx| {
+            if p.deferred_app && !p.remote_busy() { p.deferred_app = false; cx.notify(); true } else { false }
+        });
+        self.all_running = batch.progress.read(cx).busy();
+        cx.notify();
+        if install { self.install_app(window, cx); }
+    }
+
+    pub(super) fn local_batch_status(&mut self, status: Status, cx: &mut Context<Self>) {
+        let Some(batch) = &self.batch else { return };
+        batch.progress.update(cx, |p, cx| {
+            if let Some(row) = p.rows.iter_mut().find(|r| r.local) { row.status = status; }
+            cx.notify();
+        });
+        self.all_running = batch.progress.read(cx).busy();
+        cx.notify();
+    }
+
+    pub(super) fn local_batch_snapshot(&mut self, snapshot: &Value, cx: &mut Context<Self>) {
+        let status = if self.is_channel_blocked() { Status::Held(Hold::ChannelDraft) } else { match classify(snapshot) {
+            Classification::Current => Status::Current,
+            Classification::Held(hold) => Status::Held(hold),
+            Classification::Start => Status::Starting,
+        } };
+        self.local_batch_status(status, cx);
+    }
+
+    pub(super) fn batch_plan(&self) -> Plan {
+        let current = self.plan();
+        // A oferta do app não pode impedir a atualização elegível de um servidor do lote.
+        let server = if self.is_channel_blocked() { ServerStep::Held(Hold::ChannelDraft) }
+            else { plan(None, self.server.as_ref(), self.server_api).server };
+        Plan { server, app: current.app }
+    }
+
+    pub(super) fn local_batch_read(&mut self, read: &Result<Value, Failure>, baseline: Option<&str>, cx: &mut Context<Self>) {
+        let Some(batch) = &self.batch else { return };
+        batch.progress.update(cx, |p, cx| {
+            if let Some(row) = p.rows.iter_mut().find(|r| r.local) {
+                row.status = read.as_ref().map(|v| follow_status(&v["estado"], baseline)).unwrap_or(Status::Waiting);
+                if let Ok(value) = read { row.warnings = warnings(&value["estado"]); }
+            }
+            cx.notify();
+        });
+        self.all_running = batch.progress.read(cx).busy();
+        cx.notify();
+    }
+
+    pub(super) fn defer_batch_app(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(batch) = &self.batch else { return false };
+        if !batch.progress.read(cx).remote_busy() { return false; }
+        batch.progress.update(cx, |p, cx| { p.deferred_app = true; cx.notify(); });
+        self.run = Run::Idle;
+        self.all_running = true;
+        cx.notify();
+        true
+    }
+
+    pub(super) fn render_batch_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        Button::new("topbar-update-all").ghost().small().label(tr_shared("update_all_title", &[]))
+            .icon(IconName::Download).on_click(cx.listener(|this, _, window, cx| this.open_batch(window, cx)))
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+    use serde_json::json;
+
+    #[test]
+    fn update_all_shared_fixture_matches_classification_and_follow() {
+        let fixture: Value = serde_json::from_str(include_str!("../../../packages/core/src/updateAll.fixtures.json")).unwrap();
+        for case in fixture["classify"].as_array().unwrap() {
+            let actual = match classify(&case["estado_get"]) {
+                Classification::Start => "iniciar",
+                Classification::Current => "em_dia",
+                Classification::Held(Hold::WorkBranch(..)) => "travado:branch",
+                Classification::Held(Hold::LocalChanges) => "travado:mudancas",
+                Classification::Held(Hold::Running) => "travado:rodando",
+                Classification::Held(Hold::Missing(_)) => "travado:falta",
+                Classification::Held(Hold::ChannelDraft) => panic!("o canal local não participa do pré-voo remoto"),
+            };
+            assert_eq!(actual, case["esperado"].as_str().unwrap(), "{}", case["nome"]);
+        }
+        for case in fixture["follow"].as_array().unwrap() {
+            let actual = match follow_status(&case["estado"], case["base_ts"].as_str()) {
+                Status::Running { .. } => "rodando", Status::Waiting => "esperando",
+                Status::Updated => "atualizado", Status::UpdatedManual => "atualizado_manual", Status::Failed(_) => "falhou",
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(actual, case["esperado"].as_str().unwrap(), "{}", case["nome"]);
+        }
+    }
+
+    fn entry(id: &str) -> ServerEntry {
+        ServerEntry { id: id.into(), label: id.into(), address: format!("http://{id}:8765"), token: "synthetic-token".into(), ..ServerEntry::default() }
+    }
+
+    #[test]
+    fn update_all_filters_entries_and_requires_two_before_identity_lookup() {
+        let mut invite = entry("invite"); invite.invite = true;
+        let mut ephemeral = entry("ephemeral"); ephemeral.ephemeral = true;
+        let mut disabled = entry("disabled"); disabled.disabled = true;
+        let list = own_servers(&[entry("local"), invite, ephemeral, disabled]);
+        assert_eq!(list.len(), 1);
+        assert_eq!(own_servers(&[entry("local"), entry("remote")]).len(), 2);
+    }
+
+    #[test]
+    fn update_all_deduplicates_identities_preferring_local_and_keeps_unknowns() {
+        let machine = |name: &str, local| { let mut m = Machine::from_entry(&entry(name), None); m.local = local; m };
+        let machines = vec![machine("alias", false), machine("local", true), machine("remote", false),
+            machine("remote-alias", false), machine("unknown-a", false), machine("unknown-b", false)];
+        let ids = ["local", "local", "remote", "remote", "", ""].map(str::to_owned);
+        let list = unique_machines(machines, &ids);
+        assert_eq!(list.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(), ["local", "remote", "unknown-a", "unknown-b"]);
+    }
+
+    #[test]
+    fn update_all_limits_waiting_without_discarding_a_finished_result() {
+        assert_eq!(limit_status(None, SILENT_READS - 1, Duration::ZERO), None);
+        assert_eq!(limit_status(None, SILENT_READS, Duration::ZERO), Some(Status::Silent));
+        let running = Status::Running { step: 8, total: 9, text: "fixture-step".into() };
+        assert_eq!(limit_status(Some(&running), 0, Duration::from_secs(700)), None);
+        assert_eq!(limit_status(Some(&running), 0, FOLLOW_CEILING), Some(Status::Timeout));
+        assert_eq!(limit_status(Some(&Status::Waiting), 0, FOLLOW_CEILING), Some(Status::Timeout));
+        assert_eq!(limit_status(Some(&Status::Updated), SILENT_READS, FOLLOW_CEILING), None);
+        assert_eq!(follow_status(&json!({"fase":"pronto", "ok":true, "ts":"old"}), Some("old")), Status::Waiting);
+    }
+
+    #[test]
+    fn update_all_local_app_waits_for_remote_outcomes() {
+        let mut p = Progress { preparing: false, deferred_app: true, rows: vec![
+            Row { key: "local".into(), label: "local".into(), local: true, status: Status::Updated, warnings: vec![] },
+            Row { key: "remote".into(), label: "remote".into(), local: false, status: Status::Waiting, warnings: vec![] },
+        ] };
+        assert!(p.remote_busy() && p.busy());
+        p.change("remote", Status::Failed("fixture-error".into()), vec!["fixture-warning".into()]);
+        assert!(!p.remote_busy());
+        assert!(p.busy(), "o app local ainda aguarda a troca");
+        p.deferred_app = false;
+        assert!(!p.busy());
+        assert_eq!(p.rows[1].warnings, ["fixture-warning"]);
+    }
+
+    #[test]
+    fn update_all_labels_are_shared_in_both_languages() {
+        for source in [include_str!("../../../messages/pt.json"), include_str!("../../../messages/en.json")] {
+            let dict: Value = serde_json::from_str(source).unwrap();
+            for key in ["button", "title", "checking", "starting", "running", "waiting", "up_to_date", "held_branch",
+                "held_changes", "held_running", "held_missing", "offline", "updated", "updated_manual", "failed", "silent", "timeout", "warnings"] {
+                assert!(dict[format!("update_all_{key}")].as_str().is_some(), "{key}");
+            }
+        }
+        crate::i18n::english_in_this_thread(false);
+        assert_eq!(Status::Running { step: 2, total: 9, text: "fixture-step".into() }.text(), "fixture-step (2/9)");
+        assert_eq!(Status::Failed("fixture-error".into()).text(), "Falhou: fixture-error");
+        assert!(!Status::Silent.text().contains("update_all_"));
+        assert!(!Status::Timeout.text().contains("update_all_"));
+    }
+
+    fn mock(responses: Vec<(&'static str, u16, Value)>) -> (Machine, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let machine = Machine { key: address.clone(), label: address.clone(), local: false, api: Api::new(&address, "synthetic-token") };
+        let thread = std::thread::spawn(move || {
+            for (path, status, body) in responses {
+                loop {
+                    let start = std::time::Instant::now();
+                    let mut socket = loop {
+                        match listener.accept() {
+                            Ok((socket, _)) => break socket,
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && start.elapsed() < Duration::from_secs(15) =>
+                                std::thread::sleep(Duration::from_millis(5)),
+                            Err(error) => panic!("requisição ausente: {error}"),
+                        }
+                    };
+                    socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    let mut request = Vec::new();
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let mut bytes = [0; 1024];
+                        let read = socket.read(&mut bytes).unwrap();
+                        assert!(read > 0);
+                        request.extend_from_slice(&bytes[..read]);
+                    }
+                    let request = String::from_utf8(request).unwrap();
+                    // Sondas locais de porta não fazem parte da sequência do motor.
+                    if request.starts_with("HEAD / ") {
+                        write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                        continue;
+                    }
+                    assert!(request.starts_with(path), "{}", request.lines().next().unwrap());
+                    assert!(request.to_lowercase().contains("authorization: bearer synthetic-token"));
+                    let body = body.to_string();
+                    write!(socket, "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                    break;
+                }
+            }
+        });
+        (machine, thread)
+    }
+
+    #[test]
+    fn update_all_executor_keeps_warnings_and_ignores_old_result_and_pid() {
+        let (machine, server) = mock(vec![
+            ("GET /api/atualizacao?procurar=1 ", 200, json!({"atualizacao_disponivel": true, "estado":{"ts":"old"}})),
+            ("POST /api/atualizacao/iniciar ", 200, json!({"ok":true,"pid":123})),
+            ("GET /api/atualizacao ", 200, json!({"estado":{"fase":"pronto","ok":true,"ts":"old"}})),
+            ("GET /api/atualizacao ", 200, json!({"estado":{"fase":"rodando","passo":3,"total":9,"texto":"fixture-step"}})),
+            ("GET /api/atualizacao ", 200, json!({"estado":{"fase":"pronto","ok":true,"ts":"new","pid":999,"reiniciar_manual":true,"avisos":["fixture-warning"]}})),
+        ]);
+        let mut states = Vec::new();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(20), run_machine(machine, |status, warnings| states.push((status, warnings)))).await
+        });
+        server.join().unwrap();
+        result.expect("o acompanhamento simulado deve terminar em 20 segundos");
+        assert!(states.iter().any(|(s, _)| *s == Status::Waiting));
+        assert!(states.iter().any(|(s, _)| matches!(s, Status::Running { step:3, total:9, .. })));
+        assert_eq!(states.last(), Some(&(Status::UpdatedManual, vec!["fixture-warning".into()])));
+    }
+
+    #[test]
+    fn update_all_executor_failure_does_not_stop_another_machine() {
+        let (failed, first) = mock(vec![("GET /api/atualizacao?procurar=1 ", 503, json!({"detail":"fixture-failure"}))]);
+        let (ready, second) = mock(vec![("GET /api/atualizacao?procurar=1 ", 200, json!({"atualizacao_disponivel":false}))]);
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            tokio::join!(run_machine(failed, |s, _| a.push(s)), run_machine(ready, |s, _| b.push(s)));
+        });
+        first.join().unwrap(); second.join().unwrap();
+        assert!(matches!(a.last(), Some(Status::Failed(error)) if error.contains("fixture-failure")));
+        assert_eq!(b.last(), Some(&Status::Current));
+    }
+
+    #[test]
+    fn update_all_review_follow_auth_failure_finishes_immediately() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for status in [401, 403] {
+            let (machine, server) = mock(vec![
+                ("GET /api/atualizacao?procurar=1 ", 200, json!({"atualizacao_disponivel":true,"estado":{"ts":"old"}})),
+                ("POST /api/atualizacao/iniciar ", 200, json!({"ok":true,"pid":123})),
+                ("GET /api/atualizacao ", status, json!({"detail":"fixture-auth-error"})),
+            ]);
+            let mut states = Vec::new();
+            let result = runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(8), run_machine(machine, |s, _| states.push(s))).await
+            });
+            server.join().unwrap();
+            result.expect("a recusa de autenticação deve encerrar na primeira leitura");
+            assert!(matches!(states.last(), Some(Status::Failed(error)) if error.contains("fixture-auth-error")), "{states:?}");
+            assert_eq!(states.len(), 3, "consulta, início e falha, sem esperar outra leitura");
+        }
+    }
+
+    #[test]
+    fn update_all_review_idle_button_names_all_machines_without_a_local_offer() {
+        crate::i18n::english_in_this_thread(false);
+        let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None, offer: None,
+            local: None, server: None, server_api: None, server_seq: 0, active: None, active_state: None, active_api: None, active_seq: 0,
+            run: Run::Idle, checking: false, checked: None, checked_channel: None, known_channel: None, channel_blocked: None,
+            suspended: false, intent_lock: None, all_servers: vec![entry("local"), entry("remote")], batch: None, all_running: false };
+        assert!(!updater.plan().visible());
+        assert_eq!(updater.idle_texts(&updater.plan()), ("Atualizar todas as máquinas (2)".into(), "Atualizar todas as máquinas".into()));
+        updater.all_servers.push(entry("other"));
+        assert_eq!(updater.idle_texts(&updater.plan()).0, "Atualizar todas as máquinas (3)");
+    }
+}

@@ -1977,27 +1977,40 @@ def test_merge_que_muda_o_contrato_conta_pelo_primeiro_pai(repo, rust):
 
 
 
-def test_motor_morto_pelo_proprio_reinicio_conclui_quando_o_servidor_e_o_novo(repo):
+@pytest.mark.parametrize("marker", [None, '{"sem_build": true}', '{"version": "0.1.0.1"}'])
+@pytest.mark.parametrize("stage", ["reiniciar", "nativo"])
+def test_motor_morto_pelo_proprio_reinicio_conclui_quando_o_servidor_e_o_novo(repo, stage, marker, tmp_path, monkeypatch):
     """Sem escopo próprio do systemd (o gerenciador do usuário recusa unidade transiente), o motor
     nasce no cgroup do backend e o restart que ele dispara o mata antes de gravar "pronto". Quem
     responde depois é o backend novo, com o disco no commit da atualização: isso é sucesso."""
     import os as _os
+    home = tmp_path / "home"
+    monkeypatch.setattr(atualizar.Path, "home", lambda: home)
+    if marker:
+        (home / ".hangar" / "native").mkdir(parents=True)
+        (home / ".hangar" / "native" / "release.json").write_text(marker, encoding="utf-8")
     head = atualizar._git("rev-parse", "HEAD").stdout.strip()
-    atualizar._escrever(fase="rodando", etapa="reiniciar", passo=5, total=5, pid=_pid_morto(),
-                        backend_pid=_os.getpid() + 1, commit_para=head)
+    atualizar._escrever(fase="rodando", etapa=stage, passo=5, total=6, pid=_pid_morto(),
+                        backend_pid=_os.getpid() + 1, commit_para=head, avisos=["aviso anterior"])
     d = atualizar.estado_para_tela()
     assert (d["fase"], d["ok"]) == ("pronto", True)
+    native_warning = ([] if marker is None or "sem_build" in marker else [
+        "app nativo nao atualizou: a atualizacao foi concluida pelo servidor novo" if stage == "reiniciar"
+        else "app nativo nao atualizou: o processo que o atualizava nao existe mais"])
+    assert d["avisos"] == ["aviso anterior", *native_warning]
+    assert atualizar.estado_para_tela()["avisos"] == d["avisos"]
 
 
-def test_motor_morto_no_reinicio_sem_servidor_novo_ou_commit_novo_e_falha(repo):
+@pytest.mark.parametrize("stage", ["reiniciar", "nativo"])
+def test_motor_morto_no_reinicio_sem_servidor_novo_ou_commit_novo_e_falha(repo, stage):
     import os as _os
     head = atualizar._git("rev-parse", "HEAD").stdout.strip()
     # O backend que responde é o mesmo de antes: o restart não aconteceu.
-    atualizar._escrever(fase="rodando", etapa="reiniciar", passo=5, total=5, pid=_pid_morto(),
+    atualizar._escrever(fase="rodando", etapa=stage, passo=5, total=6, pid=_pid_morto(),
                         backend_pid=_os.getpid(), commit_para=head)
     assert atualizar.estado_para_tela()["ok"] is False
     # Servidor novo, mas o disco não está no commit da atualização.
-    atualizar._escrever(fase="rodando", etapa="reiniciar", passo=5, total=5, pid=_pid_morto(),
+    atualizar._escrever(fase="rodando", etapa=stage, passo=5, total=6, pid=_pid_morto(),
                         backend_pid=_os.getpid() + 1, commit_para="0" * 40, ok=None, erro=None)
     assert atualizar.estado_para_tela()["ok"] is False
 
@@ -2016,3 +2029,175 @@ def test_motor_rodado_a_mao_nao_herda_o_backend_de_outra_rodada(monkeypatch):
     assert atualizar._launching_backend() is None
     monkeypatch.setenv(atualizar._BACKEND_PID_ENV, "4321")
     assert atualizar._launching_backend() == 4321
+
+
+@pytest.fixture
+def native_machine(repo, tmp_path, monkeypatch):
+    import io
+    import urllib.request
+
+    home = tmp_path / "home"
+    monkeypatch.setattr(atualizar.Path, "home", lambda: home)
+    marker = home / ".hangar" / "native" / "release.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text('{"version": "0.1.0.1"}', encoding="utf-8")
+    monkeypatch.setenv("HANGAR_NATIVE_UPDATE_URL", "https://native.example/release")
+    monkeypatch.setattr(atualizar.config.settings, "auth_token", "local-owner")
+    data = {"marker": marker, "manifest": {"version": "0.1.0.2", "requires_api": 2},
+            "api": {"api": 2}, "requests": [], "commands": [], "events": [], "failure": None}
+
+    def urlopen(request, **kwargs):
+        url = request.full_url if isinstance(request, urllib.request.Request) else request
+        data["requests"].append(url)
+        if url.startswith("http://127.0.0.1:"):
+            assert url == "http://127.0.0.1:9876/api/client-api"
+            assert request.get_header("Authorization") == "Bearer local-owner"
+            payload = data["api"]
+        else:
+            assert url == "https://native.example/release/native-latest.json"
+            payload = data["manifest"]
+        if isinstance(payload, Exception):
+            raise payload
+        return io.BytesIO(payload if isinstance(payload, bytes) else json.dumps(payload).encode())
+
+    real_run = atualizar._rodar
+    def run(args, **kwargs):
+        if args[0] == "git":
+            return real_run(args, **kwargs)
+        data["commands"].append((args, kwargs))
+        data["events"].append("nativo")
+        if data["failure"] == "timeout":
+            raise subprocess.TimeoutExpired(args, 900)
+        if data["failure"] == "launch":
+            raise OSError("powershell ausente")
+        if data["failure"] == "unexpected":
+            raise RuntimeError("fixture-unexpected")
+        if data["failure"] == "exit":
+            return subprocess.CompletedProcess(args, 1, "##HANGAR-FALHA## arquivo preso\nfim", "")
+        return subprocess.CompletedProcess(args, 0, "instalado", "")
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(atualizar, "_rodar", run)
+    return data
+
+
+@pytest.mark.parametrize("marker", [None, '{"sem_build": true}', '[]', '{quebrado'])
+def test_native_install_requires_installed_marker(repo, native_machine, marker):
+    path = native_machine["marker"]
+    if marker is None:
+        path.unlink()
+    else:
+        path.write_text(marker, encoding="utf-8")
+    atualizar._instalar_nativo("main", 9876)
+    assert native_machine["commands"] == [] and native_machine["requests"] == []
+    assert not atualizar.estado().get("avisos")
+
+
+def test_native_install_skips_beta(repo, native_machine):
+    atualizar._instalar_nativo("beta", 9876)
+    assert native_machine["commands"] == [] and native_machine["requests"] == []
+    assert not atualizar.estado().get("avisos")
+
+
+@pytest.mark.parametrize("windows", [False, True])
+@pytest.mark.parametrize("required,api", [(2, 2), (2, 3), (None, 1)])
+def test_native_install_uses_platform_command_with_compatible_api(repo, native_machine, monkeypatch,
+                                                                windows, required, api):
+    monkeypatch.setattr(atualizar, "_E_WINDOWS", windows)
+    if required is None:
+        native_machine["manifest"].pop("requires_api")
+    else:
+        native_machine["manifest"]["requires_api"] = required
+    native_machine["api"] = {"api": api}
+    atualizar._instalar_nativo("main", 9876)
+    expected = (["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                 str(repo / "scripts" / "install-native.ps1")] if windows
+                else [str(repo / "scripts" / "install-native.sh")])
+    assert native_machine["commands"] == [(expected, {"cwd": repo, "timeout": 900})]
+    assert not atualizar.estado().get("avisos")
+
+
+@pytest.mark.parametrize("api", [1, None, "2", True, 0])
+def test_native_install_skips_incompatible_or_unknown_api(repo, native_machine, monkeypatch, api):
+    native_machine["api"] = {"api": api}
+    records = []
+    monkeypatch.setattr(atualizar.diag, "registrar", lambda *args, **kw: records.append((args, kw)))
+    atualizar._instalar_nativo("main", 9876)
+    assert native_machine["commands"] == [] and records
+    assert not atualizar.estado().get("avisos")
+
+
+@pytest.mark.parametrize("source", ["api", "manifest"])
+@pytest.mark.parametrize("failure", ["503", "unreadable", "not-object"])
+def test_native_install_unreadable_contract_only_records_diary(repo, native_machine, monkeypatch,
+                                                              source, failure):
+    import urllib.error
+    native_machine[source] = (urllib.error.HTTPError("http://local", 503, "indisponivel", {}, None)
+                              if failure == "503" else b"{quebrado" if failure == "unreadable" else [])
+    records = []
+    monkeypatch.setattr(atualizar.diag, "registrar", lambda *args, **kw: records.append((args, kw)))
+    atualizar._instalar_nativo("main", 9876)
+    assert native_machine["commands"] == [] and records
+    assert not atualizar.estado().get("avisos")
+
+
+@pytest.mark.parametrize("required", [None, "2", True, 0])
+def test_native_install_rejects_invalid_required_api(repo, native_machine, required):
+    native_machine["manifest"]["requires_api"] = required
+    atualizar._instalar_nativo("main", 9876)
+    assert native_machine["commands"] == [] and not atualizar.estado().get("avisos")
+
+
+def test_native_install_old_server_404_means_api_one(repo, native_machine):
+    import urllib.error
+    native_machine["manifest"].pop("requires_api")
+    native_machine["api"] = urllib.error.HTTPError("http://local", 404, "antigo", {}, None)
+    atualizar._instalar_nativo("main", 9876)
+    assert len(native_machine["commands"]) == 1
+
+
+@pytest.mark.parametrize("topology", ["systemd", "windows", "manual"])
+@pytest.mark.parametrize("failure", [None, "exit", "timeout", "launch", "unexpected"])
+def test_native_install_after_restart_keeps_update_success(repo, native_machine, monkeypatch,
+                                                          topology, failure):
+    data = native_machine
+    data["failure"] = failure
+    monkeypatch.setattr(atualizar, "_E_WINDOWS", topology == "windows")
+    monkeypatch.setattr(atualizar, "checar", lambda: {"pode": True, "branch": "main", "alvo": "main",
+                                                     "commit": _rev(repo, "HEAD"), "topologia": topology})
+    monkeypatch.setattr(atualizar, "resguardar", lambda pre: None)
+    monkeypatch.setattr(atualizar, "_puxar", lambda pre: None)
+    monkeypatch.setattr(atualizar, "_shell_mudou", lambda *args: False)
+    monkeypatch.setattr(atualizar, "_aplicar_passos", lambda: None)
+    monkeypatch.setattr(atualizar, "_preparar", lambda *args, **kwargs: None)
+    def restart(*args):
+        data["events"].append("reiniciar")
+        if topology == "manual":
+            atualizar._escrever(reiniciar_manual=True)
+    monkeypatch.setattr(atualizar, "_reiniciar", restart)
+    monkeypatch.setattr(atualizar, "_subiu", lambda *args: data["events"].append("http") or True)
+    pids = iter([100, 200])
+    monkeypatch.setattr(atualizar, "_pid_do_servidor",
+                        lambda *args: data["events"].append("pid") or next(pids))
+    def clean_dist():
+        assert atualizar.estado()["etapa"] == "nativo"
+        data["events"].append("limpar_dist")
+    monkeypatch.setattr(atualizar, "_dist_velho_apagar", clean_dist)
+    final = atualizar.executar(9876)
+    assert final["fase"] == "pronto" and final["ok"] is True and final["erro"] is None
+    assert final["etapa"] == "nativo" and (final["passo"], final["total"]) == (6, 6)
+    assert final["reiniciar_manual"] is (topology == "manual")
+    expected = (["pid", "reiniciar"] if topology == "manual"
+                else ["pid", "reiniciar", "http", "pid"])
+    assert data["events"] == expected + ["nativo", "limpar_dist"]
+    assert len(final["avisos"]) == (1 if failure else 0)
+    if failure:
+        assert final["avisos"][0].startswith("app nativo nao atualizou: ")
+        if failure == "exit":
+            assert final["avisos"] == ["app nativo nao atualizou: arquivo preso"]
+        elif failure == "timeout":
+            assert "900" in final["avisos"][0]
+        elif failure == "unexpected":
+            assert final["avisos"] == ["app nativo nao atualizou: fixture-unexpected"]
+        else:
+            assert "powershell ausente" in final["avisos"][0]

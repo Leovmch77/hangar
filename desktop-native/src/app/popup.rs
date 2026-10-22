@@ -216,7 +216,7 @@ pub(super) fn install_kit_surface(cx: &mut App) {
 }
 
 /// O mesmo cartão para confirmações e formulários; o kit continua cuidando do foco, da altura e da rolagem.
-pub(super) fn dialog(surface: Dialog) -> Dialog {
+pub(crate) fn dialog(surface: Dialog) -> Dialog {
     let surface = surface.p(px(20.)).rounded(px(16.)).bg(theme::popup_fill(theme::raised()))
         .border_color(theme::glass_border());
     if appearance::get().surface_material == appearance::SurfaceMaterial::Glass {
