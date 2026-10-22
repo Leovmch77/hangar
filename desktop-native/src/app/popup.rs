@@ -117,8 +117,12 @@ impl Hangar {
         let live = self.floating();
         let still = cx.reduce_motion();
         let presence = window.use_keyed_state("composer-popup", cx, |_, _| Presence::<Floating>::default());
-        let enter = if matches!(live, Some(Floating::Usage)) { motion::CARD_OPEN } else { motion::MENU_IN };
-        let (shown, visible, leaving) = presence.update(cx, |presence, _| { presence.enter = enter; presence.frame(live, still) })?;
+        // Só quem abre escolhe o ritmo: trocar no fechamento faria a saída partir de outro ponto.
+        let enter = live.as_ref().map(|f| if matches!(f, Floating::Usage) { motion::CARD_OPEN } else { motion::MENU_IN });
+        let (shown, visible, leaving) = presence.update(cx, |presence, _| {
+            if let Some(enter) = enter { presence.enter = enter; }
+            presence.frame(live, still)
+        })?;
         let card = matches!(shown, Floating::Usage);
         // As barras do cartão sobem depois que ele já apareceu: os quadros seguem até elas chegarem.
         let filling = card && !still && self.accounts.card_since.is_some_and(|at| at.elapsed() < motion::BAR_FILL.total());

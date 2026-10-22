@@ -27,9 +27,14 @@ impl Hangar {
         self.avatar_slot(panes::Area::Bottom, format!("linked-{place}-{}", target.id()), sidebar::session_look(session), size)
     }
 
-    /// Os membros do grupo da conversa aberta que estão numa máquina conectada aqui, por nome; nada sem grupo de dois.
-    fn open_group(&self) -> Option<(Target, Vec<(Target, &SessionInfo)>)> {
-        let current = Target::new(&self.open_server(), &self.selected.as_ref()?.name);
+    /// Os membros do grupo da conversa aberta que abrem daqui, por nome, e os que não abrem (máquina sem conexão aqui,
+    /// par de fora) como texto; nada sem grupo de dois.
+    fn open_group(&self) -> Option<(Target, Vec<(Target, &SessionInfo)>, Vec<String>)> {
+        let open = self.selected.as_ref()?;
+        // Sem grupo nada a montar: a conta abaixo roda a cada desenho da área do campo.
+        if open.pair_gid.as_deref().is_none_or(str::is_empty) && open.peers().is_empty() { return None; }
+        // shortcut: refeito a cada desenho com grupo; lista curta. Memoizar como `tab_groups` se pesar.
+        let current = Target::new(&self.open_server(), &open.name);
         let mut machines = self.group_machines();
         if !machines.contains(&current.server) { machines.push(current.server.clone()); }
         let rows: Vec<Row> = machines.iter().flat_map(|key| self.sessions_of(key).iter().map(move |s| Row { server: key, session: s, invite: false })).collect();
@@ -39,14 +44,19 @@ impl Hangar {
             Member::Here { server, name } => self.sessions_of(server).iter().find(|s| s.name == *name).map(|s| (Target::new(server, name), s)),
             _ => None,
         }).collect();
-        if members.len() < 2 { return None; }
+        let away: Vec<String> = group.members.iter().filter_map(|m| match m {
+            Member::Missing { server_id, name } => Some(format!("{server_id}::{name}")),
+            Member::Outside { alias, session } => Some(format!("{alias}::{session}")),
+            Member::Here { .. } => None,
+        }).collect();
+        if members.len() + away.len() < 2 { return None; }
         members.sort_by(|a, b| a.1.name.cmp(&b.1.name).then_with(|| a.0.server.cmp(&b.0.server)));
-        Some((current, members))
+        Some((current, members, away))
     }
 
     /// O grupo da conversa aberta; sem grupo, nada.
     pub(super) fn render_linked_children(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (current, members) = self.open_group()?;
+        let (current, members, away) = self.open_group()?;
         // Nome de outra máquina leva a máquina, como na lista do grupo.
         let names: Vec<String> = members.iter().map(|(t, _)| if t.server == current.server { t.name.clone() }
             else { format!("{}::{}", self.machine_label(&t.server, cx), t.name) }).collect();
@@ -65,9 +75,9 @@ impl Hangar {
         // A coluna do vínculo só ocupa lugar quando algum membro mostrado tem um.
         let show_relation = others.iter().any(|&i| !relations[i].is_empty());
         let expanded = self.linked_children_open.contains(&current);
-        let total = members.len().to_string();
+        let total = (members.len() + away.len()).to_string();
         let title = tr_shared("native_group_panel_title", &[("count", &total)]);
-        let working = members.iter().filter(|(_, s)| sidebar::working(s)).count();
+        let working = others.iter().filter(|&&i| sidebar::working(members[i].1)).count();
         let busy = (working > 0).then(|| tr_shared("native_group_panel_working", &[("count", &working.to_string())]));
 
         let focus = window.use_keyed_state("linked-children-header-focus", cx, |_, cx| cx.focus_handle().tab_stop(true)).read(cx).clone();
@@ -96,7 +106,10 @@ impl Hangar {
                         .cursor_pointer().hover(|el| el.bg(theme::accent_dim()))
                         .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.open_target(&pick, window, cx); }))
                         .child(self.linked_avatar("chip", t, s, 14.)).child(names[i].clone())
-                })))
+                }))
+                // Membro que não abre daqui: só o nome, apagado e sem clique.
+                .children(away.iter().map(|name| div().flex_shrink_0().px(px(7.)).rounded(px(5.)).border_1().border_color(theme::border())
+                    .font_family(theme::SANS).text_size(px(12.5)).text_color(theme::faint()).child(name.clone()))))
             .children(busy.map(|b| div().flex_shrink_0().whitespace_nowrap().text_color(theme::muted()).child(b)));
 
         let list = expanded.then(|| {

@@ -20,7 +20,7 @@ impl Hangar {
         let open = !self.accounts.card || self.accounts.card_top;
         self.close_popups();
         (self.accounts.card, self.accounts.card_top) = (open, false);
-        self.accounts.card_since = open.then(Instant::now);
+        if open { self.accounts.card_since = Some(Instant::now()); }
         if open { self.load_session_accounts(cx); }
         cx.notify();
     }
@@ -72,7 +72,7 @@ impl Hangar {
         let open = !(self.accounts.card && self.accounts.card_top);
         self.close_popups();
         (self.accounts.card, self.accounts.card_top) = (open, open);
-        self.accounts.card_since = open.then(Instant::now);
+        if open { self.accounts.card_since = Some(Instant::now()); }
         if open { self.load_session_accounts(cx); }
         cx.notify();
     }
