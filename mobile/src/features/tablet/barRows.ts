@@ -61,8 +61,10 @@ export function barRows(rows: AggSession[], identities: ReadonlyMap<string, stri
   });
   if (order.tabsWorkingFirst || order.tabsRecentFirst) {
     const section = (item: BarItem) => item.kind === 'group' ? 0 : isWorking(item.session) ? 1 : 2;
-    const recency = (item: BarItem) => order.tabsRecentFirst && item.kind === 'single' && section(item) === 2
-      ? Math.max(0, item.session.last_reply_at ?? 0) : 0;
+    const recency = (item: BarItem) => {
+      const at = order.tabsRecentFirst && item.kind === 'single' && section(item) === 2 ? item.session.last_reply_at ?? 0 : 0;
+      return Number.isFinite(at) ? Math.max(0, at) : 0;
+    };
     return items.sort((a, b) => section(a) - section(b) || recency(b) - recency(a));
   }
   return groupsFirst ? items.sort((a, b) => Number(b.kind === 'group') - Number(a.kind === 'group')) : items;

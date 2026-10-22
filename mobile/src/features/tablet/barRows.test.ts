@@ -8,6 +8,39 @@ const session = (name: string, serverId = 'nb', extra: Partial<AggSession> = {})
 const identities = new Map([['nb', 'notebook'], ['vm', 'casa']]);
 
 describe('barRows', () => {
+  describe.each([true, false])('ordem do desktop com groupsFirst=%s', groupsFirst => {
+    it.each([
+      { order: { tabsWorkingFirst: true }, tail: ['b-ativa', 'c-ativa', 'a-pergunta', 'd-antiga', 'e-recente'] },
+      { order: { tabsRecentFirst: true }, tail: ['b-ativa', 'c-ativa', 'e-recente', 'a-pergunta', 'd-antiga'] },
+      { order: { tabsWorkingFirst: true, tabsRecentFirst: true }, tail: ['b-ativa', 'c-ativa', 'e-recente', 'a-pergunta', 'd-antiga'] },
+    ])('mantém todos os grupos no topo com $order', ({ order, tail }) => {
+      const rows = [
+        session('a-pergunta', 'nb', { state: 'awaiting_input', last_reply_at: 3 }),
+        session('b-ativa', 'nb', { state: 'working', last_reply_at: 1 }),
+        session('c-ativa', 'nb', { state: 'working', last_reply_at: 100 }),
+        session('d-antiga', 'nb', { last_reply_at: 1 }),
+        session('e-recente', 'nb', { last_reply_at: 50 }),
+        session('f-par', 'nb', { pair_gid: 'par', last_reply_at: 1000 }),
+        session('g-par', 'nb', { pair_gid: 'par' }),
+        session('h-mae', 'nb', { pair_gid: 'ligadas' }),
+        session('i-filha', 'nb', { pair_gid: 'ligadas', linked_by: 'h-mae', last_reply_at: 2000 }),
+        session('j-orq', 'nb', { pair_gid: 'orq', provider: 'orq' }),
+        session('k-executor', 'nb', { pair_gid: 'orq' }),
+      ];
+      expect(barRows(rows, identities, groupsFirst, order).map(item => item.kind === 'group'
+        ? item.members.map(s => s.name) : item.session.name)).toEqual([
+        ['f-par', 'g-par'], ['h-mae', 'i-filha'], ['j-orq', 'k-executor'], ...tail,
+      ]);
+    });
+  });
+
+  it.each([NaN, Infinity, -Infinity])('trata last_reply_at=%s como zero na ordem por data', last_reply_at => {
+    const rows = [session('a-invalida', 'nb', { last_reply_at }), session('b-sem-data'),
+      session('c-recente', 'nb', { last_reply_at: 30 })];
+    expect(barRows(rows, identities, true, { tabsRecentFirst: true }).map(item => item.kind === 'single' && item.session.name))
+      .toEqual(['c-recente', 'a-invalida', 'b-sem-data']);
+  });
+
   it.each([true, false])('separa grupos, trabalhando e paradas com gruposFirst=%s e ignora limite de uso', groupsFirst => {
     const waiting = session('pergunta', 'nb', { state: 'awaiting_input' });
     const limited = session('limite', 'nb', { state: 'working', limited: true });

@@ -12,9 +12,13 @@ const state = vi.hoisted(() => ({ statusLine: null as string | null, stateEvent:
 const servers = vi.hoisted(() => ({ ready: true, servers: [
   { id: 'srv', label: 'Casa', baseUrl: 'https://casa.test', token: 'test' },
 ] as Server[] }));
-vi.mock('../pair/identities', () => ({ useIdentities: () => ({ identities: new Map([['srv', 'casa'], ['remote', 'escritorio']]) }) }));
+const groupHooks = vi.hoisted(() => ({ servers: vi.fn(), identities: vi.fn() }));
+vi.mock('../pair/identities', () => ({ useIdentities: () => {
+  groupHooks.identities();
+  return { identities: new Map([['srv', 'casa'], ['remote', 'escritorio']]) };
+} }));
 vi.mock('../../stores/servers', () => ({
-  useServers: (select: (s: typeof servers) => unknown) => select(servers),
+  useServers: (select: (s: typeof servers) => unknown) => { groupHooks.servers(); return select(servers); },
 }));
 vi.mock('../../ui/Glass', () => ({ Glass: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 vi.mock('../files/FilesPanel', () => ({ FilesPanel: ({ name }: { name: string }) => createElement('div', null, `files-${name}`) }));
@@ -39,6 +43,8 @@ beforeEach(() => {
   state.rows = [];
   servers.ready = true;
   servers.servers = [{ id: 'srv', label: 'Casa', baseUrl: 'https://casa.test', token: 'test' }];
+  groupHooks.servers.mockClear();
+  groupHooks.identities.mockClear();
   container = document.createElement('div');
   root = createRoot(container);
 });
@@ -98,6 +104,33 @@ describe('ContextPanel', () => {
   });
 });
 describe('ContextTab', () => {
+  it('sem navegação mostra os membros como texto, sem botão ou anúncio de abrir', () => {
+    state.rows = [session('sess', { pair_gid: 'g' }), session('par', { pair_gid: 'g' })];
+    act(() => root.render(createElement(ContextTab, { serverId: 'srv', name: 'sess' })));
+    expect(container.textContent).toContain(m.native_group_panel_title({ count: 2 }));
+    expect(container.textContent).toContain('par');
+    expect(container.querySelector('[role="button"]')).toBeNull();
+    expect(container.querySelector('[aria-label^="' + m.linked_children_open() + '"]')).toBeNull();
+  });
+
+  it('só assina servidores e identidades enquanto o cartão de grupo está montado', () => {
+    state.rows = [session('sess')];
+    render();
+    expect(groupHooks.servers).not.toHaveBeenCalled();
+    expect(groupHooks.identities).not.toHaveBeenCalled();
+    state.rows = [session('sess', { pair_gid: 'g', pair_peers: ['desligado::ausente'] })];
+    render();
+    expect(groupHooks.servers).toHaveBeenCalled();
+    expect(groupHooks.identities).toHaveBeenCalled();
+    groupHooks.servers.mockClear();
+    groupHooks.identities.mockClear();
+    state.rows = [session('sess')];
+    render();
+    expect(groupHooks.servers).not.toHaveBeenCalled();
+    expect(groupHooks.identities).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('desligado::ausente');
+  });
+
   it.each(['pt', 'en'] as const)('mostra grupo entre máquinas, vínculos locais e membros sem acesso (%s)', locale => {
     const resolveLocale = getLocale;
     overwriteGetLocale(() => locale);
