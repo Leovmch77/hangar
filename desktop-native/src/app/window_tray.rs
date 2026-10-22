@@ -26,6 +26,19 @@ fn is_bounce(since_last: Option<Duration>) -> bool { since_last.is_some_and(|gap
 pub(super) fn hides_on_close(keep: bool, icon_online: Option<bool>) -> bool { keep && icon_online == Some(true) }
 
 impl Hangar {
+    pub(super) fn watch_installed_update(window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let mut attempted = None;
+            loop {
+                cx.background_executor().timer(Duration::from_secs(5)).await;
+                if this.update_in(cx, |this, window, cx| {
+                    let ready = cx.global::<crate::update::Handle>().0.read(cx).installed_update_ready(&mut attempted);
+                    if ready { this.restart_from_tray(window, cx); }
+                }).is_err() { break; }
+            }
+        }).detach();
+    }
+
     /// Põe o ícone de acordo com a opção: cria quando liga, remove quando desliga.
     pub(super) fn sync_tray(&mut self, cx: &mut Context<Self>) {
         if !(crate::tray::SUPPORTED && appearance::get().keep_in_tray) {
