@@ -301,6 +301,9 @@ impl FlipBook {
         for key in keys { self.rows.entry(key.clone()).or_insert_with(|| FlipRow::new(String::new(), epoch)); }
     }
 
+    /// Onde a chave estava na última ordem fechada por `order`.
+    pub fn index_of(&self, key: &str) -> Option<usize> { self.order.iter().position(|k| k == key) }
+
     /// Esquece o que foi pintado: a lista saiu da tela.
     pub fn clear(&mut self) {
         if !self.rows.is_empty() || !self.order.is_empty() { *self = Self::default(); }

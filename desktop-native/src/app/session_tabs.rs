@@ -279,15 +279,43 @@ impl Hangar {
         }
     }
 
+    /// Rola a faixa o quanto a aba `index` andou desde `from` (onde ela estava antes da ordem nova), na curva do deslize
+    /// dela: as duas andam juntas e ela não sai do lugar na tela. `span` = rolagem de partida e de chegada.
+    fn follow_open_tab(&mut self, index: usize, from: Pixels, start: std::time::Instant, span: Option<(f32, f32)>,
+        window: &mut Window, cx: &mut Context<Self>) {
+        let offset = self.tabs_scroll.offset();
+        let Some((begin, end)) = span.or_else(|| {
+            let now = self.tabs_scroll.bounds_for_item(index)?;
+            let max = f32::from(self.tabs_scroll.max_offset().x);
+            Some((f32::from(offset.x), (f32::from(offset.x) + f32::from(from - now.left())).clamp(-max, 0.)))
+        }) else { return };
+        // Sem animação (pedido do sistema, janela fora de foco) a aba pula, e a faixa pula junto.
+        let still = cx.reduce_motion() || !window.is_window_active();
+        let raw = if still { 1. } else { motion::REORDER.raw_at(start, std::time::Instant::now()) };
+        self.tabs_scroll.set_offset(point(px(begin + (end - begin) * motion::REORDER.ease(raw)), offset.y));
+        cx.notify();
+        if raw < 1. {
+            cx.on_next_frame(window, move |this, window, cx| this.follow_open_tab(index, from, start, Some((begin, end)), window, cx));
+        }
+    }
+
     pub(super) fn render_tab_groups(&self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut order = 0;
         let bands = self.tab_groups();
         // Ordem nova (trabalhando primeiro, mais recente primeiro) desliza cada aba até o lugar novo, como na lista.
         let keys: Vec<String> = bands.iter().map(|g| g.members[0].id().to_string()).collect();
-        {
+        let open = self.selected_target().map(|t| self.tab_stop_of(&t)).and_then(|t| bands.iter().position(|g| g.members.contains(&t)));
+        let moved = {
             let mut book = self.sidebar.tab_flip.borrow_mut();
+            let moved = open.and_then(|new| book.index_of(&keys[new]).filter(|old| *old != new).map(|old| (old, new)));
             book.sections(&keys.iter().map(|k| (k.clone(), String::new())).collect::<Vec<_>>(), std::time::Instant::now(), cx.reduce_motion());
             book.order(&keys);
+            moved
+        };
+        // A aba aberta mudou de lugar: a faixa rola junto com ela, que fica parada onde a pessoa estava olhando.
+        if let Some((old, new)) = moved && let Some(before) = self.tabs_scroll.bounds_for_item(old) {
+            let (from, start) = (before.left(), std::time::Instant::now());
+            cx.on_next_frame(window, move |this, window, cx| this.follow_open_tab(new, from, start, None, window, cx));
         }
         bands.iter().zip(keys).map(|(group, key)| {
             let first = order;
