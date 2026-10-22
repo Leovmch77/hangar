@@ -267,8 +267,9 @@ impl Hangar {
         let active = self.api.clone().filter(|_| !self.active_invite());
         let Some(updater) = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone()) else { return };
         updater.update(cx, |updater, cx| {
-            updater.set_update_all_servers(self.servers.clone(), cx);
+            let changed = updater.set_update_all_servers(self.servers.clone(), cx);
             updater.set_servers(local, active, cx);
+            if changed { updater.refresh_machine_updates(cx); }
         });
     }
 
