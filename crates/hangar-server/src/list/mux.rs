@@ -60,7 +60,7 @@ pub fn parse_list_panes(output: &str) -> (Vec<Pane>, usize) {
             session: parts[0].to_string(),
             active: parts[1] == "1",
             pid: if digits(parts[2]) { parts[2].parse().ok() } else { None },
-            cwd: parts[3].to_string(),
+            cwd: live_cwd(parts[3]),
             pane_id: parts[4].to_string(),
             hidden: field(5) == "1",
             provider: PROVIDERS.contains(&field(6)).then(|| field(6).to_string()),
@@ -70,6 +70,15 @@ pub fn parse_list_panes(output: &str) -> (Vec<Pane>, usize) {
         })
     }).collect();
     (panes, dropped)
+}
+
+/// Pasta apagada com o processo dentro: o Linux devolve o caminho com " (deleted)" no fim, e com
+/// ele a pasta da conversa (`projects/<cwd>`) não é achada.
+fn live_cwd(cwd: &str) -> String {
+    match cwd.strip_suffix(" (deleted)") {
+        Some(base) if !std::path::Path::new(cwd).exists() => base.to_string(),
+        _ => cwd.to_string(),
+    }
 }
 
 /// Recusa que quer dizer "não há sessão", não "não sei" (`tmux.py:_run`, `absent`). Fica de fora o
@@ -166,6 +175,17 @@ mod tests {
         assert_eq!(panes[2].session_created, None, "zero não é nascimento");
         assert_eq!((panes[3].pid, panes[3].hidden, &panes[3].provider, panes[3].session_created), (None, false, &None, None));
         assert_eq!((panes[4].hidden, &panes[4].provider), (false, &None), "campo cru e provedor desconhecido");
+    }
+
+    #[test]
+    fn deleted_cwd_keeps_the_original_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("x (deleted)");
+        std::fs::create_dir(&real).unwrap();
+        let out = format!("a\t1\t1\t/sumiu/wt-PM-1 (deleted)\t%0\nb\t1\t2\t{}\t%1\n", real.display());
+        let (panes, _) = parse_list_panes(&out);
+        assert_eq!(panes[0].cwd, "/sumiu/wt-PM-1");
+        assert_eq!(panes[1].cwd, real.display().to_string(), "pasta que existe com esse nome fica");
     }
 
     #[test]

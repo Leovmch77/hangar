@@ -375,6 +375,13 @@ def paste_via_clipboard(name: str, text: str) -> bool:
         return True
 
 
+def _cwd_vivo(cwd: str) -> str:
+    # Pasta apagada com o processo dentro: o Linux devolve o caminho com " (deleted)" no fim.
+    if cwd.endswith(" (deleted)") and not os.path.exists(cwd):
+        return cwd[: -len(" (deleted)")]
+    return cwd
+
+
 def list_sessions() -> list[dict]:
     cp = _run(["tmux", "list-sessions", "-F", "#{session_name}\t#{pane_current_path}"])
     _exige_resposta(cp)
@@ -385,7 +392,7 @@ def list_sessions() -> list[dict]:
         if not line.strip():
             continue
         name, _, cwd = line.partition("\t")
-        out.append({"name": name, "cwd": cwd})
+        out.append({"name": name, "cwd": _cwd_vivo(cwd)})
     return out
 
 
@@ -406,7 +413,7 @@ def list_panes_active() -> list[dict]:
         name, active, pid, cwd, pane_id = parts
         if active != "1" or name in out:
             continue
-        out[name] = {"name": name, "pid": int(pid) if pid.isdigit() else None, "cwd": cwd,
+        out[name] = {"name": name, "pid": int(pid) if pid.isdigit() else None, "cwd": _cwd_vivo(cwd),
                      "pane_id": pane_id}
     return list(out.values())
 
@@ -447,7 +454,7 @@ def list_panes_all() -> dict[str, list[dict]]:
         provider = parts[6] if len(parts) > 6 else ""
         birth = parts[7] if len(parts) > 7 else ""
         out.setdefault(name, []).append({
-            "name": name, "pid": int(pid) if pid.isdigit() else None, "cwd": cwd,
+            "name": name, "pid": int(pid) if pid.isdigit() else None, "cwd": _cwd_vivo(cwd),
             "pane_id": pane_id, "active": active == "1", "hidden": hidden == "1",
             "provider": provider if provider in {"claude", "codex", "pi", "omp", "kimi"} else None,
             "session_created": int(birth) if birth.isdigit() and int(birth) > 0 else None,
