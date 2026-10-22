@@ -45,6 +45,15 @@ const css=Object.entries(v).filter(([k])=>/^--[a-z0-9-]+$/.test(k)).map(([k,x])=
 const el=document.getElementById("hangar-theme");if(el)el.textContent=":root{color-scheme:"+t+";"+(el.dataset[t]||"")+css+"}"+el.dataset.base};
 window.__hangarApply=apply;addEventListener("message",e=>{const d=e.data;if(d&&d.method==="ui/notifications/host-context-changed")apply(d.params)})})();"#;
 
+/// Página de tema próprio sem fundo pintado e com texto claro: no branco do navegador ela some. Ganha o fundo do tema
+/// escuro e a marca `data-hangar-fallback`, que o rascunho lê para avisar. Texto escuro sem fundo continua legível e
+/// fica como está.
+const OWN_FALLBACK: &str = r##"(()=>{const fix=()=>{const d=document.documentElement,b=document.body,bg=e=>e?getComputedStyle(e).backgroundColor:"";
+const clear=c=>!c||c==="transparent"||/^rgba\(.*,\s*0\)$/.test(c);if(!clear(bg(d))||!clear(bg(b)))return;
+const m=(getComputedStyle(b||d).color.match(/[\d.]+/g)||[]).map(Number);if(m.length<3)return;
+if((0.299*m[0]+0.587*m[1]+0.114*m[2])/255>0.5){d.style.background="#1a171a";d.dataset.hangarFallback="1"}};
+document.readyState==="loading"?document.addEventListener("DOMContentLoaded",fix):fix()})();"##;
+
 static HEAD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)<head(\s[^>]*)?>").unwrap());
 static HTML: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)<html(\s[^>]*)?>").unwrap());
 static DOCTYPE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^\x{FEFF}?\s*<!doctype[^>]*>").unwrap());
@@ -55,10 +64,10 @@ static INERT: LazyLock<Regex> = LazyLock::new(|| {
 /// `data-dark` e `data-light` guardam os padrões de cada esquema (cores, raio e fontes), de onde a troca de tema parte
 /// antes de aplicar as do cliente; `data-base`, o CSS que ela não reescreve e que vem depois, sem variável que o
 /// cliente mande (senão venceria a dele).
-/// Página com tema próprio leva só a ponte: tamanho e link ainda passam por ela.
+/// Página com tema próprio leva só a ponte (tamanho e link ainda passam por ela) e a reserva de fundo.
 fn block(follow_app_theme: bool) -> String {
     let host = format!("<script id=\"hangar-host\">{HOST}</script>");
-    if !follow_app_theme { return host; }
+    if !follow_app_theme { return format!("{host}<script id=\"hangar-own-fallback\">{OWN_FALLBACK}</script>"); }
     let css = format!(":root{{color-scheme:dark;{DARK}{COMMON}}}@media (prefers-color-scheme: light){{:root{{color-scheme:light;{LIGHT}}}}}{BASE}{DERIVED}");
     let attr = |v: &str| v.replace('"', "&quot;");
     let (dark, light, base) = (attr(&format!("{DARK}{COMMON}")), attr(&format!("{LIGHT}{COMMON}")), attr(&format!("{BASE}{DERIVED}")));
@@ -240,10 +249,11 @@ mod tests {
     }
 
     #[test]
-    fn own_theme_gets_only_the_bridge() {
+    fn own_theme_gets_only_the_bridge_and_the_background_fallback() {
         let out = inject("<!doctype html><html><head><style>p{}</style></head><body></body></html>", false);
         assert!(!out.contains("<style id=\"hangar-theme\"") && !out.contains("--background"));
         assert!(out.contains("<head><script id=\"hangar-host\">"));
+        assert!(out.find("hangar-own-fallback").unwrap() < out.find("<style>p{}").unwrap());
         assert!(out.find("hangar-host").unwrap() < out.find("<style>p{}").unwrap());
         assert!(inject("<!doctype html><p>oi</p>", false).starts_with("<!doctype html><head><script id=\"hangar-host\">"));
     }
