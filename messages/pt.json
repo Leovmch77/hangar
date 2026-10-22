@@ -9146,5 +9146,20 @@
   "native_accounts_list_sort_name": "Nome",
   "native_accounts_list_sort_asc": "crescente",
   "native_accounts_list_sort_desc": "decrescente",
-  "native_accounts_list_reset_next": "a próxima expira {n}"
+  "native_accounts_list_reset_next": "a próxima expira {n}",
+  "tablet_sessions_empty": "Nenhuma sessão ativa",
+  "tablet_landscape": "Tablet deitado",
+  "tablet_bar_collapse": "Recolher barra de sessões",
+  "tablet_bar_expand": "Expandir barra de sessões",
+  "tablet_bar_position": "Posição da barra de sessões",
+  "tablet_bar_left": "Esquerda",
+  "tablet_bar_bottom": "Embaixo",
+  "tablet_bar_top": "Em cima",
+  "tablet_new_session": "Nova sessão",
+  "tablet_tab_context": "Contexto",
+  "tablet_tab_files": "Arquivos",
+  "tablet_tab_background": "Em 2º plano",
+  "tablet_tab_git": "Git",
+  "tablet_context_empty": "Sem dados de contexto",
+  "tablet_actions": "Ações"
 }

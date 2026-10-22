@@ -74,7 +74,7 @@ export function OrchestrationPanel() {
     if (arbiter) openSession(arbiter);
   }, [serverId, name, openSession]);
   const hasArbiter = Boolean(live.find(session => session.name === name)?.orq_arbiter);
-  return <Screen><OrchestrationHeader title={m.orq_tab_title()} serverLabel={server?.label} onClose={() => router.back()} historyAction={server && !server.invite ? () => router.push({ pathname: '/config/orchestration-history', params: { server: serverId } } as never) : undefined} />
+  return <Screen independent><OrchestrationHeader title={m.orq_tab_title()} serverLabel={server?.label} onClose={() => router.back()} historyAction={server && !server.invite ? () => router.push({ pathname: '/config/orchestration-history', params: { server: serverId } } as never) : undefined} />
     {error || !panel ? <OrchestrationStatus error={error} retry={server && !server.invite ? refresh : undefined} /> : null}
     {panel ? <OrchestrationContent key={`${serverId}:${name}:${panel.run}`} panel={panel} live={live} onOpenSession={openSession} onOpenDocument={setDocument} onOpenArbiter={hasArbiter ? openArbiter : undefined} /> : null}
     {document && server && !server.invite ? <OrqDocument serverId={serverId} name={name} path={document} onClose={() => setDocument(null)} /> : null}

@@ -9146,5 +9146,20 @@
   "native_accounts_list_sort_name": "Name",
   "native_accounts_list_sort_asc": "ascending",
   "native_accounts_list_sort_desc": "descending",
-  "native_accounts_list_reset_next": "the next one expires {n}"
+  "native_accounts_list_reset_next": "the next one expires {n}",
+  "tablet_sessions_empty": "No active sessions",
+  "tablet_landscape": "Tablet landscape",
+  "tablet_bar_collapse": "Collapse sessions bar",
+  "tablet_bar_expand": "Expand sessions bar",
+  "tablet_bar_position": "Sessions bar position",
+  "tablet_bar_left": "Left",
+  "tablet_bar_bottom": "Bottom",
+  "tablet_bar_top": "Top",
+  "tablet_new_session": "New session",
+  "tablet_tab_context": "Context",
+  "tablet_tab_files": "Files",
+  "tablet_tab_background": "Background",
+  "tablet_tab_git": "Git",
+  "tablet_context_empty": "No context data",
+  "tablet_actions": "Actions"
 }

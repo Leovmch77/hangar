@@ -63,6 +63,11 @@ vi.mock('expo-file-system', () => ({ Directory: class {}, File: class {}, Paths:
 vi.mock('expo-image-picker', () => ({}));
 vi.mock('expo-document-picker', () => ({}));
 vi.mock('expo-clipboard', () => ({}));
+vi.mock('expo-intent-launcher', () => ({ startActivityAsync: vi.fn() }));
+vi.mock('react-native-enriched-markdown', () => ({
+  EnrichedMarkdownText: ({ markdown }: { markdown: string }) => React.createElement('pre', null, markdown),
+}));
+vi.mock('react-native-gifted-charts', async () => ({ BarChart: (await import('react-native')).View }));
 vi.mock('expo-audio', () => ({ AudioModule: {}, RecordingPresets: {} }));
 vi.mock('expo-updates', () => ({ runtimeVersion: 'native-2' }));
 vi.mock('react-native-keyboard-controller', async () => ({

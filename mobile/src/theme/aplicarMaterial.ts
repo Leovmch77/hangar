@@ -41,7 +41,8 @@ export function leituraEmVigor(s: { leitura?: Leitura; fundo?: Fundo; imagemUri?
 // cor derivar a cada troca, e tirar o acento não teria como voltar ao original.
 // `reduzir` = "Reduzir transparência" do sistema: cola os dois alphas em 1 e some com o vidro de
 // tudo de uma vez. Vem por argumento, não do estado, porque não é preferência do app e não persiste.
-export function aplicarMaterial(s: Material, { reduzir = false }: { reduzir?: boolean } = {}) {
+export function aplicarMaterial(s: Material, { reduzir = false, escalaTexto = 1 }: { reduzir?: boolean; escalaTexto?: number } = {}) {
+  const conversa = s.conversa ?? CONVERSA_PADRAO;
   const cores = {
     paleta: s.paleta ?? 'classic',
     acento: s.acento,
@@ -55,7 +56,7 @@ export function aplicarMaterial(s: Material, { reduzir = false }: { reduzir?: bo
       tokens: tokensDe(base, nome, cores),
       panelAlpha: reduzir ? 1 : s.panelAlpha,
       surfaceAlpha: reduzir ? 1 : s.surfaceAlpha,
-      conversa: s.conversa ?? CONVERSA_PADRAO,
+      conversa: { ...conversa, texto: conversa.texto * escalaTexto },
     }));
   }
 }

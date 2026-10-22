@@ -62,6 +62,16 @@ const avatar = () => host.querySelector<HTMLElement>('[data-testid="session-avat
 const title = () => host.querySelector<HTMLButtonElement>('button[aria-label^="mobile-menu,"]');
 const homeButton = () => host.querySelector(`[aria-label="${m.chat_ir_inicio()}"]`) as HTMLElement | null;
 
+it.each([
+  ['phone', false, 90],
+  ['phone', true, 130],
+  ['tablet', false, 46],
+  ['tablet', true, 46],
+] as const)('alinha o loop no cabeçalho %s com Início %s sem alterar o recuo do celular', (header, home, padding) => {
+  render(home ? vi.fn() : undefined, { header, chipLoop: createElement('i', { 'data-loop': true }) });
+  expect(host.querySelector<HTMLElement>('[data-loop]')!.parentElement!.style.paddingLeft).toBe(`${padding}px`);
+});
+
 it.each(['/home/u/hangar-voz', undefined])('ícone decorativo identifica o servidor no subtítulo com pasta %s', (cwd) => {
   store.rows = [{ ...session, cwd }];
   render();

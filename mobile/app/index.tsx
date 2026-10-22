@@ -6,6 +6,7 @@ import { useFocusEffect, useIsFocused, useLocalSearchParams, useRouter } from 'e
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { DrawerLayoutMethods } from 'react-native-gesture-handler/ReanimatedDrawerLayout';
 import { Screen } from '../src/ui/Screen';
+import { useTabletLandscape } from '../src/features/tablet/layout';
 import { WorkingMarkPaused } from '../src/ui/WorkingMark';
 import { Icon } from '../src/ui/Icon';
 import { EdgeButton } from '../src/ui/EdgeButton';
@@ -22,6 +23,7 @@ import { useAparencia, type HomeScreen } from '../src/stores/aparencia';
 export default function Index() {
   const router = useRouter();
   const focused = useIsFocused();
+  const tablet = useTabletLandscape();
   const params = useLocalSearchParams<{ compose?: string | string[] }>();
   const compose = Array.isArray(params.compose) ? params.compose[0] : params.compose;
   const activeId = useServers((s) => s.activeId);
@@ -50,14 +52,14 @@ export default function Index() {
   }, [compose, openConversation, router]));
 
   useFocusEffect(useCallback(() => {
-    if (Platform.OS !== 'android') return;
+    if (tablet || Platform.OS !== 'android') return;
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       if (mode !== 'newConversation') return false;
       showSessions();
       return true;
     });
     return () => sub.remove();
-  }, [mode, showSessions]));
+  }, [tablet, mode, showSessions]));
 
   // Só o cabeçalho inicia o gesto: lista, campo e controles de uso conservam os seus movimentos.
   const swipe = useMemo(() => PanResponder.create({
@@ -75,8 +77,8 @@ export default function Index() {
   return (
     <WorkingMarkPaused.Provider value={!focused}>
     <Screen edges={[]}>
-      <SessionsDrawer ref={drawer} openOnBack={mode === 'sessions'} onClose={closeDrawer} onOpenServers={() => setServersOpen(true)}>
-        <View style={styles.bar} {...swipe.panHandlers}>
+      <SessionsDrawer ref={drawer} enabled={!tablet} openOnBack={mode === 'sessions'} onClose={closeDrawer} onOpenServers={() => setServersOpen(true)}>
+        {!tablet ? <View style={styles.bar} {...swipe.panHandlers}>
           <EdgeButton onPress={mode === 'newConversation' ? showSessions : openDrawer} style={styles.sessions}
             accessibilityLabel={m.native_sessions()} accessibilityValue={{ text: String(count) }}>
             <Icon name={mode === 'newConversation' ? 'ChevronLeft' : 'PanelLeft'} size={22} color={theme.tokens.text.primary} />
@@ -88,10 +90,10 @@ export default function Index() {
           {topButton('ChartNoAxesCombined', m.nav_custos(), () => router.push('/costs' as never))}
           {topButton('Server', m.maquinas_este_aparelho(), () => setServersOpen(true))}
           {topButton('Settings', m.config_modal_titulo(), () => router.push('/config' as never))}
-        </View>
-        <CreateSessionSheet keyboardOffset={Platform.OS === 'ios' ? insets.top + BAR : undefined}
-          home={{ mode, focusRequest, onNewConversation: openConversation,
-            sessions: <SessionList variant="home" onClose={closeDrawer} onOpenServers={() => setServersOpen(true)} /> }} />
+        </View> : null}
+        <CreateSessionSheet keyboardOffset={!tablet && Platform.OS === 'ios' ? insets.top + BAR : undefined}
+          home={{ mode: tablet ? 'newConversation' : mode, focusRequest, onNewConversation: openConversation,
+            sessions: tablet ? null : <SessionList variant="home" onClose={closeDrawer} onOpenServers={() => setServersOpen(true)} /> }} />
       </SessionsDrawer>
       <ServerSheet open={serversOpen} onFechar={() => setServersOpen(false)} />
     </Screen>
