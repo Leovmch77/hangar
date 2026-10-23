@@ -59,6 +59,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   interpretador real nos lançadores, porque o bash não roda alias de app; quem não devolve caminho
   é a Store. Exceção: o `hangar-codex-tui` usa `backend\.venv\Scripts\python.exe` quando ele
   existe, e o Python dos outros lançadores sem o venv; sem Python real, nenhum lançador é criado. Ver [Python do Install Manager](#python-do-install-manager-22102026).
+- **Todo atalho sem extensão em `~/.local/bin` tem um gêmeo `.cmd` na mesma pasta.** Sem ele, o
+  PowerShell e o `cmd` resolvem o nome para o arquivo do bash e o Windows pergunta com que programa
+  abri-lo. Ver [`python3.cmd`](#python3cmd-ao-lado-do-atalho-do-bash-23102026).
 - **Instalação Windows mantém o nível de permissão**: iniciada como admin, registra tarefas
   interativas elevadas e atalhos elevados do Electron; comum, usa UAC pontual. Atualização
   manual sem elevação não pode rebaixar uma instalação elevada.
@@ -913,3 +916,17 @@ atalhos achados, roda cada um com `-c "import sys; print(sys.executable)"` e usa
 devolvido. O atalho da Store não devolve caminho e segue recusado. Medido na máquina afetada: o
 `py` do Install Manager respondeu `...\pythoncore-3.14-64\python.exe`, o `-Update` criou os
 lançadores e o `python3` do bash de login passou a apontar para esse interpretador.
+
+## `python3.cmd` ao lado do atalho do bash (23/10/2026)
+
+Na DELPHI-02 o Windows abria a cada pouco o diálogo "Como deseja abrir este arquivo?" para
+`~/.local/bin/python3`. Os lançadores `.cmd` põem `%USERPROFILE%\.local\bin` na frente do PATH e o
+repassam aos filhos, e os hooks do Claude e do Codex chamam `python3 <hook>.py`. Com esse PATH,
+tanto o `Get-Command python3` quanto o `where python3` resolviam para o atalho sem extensão, antes
+do `Python314\python3.exe` de uma pasta posterior. O Windows não executa arquivo sem
+extensão: abre pelo programa associado. O `hangar-send` não sofria disso porque o `hangar-send.cmd`
+mora na mesma pasta, e na mesma pasta os dois shells preferem a extensão do PATHEXT.
+
+Agora o instalador grava `python3.cmd` junto do atalho, com o mesmo interpretador. Medido numa
+pasta temporária com os dois arquivos na frente do PATH: PowerShell e `cmd` resolveram e rodaram o
+`python3.cmd` (entrada padrão incluída), e o bash do Git seguiu no atalho `sh`.

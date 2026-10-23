@@ -2437,6 +2437,13 @@ if (-not $bash) {
                      "exec '$pyMsys'$arg `"`$@`"`n"
         if (Escrever-Lancador $shim $corpoShim 'sh') { Ok "atalho python3 -> $pyExe$arg" }
         else { Ok 'atalho python3 ja atualizado' }
+        # Gemeo .cmd do atalho: os lancadores poem este bin na frente do PATH, e ai o PowerShell e o
+        # cmd resolvem `python3` para o arquivo sem extensao, que o Windows so sabe ABRIR (dialogo
+        # "como deseja abrir"). Com o .cmd na mesma pasta, os dois escolhem ele; o bash segue no sh.
+        $shimCmd = Join-Path $binUsuario 'python3.cmd'
+        $corpoShimCmd = "@echo off`r`n`"$pyExe`"$arg %*`r`n"
+        if (Escrever-Lancador $shimCmd $corpoShimCmd 'cmd') { Ok "atalho python3.cmd -> $pyExe$arg" }
+        else { Ok 'atalho python3.cmd ja atualizado' }
     }
 
     # (2) lancador pro PowerShell: o script nao tem extensao, entao o Windows nao o executa
