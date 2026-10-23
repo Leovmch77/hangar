@@ -59,7 +59,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   interpretador real nos lançadores, porque o bash não roda alias de app; quem não devolve caminho
   é a Store. Exceção: o `hangar-codex-tui` usa `backend\.venv\Scripts\python.exe` quando ele
   existe, e o Python dos outros lançadores sem o venv; sem Python real, nenhum lançador é criado. Ver [Python do Install Manager](#python-do-install-manager-22102026).
-- **Todo atalho sem extensão em `~/.local/bin` tem um gêmeo `.cmd` na mesma pasta.** Sem ele, o
+- **Atalho sem extensão que o instalador grava em `~/.local/bin` ganha um gêmeo `.cmd` na mesma
+  pasta.** Sem ele, o
   PowerShell e o `cmd` resolvem o nome para o arquivo do bash e o Windows pergunta com que programa
   abri-lo. Ver [`python3.cmd`](#python3cmd-ao-lado-do-atalho-do-bash-23102026).
 - **Instalação Windows mantém o nível de permissão**: iniciada como admin, registra tarefas
