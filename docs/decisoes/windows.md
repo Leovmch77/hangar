@@ -58,7 +58,7 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   winget) também mora lá e executa. O instalador pergunta `sys.executable` ao atalho e grava o
   interpretador real nos lançadores, porque o bash não roda alias de app; quem não devolve caminho
   é a Store. Exceção: o `hangar-codex-tui` usa `backend\.venv\Scripts\python.exe` quando ele
-  existe, e só cai nesse interpretador sem o venv. Ver [Python do Install Manager](#python-do-install-manager-22102026).
+  existe, e o Python dos outros lançadores sem o venv; sem Python real, nenhum lançador é criado. Ver [Python do Install Manager](#python-do-install-manager-22102026).
 - **Instalação Windows mantém o nível de permissão**: iniciada como admin, registra tarefas
   interativas elevadas e atalhos elevados do Electron; comum, usa UAC pontual. Atualização
   manual sem elevação não pode rebaixar uma instalação elevada.
